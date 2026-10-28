@@ -33,6 +33,12 @@ struct System {
     // (выход БД, метрики, оси) как переменные состояния. codegen_scheme / codegen_adaptive и
     // обёртки поддерживают это сами; точки входа, которые не умеют, отказывают явно.
     std::vector<std::string> out_exprs;
+    // Уровень B («Solve as ODE» при связях, не разрешимых явно): vars = [x; z], rhs = f(x, z, t) (только
+    // x), zb_g[k] = g_k(x, z, t), z — из g = 0 Ньютоном в каждом вычислении f (лямбда ucuda_zb в
+    // начале тела, тёплый старт — z прошлого шага, кэш по x и t), после шага z пишутся в X[nx + k].
+    // zb_names — имена z (заполняет внутренний sys_core: у ядра схемы vars только x).
+    std::vector<std::string> zb_g;
+    std::vector<std::string> zb_names;
 
     // Ньютон неявных схем здесь не живёт: допуск, предел итераций и режим якобиана —
     // рантайм-слоты a[] каждой вкладки (NewtonSettings ниже).
@@ -397,7 +403,8 @@ bool scheme_supports_time(Scheme sch);
 //   ROS2 — Rosenbrock ROS2 (линейно-неявный, L-устойчив, порядок 2).
 //   CD / CDYoshida4 — CD с решением связи при каждом изменении x (уровень B, индекс 1; связь может
 //   быть нелинейной по z), и его композиция Йошиды 4-го порядка (при a[0] = 0.5).
-enum class DaeScheme { BDF1, Trapezoidal, TRBDF2, ExplicitEuler, ExplicitMidpoint, RK4, ROS2, CD, CDYoshida4 };
+enum class DaeScheme { BDF1, Trapezoidal, TRBDF2, ExplicitEuler, ExplicitMidpoint, RK4, ROS2, CD, CDYoshida4,
+                       ROS3P, Rodas4 };
 // Согласованные НУ (индекс 1): при фиксированных x решает g(x, z, t0) = 0 по z Ньютоном
 // (якобиан dg/dz символьный, тот же, что у шага). X — [x; z] на входе и выходе; a — раскладка
 // шага ([s, p_1..p_M, хвост]). Стартует с z из X. false — z не тронут, why — причина:
@@ -411,6 +418,9 @@ bool dae_consistent_z(const System& s, const double* a, int na, double t0, doubl
 // z_exprs — выражения z(x) (для наблюдаемых). false — причина в why (индекс >= 2 или z
 // входит нелинейно: тогда только методы ДАУ).
 bool dae_reduce_to_ode(const System& s, System& ode, std::vector<std::string>* z_exprs, std::string* why);
+// Структурный индекс 1: в каждой связи 0 = g есть хотя бы одна z (иначе dg/dz вырожден). Уровень B
+// «Solve as ODE» (z Ньютоном) и проверка галочки в редакторе.
+bool dae_index1_structural(const System& s);
 // Тело заканчивается меткой dae_nx_tag(s.dae_nx) — см. dae_nx_from_body.
 std::string codegen_dae_scheme(const System& s, DaeScheme sch);
 // Метка числа x в теле шага метода ДАУ: LLE/LS по ней возмущают клоны только по x

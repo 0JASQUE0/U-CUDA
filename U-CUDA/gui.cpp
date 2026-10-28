@@ -5291,10 +5291,16 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
                 System ode;
                 std::vector<std::string> zex;
                 std::string why;
-                st.reducible = dae_reduce_to_ode(d.as_codegen_system(), ode, &zex, &why);
+                const System dsys = d.as_codegen_system();
+                st.reducible = dae_reduce_to_ode(dsys, ode, &zex, &why);
                 if (st.reducible) {
                     st.reduce_msg = "explicit z(x):";
                     for (size_t j = 0; j < d.alg.size(); ++j) st.reduce_msg += "\n  " + d.alg[j] + " = " + zex[j];
+                } else if (dae_index1_structural(dsys)) {
+                    // Уровень B: z из связей Ньютоном в каждом вычислении f.
+                    st.reducible = true;
+                    st.reduce_msg = "z by Newton in every f (level B): " + why
+                                  + "\n  schemes: explicit RK / DOPRI / GBS, Extr/Comp over them, adaptive";
                 } else st.reduce_msg = why;
             } catch (const std::exception& e) {
                 st.ok = false;
@@ -5312,13 +5318,15 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
         // поставить — только если сведение удаётся.
         if (st.ok) {
             ImGui::BeginDisabled(!st.reducible && !buf.dae_as_ode);
-            ImGui::Checkbox("Solve as ODE (substitute z)", &buf.dae_as_ode);
+            ImGui::Checkbox("Solve as ODE", &buf.dae_as_ode);
             ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("z is expressed from the constraints and substituted into f:\n"
-                                  "the system becomes an ODE in x and runs in every tab with every\n"
-                                  "ODE scheme (CD, Yoshida, RK, implicit; bifurcations, LLE/LS, basins).\n"
-                                  "z is then not part of the state. Index 1 with z linear in its constraint.");
+                ImGui::SetTooltip("Index 1 only. If z enters its constraint linearly, z(x) is substituted\n"
+                                  "into f (level A): an ODE in x for every tab and every ODE scheme.\n"
+                                  "Otherwise z is found by Newton from g(x, z) = 0 before every f\n"
+                                  "(level B): explicit RK / DOPRI / GBS, Extr/Comp over them, adaptive.\n"
+                                  "Either way z stays in the state after x, so bifurcation output,\n"
+                                  "metrics and plot axes can use it; LLE/LS perturb x only.");
             ImGui::TextDisabled("%s", st.reduce_msg.c_str());
             if (buf.dae_as_ode && !st.reducible)
                 ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "cannot solve as ODE: untick");
@@ -5347,7 +5355,7 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
                                   "iterations is accepted unconverged and the constraint drifts.");
             ImGui::EndTable();
         }
-        ImGui::TextDisabled("DAE methods (Analysis): BDF1 / Trapezoidal / TR-BDF2 / Rosenbrock ROS2 for any index;\n"
+        ImGui::TextDisabled("DAE methods: BDF1 / Trapezoidal / TR-BDF2 / Rosenbrock ROS2, ROS3P, Rodas4 for any index;\n"
                             "CD, CD + Yoshida-4 and explicit Euler / Midpoint / RK4 with the constraint solved\n"
                             "whenever x changes - index 1 only. 'Solve as ODE' opens every tab and ODE scheme.");
     }

@@ -21,8 +21,20 @@ System AppModel::build_system() const {
         System ode;
         std::vector<std::string> zex;
         std::string why;
-        if (!dae_reduce_to_ode(s, ode, &zex, &why))
-            throw std::runtime_error("solve as ODE: " + why);
+        if (!dae_reduce_to_ode(s, ode, &zex, &why)) {
+            // Уровень B: связь не разрешается явно — z Ньютоном в каждом вычислении f (System::zb_g).
+            // Нужен индекс 1: в каждой связи есть z (иначе dg/dz вырожден).
+            ode = System{};
+            ode.vars = s.vars;
+            ode.params = s.params;
+            ode.latex = s.latex;
+            ode.cd_fp_iters = s.cd_fp_iters;
+            ode.rhs.assign(s.rhs.begin(), s.rhs.begin() + s.dae_nx);
+            ode.zb_g.assign(s.rhs.begin() + s.dae_nx, s.rhs.end());
+            if (!dae_index1_structural(s))
+                throw std::runtime_error("solve as ODE: " + why);
+            return ode;
+        }
         ode.vars.insert(ode.vars.end(), s.vars.begin() + s.dae_nx, s.vars.end());
         ode.out_exprs = zex;
         return ode;

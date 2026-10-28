@@ -615,7 +615,7 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
         result.step_stats = out.stats;
     }
     else if (!scheme_supports_adaptive(scheme_from_name(in.scheme)) || system_uses_time(in.sys)
-             || !in.sys.out_exprs.empty()) {   // z-выходы (Solve as ODE) — тоже: вычислитель их не знает
+             || !in.sys.out_exprs.empty() || !in.sys.zb_g.empty()) {   // z (Solve as ODE) — тоже: вычислитель их не знает
         // Экстраполятор (Extr, GBS): CPU-драйвер exe считает по таблицам Бутчера и тело базы в
         // стадиях не выразит. Те же тела, что у GPU, собирает cl.exe в DLL адаптивного модуля
         // (AdaptiveCpuModule, кэш на диске), траектория — ucuda_cpu_ad_phase, копия phase_kernel_ad;
@@ -816,7 +816,7 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     // ДАУ на CPU: тело DAE-метода — обычный шаг над [x; z], его собирает в нативную функцию
     // krs_cpu, как пользовательскую КРС (вычислитель правых частей ДАУ не считает).
     // Явное время и z-выходы (Solve as ODE) — тоже здесь: вычислитель правых частей их не знает.
-    else if (in.krs_is_custom || in.sys.dae_nx >= 0 || timed || !in.sys.out_exprs.empty()) {
+    else if (in.krs_is_custom || in.sys.dae_nx >= 0 || timed || !in.sys.out_exprs.empty() || !in.sys.zb_g.empty()) {
         // Custom КРС: тело — сырой C с объявлениями, циклами и локальными
         // массивами. SystemEvaluator интерпретирует только ВЫРАЖЕНИЯ правых
         // частей, поэтому тело компилируется в нативную функцию шага

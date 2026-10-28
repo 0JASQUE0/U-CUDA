@@ -357,6 +357,8 @@ namespace { // внутренняя линковка: всё ниже не ви�
         // константы маппятся сами на себя
         for (const auto& c : math_constants()) nm.m[c] = c;
         if (!tname.empty() && !nm.m.count("t")) nm.m["t"] = tname;
+        // Уровень B: z — решение Ньютона текущего вычисления f (ucuda_zb_v), не элемент массива стадии.
+        for (size_t k = 0; k < s.zb_names.size(); ++k) nm.m[s.zb_names[k]] = "ucuda_zb_v[" + std::to_string(k) + "]";
         return nm;
     }
     std::vector<std::string> rhs_over(const System& s, const std::string& st, const std::string& tname = {}) {
@@ -364,7 +366,13 @@ namespace { // внутренняя линковка: всё ниже не ви�
         NameMap nm = build_namemap(s, st, tname); std::vector<std::string> out;
         for (size_t i = 0; i < s.rhs.size(); ++i) {
             Parser p(s.rhs[i], s.latex); PN ast = p.parse();
-            std::ostringstream o; emit(ast, nm, o); out.push_back(o.str());
+            std::ostringstream o;
+            // Уровень B: f над массивом стадии st — сначала z = phi(st) (ucuda_zb, запятая задаёт порядок;
+            // повтор с тем же x и t берёт кэш), потом само выражение.
+            if (!s.zb_g.empty()) o << "(ucuda_zb(" << st << ", " << (tname.empty() ? "(numb)0" : tname) << "), (";
+            emit(ast, nm, o);
+            if (!s.zb_g.empty()) o << "))";
+            out.push_back(o.str());
         }
         return out;
     }
@@ -1686,6 +1694,130 @@ namespace { // внутренняя линковка: всё ниже не ви�
         return o.str();
     }
 
+    // Rosenbrock для M y' = F(t, y), M = diag(I_x, 0_z), в форме Hairer-Wanner (rodas.f) — без
+    // умножений на J в правых частях стадий:
+    //   (M/(gamma h) - J) u_i = F(t_n + alpha_i h, y_n + sum_{j<i} a_ij u_j) + M sum_{j<i} (c_ij/h) u_j
+    //                           + gt_i h F_t,
+    //   y_{n+1} = y_n + sum m_i u_i.
+    // J и F_t — в (t_n, y_n): одно LU на шаг, без Ньютона. Коэффициенты: RosTab ниже.
+    struct RosTab {
+        const char* title;
+        int S;
+        double gamma;
+        std::vector<double> alpha, gt, m;
+        std::vector<std::vector<double>> a, c;   // строго нижнетреугольные, a[i][j], j < i
+    };
+    // ROS3P (Lang, Verwer 2001): порядок 3 и по x, и по z индекса 1, A-устойчив, gamma = 1/2 + sqrt(3)/6.
+    const RosTab& ros3p_tab() {
+        static const RosTab t = { "ROS3P (Lang-Verwer), order 3", 3, 7.886751345948129e-01,
+            { 0.0, 1.0, 1.0 },
+            { 7.886751345948129e-01, -2.113248654051871e-01, -1.077350269189626e+00 },
+            { 2.0, 5.773502691896258e-01, 4.226497308103742e-01 },
+            { {}, { 1.267949192431123e+00 }, { 1.267949192431123e+00, 0.0 } },
+            { {}, { -1.607695154586736e+00 }, { -3.464101615137755e+00, -1.732050807568877e+00 } } };
+        return t;
+    }
+    // Rodas4 (Hairer, Wanner; rodas.f, METH = 1): порядок 4, жёстко точный (последние две стадии
+    // в t_n + h), L-устойчив. y_{n+1} = вход 6-й стадии + u_6.
+    const RosTab& rodas4_tab() {
+        static const double A51 = 0.1221224509226641e+01, A52 = 0.6019134481288629e+01,
+                            A53 = 0.1253708332932087e+02, A54 = -0.6878860361058950e+00;
+        static const RosTab t = { "Rodas4 (Hairer-Wanner), order 4", 6, 0.25,
+            { 0.0, 0.386, 0.21, 0.63, 1.0, 1.0 },
+            { 0.25, -0.1043, 0.1035, -0.362e-01, 0.0, 0.0 },
+            { A51, A52, A53, A54, 1.0, 1.0 },
+            { {},
+              { 0.1544000000000000e+01 },
+              { 0.9466785280815826e+00, 0.2557011698983284e+00 },
+              { 0.3314825187068521e+01, 0.2896124015972201e+01, 0.9986419139977817e+00 },
+              { A51, A52, A53, A54 },
+              { A51, A52, A53, A54, 1.0 } },
+            { {},
+              { -0.5668800000000000e+01 },
+              { -0.2430093356833875e+01, -0.2063599157091915e+00 },
+              { -0.1073529058151375e+00, -0.9594562251023355e+01, -0.2047028614809616e+02 },
+              { 0.7496443313967647e+01, -0.1024680431464352e+02, -0.3399990352819905e+02, 0.1170890893206160e+02 },
+              { 0.8083246795921522e+01, -0.7981132988064893e+01, -0.3152159432874371e+02, 0.1631930543123136e+02,
+                -0.6058818238834054e+01 } } };
+        return t;
+    }
+    std::string dae_rosenbrock(const System& s, const RosTab& T) {
+        const bool ht = system_uses_time(s);
+        const int N = (int)s.vars.size(), nx = s.dae_nx, S = T.S;
+        const auto J = jac_over(s, "X", time_name(s));
+        std::vector<std::string> Ft;
+        if (ht) {
+            NameMap nm = build_namemap(s, "X", kStepTimeArg);
+            for (int i = 0; i < N; ++i) {
+                Parser p(s.rhs[i], s.latex);
+                Ft.push_back(emit_to_str(pn_diff(p.parse(), "t"), nm));
+            }
+        }
+        std::ostringstream o;
+        o << "    /* Rosenbrock " << T.title << " */\n";
+        o << "    const numb ihg = (numb)1 / ((numb)" << fmtnum(T.gamma) << " * h), ih = (numb)1 / h;\n";
+        o << "    numb Am[" << N * N << "], U[" << S * N << "], Yv[" << N << "];\n";
+        o << "    int piv[" << N << "];\n    int ik, ir, ic, ip;\n    numb mx, av, mlt;\n";
+        for (int i = 0; i < N; ++i)
+            for (int j = 0; j < N; ++j) {
+                const std::string& d = J[(size_t)i * N + j];
+                o << "    Am[" << i * N + j << "] = " << ((i == j && i < nx) ? "ihg" : "(numb)0.0");
+                if (d != "(numb)0.0") o << " - (" << d << ")";
+                o << ";\n";
+            }
+        o << "    for (ik = 0; ik < " << N << "; ik++) {\n"
+             "        ip = ik; mx = fabs(Am[ik * " << N << " + ik]);\n"
+             "        for (ir = ik + 1; ir < " << N << "; ir++) { av = fabs(Am[ir * " << N << " + ik]); if (av > mx) { mx = av; ip = ir; } }\n"
+             "        piv[ik] = ip;\n"
+             "        if (ip != ik) for (ic = 0; ic < " << N << "; ic++) { mlt = Am[ik * " << N << " + ic]; Am[ik * " << N << " + ic] = Am[ip * " << N << " + ic]; Am[ip * " << N << " + ic] = mlt; }\n"
+             "        for (ir = ik + 1; ir < " << N << "; ir++) {\n"
+             "            mlt = Am[ir * " << N << " + ik] / Am[ik * " << N << " + ik];\n"
+             "            Am[ir * " << N << " + ik] = mlt;\n"
+             "            for (ic = ik + 1; ic < " << N << "; ic++) Am[ir * " << N << " + ic] -= mlt * Am[ik * " << N << " + ic];\n"
+             "        }\n"
+             "    }\n";
+        if (ht) {
+            o << "    numb Ftv[" << N << "];\n";
+            for (int i = 0; i < N; ++i) o << "    Ftv[" << i << "] = h * (" << Ft[i] << ");\n";
+        }
+        for (int st = 0; st < S; ++st) {
+            const std::string base = "U + " + std::to_string(st * N);
+            o << "    /* stage " << st + 1 << " */\n";
+            for (int i = 0; i < N; ++i) {
+                o << "    Yv[" << i << "] = X[" << i << "]";
+                for (int j = 0; j < st; ++j)
+                    if (T.a[st][j] != 0.0) o << " + (numb)(" << fmtnum(T.a[st][j]) << ") * U[" << j * N + i << "]";
+                o << ";\n";
+            }
+            const std::string tst = T.alpha[st] == 0.0 ? std::string() : "(ucuda_t + (numb)(" + fmtnum(T.alpha[st]) + ") * h)";
+            const auto F = rhs_over(s, "Yv", tst.empty() ? time_name(s) : time_name(s, tst.c_str()));
+            for (int i = 0; i < N; ++i) {
+                o << "    U[" << st * N + i << "] = (" << F[i] << ")";
+                if (i < nx)
+                    for (int j = 0; j < st; ++j)
+                        if (T.c[st][j] != 0.0) o << " + (numb)(" << fmtnum(T.c[st][j]) << ") * ih * U[" << j * N + i << "]";
+                if (ht && T.gt[st] != 0.0) o << " + (numb)(" << fmtnum(T.gt[st]) << ") * Ftv[" << i << "]";
+                o << ";\n";
+            }
+            o << "    {\n        numb* v = " << base << ";\n";
+            o << "        for (ik = 0; ik < " << N << "; ik++) {\n"
+                 "            ip = piv[ik]; if (ip != ik) { mlt = v[ik]; v[ik] = v[ip]; v[ip] = mlt; }\n"
+                 "            for (ir = ik + 1; ir < " << N << "; ir++) v[ir] -= Am[ir * " << N << " + ik] * v[ik];\n"
+                 "        }\n"
+                 "        for (ik = " << N - 1 << "; ik >= 0; ik--) {\n"
+                 "            for (ic = ik + 1; ic < " << N << "; ic++) v[ik] -= Am[ik * " << N << " + ic] * v[ic];\n"
+                 "            v[ik] /= Am[ik * " << N << " + ik];\n"
+                 "        }\n    }\n";
+        }
+        for (int i = 0; i < N; ++i) {
+            o << "    X[" << i << "] = X[" << i << "]";
+            for (int j = 0; j < S; ++j)
+                if (T.m[j] != 0.0) o << " + (numb)(" << fmtnum(T.m[j]) << ") * U[" << j * N + i << "]";
+            o << ";\n";
+        }
+        return o.str();
+    }
+
     // CD для ДАУ индекса 1 (уровень B, отчёт CD-ДАУ): связь решается всякий раз, когда меняется x.
     //   D  (шаг h1 = a[0]*h, прямой порядок x): x_i += h1 f_i(x, z, t_n), затем z из g(x, z) = 0;
     //   D* (шаг h2 = h - h1, обратный порядок): x_i - x_i^old - h2 f_i(x, z, t_{n+1}) = 0 и
@@ -2628,7 +2760,7 @@ struct SystemEvaluator::Impl {
 };
 
 SystemEvaluator::SystemEvaluator(const System& sys) : impl_(new Impl) {
-    if (!sys.out_exprs.empty())   // z-выходы считает шаг КРС (krs_cpu), не вычислитель
+    if (!sys.out_exprs.empty() || !sys.zb_g.empty())   // z-выходы считает шаг КРС (krs_cpu), не вычислитель
         throw std::runtime_error("SystemEvaluator: z outputs need the compiled step (krs_cpu)");
     if (sys.vars.size() != sys.rhs.size())
         throw std::runtime_error("SystemEvaluator: vars/rhs size mismatch");
@@ -2847,7 +2979,7 @@ bool scheme_has_complex_core(const std::string& name) {
 }
 
 std::string codegen_scheme_complex_core(const System& s, Scheme sch) {
-    if (!s.out_exprs.empty())
+    if (!s.out_exprs.empty() || !s.zb_g.empty())
         throw std::runtime_error("z outputs (Solve as ODE): ExtrZ (complex extrapolation core) is not available - pick another scheme");
     if (system_uses_time(s)) throw std::runtime_error(kTimeUnsupportedMsg);
     switch (sch) {
@@ -3797,6 +3929,8 @@ static std::string dae_scheme_body(const System& s, DaeScheme sch) {
     case DaeScheme::Trapezoidal: return scheme_implicit_common(s, ImplicitKind::Euler, s.dae_nx, true);
     case DaeScheme::TRBDF2:      return dae_tr_bdf2(s);
     case DaeScheme::ROS2:        return dae_ros2(s);
+    case DaeScheme::ROS3P:       return dae_rosenbrock(s, ros3p_tab());
+    case DaeScheme::Rodas4:      return dae_rosenbrock(s, rodas4_tab());
     case DaeScheme::CD:          return dae_cd(s, false);
     case DaeScheme::CDYoshida4:  return dae_cd(s, true);
     case DaeScheme::ExplicitEuler: {
@@ -3870,6 +4004,19 @@ namespace {
         for (auto& x : c->args) x = pn_subst(x, m);
         return c;
     }
+}
+
+bool dae_index1_structural(const System& s) {
+    const int N = (int)s.vars.size(), nx = s.dae_nx;
+    if (nx < 0 || (int)s.rhs.size() != N) return false;
+    for (int k = nx; k < N; ++k) {
+        Parser p(s.rhs[k], s.latex);
+        const PN g = p.parse();
+        bool any = false;
+        for (int j = nx; j < N && !any; ++j) any = pn_contains_var(g, s.vars[j]);
+        if (!any) return false;
+    }
+    return true;
 }
 
 bool dae_reduce_to_ode(const System& s, System& ode, std::vector<std::string>* z_exprs, std::string* why) {
@@ -4006,14 +4153,14 @@ bool dae_consistent_z(const System& s, const double* a, int na, double t0, doubl
 const std::vector<std::string>& dae_scheme_names() {
     // Порядок — как в комбо: неявные (любой индекс), затем явные с решением связи (индекс 1).
     static const std::vector<std::string> n = { "DAE BDF1", "DAE Trapezoidal", "DAE TR-BDF2",
-        "DAE Rosenbrock ROS2", "DAE CD", "DAE CD + Yoshida-4",
+        "DAE Rosenbrock ROS2", "DAE Rosenbrock ROS3P", "DAE Rodas4", "DAE CD", "DAE CD + Yoshida-4",
         "DAE Explicit Euler", "DAE Explicit Midpoint", "DAE RK4" };
     return n;
 }
 
 bool dae_scheme_from_name(const std::string& name, DaeScheme* out) {
     static const DaeScheme v[] = { DaeScheme::BDF1, DaeScheme::Trapezoidal, DaeScheme::TRBDF2,
-        DaeScheme::ROS2, DaeScheme::CD, DaeScheme::CDYoshida4,
+        DaeScheme::ROS2, DaeScheme::ROS3P, DaeScheme::Rodas4, DaeScheme::CD, DaeScheme::CDYoshida4,
         DaeScheme::ExplicitEuler, DaeScheme::ExplicitMidpoint, DaeScheme::RK4 };
     const auto& n = dae_scheme_names();
     for (size_t i = 0; i < n.size(); ++i)
@@ -4023,12 +4170,141 @@ bool dae_scheme_from_name(const std::string& name, DaeScheme* out) {
 
 // --- Выходы z (System::out_exprs): «Solve as ODE» несёт z = phi(x) в состоянии после x ---
 namespace {
-    // ОДУ по x: z сняты (их строк в rhs и нет).
+    // ОДУ по x: z сняты (их строк в rhs и нет). Уровень B: имена z переезжают в zb_names — f ссылается
+    // на них, а build_namemap отдаёт их решению Ньютона.
     System sys_core(const System& s) {
         System c = s;
+        if (!s.zb_g.empty() && c.zb_names.empty())
+            c.zb_names.assign(s.vars.begin() + (long long)s.rhs.size(), s.vars.end());
         c.vars.resize(s.rhs.size());
         c.out_exprs.clear();
         return c;
+    }
+
+    // --- Уровень B: z из g(x, z, t) = 0 Ньютоном (System::zb_g) ---
+    // Только схемы, у которых каждое вычисление f идёт через rhs_over (там z решается перед f):
+    // прочие (CD, SEMP/SIMP/D, неявные, комплексные) печатают f своим путём и увидели бы старую z.
+    bool zb_scheme_ok(Scheme sch) {
+        switch (sch) {
+        case Scheme::Euler: case Scheme::ExplicitMidpoint: case Scheme::RK4: case Scheme::DOPRI78:
+        case Scheme::DOPRI78Legacy: case Scheme::RK45: case Scheme::DOP853:
+        case Scheme::GBS: case Scheme::GBS24: case Scheme::GBS246: case Scheme::GBS2468:
+        case Scheme::GBS246810: case Scheme::GBS24681012:
+            return true;
+        default:
+            return false;
+        }
+    }
+    const char* const kZbSchemeMsg =
+        "Solve as ODE with a nonlinear constraint (z by Newton): explicit RK / DOPRI / GBS and Extr/Comp over "
+        "them only - CD, SEMP/SIMP/D, implicit and complex schemes print f their own way; use a DAE method";
+    // Преамбула тела: лямбда ucuda_zb(xs, t) — Ньютон по z (полный, якобиан dg/dz символьный, LU с
+    // выбором главного; допуск и предел итераций — Ньютоновские слоты a[]). Тёплый старт — z входа
+    // X[nx + k]; повторный вызов с тем же x и t — без пересчёта.
+    std::string zb_prelude(const System& c, int nx) {
+        const int nz = (int)c.zb_g.size();
+        System sx = c;
+        sx.vars.resize((size_t)nx);
+        NameMap nm = build_namemap(sx, "xs", system_uses_time(c) ? "ucuda_tz" : "");
+        std::vector<std::string> G(nz), Jz((size_t)nz * nz);
+        for (int k = 0; k < nz; ++k) {
+            Parser p(c.zb_g[k], c.latex);
+            const PN g = p.parse();
+            jac_check_differentiable(g);
+            G[k] = emit_to_str(g, nm);
+            for (int m = 0; m < nz; ++m) Jz[(size_t)k * nz + m] = emit_to_str(pn_diff(g, c.zb_names[m]), nm);
+        }
+        const int slot = newton_slot(c);
+        std::ostringstream o;
+        o << "    /* Solve as ODE, level B: z from g(x, z, t) = 0 by Newton before every f */\n";
+        o << "    numb ucuda_zb_v[" << nz << "], ucuda_zb_c[" << nx << "], ucuda_zb_tc = (numb)0;\n";
+        o << "    bool ucuda_zb_has = false;\n";
+        for (int k = 0; k < nz; ++k) o << "    ucuda_zb_v[" << k << "] = X[" << nx + k << "];\n";
+        o << "    auto ucuda_zb = [&](const numb* xs, const numb ucuda_tz) {\n"
+             "        bool same = ucuda_zb_has && ucuda_tz == ucuda_zb_tc;\n";
+        o << "        for (int i = 0; i < " << nx << " && same; ++i) same = xs[i] == ucuda_zb_c[i];\n"
+             "        if (same) return;\n";
+        o << "        for (int i = 0; i < " << nx << "; ++i) ucuda_zb_c[i] = xs[i];\n"
+             "        ucuda_zb_tc = ucuda_tz; ucuda_zb_has = true;\n"
+             "        (void)ucuda_tz;\n";
+        o << "        const numb zb_tol = a[" << slot << "];\n"
+             "        const int zb_max = (int)a[" << slot + 1 << "];\n";
+        o << "        numb Gm[" << nz << "], Jmm[" << nz * nz << "];\n"
+             "        int ik, ir, ic, ip; numb mx, av, mlt, nrm, zz;\n"
+             "        for (int it = 0; it < zb_max; ++it) {\n";
+        for (int k = 0; k < nz; ++k) o << "            Gm[" << k << "] = (" << G[k] << ");\n";
+        for (int k = 0; k < nz * nz; ++k) o << "            Jmm[" << k << "] = (" << Jz[(size_t)k] << ");\n";
+        o << "            for (ik = 0; ik < " << nz << "; ik++) {\n"
+             "                ip = ik; mx = fabs(Jmm[ik * " << nz << " + ik]);\n"
+             "                for (ir = ik + 1; ir < " << nz << "; ir++) { av = fabs(Jmm[ir * " << nz << " + ik]); if (av > mx) { mx = av; ip = ir; } }\n"
+             "                if (ip != ik) { for (ic = 0; ic < " << nz << "; ic++) { mlt = Jmm[ik * " << nz << " + ic]; Jmm[ik * " << nz << " + ic] = Jmm[ip * " << nz << " + ic]; Jmm[ip * " << nz << " + ic] = mlt; }"
+             " mlt = Gm[ik]; Gm[ik] = Gm[ip]; Gm[ip] = mlt; }\n"
+             "                for (ir = ik + 1; ir < " << nz << "; ir++) {\n"
+             "                    mlt = Jmm[ir * " << nz << " + ik] / Jmm[ik * " << nz << " + ik];\n"
+             "                    for (ic = ik; ic < " << nz << "; ic++) Jmm[ir * " << nz << " + ic] -= mlt * Jmm[ik * " << nz << " + ic];\n"
+             "                    Gm[ir] -= mlt * Gm[ik];\n"
+             "                }\n"
+             "            }\n"
+             "            for (ik = " << nz - 1 << "; ik >= 0; ik--) {\n"
+             "                for (ic = ik + 1; ic < " << nz << "; ic++) Gm[ik] -= Jmm[ik * " << nz << " + ic] * Gm[ic];\n"
+             "                Gm[ik] /= Jmm[ik * " << nz << " + ik];\n"
+             "            }\n"
+             "            nrm = 0; zz = 0;\n";
+        for (int k = 0; k < nz; ++k)
+            o << "            ucuda_zb_v[" << k << "] -= Gm[" << k << "]; nrm += Gm[" << k << "] * Gm[" << k
+              << "]; zz += ucuda_zb_v[" << k << "] * ucuda_zb_v[" << k << "];\n";
+        o << "            if (nrm < zb_tol * zb_tol || nrm < zb_tol * zb_tol * zz) break;\n"
+             "        }\n"
+             "    };\n";
+        return o.str();
+    }
+    // После шага: z нового состояния st (момент tname) — в st[nx + k].
+    std::string zb_tail(const System& c, const char* st, const std::string& tname, int nx) {
+        std::ostringstream o;
+        o << "    ucuda_zb(" << st << ", " << (tname.empty() ? "(numb)0" : tname) << ");\n";
+        for (size_t k = 0; k < c.zb_g.size(); ++k)
+            o << "    " << st << "[" << nx + (int)k << "] = ucuda_zb_v[" << k << "];\n";
+        return o.str();
+    }
+    // Адаптивный шаг: строки z с dz_k/dt = -(sum_i dg_k/dx_i f_i + dg_k/dt) / (dg_k/dz_k) — если каждая
+    // связь содержит только свою z (dg/dz диагонален), иначе отказ. Выражения ссылаются на z,
+    // rhs_over подставит решение Ньютона в том же x.
+    System sys_augmented_b(const System& s) {
+        System a = sys_core(s);
+        const int nx = (int)s.rhs.size(), nz = (int)s.zb_g.size();
+        std::vector<PN> f(nx);
+        for (int i = 0; i < nx; ++i) { Parser p(s.rhs[i], s.latex); f[i] = p.parse(); }
+        const bool ut = system_uses_time(s);
+        for (int k = 0; k < nz; ++k) {
+            Parser p(s.zb_g[k], s.latex);
+            const PN g = p.parse();
+            for (int m = 0; m < nz; ++m)
+                if (m != k && pn_contains_var(g, a.zb_names[m]))
+                    throw std::runtime_error("adaptive step, Solve as ODE with a nonlinear constraint: constraint "
+                        + std::to_string(k + 1) + " couples several z - use a fixed step or a DAE method");
+            PN num = pn_num(0.0);
+            for (int i = 0; i < nx; ++i) {
+                const PN di = pn_diff(g, s.vars[i]);
+                if (!pn_is_zero(di)) num = pn_is_zero(num) ? pn_mul(di, f[i]) : pn_add(num, pn_mul(di, f[i]));
+            }
+            if (ut) {
+                const PN dt = pn_diff(g, "t");
+                if (!pn_is_zero(dt)) num = pn_is_zero(num) ? dt : pn_add(num, dt);
+            }
+            a.vars.push_back(a.zb_names[(size_t)k]);
+            a.rhs.push_back(pn_print(pn_neg(pn_div(num, pn_diff(g, a.zb_names[(size_t)k]))), s.latex));
+        }
+        return a;
+    }
+    void zb_adaptive_finish(AdaptiveCode& c, const System& s) {
+        const int nx = (int)s.rhs.size();
+        System core = sys_core(s);
+        const std::string pre = zb_prelude(core, nx);
+        for (std::string* b : { &c.rhs, &c.emb, &c.dprep })
+            if (b->find("ucuda_zb(") != std::string::npos) *b = pre + *b;
+        c.emb += zb_tail(core, "Y", time_name(s, "(ucuda_t + h)"), nx);
+        for (size_t k = 0; k < s.zb_g.size(); ++k)
+            c.emb += "    E[" + std::to_string(nx + (int)k) + "] = (numb)0;\n";
     }
     // st[nx + j] = phi_j(st[0..nx-1]) — пересчёт выходов по новому состоянию (время — tname).
     std::string outputs_tail(const System& s, const char* st, const std::string& tname) {
@@ -4082,6 +4358,15 @@ namespace {
 
 std::string codegen_scheme(const System& s, Scheme sch) {
     if (s.dae_nx >= 0) throw std::runtime_error(kDaeNeedsDaeScheme);
+    // Уровень B: преамбула с Ньютоном по z, шаг по x (каждое f сначала решает z), z нового
+    // состояния в X[nx + k]; метка nx — как у выходов (проекция клона = пересчёт его z).
+    if (!s.zb_g.empty() && s.vars.size() > s.rhs.size()) {
+        if (!zb_scheme_ok(sch)) throw std::runtime_error(kZbSchemeMsg);
+        const int nx = (int)s.rhs.size();
+        const System core = sys_core(s);
+        return zb_prelude(core, nx) + codegen_scheme(core, sch)
+             + zb_tail(core, "X", time_name(s, "(ucuda_t + h)"), nx) + dae_nx_tag(nx);
+    }
     // Выходы z: шаг по x, затем z = phi(x нового состояния); метка nx — LLE/LS возмущают только x,
     // а проекция клона (шаг с h = 0) просто пересчитывает его z.
     if (!s.out_exprs.empty())
@@ -4155,6 +4440,11 @@ bool scheme_supports_adaptive(Scheme sch) {
 }
 
 AdaptiveCode codegen_adaptive(const System& s, Scheme sch) {
+    if (!s.zb_g.empty() && s.vars.size() > s.rhs.size()) {   // уровень B: dz/dt строками, z(Y) Ньютоном
+        AdaptiveCode c = codegen_adaptive(sys_augmented_b(s), sch);
+        zb_adaptive_finish(c, s);
+        return c;
+    }
     if (!s.out_exprs.empty()) {   // выходы z: строки с dz/dt, затем z = phi(Y), E_z = 0
         AdaptiveCode c = codegen_adaptive(sys_augmented(s), sch);
         adaptive_outputs_tail(c, s);
@@ -4967,6 +5257,12 @@ void extr_ad_finish(std::ostringstream& o, const System& s, const char* ac, cons
 AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& base_body,
                                             const std::vector<int>& n, int p, bool symmetric,
                                             const std::string& base_name, double base_rhs) {
+    if (!s.zb_g.empty() && s.vars.size() > s.rhs.size()) {   // база уже несёт свой Ньютон по z
+        AdaptiveCode c = codegen_adaptive_extrapolation(sys_augmented_b(s), base_body, n, p, symmetric,
+                                                        base_name, base_rhs);
+        zb_adaptive_finish(c, s);
+        return c;
+    }
     if (!s.out_exprs.empty()) {   // база (codegen_scheme) уже пересчитывает z после каждого подшага
         AdaptiveCode c = codegen_adaptive_extrapolation(sys_augmented(s), base_body, n, p, symmetric,
                                                         base_name, base_rhs);
@@ -5091,6 +5387,11 @@ AdaptiveCode codegen_adaptive_extrapolation_complex(const System& s, const std::
 }
 
 AdaptiveCode codegen_adaptive_gbs(const System& s, int K) {
+    if (!s.zb_g.empty() && s.vars.size() > s.rhs.size()) {
+        AdaptiveCode c = codegen_adaptive_gbs(sys_augmented_b(s), K);
+        zb_adaptive_finish(c, s);
+        return c;
+    }
     if (!s.out_exprs.empty()) {
         AdaptiveCode c = codegen_adaptive_gbs(sys_augmented(s), K);
         adaptive_outputs_tail(c, s);
@@ -5181,7 +5482,8 @@ static double cd_implicit_sweep_rhs(const System& s, int iters = CD_ITERS) {
 }
 
 double scheme_rhs_per_step(const System& s, const std::string& name) {
-    if (!s.out_exprs.empty()) return scheme_rhs_per_step(sys_core(s), name);   // z пересчёт f не стоит
+    if ((!s.out_exprs.empty() || !s.zb_g.empty()) && s.vars.size() > s.rhs.size())
+        return scheme_rhs_per_step(sys_core(s), name);   // z: пересчёт выходов / Ньютон в цене f не учтён
     if (const int k = builtin_scheme_rhs_per_step(name); k > 0) return (double)k;
     ExtrapolationSpec es;
     if (parse_extrapolation_name(name, &es)) {
@@ -5818,6 +6120,7 @@ bool system_uses_time(const System& s) {
     };
     std::vector<std::string> all = s.rhs;   // и выходы z (их пересчёт берёт t конца шага)
     all.insert(all.end(), s.out_exprs.begin(), s.out_exprs.end());
+    all.insert(all.end(), s.zb_g.begin(), s.zb_g.end());   // и связи уровня B
     for (const auto& r : all) {
         Parser p(r, s.latex);
         if (has_t(p.parse())) return true;

@@ -307,7 +307,12 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
 - A DAE method is an ordinary step body over X = [x; z] (`codegen_dae_scheme`), so it runs in the
   existing kernels with the usual a[] layout and Newton tail. Methods (`dae_scheme_names`):
   BDF1, Trapezoidal, TR-BDF2 (two passes of `scheme_implicit_common` in their own blocks, h shadowed),
-  Rosenbrock ROS2 (`dae_ros2`; with t it adds +-gamma h^2 F_t, F_t from `pn_diff` by t), CD and
+  Rosenbrock ROS2 (`dae_ros2`; with t it adds +-gamma h^2 F_t, F_t from `pn_diff` by t), Rosenbrock
+  ROS3P (Lang-Verwer, order 3) and Rodas4 (rodas.f METH 1, order 4, stiffly accurate) through one
+  emitter `dae_rosenbrock(s, RosTab)` in the Hairer-Wanner form (M/(gamma h) - J) u_i = F(t + alpha_i h,
+  y + sum a_ij u_j) + M sum (c_ij/h) u_j + gt_i h F_t, y1 = y + sum m_i u_i (one LU per step; orders 3 / 4
+  in x and z checked with and without t — with a CONSISTENT start: an inconsistent z0 drops every
+  method to order 1, test harnesses project z first with the h = 0 step), CD and
   CD + Yoshida-4 (`dae_cd`, level B: D explicit forward with z re-solved after every x update, D*
   implicit reverse with one Newton on (x_i, z)), and explicit Euler / Midpoint / RK4 with the
   constraint solved per stage (`dae_explicit_rk`). CD and the explicit ones are index 1 only —
@@ -327,6 +332,19 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   with the diode current: BD on x and LS bit-identical to the plain ODE, Metrics on z equal to the
   native DAE RK4 to 1e-10 (periodic points). The old Analysis observables
   (`PhaseAnalysisSession::observables/obs_exprs`, appended after the run) are no longer filled.
+- Level B ("Solve as ODE" when a constraint is not explicitly solvable but every g has a z —
+  `dae_index1_structural`): `System::zb_g` = g, rhs = f(x, z) (x rows), vars = [x; z]. The body starts
+  with `zb_prelude`: a lambda `ucuda_zb(xs, t)` — full Newton on g(xs, z, t) = 0 (symbolic dg/dz, LU,
+  Newton slots of a[]), warm start from X[nx + k], cached by (x, t). `build_namemap` maps z names
+  (`zb_names`, set by `sys_core`) to `ucuda_zb_v[k]`, and `rhs_over` prints every f as
+  `(ucuda_zb(st, t), (f))`, so each stage solves z for its own x; `zb_tail` writes z of the new state
+  into X[nx + k]; tag nx as for outputs. Only schemes whose every f goes through `rhs_over`
+  (`zb_scheme_ok`: explicit RK, DOPRI78, RK45, DOP853, GBS; Extr/Comp over them); CD, SEMP/SIMP/D,
+  implicit and complex print f their own way and are refused (`kZbSchemeMsg`). Adaptive
+  (`sys_augmented_b`): z rows dz_k/dt = -(sum dg_k/dx_i f_i + dg_k/dt) / (dg_k/dz_k) when each g holds
+  only its own z (else refused), prelude added to rhs/emb/dprep, Y_z by Newton, E_z = 0. Checked: RK4 of
+  level B = DAE RK4 (same method) to all digits on nonlinear coupling, Kepler and a two-z system with t;
+  GBS 2-4 order 4; Mikhailov LS on GPU identical to DAE RK4, adaptive DOP853 Metrics = fixed RK4 to 1e-6.
 - Consistent initial z: `dae_consistent_z` (CPU, `SystemEvaluator` on a copy with dae_nx = -1) solves
   g(x0, z) = 0 before Analysis runs; index >= 2 is reported in `AnalysisResult::dae_status`.
 - Guards: `codegen_scheme` / `codegen_adaptive` refuse `dae_nx >= 0`; `SystemEvaluator` refuses it (it
