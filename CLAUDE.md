@@ -422,6 +422,23 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
     per variable (scalar Newton); X gets (z1 + z2)/2 — the mid-step z, so compared at t_n it converges with
     order 1 (the t_n - h/2 comparison is not checked yet); x order 2. Refused on index 1 (use DAE CD) and index 3.
   - Index 3 is refused by Trapezoidal, Implicit Midpoint, ROS2 / ROS3P / Rodas4 and CD (index 2).
+- Stage 6, sparse LU: `plan_elimination` / `elimination_report` and `MatEntry` / `EliminationPlan` moved
+  from `circuit_codegen` to header-only `sparse_lu.h` (the circuit code includes it, unchanged); new
+  optional `diag_first` = rows eliminated first, each on its own diagonal. Codegen (`SparseLu`,
+  `sparse_lu_build/decl/factor/solve`) uses a HYBRID for DAE Newton matrices: the x rows of I - hJ
+  (diagonal ~1) are eliminated by the plan as straight-line code into `Asp[]` (multipliers in place), the
+  rest — the z x z Schur block (`Asp[0..nb^2)`, rows `ucuda_rb`) — by a dense LU with partial pivoting
+  at run time. Pure structural (Markowitz) pivots failed on the constraint block: index-3 rows are
+  scaled ~h^2 after the x elimination, and Andrews squeezer did not pass the threshold on a single
+  factorization (q2 = 0 makes G^T entries vanish). Phase 1 checks a threshold (|pivot| >= 1e-3 max|column|);
+  a failure sends that factorization to the full dense LU (`ucuda_dn`; never observed on the stands).
+  Used by `scheme_implicit_common` for DAE with N > 8 (N <= 8 keeps the unrolled dense text) and by
+  Radau IIA (3N x 3N) always — unless the cost model says no: phase-1 ops + nb^3/3 must be under half of
+  n^3/3 and phase 1 at most 4000 multiply-adds (Andrews Radau + GGL: 7884 ops looked 4.6x cheaper on paper
+  and ran 1.4x slower — the straight-line code size, not arithmetic). `UCUDA_DAE_DENSE_LU=1` forces the
+  dense LU (comparison knob). CPU probe, same results to the last digit: Andrews BDF1 114 -> 69 ms,
+  Radau IIA 915 -> 250 ms (both match the Test Set q(0.03): Radau 1.4e-9), double pendulum BDF1
+  27 -> 16 ms, Radau 590 -> 465 ms. Not measured on the GPU (bodies are plain C; NVRTC not checked).
 - Newton for DAE: the predictor of `scheme_implicit_common` (BDF1, Trapezoidal, TR-BDF2, SDIRK2,
   Implicit Midpoint) is X_n for x and z alike, like Radau. The explicit-Euler x predictor the ODE
   schemes keep threw Newton far from the root on stiff circuits: "DAE-1 PUT burst neuron" at h = 5e-4

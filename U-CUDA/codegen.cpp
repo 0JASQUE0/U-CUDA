@@ -1,5 +1,7 @@
 ﻿// Реализация парсера (обычный синтаксис + LaTeX) и кодгена схем.
 #include "codegen.hpp"
+#include "sparse_lu.h"
+#include <cstdlib>
 #include <map>
 #include <set>
 #include <memory>
@@ -1208,6 +1210,137 @@ namespace { // внутренняя линковка: всё ниже не ви�
     // Время стадий: f(X_n) в ucuda_t, невязка и якобиан в ucuda_t + h. Без dae_nx текст
     // прежний до байта.
     // dae_hc — своё выражение для hc (стадия BDF2 у TR-BDF2), иначе h или h/2.
+    // ---------- Этап 6: разреженная LU по структуре (план — sparse_lu.h) ----------
+    // Матрица — массив Asp[nnz] с постоянными индексами (клетки портрета после fill-in), без перестановок
+    // во время счёта: ведущие элементы выбраны планом по структуре. Множители L ложатся на место
+    // A[r][pc] (их уже никто не перезапишет: столбец pc после шага закрыт).
+    // Гибрид (так у ДАУ): по плану исключаются только строки diag_first по своим диагоналям (x-строки
+    // I - h J, диагональ ~1); остаток — блок Rb x Cb (дополнение Шура по z) — плотная LU с выбором
+    // главного во время счёта. Статический выбор в блоке связей промахивался: строки индекса 3 после
+    // исключения x масштабированы как h^2 (Andrews squeezer: порог не проходил ни разу). Блок лежит в
+    // Asp[0 .. nb*nb) по строкам, остальные клетки — после.
+    struct SparseLu {
+        EliminationPlan plan;
+        std::map<std::pair<int, int>, int> id;
+        std::set<std::pair<int, int>> orig;
+        int nnz = 0, n1 = 0, nb = 0;
+        double ops1 = 0;   // умножений-сложений первой фазы
+        std::vector<int> Rb, Cb;
+        std::string at(int r, int c) const { return "Asp[" + std::to_string(id.at({ r, c })) + "]"; }
+    };
+    bool sparse_lu_build(const std::vector<MatEntry>& pat, int n, const std::vector<char>& df, SparseLu& S) {
+        // UCUDA_DAE_DENSE_LU=1 — плотная LU, как до этапа 6 (сравнение скорости и результатов).
+        static const bool dense_forced = [] { const char* e = std::getenv("UCUDA_DAE_DENSE_LU"); return e && *e == '1'; }();
+        if (dense_forced) return false;
+        S = SparseLu{};
+        for (const MatEntry& e : pat) S.orig.insert({ e.row, e.col });
+        for (int i = 0; i < n; ++i) {
+            if (df[(size_t)i]) ++S.n1;
+            else { S.Rb.push_back(i); S.Cb.push_back(i); }
+        }
+        S.nb = (int)S.Rb.size();
+        std::vector<MatEntry> full = pat;
+        for (int r : S.Rb) for (int c : S.Cb) if (!S.orig.count({ r, c })) full.push_back(MatEntry{ r, c });
+        std::string err;
+        if (!plan_elimination(full, n, S.plan, &err, &df)) return false;
+        for (int k = 0; k < S.n1; ++k)   // первая фаза — ровно диагонали строк df
+            if (S.plan.steps[(size_t)k].pivot_row != S.plan.steps[(size_t)k].pivot_col || !df[(size_t)S.plan.steps[(size_t)k].pivot_row])
+                return false;
+        // Модель стоимости: умножения-сложения первой фазы (по плану) + nb^3/3 блока против n^3/3 плотной;
+        // разреженная — только при выигрыше хотя бы вдвое. И первая фаза не длиннее 4000 операций: это
+        // прямолинейный код, и его объём стоит дороже арифметики. Andrews, Radau + GGL: 7884 операции первой
+        // фазы + блок 57 x 57 — по модели в 4.6 раза дешевле плотной 99 x 99, на деле в 1.4 раза медленнее
+        // (CPU, cl /O2); Radau без GGL (909 операций, блок 39) — в 3.9 раза быстрее.
+        {
+            for (int k = 0; k < S.n1; ++k)
+                S.ops1 += (double)S.plan.steps[(size_t)k].rows.size() * (double)S.plan.steps[(size_t)k].cols.size();
+            if (S.ops1 > 4000.0) return false;
+            if (2.0 * (S.ops1 + (double)S.nb * S.nb * S.nb / 3.0) > (double)n * n * n / 3.0) return false;
+        }
+        for (int a = 0; a < S.nb; ++a)
+            for (int b = 0; b < S.nb; ++b) S.id[{ S.Rb[(size_t)a], S.Cb[(size_t)b] }] = a * S.nb + b;
+        for (const MatEntry& e : S.plan.filled)
+            if (!S.id.count({ e.row, e.col })) S.id[{ e.row, e.col }] = (int)S.id.size();
+        S.nnz = (int)S.id.size();
+        return true;
+    }
+    // Факторизация. Первая фаза (x-диагонали по плану) проверяет порог: |ведущий| >= 1e-3 * max|столбца|
+    // среди исключаемых строк и >= 1e-30; не прошёл — fallback = 1 (вызывающий решает всю матрицу плотной
+    // LU). Затем блок — плотная LU с выбором главного (перестановки только от столбца k, как везде) в
+    // ucuda_pv; вырожденный — sing = 1. Нужны int ik, ir, ic, ip и numb mx, av, dgn, mlt.
+    void sparse_lu_factor(std::ostream& o, const SparseLu& S, const char* ind, const char* fallback) {
+        for (int k = 0; k < S.n1; ++k) {
+            const EliminationStep& st = S.plan.steps[(size_t)k];
+            o << ind << "if (!" << fallback << ") { dgn = " << S.at(st.pivot_row, st.pivot_col) << "; mx = fabs(dgn) * (numb)1e3;";
+            for (int r : st.rows) o << " av = fabs(" << S.at(r, st.pivot_col) << "); if (av > mx) mx = av;";
+            o << " if (fabs(dgn) < (numb)1e-30 || fabs(dgn) * (numb)1e3 < mx) " << fallback << " = 1;";
+            if (!st.rows.empty()) {
+                o << " else {\n";
+                for (int r : st.rows) {
+                    o << ind << "    mlt = " << S.at(r, st.pivot_col) << " / dgn; " << S.at(r, st.pivot_col) << " = mlt;";
+                    for (int c : st.cols) o << " " << S.at(r, c) << " -= mlt * " << S.at(st.pivot_row, c) << ";";
+                    o << "\n";
+                }
+                o << ind << "} }\n";
+            } else o << " }\n";
+        }
+        if (S.nb == 0) return;
+        const std::string nb = std::to_string(S.nb);
+        o << ind << "if (!" << fallback << ") {   /* dense block " << nb << " x " << nb << ", partial pivoting */\n";
+        o << ind << "    for (ik = 0; ik < " << nb << "; ik++) {\n";
+        o << ind << "        ip = ik; mx = fabs(Asp[ik * " << nb << " + ik]);\n";
+        o << ind << "        for (ir = ik + 1; ir < " << nb << "; ir++) { av = fabs(Asp[ir * " << nb << " + ik]); if (av > mx) { mx = av; ip = ir; } }\n";
+        o << ind << "        ucuda_pv[ik] = ip;\n";
+        o << ind << "        if (ip != ik) for (ic = ik; ic < " << nb << "; ic++) { mlt = Asp[ik * " << nb << " + ic]; Asp[ik * " << nb
+          << " + ic] = Asp[ip * " << nb << " + ic]; Asp[ip * " << nb << " + ic] = mlt; }\n";
+        o << ind << "        dgn = Asp[ik * " << nb << " + ik];\n";
+        o << ind << "        if (fabs(dgn) < (numb)1e-30) { sing = 1; break; }\n";
+        o << ind << "        for (ir = ik + 1; ir < " << nb << "; ir++) {\n";
+        o << ind << "            mlt = Asp[ir * " << nb << " + ik] / dgn; Asp[ir * " << nb << " + ik] = mlt;\n";
+        o << ind << "            for (ic = ik + 1; ic < " << nb << "; ic++) Asp[ir * " << nb << " + ic] -= mlt * Asp[ik * " << nb << " + ic];\n";
+        o << ind << "        }\n";
+        o << ind << "    }\n";
+        o << ind << "}\n";
+    }
+    // Объявления гибрида: Asp, перестановки блока, номера строк блока.
+    void sparse_lu_decl(std::ostream& o, const SparseLu& S, int nsol) {
+        o << "    numb Asp[" << S.nnz << "], Dv[" << nsol << "];   /* sparse LU: " << S.n1 << " pivots by plan ("
+          << (long long)S.ops1 << " multiply-adds), dense block " << S.nb << " x " << S.nb << "; dense fallback */\n";
+        o << "    int  ucuda_dn = 0, ucuda_pv[" << (S.nb > 0 ? S.nb : 1) << "];\n";
+        o << "    const int ucuda_rb[" << (S.nb > 0 ? S.nb : 1) << "] = { ";
+        for (int a = 0; a < S.nb; ++a) o << (a ? ", " : "") << S.Rb[(size_t)a];
+        if (S.nb == 0) o << "0";
+        o << " };\n";
+    }
+    // Решение: правая часть rhs[] по строкам (портится), ответ sol[] по столбцам.
+    void sparse_lu_solve(std::ostream& o, const SparseLu& S, const std::string& rhs, const std::string& sol, const char* ind) {
+        for (int k = 0; k < S.n1; ++k) {
+            const EliminationStep& st = S.plan.steps[(size_t)k];
+            for (int r : st.rows)
+                o << ind << rhs << "[" << r << "] -= " << S.at(r, st.pivot_col) << " * " << rhs << "[" << st.pivot_row << "];\n";
+        }
+        if (S.nb > 0) {
+            const std::string nb = std::to_string(S.nb);
+            o << ind << "for (ik = 0; ik < " << nb << "; ik++) {\n";
+            o << ind << "    ip = ucuda_pv[ik]; if (ip != ik) { mlt = " << rhs << "[ucuda_rb[ik]]; " << rhs << "[ucuda_rb[ik]] = " << rhs
+              << "[ucuda_rb[ip]]; " << rhs << "[ucuda_rb[ip]] = mlt; }\n";
+            o << ind << "    for (ir = ik + 1; ir < " << nb << "; ir++) " << rhs << "[ucuda_rb[ir]] -= Asp[ir * " << nb << " + ik] * "
+              << rhs << "[ucuda_rb[ik]];\n";
+            o << ind << "}\n";
+            o << ind << "for (ik = " << S.nb - 1 << "; ik >= 0; ik--) {\n";
+            o << ind << "    mlt = " << rhs << "[ucuda_rb[ik]];\n";
+            o << ind << "    for (ic = ik + 1; ic < " << nb << "; ic++) mlt -= Asp[ik * " << nb << " + ic] * " << sol << "[ucuda_rb[ic]];\n";
+            o << ind << "    " << sol << "[ucuda_rb[ik]] = mlt / Asp[ik * " << nb << " + ik];\n";
+            o << ind << "}\n";
+        }
+        for (int k = S.n1 - 1; k >= 0; --k) {
+            const EliminationStep& st = S.plan.steps[(size_t)k];
+            o << ind << sol << "[" << st.pivot_col << "] = (" << rhs << "[" << st.pivot_row << "]";
+            for (int c : st.cols) o << " - " << S.at(st.pivot_row, c) << " * " << sol << "[" << c << "]";
+            o << ") / " << S.at(st.pivot_row, st.pivot_col) << ";\n";
+        }
+    }
+
     // Множитель h^(k-1) переменной i индекса k >= 2 в норме поправки Ньютона ДАУ (как в RADAU5);
     // "" — индекс 0/1 (тогда текст тела прежний до байта).
     std::string dae_norm_w(const System& s, int i) {
@@ -1281,6 +1414,21 @@ namespace { // внутренняя линковка: всё ниже не ви�
         }
         o << "    " << sty << " " << stn << "[" << N << "];\n";
         o << "    " << sty << " Fv[" << N << "];\n";
+        // Этап 6: ДАУ больше 8 переменных — разреженная LU по структуре (плотная в форме цикла уходит в
+        // локальную память и стоит N^3); до 8 — плотная раскатанная, текст прежний.
+        SparseLu SL;
+        bool sparse = false;
+        if (dae && N > 8) {
+            std::vector<MatEntry> pat;
+            std::vector<char> df((size_t)N, 0);
+            for (int i = 0; i < N; ++i) {
+                if (i < dae_nx) { df[(size_t)i] = 1; pat.push_back(MatEntry{ i, i }); }
+                for (int j = 0; j < N; ++j)
+                    if (Jn[(size_t)i * N + j] != "(numb)0.0" && !(i < dae_nx && i == j)) pat.push_back(MatEntry{ i, j });
+            }
+            sparse = sparse_lu_build(pat, N, df, SL);
+        }
+        if (sparse) sparse_lu_decl(o, SL, N);
         o << "    " << sty << " Am[" << N * N << "];\n";
         o << "    int  piv[" << N << "];\n";
         if (cx)
@@ -1337,6 +1485,22 @@ namespace { // внутренняя линковка: всё ниже не ви�
         // modified Newton only when the frozen matrix stops contracting.
         o << "        if (refresh) {\n";
         o << "            /* Am = I - hc * J(" << stn << ") */\n";
+        if (sparse) {
+            for (const auto& kv : SL.id) {
+                const int i = kv.first.first, j = kv.first.second;
+                const std::string& d = Jn[(size_t)i * N + j];
+                o << "            Asp[" << kv.second << "] = ";
+                if (!SL.orig.count(kv.first)) o << "(numb)0.0;\n";   // fill-in
+                else if (i >= dae_nx) o << "(" << d << ");\n";
+                else if (d == "(numb)0.0") o << "(numb)1.0;\n";
+                else if (i == j) o << "(numb)1.0 - hc * (" << d << ");\n";
+                else             o << "-hc * (" << d << ");\n";
+            }
+            o << "            /* sparse LU, pivots chosen by structure (sparse_lu.h); a failed threshold -> dense */\n";
+            o << "            ucuda_dn = 0;\n";
+            sparse_lu_factor(o, SL, "            ", "ucuda_dn");
+            o << "            if (ucuda_dn) {\n";
+        }
         for (int i = 0; i < N; ++i) {
             for (int j = 0; j < N; ++j) {
                 const std::string& d = Jn[(size_t)i * N + j];
@@ -1414,6 +1578,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
             }
             o << "            }\n";
         }
+        if (sparse) o << "            }   /* ucuda_dn */\n";
         o << "            refresh = 0;\n";
         o << "        }\n";
         o << "        if (sing) break;\n";
@@ -1426,6 +1591,13 @@ namespace { // внутренняя линковка: всё ниже не ви�
               << "] - hc * (" << fn[i] << ")";
             if (dae_trap) o << " - hc * Fd[" << i << "]";
             o << ";\n";
+        }
+        if (sparse) {
+            o << "        if (!ucuda_dn) {\n";
+            o << "        /* sparse solve: Dv = A^-1 Fv */\n";
+            sparse_lu_solve(o, SL, "Fv", "Dv", "        ");
+            for (int i = 0; i < N; ++i) o << "        Fv[" << i << "] = Dv[" << i << "];\n";
+            o << "        } else {\n";
         }
         if (!unroll) {
             o << "        /* solve Am * dX = Fv in place */\n";
@@ -1441,6 +1613,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
             o << "            " << div_eq("Fv[ik]", "Am[ik * ndim + ik]") << "\n";
             o << "        }\n";
         }
+        if (sparse) o << "        }   /* ucuda_dn */\n";
         if (unroll) o << "        /* solve Am * dX = Fv in place, unrolled */\n";
         auto F = [](int i) { return "Fv[" + std::to_string(i) + "]"; };
         for (int k = 0; unroll && k < N; ++k) {
@@ -1633,9 +1806,29 @@ namespace { // внутренняя линковка: всё ниже не ви�
         o << " };\n    const numb RC[3] = { ";
         for (int k = 0; k < 3; ++k) o << (k ? ", " : "") << "(numb)" << fmtnum(C[k]);
         o << " };\n";
-        o << "    numb Sv[" << N << "], W[" << M << "], Fs[" << M << "], Js[" << 3 * N * N << "], Am[" << M * M
-          << "], Rv[" << M << "], Wt[" << N << "];\n";
-        o << "    int  piv[" << M << "];\n";
+        // Этап 6: матрица 3N x 3N блочная (стадии связаны только через x-строки с ненулевым J) — разреженная
+        // LU по структуре; плотная (форма цикла) — только если план не построился.
+        SparseLu SL;
+        bool sparse = false;
+        {
+            std::vector<MatEntry> pat;
+            std::vector<char> df((size_t)M, 0);
+            for (int bi = 0; bi < 3; ++bi)
+                for (int l = 0; l < N; ++l) {
+                    const int r = bi * N + l;
+                    if (l < nx) df[(size_t)r] = 1;
+                    for (int bj = 0; bj < 3; ++bj)
+                        for (int m = 0; m < N; ++m) {
+                            const bool jz = JS[(size_t)l * N + m] == "(numb)0.0";
+                            const bool live = l < nx ? ((bi == bj && l == m) || !jz) : (bi == bj && !jz);
+                            if (live) pat.push_back(MatEntry{ r, bj * N + m });
+                        }
+                }
+            sparse = sparse_lu_build(pat, M, df, SL);
+        }
+        o << "    numb Sv[" << N << "], W[" << M << "], Fs[" << M << "], Js[" << 3 * N * N << "], Rv[" << M << "], Wt[" << N << "];\n";
+        if (sparse) sparse_lu_decl(o, SL, M);
+        o << "    numb Am[" << M * M << "];\n    int  piv[" << M << "];\n";
         o << "    const numb ntol  = a[" << nslot << "];\n";
         o << "    const int  nmax  = (int)a[" << nslot + 1 << "];\n";
         o << "    const int  nfull = (int)a[" << nslot + 2 << "];\n";
@@ -1671,6 +1864,25 @@ namespace { // внутренняя линковка: всё ниже не ви�
         o << "            }\n";
         o << "        }\n";
         o << "        if (refresh) {\n";
+        if (sparse) {
+            for (const auto& kv : SL.id) {
+                const int r = kv.first.first, c = kv.first.second;
+                const int bi = r / N, l = r % N, bj = c / N, m = c % N;
+                o << "            Asp[" << kv.second << "] = ";
+                if (!SL.orig.count(kv.first)) { o << "(numb)0.0;\n"; continue; }
+                const std::string js = "Js[" + std::to_string(bj * N * N + l * N + m) + "]";
+                const bool jz = JS[(size_t)l * N + m] == "(numb)0.0";
+                if (l < nx) {
+                    if (bi == bj && l == m) o << "(numb)1.0" << (jz ? "" : " - h * RA[" + std::to_string(bi * 3 + bj) + "] * " + js);
+                    else o << "-h * RA[" << bi * 3 + bj << "] * " << js;
+                } else o << js;
+                o << ";\n";
+            }
+            o << "            ucuda_dn = 0;\n";
+            sparse_lu_factor(o, SL, "            ", "ucuda_dn");
+            o << "            if (ucuda_dn) {\n";
+        }
+        {
         o << "            for (bi = 0; bi < 3; bi++) for (l = 0; l < " << N << "; l++)\n";
         o << "            for (bj = 0; bj < 3; bj++) for (m = 0; m < " << N << "; m++) {\n";
         o << "                ir = bi * " << N << " + l; ic = bj * " << N << " + m;\n";
@@ -1691,8 +1903,10 @@ namespace { // внутренняя линковка: всё ниже не ви�
         o << "                    for (ic = ik + 1; ic < " << M << "; ic++) Am[ir * " << M << " + ic] -= mlt * Am[ik * " << M << " + ic];\n";
         o << "                }\n";
         o << "            }\n";
+        if (sparse) o << "            }   /* ucuda_dn */\n";
         o << "            refresh = 0;\n";
         o << "        }\n";
+        }
         o << "        if (sing) break;\n";
         // невязка
         o << "        for (bi = 0; bi < 3; bi++) for (l = 0; l < " << N << "; l++) {\n";
@@ -1702,6 +1916,13 @@ namespace { // внутренняя линковка: всё ниже не ви�
         o << "            else Rv[ir] = Fs[ir];\n";
         o << "        }\n";
         // решение
+        if (sparse) {
+            o << "        if (!ucuda_dn) {\n";
+            sparse_lu_solve(o, SL, "Rv", "Dv", "        ");
+            o << "        for (ik = 0; ik < " << M << "; ik++) Rv[ik] = Dv[ik];\n";
+            o << "        } else {\n";
+        }
+        {
         o << "        for (ik = 0; ik < " << M << "; ik++) {\n";
         o << "            ip = piv[ik]; if (ip != ik) { mlt = Rv[ik]; Rv[ik] = Rv[ip]; Rv[ip] = mlt; }\n";
         o << "            for (ir = ik + 1; ir < " << M << "; ir++) Rv[ir] -= Am[ir * " << M << " + ik] * Rv[ik];\n";
@@ -1710,6 +1931,8 @@ namespace { // внутренняя линковка: всё ниже не ви�
         o << "            for (ic = ik + 1; ic < " << M << "; ic++) Rv[ik] -= Am[ik * " << M << " + ic] * Rv[ic];\n";
         o << "            Rv[ik] /= Am[ik * " << M << " + ik];\n";
         o << "        }\n";
+        if (sparse) o << "        }   /* ucuda_dn */\n";
+        }
         o << "        nrm = 0; xx = 0;\n";
         o << "        for (ik = 0; ik < " << M << "; ik++) {\n";
         o << "            W[ik] -= Rv[ik];\n";
