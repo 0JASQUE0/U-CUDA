@@ -355,6 +355,7 @@ public:
     std::string alg_text;
     std::string dae_index_text;    // "x=1, lambda=3", см. SystemRecord
     bool dae_as_ode = false;       // ДАУ -> ОДУ подстановкой z (см. SystemRecord)
+    std::string dae_stab_alpha = "10";   // уровень C: (d/dt + alpha)^m g = 0 (см. SystemRecord)
     // ДАУ решается схемами ОДУ (сведение включено) — тогда всё как у ОДУ.
     bool dae_native() const { return is_dae && !dae_as_ode; }
     InputMode mode = InputMode::Image;
@@ -450,6 +451,11 @@ public:
     std::vector<std::string> wrapper_schemes;
     // Выключенные обёртки, канонические имена (см. SystemRecord::disabled_wrappers).
     std::vector<std::string> disabled_wrappers;
+    // Выключенные методы ДАУ (см. SystemRecord::dae_schemes_off).
+    std::vector<std::string> dae_schemes_off;
+    bool dae_scheme_on(const std::string& n) const {
+        return std::find(dae_schemes_off.begin(), dae_schemes_off.end(), n) == dae_schemes_off.end();
+    }
     bool wrapper_enabled(const std::string& name) const {
         const std::string c = wrapper_canonical_name(name);
         for (const auto& d : disabled_wrappers) if (d == c) return false;
@@ -586,6 +592,9 @@ public:
         std::vector<std::string> params;
         bool        reducible = false;      // сводится к ОДУ подстановкой z (dae_reduce_to_ode)
         std::string reduce_msg;             // z(x) или почему не сводится
+        bool        level_c = false;        // сводится только уровнем C (индекс 2-3, стабилизация alpha)
+        std::string latex;                  // уравнения для превью: \dot{x} = f, 0 = g (по строке)
+        int         latex_lines = 0;
     };
     DaeEditorState dae_editor;
 
@@ -1122,6 +1131,24 @@ public:
         try {
             System sys = build_system();
             std::string out;
+            // ДАУ: тела методов ДАУ над [x; z]. Метод, который к системе не применим (CD и явные
+            // при индексе >= 2), печатает причину, а не обрывает остальные.
+            if (dae_native()) {
+                bool any = false;
+                for (const auto& n : dae_scheme_names()) {
+                    if (!dae_scheme_on(n)) continue;
+                    any = true;
+                    DaeScheme ds;
+                    dae_scheme_from_name(n, &ds);
+                    out += "// ===== " + n + " =====\n";
+                    try { out += codegen_dae_scheme(sys, ds); }
+                    catch (const std::exception& e) { out += "// (not available: " + std::string(e.what()) + ")\n"; }
+                    out += "\n";
+                }
+                if (!any) { error_message = "no DAE method selected"; return false; }
+                generated_code = out;
+                return true;
+            }
             // A map has exactly one step body and no scheme to pick from.
             if (is_map) {
                 generated_code = "// ===== Map =====\n"
@@ -1174,7 +1201,13 @@ public:
                 out += "// ===== ";
                 out += it.name;
                 out += " =====\n";
-                out += codegen_scheme(sys, it.s);
+                // ДАУ как ОДУ (уровень B) берёт не все схемы — у неё отказ печатается на месте.
+                if (is_dae) {
+                    try { out += codegen_scheme(sys, it.s); }
+                    catch (const std::exception& e) { out += "// (not available: " + std::string(e.what()) + ")\n"; }
+                } else {
+                    out += codegen_scheme(sys, it.s);
+                }
                 out += "\n";
             }
             // custom-схемы — добавляем их код как есть для preview

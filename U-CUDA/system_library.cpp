@@ -135,6 +135,7 @@ std::string record_to_json(const SystemRecord& r) {
         kv(o, "alg_text", r.alg_text);
         kv(o, "dae_index_text", r.dae_index_text);
         kv(o, "dae_as_ode", r.dae_as_ode ? "1" : "0");   // строкой — см. "kind"
+        kv(o, "dae_stab_alpha", r.dae_stab_alpha);
     }
     kv(o, "mode", r.mode);
     kv(o, "latex_text", r.latex_text);
@@ -216,7 +217,16 @@ std::string record_to_json(const SystemRecord& r) {
         if (k) o << ", ";
         o << "\"" << esc(r.disabled_wrappers[k]) << "\"";
     }
-    o << "]\n";
+    o << "]";
+    if (r.is_dae) {   // у ОДУ поля нет — их system.json прежний
+        o << ",\n  \"dae_schemes_off\": [";
+        for (size_t k = 0; k < r.dae_schemes_off.size(); ++k) {
+            if (k) o << ", ";
+            o << "\"" << esc(r.dae_schemes_off[k]) << "\"";
+        }
+        o << "]";
+    }
+    o << "\n";
     o << "}\n";
     return o.str();
 }
@@ -333,14 +343,15 @@ SystemRecord record_from_json(const std::string& json) {
                 }
             } else { ++p.i; }
         }
-        else if (key == "disabled_wrappers") {
+        else if (key == "disabled_wrappers" || key == "dae_schemes_off") {
             // Тот же плоский массив строк, что у extr_schemes.
+            std::vector<std::string>& dst = key == "disabled_wrappers" ? r.disabled_wrappers : r.dae_schemes_off;
             p.ws();
-            if (p.s[p.i] != '[') throw std::runtime_error("JSON: expected [ for disabled_wrappers");
+            if (p.s[p.i] != '[') throw std::runtime_error("JSON: expected [ for " + key);
             ++p.i; p.ws();
             if (p.peek() != ']') {
                 while (true) {
-                    r.disabled_wrappers.push_back(p.parse_string());
+                    dst.push_back(p.parse_string());
                     p.ws();
                     if (p.peek() == ',') { ++p.i; continue; }
                     if (p.peek() == ']') { ++p.i; break; }
@@ -356,6 +367,7 @@ SystemRecord record_from_json(const std::string& json) {
             else if (key == "alg_text") r.alg_text = val;
             else if (key == "dae_index_text") r.dae_index_text = val;
             else if (key == "dae_as_ode") r.dae_as_ode = (val == "1" || val == "true");
+            else if (key == "dae_stab_alpha") r.dae_stab_alpha = val;
             else if (key == "mode") r.mode = val;
             else if (key == "latex_text") r.latex_text = val;
             else if (key == "plain_text") r.plain_text = val;

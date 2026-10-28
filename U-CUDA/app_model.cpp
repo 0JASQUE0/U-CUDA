@@ -16,8 +16,23 @@ System AppModel::build_system() const {
     // z остаются в состоянии выходами (System::out_exprs): шаг пересчитывает их по новому x, и
     // их видят выход БД, метрики и оси графиков, как обычные переменные.
     if (is_dae) {
-        System s = parse_dae(plain_text, vars_text, alg_text, params_text, dae_index_text).as_codegen_system();
+        // Вспомогательные функции — те же, что у ОДУ: подставляются в уравнения при разборе.
+        FuncDefs funcs;
+        if (use_aux_funcs && !func_defs_text.empty()) funcs = parse_func_defs(func_defs_text);
+        System s = parse_dae(plain_text, vars_text, alg_text, params_text, dae_index_text, funcs).as_codegen_system();
         if (!dae_as_ode) return s;
+        if (!dae_index1_structural(s)) {
+            // Уровень C (индекс 2-3): связи заменяются продифференцированными со стабилизацией
+            // (d/dt + alpha)^m g = 0 — дальше это индекс 1 для уровней A/B.
+            double alpha = 0;
+            try { alpha = std::stod(dae_stab_alpha); } catch (...) {
+                throw std::runtime_error("solve as ODE (level C): stabilization alpha is not a number");
+            }
+            System s1;
+            std::string why;
+            if (!dae_stabilized_index1(s, alpha, s1, &why)) throw std::runtime_error("solve as ODE (level C): " + why);
+            s = s1;
+        }
         System ode;
         std::vector<std::string> zex;
         std::string why;
@@ -208,6 +223,7 @@ SystemRecord AppModel::to_record() const {
     r.alg_text = alg_text;
     r.dae_index_text = dae_index_text;
     r.dae_as_ode = dae_as_ode;
+    r.dae_stab_alpha = dae_stab_alpha;
     switch (mode) {
     case InputMode::Image: r.mode = "Image"; break;
     case InputMode::Latex: r.mode = "LaTeX"; break;
@@ -267,6 +283,7 @@ SystemRecord AppModel::to_record() const {
     r.custom_schemes = custom_schemes;
     r.wrapper_schemes = wrapper_schemes;
     r.disabled_wrappers = disabled_wrappers;
+    r.dae_schemes_off = dae_schemes_off;
     return r;
 }
 
@@ -278,6 +295,7 @@ void AppModel::from_record(const SystemRecord& r) {
     alg_text = r.alg_text;
     dae_index_text = r.dae_index_text;
     dae_as_ode = r.dae_as_ode;
+    dae_stab_alpha = r.dae_stab_alpha;
     if (r.mode == "Image") mode = InputMode::Image;
     else if (r.mode == "Plain") mode = InputMode::Plain;
     else mode = InputMode::Latex;
@@ -339,6 +357,7 @@ void AppModel::from_record(const SystemRecord& r) {
     wrapper_schemes = r.wrapper_schemes;
     sort_wrapper_schemes(wrapper_schemes);   // старые библиотеки — в порядке добавления
     disabled_wrappers = r.disabled_wrappers;
+    dae_schemes_off = r.dae_schemes_off;
     loaded_name = r.name;          // запоминаем имя на диске
     // обновим списки символов (без падения, если система ещё неполна)
     refresh_symbols();
@@ -379,6 +398,7 @@ void AppModel::clear() {
     alg_text.clear();
     dae_index_text.clear();
     dae_as_ode = false;
+    dae_stab_alpha = "10";
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_dopri78_legacy
         = scheme_rk45 = scheme_dop853
         = scheme_cd = scheme_cdfast
@@ -399,6 +419,7 @@ void AppModel::clear() {
     custom_schemes.clear();
     wrapper_schemes.clear();
     disabled_wrappers.clear();
+    dae_schemes_off.clear();
     known_vars.clear();
     known_params.clear();
     generated_code.clear();

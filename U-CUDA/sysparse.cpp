@@ -236,7 +236,7 @@ namespace {
         static const std::set<std::string> f = {
             "sin","cos","tan","asin","acos","atan","sinh","cosh","tanh",
             "exp","log","log2","log10","sqrt","cbrt","fabs","abs",
-            "pow","atan2","fmod","floor","ceil"
+            "pow","atan2","fmod","floor","ceil","min","max","fmin","fmax","copysign"
         };
         return f;
     }
@@ -647,7 +647,7 @@ DetectedAlphabet detect_alphabet(const std::string& text, bool discrete_map) {
         "asin","acos","atan","atan2",
         "sinh","cosh","tanh","asinh","acosh","atanh",
         "exp","log","ln","log2","log10","sqrt","cbrt","pow","fmod",
-        "abs","fabs","max","min","floor","ceil",
+        "abs","fabs","max","min","fmax","fmin","copysign","floor","ceil",
         "pi","infty","cdot","times","div","pm","mp","cdots","ldots",
         "frac","dfrac","dot","ddot","left","right","big","Big","bigg","Bigg",
         "begin","end",

@@ -27,6 +27,10 @@ struct System {
     // алгебраические (z), rhs = [f; g] со связями 0 = g. -1 — обычная ОДУ. Схемы ОДУ на
     // такой System не строятся (codegen_scheme откажет), только codegen_dae_scheme.
     int dae_nx = -1;
+    // Индекс каждой переменной ДАУ (как nind1/2/3 в RADAU5; пусто или 0/1 — индекс 1). Норма поправки
+    // Ньютона берёт переменную индекса k с множителем h^(k-1): без этого на индексе 3 поправка
+    // множителя Лагранжа (~1/h^2) решала, когда остановиться, а не позиции.
+    std::vector<int> dae_index;
 
     // Выходы z («Solve as ODE», уровень A): vars = [x; z], rhs = f (только x), out_exprs[j] = phi_j(x)
     // — z после шага пересчитываются по новому x и в f не входят. Так z видят все вкладки
@@ -390,6 +394,11 @@ inline constexpr const char* kTimeUnsupportedMsg =
     "(supported: explicit RK, implicit Euler/Midpoint, SEMP/SIMP/D, CD, CD {1-0}, CD FP, CD fast as CD, GBS, Extr/Comp over them; "
     "adaptive RK45/DOP853/DOPRI78, GBS, Extr)";
 bool system_uses_time(const System& s);
+// Превью уравнений: выражение (синтаксис кодогена) в LaTeX для math_formula_draw — \frac, ^{},
+// \mathrm{sin}, модуль через \left|; имя с цифровым хвостом — с индексом (x1 -> x_{1}),
+// греческое — со слешем.
+std::string expr_to_latex(const std::string& expr, bool latex_in, const std::vector<std::string>& user_funcs = {});
+std::string name_to_latex(const std::string& name);
 // Схема умеет печатать время стадий (неявные, CD, комплексные, ГБШ — ещё нет).
 bool scheme_supports_time(Scheme sch);
 // ДАУ: схемы этапа 4 плана DAE. Тело шага — как у схем ОДУ (calculateDiscreteModel над
@@ -404,7 +413,7 @@ bool scheme_supports_time(Scheme sch);
 //   CD / CDYoshida4 — CD с решением связи при каждом изменении x (уровень B, индекс 1; связь может
 //   быть нелинейной по z), и его композиция Йошиды 4-го порядка (при a[0] = 0.5).
 enum class DaeScheme { BDF1, Trapezoidal, TRBDF2, ExplicitEuler, ExplicitMidpoint, RK4, ROS2, CD, CDYoshida4,
-                       ROS3P, Rodas4 };
+                       ROS3P, Rodas4, SDIRK2, ImplicitMidpoint, Radau5, BDF1GGL, Radau5GGL, CDIndex2 };
 // Согласованные НУ (индекс 1): при фиксированных x решает g(x, z, t0) = 0 по z Ньютоном
 // (якобиан dg/dz символьный, тот же, что у шага). X — [x; z] на входе и выходе; a — раскладка
 // шага ([s, p_1..p_M, хвост]). Стартует с z из X. false — z не тронут, why — причина:
@@ -421,6 +430,18 @@ bool dae_reduce_to_ode(const System& s, System& ode, std::vector<std::string>* z
 // Структурный индекс 1: в каждой связи 0 = g есть хотя бы одна z (иначе dg/dz вырожден). Уровень B
 // «Solve as ODE» (z Ньютоном) и проверка галочки в редакторе.
 bool dae_index1_structural(const System& s);
+// Этап 5. Массив производных связей: связь дифференцируется вдоль x' = f, пока в ней не появится z;
+// индекс связи — число элементов (1 — z прямо в g). dae_structural_index — максимум по связям
+// (-1 — не ДАУ, 0 — не определяется: связь без z и после 3 производных).
+int dae_structural_index(const System& s);
+// Уровень C «Solve as ODE»: каждая связь индекса m+1 заменяется на (d/dt + alpha)^m g = 0 (её m-я
+// производная плюс младшие с биномиальными весами — стабилизация Баумгарте с кратным корнем), так что
+// получается ДАУ индекса 1 для уровней A/B; дрейф исходной связи гаснет как e^(-alpha t).
+bool dae_stabilized_index1(const System& s, double alpha, System& out, std::string* why);
+// GGL (Gear-Gupta-Leimkuhler): связям уровня позиций (индекс 3) добавляются множители mu
+// (vars "ucuda_ggl_mu<k>"): x' = f - (dg/dx)^T mu, 0 = g, 0 = d/dt g — система индекса 2 с mu = 0
+// на решении. Методы "... + GGL" держат mu внутри шага (состояние X прежнее).
+bool dae_ggl_system(const System& s, System& out, std::string* why);
 // Тело заканчивается меткой dae_nx_tag(s.dae_nx) — см. dae_nx_from_body.
 std::string codegen_dae_scheme(const System& s, DaeScheme sch);
 // Метка числа x в теле шага метода ДАУ: LLE/LS по ней возмущают клоны только по x

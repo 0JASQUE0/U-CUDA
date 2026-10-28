@@ -52,6 +52,7 @@ struct DaeSystem {
         s.vars.insert(s.vars.end(), alg.begin(), alg.end());
         s.params = params;
         s.dae_nx = (int)diff.size();
+        s.dae_index = index;
         s.rhs = f;
         s.rhs.insert(s.rhs.end(), g.begin(), g.end());
         s.latex = true;

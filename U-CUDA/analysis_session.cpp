@@ -264,7 +264,12 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
     std::vector<std::string> out;
     // A map has no scheme: its only step is the right-hand side itself.
     if (r.is_map) { out.emplace_back("Map"); return out; }
-    if (r.is_dae && !r.dae_as_ode) return dae_scheme_names();   // у ДАУ — только свои схемы
+    if (r.is_dae && !r.dae_as_ode) {   // у ДАУ — только свои схемы, без выключенных в редакторе
+        for (const auto& n : dae_scheme_names())
+            if (std::find(r.dae_schemes_off.begin(), r.dae_schemes_off.end(), n) == r.dae_schemes_off.end())
+                out.push_back(n);
+        return out;
+    }
     // Порядок — как в комбо схем: по порядку точности.
     if (r.scheme_euler)    out.emplace_back("Euler");
     if (r.scheme_cromer)   out.emplace_back("Euler-Cromer");
@@ -774,14 +779,17 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     // уже согласованное шагом, — его не трогаем.
     if (in.sys.dae_nx >= 0 && in.sys.dae_nx < dim && !use_override) {
         int solved = 0;
-        std::string why;
+        std::string why, done;   // done — что сделано при индексе >= 2 (скрытые связи), пусто при индексе 1
         for (int k = 0; k < N; ++k) {
             std::string w;
-            if (dae_consistent_z(in.sys, a.data(), (int)a.size(), 0.0, &ic_flat[(size_t)k * dim], &w)) ++solved;
+            if (dae_consistent_z(in.sys, a.data(), (int)a.size(), 0.0, &ic_flat[(size_t)k * dim], &w)) {
+                ++solved;
+                if (done.empty()) done = w;
+            }
             else if (why.empty()) why = w;
         }
         result.dae_status = solved == N
-            ? std::string("initial z made consistent: g(x0, z) = 0")
+            ? (done.empty() ? std::string("initial z made consistent: g(x0, z) = 0") : "initial values: " + done)
             : "initial z: " + why;
     }
 

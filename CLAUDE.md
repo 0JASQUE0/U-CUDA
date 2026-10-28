@@ -306,7 +306,7 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   it for `is_dae` records.
 - A DAE method is an ordinary step body over X = [x; z] (`codegen_dae_scheme`), so it runs in the
   existing kernels with the usual a[] layout and Newton tail. Methods (`dae_scheme_names`):
-  BDF1, Trapezoidal, TR-BDF2 (two passes of `scheme_implicit_common` in their own blocks, h shadowed),
+  BDF1, Trapezoidal, SDIRK2, Implicit Midpoint, Radau IIA (5) (see "Stage 5" below), TR-BDF2 (two passes of `scheme_implicit_common` in their own blocks, h shadowed),
   Rosenbrock ROS2 (`dae_ros2`; with t it adds +-gamma h^2 F_t, F_t from `pn_diff` by t), Rosenbrock
   ROS3P (Lang-Verwer, order 3) and Rodas4 (rodas.f METH 1, order 4, stiffly accurate) through one
   emitter `dae_rosenbrock(s, RosTab)` in the Hairer-Wanner form (M/(gamma h) - J) u_i = F(t + alpha_i h,
@@ -345,6 +345,22 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   only its own z (else refused), prelude added to rhs/emb/dprep, Y_z by Newton, E_z = 0. Checked: RK4 of
   level B = DAE RK4 (same method) to all digits on nonlinear coupling, Kepler and a two-z system with t;
   GBS 2-4 order 4; Mikhailov LS on GPU identical to DAE RK4, adaptive DOP853 Metrics = fixed RK4 to 1e-6.
+- DAE editor (Library → DAE): auxiliary functions (`use_aux_funcs` / `func_defs_text`, inlined by
+  `parse_dae(.., funcs)` exactly as for ODEs), a LaTeX preview (`expr_to_latex` / `name_to_latex` in codegen:
+  \frac, ^{}, \mathrm{f}, |..|, x1 → x_{1}, greek names; with aux functions the raw rows are shown with the
+  calls kept — `Parser::extra_funcs`, preview only), method checkboxes (`dae_schemes_off` in the record,
+  a list of the OFF ones so old records keep all on; with "Solve as ODE" the ODE `scheme_*` flags via the
+  shared `draw_builtin_scheme_checkboxes`) and Generate (`AppModel::generate` prints every enabled DAE method;
+  a method that does not apply prints its reason instead of failing the rest).
+- `min(a, b)` / `max(a, b)` are parser functions (normalised to `fmin` / `fmax`: NVRTC, CRT and dd/qd all
+  have them), with a derivative for the implicit schemes (branch by `copysign(1, a - b)`) and evaluator
+  opcodes; refused in complex schemes. Before them min was written as (a + b - |a - b|)/2.
+- Mikhailov presets: "Mikhailov DAU_n" (original), "Mikhailov DAU_n (compact)" (same DAE via aux
+  functions and min — equal to 2e-15) and "Mikhailov ODE 6D (Baumgarte)" (ODE: both constraints
+  differentiated, VM and vd are variables, `-kb*g` keeps them on the constraint; RK4 agrees with the DAE to
+  1e-10, |g| <= 4e-9 over t = 1500; every ODE scheme incl. CD). Neither constraint is explicitly solvable:
+  the Schottky branch reaches 7-127% of the linear current and the diode drop 70-75% of lam*u1 on the
+  attractor, so dropping them is not an option.
 - Consistent initial z: `dae_consistent_z` (CPU, `SystemEvaluator` on a copy with dae_nx = -1) solves
   g(x0, z) = 0 before Analysis runs; index >= 2 is reported in `AnalysisResult::dae_status`.
 - Guards: `codegen_scheme` / `codegen_adaptive` refuse `dae_nx >= 0`; `SystemEvaluator` refuses it (it
@@ -363,14 +379,56 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   Headless probes with `set_nvrtc_rdc` off compile a DAE LLE/LS module for Mikhailov in ~200-270 s (one
   monolithic module); with rdc on (set in `_app_config.json`; the code default is off) it is ~11 s. Why: see
   "How a sweep module is compiled".
-- Not yet: CD for index 2 (the report's secant-on-z variant), index-3 Newton scaling / GGL (stage 5).
-- Newton for DAE: the z predictor is the old value, so a fast multiplier (pendulum) needs ~9 iterations;
-  a step that runs out of iterations is accepted unconverged and the constraint drifts until the run
-  diverges. DAE presets and new DAE systems use full Newton, 25 iterations. The DAE body also stops on a
-  relative test (||dX||^2 < tol^2 |X|^2): on index 2-3 the absolute tol is below the round-off of the
-  correction and every step ran to max_iters.
-- Index 3: BDF1 holds the single pendulum, but the double pendulum diverges at any h (earlier for
-  smaller h — unscaled index-3 Newton, cond ~1/h^2). Stage 5 (scaling / GGL).
+- Stage 5, part 1: DAE SDIRK2 (Alexander, `dae_sdirk2`: two implicit Euler passes with gamma*h, like
+  TR-BDF2), DAE Implicit Midpoint (`scheme_implicit_common` Midpoint with dae_nx — a control method: it
+  does not hold an index-2 constraint and diverges on index 3, as the plan says), DAE Radau IIA (5)
+  (`dae_radau5`: 3 stages, full Newton on 3N unknowns, x rows Y_i - x_n - h sum a_ij f(Y_j), constraint
+  rows g(Y_i) = 0, loop-form LU 3N x 3N; RADAU5's simplified Newton with the A^-1 transform is not done).
+  `System::dae_index` (from `dae_index_text`, `DaeSystem::as_codegen_system`) weights the Newton
+  correction of an index-k variable by h^(k-1) (`dae_norm_w`), in `scheme_implicit_common` and Radau;
+  index <= 1 systems print the old text. Orders (headless probe, self-convergence): Radau IIA index 1:
+  5 / 5, index 2 (pendulum): x 5, z 3, index 3 (pendulum, double pendulum): x 3 (velocities), lambda 2 —
+  the Hairer-Lubich-Roche orders 2s-1 / s / s-1. SDIRK2: x 2, z 1 on index 2.
+- **LU bug (fixed in stage 5):** every printed LU (`scheme_implicit_common` loop and unrolled, Rosenbrock,
+  Radau) and `integrator.cpp` `lu_factor` swapped WHOLE rows (with the L multipliers of earlier
+  columns), while the solve replays the swaps one by one LINPACK-style — that needs the multipliers left
+  in place. Whenever pivoting fired after the first column, the Newton correction (and the Rosenbrock
+  stage) was wrong. ODE implicit schemes with I - hJ almost never pivot (no change there); DAE
+  constraint rows always do. Symptoms it caused: ~9 Newton iterations per DAE step, the double pendulum
+  "diverging at any h" on BDF1, Trapezoidal diverging on the index-3 pendulum. Now swaps cover columns
+  >= k only. After the fix the double pendulum runs on BDF1, TR-BDF2, SDIRK2 and Radau IIA (|g| ~ 1e-16
+  over t = 10, h = 1e-3); Trapezoidal and Implicit Midpoint still diverge there (not L-stable), Rosenbrock
+  methods lose order on index 2-3 (they are index-1 methods).
+- Stage 5, part 2. Core: `dae_deriv_array` (anonymous namespace) differentiates each constraint along
+  x' = f (`pn_total_dt`: sum dc/dx_i f_i + dc/dt) until a z appears; the length of that chain is the
+  constraint's index, `dae_structural_index(s)` the maximum (0: no z after 3 derivatives). On it:
+  - Consistent initial values for index >= 2 (`dae_consistent_hidden`, called by `dae_consistent_z` when
+    any chain is longer than 1): x0 is projected onto the z-free levels by minimum-norm Gauss-Newton
+    (x -= C^T (C C^T)^-1 c), then z from the last levels by Newton; expressions are evaluated by
+    `SystemEvaluator`s over chunks of N rows. Analysis shows "initial values: hidden constraints (index k):
+    x0 projected (max shift ..)". Pendulum index 3 from x0 + 0.01: back on the circle, velocity tangent.
+  - GGL: `dae_ggl_system` adds multipliers `ucuda_ggl_mu<k>` for the position-level (index-3)
+    constraints: x' = f - (dg/dx)^T mu, 0 = g, 0 = d/dt g (index 2, mu = 0 on the solution). The
+    methods "DAE BDF1 + GGL" / "DAE Radau IIA + GGL" keep mu local to the step (X shadowed by a copy
+    [x; z; mu] with mu = 0), so the state and every tab stay as they are. Radau + GGL on the pendulum and
+    double pendulum: x 5, lambda 3 (plain Radau: 3 / 2).
+  - Level C ("Solve as ODE" when not structurally index 1): `dae_stabilized_index1` replaces an
+    index-(m+1) constraint by (d/dt + alpha)^m g = 0 (binomial weights, a double root: Baumgarte), then
+    levels A/B take over (`AppModel::build_system`). alpha: record field `dae_stab_alpha` (default 10,
+    editor field shown for level C). RK4 order 4, |g| 1e-7..1e-9 over t = 20 (pendulums); a stiff system
+    still needs a stiff ODE scheme (Circle stiff, lambda = 1e4, diverges on explicit RK4).
+  - "DAE CD (index 2)" (`dae_cd2`): z constant per half-step, chosen (Newton with a finite-difference
+    Jacobian, the report's secant) so that g holds at the end of the half-step; D explicit, D* implicit
+    per variable (scalar Newton); X gets (z1 + z2)/2 — the mid-step z, so compared at t_n it converges with
+    order 1 (the t_n - h/2 comparison is not checked yet); x order 2. Refused on index 1 (use DAE CD) and index 3.
+  - Index 3 is refused by Trapezoidal, Implicit Midpoint, ROS2 / ROS3P / Rodas4 and CD (index 2).
+- Newton for DAE: the predictor of `scheme_implicit_common` (BDF1, Trapezoidal, TR-BDF2, SDIRK2,
+  Implicit Midpoint) is X_n for x and z alike, like Radau. The explicit-Euler x predictor the ODE
+  schemes keep threw Newton far from the root on stiff circuits: "DAE-1 PUT burst neuron" at h = 5e-4
+  got the internal PUT node to ~1.4 V (currents ~e^40) at a spike front, and 25 full-Newton iterations
+  did not converge; the step was accepted unconverged and the run turned to noise. DAE presets and new DAE systems use full Newton,
+  25 iterations. The DAE body also stops on a relative test (||dX||^2 < tol^2 |X|^2): on index 2-3 the
+  absolute tol is below the round-off of the correction.
 
 ## Adaptive step (RK45 / DOPRI78 / DOP853)
 Fixed step stays the default and must stay **bit-for-bit** unchanged: the adaptive path is

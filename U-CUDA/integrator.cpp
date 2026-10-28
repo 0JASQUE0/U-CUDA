@@ -480,8 +480,10 @@ bool lu_factor(double* Am, int* piv, int n) {
             if (av > mx) { mx = av; p = r; }
         }
         piv[k] = p;
+        // Только столбцы от k (LINPACK): множители прежних шагов остаются на месте, иначе lu_solve,
+        // повторяющий перестановки по одной, взял бы чужие (тот же разбор, что в codegen.cpp).
         if (p != k)
-            for (int c = 0; c < n; ++c) std::swap(Am[k * n + c], Am[p * n + c]);
+            for (int c = k; c < n; ++c) std::swap(Am[k * n + c], Am[p * n + c]);
         const double d = Am[k * n + k];
         if (std::fabs(d) < 1e-30) return false;
         for (int r = k + 1; r < n; ++r) {
@@ -562,7 +564,7 @@ bool lu_factor_cx(ucmplx* Am, int* piv, int n) {
         }
         piv[k] = p;
         if (p != k)
-            for (int c = 0; c < n; ++c) std::swap(Am[k * n + c], Am[p * n + c]);
+            for (int c = k; c < n; ++c) std::swap(Am[k * n + c], Am[p * n + c]);
         const ucmplx d = Am[k * n + k];
         if (ucmplx_abs(d) < 1e-30) return false;
         for (int r = k + 1; r < n; ++r) {

@@ -4319,6 +4319,97 @@ static void draw_wrapper_list(AppModel& model) {
     }
 }
 
+// Галочки встроенных схем ОДУ (флаги scheme_* системы): вкладка System редактора ОДУ и редактор
+// ДАУ при «Solve as ODE».
+static void draw_builtin_scheme_checkboxes(AppModel& model) {
+    ImGui::Text("Schemes to generate:");
+    // И кнопки, и сам список идут по kBuiltinSchemes и пропускают схемы,
+    // скрытые в Settings: скрытая схема не должна ни показываться, ни
+    // включаться скопом.
+    auto scheme_shown = [&](const BuiltinScheme& b) { return !model.scheme_hidden(b.name); };
+    if (ImGui::Button("Select all"))
+        for (const auto& b : kBuiltinSchemes) if (scheme_shown(b)) model.*b.flag = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Clear all"))
+        for (const auto& b : kBuiltinSchemes) if (scheme_shown(b)) model.*b.flag = false;
+
+    // Схемы сгруппированы по порядку точности — тот же порядок, что в комбо
+    // выбора схемы и в списке генерации (AppModel::generate). Таблица
+    // отсортирована по order, поэтому шапка печатается на его смене, и группа
+    // целиком скрытых схем не оставляет пустого заголовка.
+    // У CD, Complex CD, SEMP и SIMP порядок группы достигается только при
+    // s = a[0] = 0.5; при других s все четыре падают до первого.
+    {
+        std::string  shown_group;
+        bool first_in_line = true;
+        for (const auto& b : kBuiltinSchemes) {
+            if (!scheme_shown(b)) continue;
+            if (scheme_group_title(b) != shown_group) {
+                ImGui::SeparatorText(scheme_group_title(b).c_str());
+                shown_group   = scheme_group_title(b);
+                first_in_line = true;
+            }
+            if (!first_in_line) ImGui::SameLine();
+            first_in_line = false;
+            ImGui::Checkbox(b.name, &(model.*b.flag));
+            if (b.tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", b.tooltip);
+        }
+    }
+
+    // Маска из Settings — фильтр интерфейса, флаги системы она не трогает.
+    // Поэтому скрытая схема может остаться включённой у системы, и Generate
+    // её выпустит, хотя чекбокса рядом уже нет — об этом надо сказать прямо.
+    {
+        std::string hidden_on;
+        for (const auto& b : kBuiltinSchemes) {
+            if (!model.scheme_hidden(b.name) || !(model.*b.flag)) continue;
+            if (!hidden_on.empty()) hidden_on += ", ";
+            hidden_on += b.name;
+        }
+        if (!hidden_on.empty())
+            ImGui::TextDisabled("Hidden in Settings, still enabled for this system: %s",
+                                hidden_on.c_str());
+    }
+}
+
+// Галочки методов ДАУ (список выключенных — AppModel::dae_schemes_off). Порядок — dae_scheme_names.
+static void draw_dae_method_checkboxes(AppModel& model) {
+    ImGui::Text("DAE methods to generate:");
+    if (ImGui::Button("Select all##dae")) model.dae_schemes_off.clear();
+    ImGui::SameLine();
+    if (ImGui::Button("Clear all##dae")) model.dae_schemes_off = dae_scheme_names();
+    // Группы: неявные (любой индекс) и с решением связи при каждом x (только индекс 1).
+    static const char* const kTips[] = {
+        "Implicit Euler on [x; z], one Newton per step. Order 1, L-stable, any index.",
+        "Trapezoid in x, constraint at the new node. Order 2, not L-stable (index 3 diverges).",
+        "TR-BDF2: trapezoid to t + gamma h, then BDF2. Order 2, L-stable.",
+        "Rosenbrock ROS2: linearly implicit, one LU per step, no Newton. Order 2, L-stable.",
+        "Rosenbrock ROS3P (Lang-Verwer): order 3 in x and z, A-stable, one LU per step.",
+        "Rodas4 (Hairer-Wanner): order 4, stiffly accurate, L-stable, one LU per step.",
+        "CD for DAE (level B): explicit forward half with z re-solved after every x update, implicit\n"
+        "reverse half with one Newton on (x_i, z). Order 2 at s = 0.5. Index 1 only.",
+        "Yoshida composition of three CD steps: order 4 at s = 0.5. Index 1 only.",
+        "Explicit Euler with z solved from the constraint at every stage. Index 1, non-stiff.",
+        "Explicit midpoint with z solved at every stage. Order 2, index 1, non-stiff.",
+        "RK4 with z solved at every stage. Order 4, index 1, non-stiff.",
+    };
+    const auto& names = dae_scheme_names();
+    bool first_in_line = true;
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (i == 0) ImGui::SeparatorText("implicit, any index");
+        if (names[i] == "DAE CD") { ImGui::SeparatorText("constraint solved whenever x changes, index 1"); first_in_line = true; }
+        if (!first_in_line) ImGui::SameLine();
+        first_in_line = false;
+        bool on = model.dae_scheme_on(names[i]);
+        if (ImGui::Checkbox(names[i].c_str(), &on)) {
+            auto& off = model.dae_schemes_off;
+            off.erase(std::remove(off.begin(), off.end(), names[i]), off.end());
+            if (!on) off.push_back(names[i]);
+        }
+        if (i < sizeof(kTips) / sizeof(kTips[0]) && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kTips[i]);
+    }
+}
+
 static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     model.poll(); // забрать результат OCR, если готов
 
@@ -4479,54 +4570,7 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
     }
 
     // методы
-    ImGui::Text("Schemes to generate:");
-    // И кнопки, и сам список идут по kBuiltinSchemes и пропускают схемы,
-    // скрытые в Settings: скрытая схема не должна ни показываться, ни
-    // включаться скопом.
-    auto scheme_shown = [&](const BuiltinScheme& b) { return !model.scheme_hidden(b.name); };
-    if (ImGui::Button("Select all"))
-        for (const auto& b : kBuiltinSchemes) if (scheme_shown(b)) model.*b.flag = true;
-    ImGui::SameLine();
-    if (ImGui::Button("Clear all"))
-        for (const auto& b : kBuiltinSchemes) if (scheme_shown(b)) model.*b.flag = false;
-
-    // Схемы сгруппированы по порядку точности — тот же порядок, что в комбо
-    // выбора схемы и в списке генерации (AppModel::generate). Таблица
-    // отсортирована по order, поэтому шапка печатается на его смене, и группа
-    // целиком скрытых схем не оставляет пустого заголовка.
-    // У CD, Complex CD, SEMP и SIMP порядок группы достигается только при
-    // s = a[0] = 0.5; при других s все четыре падают до первого.
-    {
-        std::string  shown_group;
-        bool first_in_line = true;
-        for (const auto& b : kBuiltinSchemes) {
-            if (!scheme_shown(b)) continue;
-            if (scheme_group_title(b) != shown_group) {
-                ImGui::SeparatorText(scheme_group_title(b).c_str());
-                shown_group   = scheme_group_title(b);
-                first_in_line = true;
-            }
-            if (!first_in_line) ImGui::SameLine();
-            first_in_line = false;
-            ImGui::Checkbox(b.name, &(model.*b.flag));
-            if (b.tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", b.tooltip);
-        }
-    }
-
-    // Маска из Settings — фильтр интерфейса, флаги системы она не трогает.
-    // Поэтому скрытая схема может остаться включённой у системы, и Generate
-    // её выпустит, хотя чекбокса рядом уже нет — об этом надо сказать прямо.
-    {
-        std::string hidden_on;
-        for (const auto& b : kBuiltinSchemes) {
-            if (!model.scheme_hidden(b.name) || !(model.*b.flag)) continue;
-            if (!hidden_on.empty()) hidden_on += ", ";
-            hidden_on += b.name;
-        }
-        if (!hidden_on.empty())
-            ImGui::TextDisabled("Hidden in Settings, still enabled for this system: %s",
-                                hidden_on.c_str());
-    }
+    draw_builtin_scheme_checkboxes(model);
 
     // Настройки Ньютона на уровне системы — значения по умолчанию для новых вкладок, как
     // symmetry s: каждая вкладка держит свои (NewtonSettings, поля в блоке Integration)
@@ -4990,6 +5034,8 @@ static void draw_library_list(AppModel& model, SystemLibrary& lib, LibTab tab) {
             // несошедшийся шаг, и связь уплывала.
             model.library_edit_buffer->newton_full      = true;
             model.library_edit_buffer->newton_max_iters = "25";
+            // «Solve as ODE» берёт схемы ОДУ из флагов scheme_*: RK4 годится и уровню B.
+            model.library_edit_buffer->scheme_rk4       = true;
         }
         model.edit_original_name.clear();
         model.edit_error.clear();
@@ -5238,13 +5284,19 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
     // и живёт в основной модели — иначе в редакторе показались бы скрытые схемы.
     buf.hidden_schemes = model.hidden_schemes;
     if (buf.is_dae) {
-        // Пока только текст записи: разбор "0 = g" и решатели появятся на этапах
-        // DAE-ядра, до тех пор система не уходит в анализ.
         ImGui::TextWrapped("x' = f(x, z, t),  0 = g(x, z, t). One equation per line: "
                            "x' = ... for each differential variable, 0 = ... for each "
-                           "algebraic one.");
+                           "algebraic one. min(a, b) / max(a, b) are available.");
         ImGui::Text("Equations:");
         InputTextMultilineStr("##dae_eqs", buf.plain_text, ImVec2(-1, 160));
+        // Вспомогательные функции — как у ОДУ: подставляются в уравнения при разборе.
+        ImGui::Checkbox("Use auxiliary functions##dae", &buf.use_aux_funcs);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("One definition per line, e.g. G(x) = Goff + (Gon - Goff)*x.\n"
+                              "A call is replaced by the body with the arguments substituted;\n"
+                              "a function may call another one defined above or below.");
+        if (buf.use_aux_funcs)
+            InputTextMultilineStr("##dae_funcs", buf.func_defs_text, ImVec2(-1, 110));
         ImGui::Text("Differential variables (x):"); ImGui::SameLine();
         ImGui::SetNextItemWidth(-1);
         InputTextStr("##dae_vars", buf.vars_text);
@@ -5264,12 +5316,15 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
         // Разбор — только при смене ввода.
         AppModel::DaeEditorState& st = model.dae_editor;
         const std::string key = buf.plain_text + '\x1e' + buf.vars_text + '\x1e' + buf.alg_text
-                              + '\x1e' + buf.params_text + '\x1e' + buf.dae_index_text;
+                              + '\x1e' + buf.params_text + '\x1e' + buf.dae_index_text
+                              + '\x1e' + (buf.use_aux_funcs ? buf.func_defs_text : std::string());
         if (st.key != key) {
             st.key = key;
             try {
+                FuncDefs funcs;
+                if (buf.use_aux_funcs && !buf.func_defs_text.empty()) funcs = parse_func_defs(buf.func_defs_text);
                 const DaeSystem d = parse_dae(buf.plain_text, buf.vars_text, buf.alg_text,
-                                              buf.params_text, buf.dae_index_text);
+                                              buf.params_text, buf.dae_index_text, funcs);
                 st.ok = true;
                 st.vars = d.diff;
                 st.vars.insert(st.vars.end(), d.alg.begin(), d.alg.end());
@@ -5287,10 +5342,71 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
                 for (size_t i = 0; i < d.n_vars(); ++i)
                     m += " " + st.vars[i] + "=" + (d.index[i] ? std::to_string(d.index[i]) : "?");
                 st.message = m;
+                // Превью: \dot{x} = f по дифференциальным, 0 = g по связям — тем же AST, что у кодогена.
+                {
+                    const System ps = d.as_codegen_system();
+                    st.latex.clear();
+                    st.latex_lines = 0;
+                    std::vector<std::string> fnames;
+                    for (const auto& kv : funcs) fnames.push_back(kv.first);
+                    // Сами вспомогательные функции — первыми строками (в уравнениях они уже подставлены);
+                    // тело может звать другие функции (iM = G(x)*v + iS(v)) — они печатаются вызовами.
+                    for (const auto& kv : funcs) {
+                        std::string args;
+                        for (size_t k = 0; k < kv.second.args.size(); ++k)
+                            args += (k ? ", " : "") + name_to_latex(kv.second.args[k]);
+                        std::string body;
+                        try { body = expr_to_latex(kv.second.body, false, fnames); }
+                        catch (const std::exception&) { body = "?"; }
+                        st.latex += "\\mathrm{" + kv.first + "}\\left(" + args + "\\right) = " + body + "\n";
+                        ++st.latex_lines;
+                    }
+                    // Уравнения: с функциями — исходные строки (вызовы G(xm) видны как есть), без них —
+                    // разобранные f и g. Строка, которая не прочлась, берётся из разбора (с подстановкой).
+                    std::vector<std::string> raw_rows;
+                    if (!fnames.empty()) {
+                        std::istringstream in(buf.plain_text);
+                        std::string row;
+                        while (std::getline(in, row)) {
+                            const size_t a = row.find_first_not_of(" \t\r");
+                            if (a == std::string::npos || row[a] == '#' || row[a] == '%' || row.compare(a, 2, "//") == 0) continue;
+                            raw_rows.push_back(row.substr(a));
+                        }
+                    }
+                    const bool use_raw = !fnames.empty() && raw_rows.size() == ps.rhs.size();
+                    for (size_t i = 0; i < ps.rhs.size(); ++i) {
+                        const bool diff = (int)i < ps.dae_nx;
+                        std::string ln;
+                        std::string lhs = diff ? "\\dot{" + name_to_latex(ps.vars[i]) + "} = " : std::string("0 = ");
+                        bool done = false;
+                        if (use_raw) {
+                            const size_t eq = raw_rows[i].find('=');
+                            if (eq != std::string::npos) {
+                                std::string l = raw_rows[i].substr(0, eq);
+                                l.erase(std::remove_if(l.begin(), l.end(), [](char c) { return c == ' ' || c == '\t'; }), l.end());
+                                try {
+                                    ln = expr_to_latex(raw_rows[i].substr(eq + 1), false, fnames);
+                                    if (l != "0") {
+                                        const size_t q = l.find_first_of("'(");
+                                        lhs = "\\dot{" + name_to_latex(l.substr(0, q)) + "} = ";
+                                    }
+                                    done = true;
+                                } catch (const std::exception&) {}
+                            }
+                        }
+                        if (!done) {
+                            try { ln = expr_to_latex(ps.rhs[i], ps.latex); }
+                            catch (const std::exception&) { ln = "?"; }
+                        }
+                        st.latex += lhs + ln + "\n";
+                        ++st.latex_lines;
+                    }
+                }
                 // Уровень A: можно ли решать как ОДУ (z выражены из связей явно).
                 System ode;
                 std::vector<std::string> zex;
                 std::string why;
+                st.level_c = false;
                 const System dsys = d.as_codegen_system();
                 st.reducible = dae_reduce_to_ode(dsys, ode, &zex, &why);
                 if (st.reducible) {
@@ -5301,18 +5417,48 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
                     st.reducible = true;
                     st.reduce_msg = "z by Newton in every f (level B): " + why
                                   + "\n  schemes: explicit RK / DOPRI / GBS, Extr/Comp over them, adaptive";
-                } else st.reduce_msg = why;
+                } else {
+                    // Уровень C (индекс 2-3): связи дифференцируются до появления z и стабилизируются.
+                    System s1;
+                    std::string w2;
+                    const int idx = dae_structural_index(dsys);
+                    if (idx >= 2 && dae_stabilized_index1(dsys, 1.0, s1, &w2)) {
+                        System o2;
+                        std::vector<std::string> z2;
+                        std::string w3;
+                        const bool lev_a = dae_reduce_to_ode(s1, o2, &z2, &w3);
+                        st.reducible = true;
+                        st.level_c = true;
+                        st.reduce_msg = "level C (index " + std::to_string(idx) + "): constraints differentiated until z "
+                                        "appears, (d/dt + alpha)^m g = 0;\n  then " + std::string(lev_a ? "explicit z (level A)"
+                                        : "z by Newton (level B)") + ". The original constraint is only held by the "
+                                        "stabilization (drift ~ e^(-alpha t)).";
+                    } else st.reduce_msg = why + (w2.empty() ? std::string() : "; " + w2);
+                }
             } catch (const std::exception& e) {
                 st.ok = false;
                 st.message = e.what();
                 st.vars.clear();
                 st.params.clear();
                 st.reducible = false;
+                st.level_c = false;
                 st.reduce_msg.clear();
+                st.latex.clear();
+                st.latex_lines = 0;
             }
         }
         if (st.ok) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "%s", st.message.c_str());
         else       ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", st.message.c_str());
+        if (st.ok && st.latex_lines > 0) {
+            ImGui::TextDisabled("Equations (LaTeX preview):");
+            const float row = std::floor(ImGui::GetFontSize() * 1.3f + 0.5f) * 1.9f;
+            draw_latex_preview("##dae_latex", st.latex,
+                               ImVec2(-1, std::min(row * (float)st.latex_lines + row * 0.5f, row * 12.0f)));
+            if (ImGui::BeginPopupContextItem("##dae_latex_ctx")) {
+                if (ImGui::MenuItem("Copy LaTeX") && cb.set_clipboard_text) cb.set_clipboard_text(st.latex);
+                ImGui::EndPopup();
+            }
+        }
 
         // Этап 3, уровень A: ДАУ -> ОДУ подстановкой z. Снять галочку можно всегда;
         // поставить — только если сведение удаётся.
@@ -5321,13 +5467,22 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
             ImGui::Checkbox("Solve as ODE", &buf.dae_as_ode);
             ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Index 1 only. If z enters its constraint linearly, z(x) is substituted\n"
+                ImGui::SetTooltip("If z enters its constraint linearly, z(x) is substituted\n"
                                   "into f (level A): an ODE in x for every tab and every ODE scheme.\n"
                                   "Otherwise z is found by Newton from g(x, z) = 0 before every f\n"
                                   "(level B): explicit RK / DOPRI / GBS, Extr/Comp over them, adaptive.\n"
+                                  "Index 2-3 (level C): constraints are differentiated until z appears\n"
+                                  "and stabilized, then level A or B.\n"
                                   "Either way z stays in the state after x, so bifurcation output,\n"
                                   "metrics and plot axes can use it; LLE/LS perturb x only.");
             ImGui::TextDisabled("%s", st.reduce_msg.c_str());
+            if (buf.dae_as_ode && st.level_c) {
+                InputNumStr("stabilization alpha##daestab", buf.dae_stab_alpha, 140.0f);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Level C replaces each index-(m+1) constraint by (d/dt + alpha)^m g = 0:\n"
+                                      "the drift of g decays like e^(-alpha t). Larger alpha holds g tighter\n"
+                                      "but makes the ODE stiffer (explicit schemes need h*alpha small).");
+            }
             if (buf.dae_as_ode && !st.reducible)
                 ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "cannot solve as ODE: untick");
         }
@@ -5355,9 +5510,12 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
                                   "iterations is accepted unconverged and the constraint drifts.");
             ImGui::EndTable();
         }
-        ImGui::TextDisabled("DAE methods: BDF1 / Trapezoidal / TR-BDF2 / Rosenbrock ROS2, ROS3P, Rodas4 for any index;\n"
-                            "CD, CD + Yoshida-4 and explicit Euler / Midpoint / RK4 with the constraint solved\n"
-                            "whenever x changes - index 1 only. 'Solve as ODE' opens every tab and ODE scheme.");
+        // Методы: при «Solve as ODE» система — ОДУ (схемы ОДУ, флаги scheme_*), иначе — методы ДАУ.
+        ImGui::Separator();
+        if (buf.dae_as_ode) draw_builtin_scheme_checkboxes(buf);
+        else                draw_dae_method_checkboxes(buf);
+        ImGui::Spacing();
+        draw_generated_code_block(buf, cb);
     }
     else if (ImGui::BeginTabBar("editor_tabs")) {
         if (ImGui::BeginTabItem("System")) {
@@ -16979,7 +17137,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // ДАУ: флагов scheme_* у неё нет, а схемы ОДУ на ней не строятся — список
         // свой (иначе этот синк каждый кадр затирал бы его схемами ОДУ).
         std::vector<std::string> enabled_now;
-        if (model.dae_native()) enabled_now = dae_scheme_names();
+        if (model.dae_native()) {
+            for (const auto& n : dae_scheme_names())
+                if (model.dae_scheme_on(n)) enabled_now.push_back(n);
+        }
         else
             for (const auto& b : kBuiltinSchemes)
                 if (model.*b.flag) enabled_now.push_back(b.name);
