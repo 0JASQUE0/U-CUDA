@@ -1,4 +1,5 @@
-﻿// Импорт SPICE-netlist'а в ДАУ (этапы 8 и 9a). Всё на CPU (cl.exe-шаг krs_cpu):
+﻿// Импорт SPICE-netlist'а в ДАУ (этапы 8, 9a и 9d). Всё на CPU (cl.exe-шаг krs_cpu):
+//   - этап 9d: JFET (насыщение, линейная область, P = -N), F POLY, ОУ с JFET-входом "как есть" против идеального;
 //   - RC с источниками SIN / PULSE / PWL против скалярной ОДУ (RK4 мелким шагом);
 //   - интегратор на TL072 (таблица замен -> нуллор) внутри .subckt с параметрами и .param;
 //   - F / H (токи через источник напряжения), отказы (MOSFET, диод без .model, неизвестная подсхема, I() без источника);
@@ -148,7 +149,7 @@ void subcircuits() {
     SpiceImportResult r;
     std::string err;
     ut::require(!spice_import("* m\nV1 a 0 1\nM1 a a 0 0 nmod\nC1 a 0 1u\n", {}, r, &err) &&
-                err.find("field-effect") != std::string::npos, "MOSFET refused: " + err);
+                err.find("MOSFET") != std::string::npos, "MOSFET refused: " + err);
     ut::require(!spice_import("* d\nV1 a 0 1\nD1 a b nomodel\nC1 b 0 1u\n", {}, r, &err) &&
                 err.find("unknown model") != std::string::npos, "diode without .model refused: " + err);
     ut::require(!spice_import("* x\nX1 a b nosuch\nC1 a 0 1u\nR1 b 0 1k\n", {}, r, &err) &&
@@ -316,6 +317,67 @@ void devices() {
     ut::require(fl, "node without a DC path is reported");
 }
 
+// --- этап 9d: JFET, F/H POLY, ОУ "как есть" и копия на идеальных -------------------------------
+std::vector<double> op_point(const std::string& net, Imported& m, const SpiceImportOptions& o = {}) {
+    std::string err;
+    { const bool ok_ = spice_import(net, o, m.r, &err); ut::require(ok_, "import: " + err); }
+    const DaeSystem d = parse_dae(m.r.plain_text, m.r.vars_text, m.r.alg_text, m.r.params_text);
+    m.sys = d.as_codegen_system();
+    std::vector<double> a = { 0.5 };
+    for (const auto& p : d.params) a.push_back(std::stod(m.r.param_values.at(p)));
+    m.a = tail(a);
+    std::vector<double> X(m.sys.vars.size(), 0.0);
+    int it = 0;
+    { const bool ok_ = dae_dc_operating_point(m.sys, m.a.data(), (int)m.a.size(), 0.0, X.data(), &it, &err);
+      ut::require(ok_, "DC OP: " + err); }
+    return X;
+}
+
+void devices_9d() {
+    // JFET: ток стока по Шихману–Ходжесу (насыщение и линейная область), N и P зеркально.
+    auto jfet = [&](double vds, double vgs, bool p) {
+        const char* s = p ? "-" : "";
+        Imported m;
+        const auto X = op_point(std::string("* jfet\nVd d 0 DC ") + s + std::to_string(vds) + "\nVg g 0 DC " + s +
+                                std::to_string(vgs) + "\nJ1 d g 0 jm\nC1 d 0 1n\n.model jm " + (p ? "PJF" : "NJF") +
+                                "(VTO=-2 BETA=1e-3 LAMBDA=1e-3 IS=1e-14)\n", m);   // VTO < 0 у обоих типов, знак — у типа
+        return -X[(size_t)m.idx("i_vd")];   // ток, который Vd отдаёт в сток
+    };
+    ut::approx(jfet(5, -1, false), 1e-3 * 1 * (1 + 5e-3), 1e-9, "N-JFET saturation: BETA (vgs - VTO)^2 (1 + LAMBDA vds)");
+    ut::approx(jfet(0.5, 0, false), 1e-3 * 0.5 * (4 - 0.5) * (1 + 5e-4), 1e-9, "N-JFET linear region");
+    ut::approx(jfet(5, -1, true), -1e-3 * 1 * (1 + 5e-3), 1e-9, "P-JFET = -N-JFET");
+    // F с POLY(2): ток = 1*i(V1) + 2*i(V2); i(V1) = -1 мА, i(V2) = -2 мА -> -5 мА из 0 в out через 1k.
+    {
+        Imported m;
+        const auto X = op_point("* fpoly\nV1 a 0 1\nR1 a 0 1k\nV2 b 0 2\nR2 b 0 1k\nF1 0 out POLY(2) V1 V2 0 1 2\n"
+                                "R3 out 0 1k\nC1 out 0 1n\n", m);
+        ut::approx(X[(size_t)m.idx("v_out")], -5.0, 1e-9, "F POLY(2) of two source currents");
+    }
+    // ОУ с JFET-входом (своя макромодель под именем TL072): инвертирующий усилитель x(-10).
+    const std::string amp =
+        "* inverting amplifier\n"
+        ".subckt TL072 inp inn vcc vee out\n"
+        "J1 d1 inp s jn\nJ2 d2 inn s jn\nIss s vee 400u\nR1 vcc d1 10k\nR2 vcc d2 10k\n"
+        "G1 0 o2 d2 d1 1m\nR3 o2 0 100meg\nC2 o2 0 10p\nE1 out 0 o2 0 1\n"
+        ".model jn NJF(VTO=-2 BETA=1e-3 LAMBDA=1e-3 IS=1e-14)\n.ends\n"
+        "Vin in 0 DC 0.1\nRin in m 1k\nRf m out 10k\nX1 0 m vcc vee out TL072\nVcc vcc 0 15\nVee vee 0 -15\n"
+        "Cl out 0 1n\n";
+    Imported real, ideal;
+    SpiceImportOptions io;
+    io.ideal_opamps = true;
+    const auto xr = op_point(amp, real), xi = op_point(amp, ideal, io);
+    bool as_is = false, repl = false;
+    for (const auto& s : real.r.notes) as_is |= s.find("TL072 imported as is") != std::string::npos;
+    for (const auto& s : ideal.r.notes) repl |= s.find("TL072 replaced by an ideal op-amp") != std::string::npos;
+    ut::require(as_is && repl, "op-amp mode is reported (as is / ideal)");
+    ut::require(real.r.summary.find("semiconductors 2") != std::string::npos, "as is: the JFET pair is in the circuit");
+    const double vr = xr[(size_t)real.idx("v_out")], vi = xi[(size_t)ideal.idx("v_out")];
+    std::printf("  inverting amp x(-10): real model V(out) = %.6f, ideal = %.6f\n", vr, vi);
+    ut::approx(vi, -1.0, 1e-12, "ideal op-amp: exactly -1 V");
+    ut::approx(vr, -1.0, 2e-3, "JFET op-amp model as is: -1 V within the finite open-loop gain");
+    ut::require(std::fabs(vr - vi) > 1e-9, "the real model is not silently the ideal one");
+}
+
 // Цепь Чуа с гладкой нелинейностью: отрицательная проводимость (G) и встречные диоды. Импорт против
 // той же системы, выписанной руками как ОДУ.
 void chua() {
@@ -359,6 +421,7 @@ int main() {
         round_trip();
         devices();
         chua();
+        devices_9d();
         return 0;
     });
 }

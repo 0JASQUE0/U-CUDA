@@ -5311,6 +5311,34 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
             ImGui::Checkbox("Watch##dae_circuit", &cst.circuit_watch);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Re-import when the file is saved (checked once a second).");
+            // ОУ: как есть (их .subckt из netlist'а) или идеальные; копия на идеальных — отдельной записью.
+            if (ImGui::Checkbox("Ideal op-amps##dae_circuit", &buf.circuit_ideal_opamps) && !buf.circuit_source.empty())
+                cst.circuit_import_now = true;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Off: op-amps (TL072, LM741, ...) are imported as is - their .subckt models\n"
+                                  "from the netlist, element by element. On: each is an ideal op-amp (nullor).\n"
+                                  "An op-amp without a .subckt in the netlist is ideal either way.");
+            if (!buf.circuit_source.empty() && !buf.circuit_ideal_opamps) {
+                ImGui::SameLine();
+                if (ImGui::Button("Save ideal copy##dae_circuit")) {
+                    AppModel copy([](const std::vector<unsigned char>&) { return std::string{}; });
+                    copy.from_record(buf.to_record());
+                    copy.circuit_ideal_opamps = true;
+                    copy.name = (buf.name.empty() ? std::string("Circuit") : buf.name) + " (ideal op-amps)";
+                    std::string rep, e;
+                    if (copy.import_circuit(&rep, &e)) {
+                        try {
+                            const std::string saved = lib.save(copy.to_record());
+                            invalidate_library_cache();
+                            cst.circuit_report = "saved the copy on ideal op-amps as '" + saved + "'\n" + rep;
+                            cst.circuit_error.clear();
+                        } catch (const std::exception& ex) { cst.circuit_error = std::string("Save ideal copy: ") + ex.what(); }
+                    } else cst.circuit_error = "Ideal copy: " + e;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Save the same circuit with ideal op-amps as a new library system\n"
+                                      "(name + \" (ideal op-amps)\"), next to this one with the real models.");
+            }
             if (!buf.circuit_source.empty() && cst.circuit_watch) {
                 const double now = ImGui::GetTime();
                 if (now - cst.circuit_poll_t > 1.0) {

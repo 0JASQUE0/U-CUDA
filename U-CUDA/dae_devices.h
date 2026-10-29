@@ -33,6 +33,14 @@ BjtCurrents bjt_currents(const std::string& vbe, const std::string& vbc,
                          const std::string& nf, const std::string& nr,
                          const std::string& vaf_inv, const std::string& var_inv);
 
+// Ток стока N-JFET (Шихман–Ходжес, SPICE level 1), втекает в сток: при vds >= 0
+//   Id = BETA vm (2 vov - vm)(1 + LAMBDA vds), vov = max(vgs - VTO, 0), vm = min(vds, vov)
+// (vm = vds — линейная область, vm = vov — насыщение, vov = 0 — отсечка); при vds < 0 сток и
+// исток меняются ролями (вычитается то же от vgd, -vds). Ветвлений нет — только min/max.
+// P-JFET: вызывать с vsg, vsd, vdg и менять знак тока.
+std::string jfet_drain_current(const std::string& vgs, const std::string& vds, const std::string& vgd,
+                               const std::string& vto, const std::string& beta, const std::string& lambda);
+
 // Рабочая точка ДАУ (s.dae_nx >= 0): f(x, z, t0) = 0 и g(x, z, t0) = 0 по ВСЕМ переменным —
 // у схемы это расчёт по постоянному току (токи конденсаторов 0, напряжения индуктивностей 0).
 // Ньютон с дроблением шага (Армихо по max|F|) и ограничением поправки; X — старт и результат.

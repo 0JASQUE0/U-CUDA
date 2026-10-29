@@ -49,6 +49,18 @@ BjtCurrents bjt_currents(const std::string& vbe, const std::string& vbc,
     return c;
 }
 
+std::string jfet_drain_current(const std::string& vgs, const std::string& vds, const std::string& vgd,
+                               const std::string& vto, const std::string& beta, const std::string& lambda) {
+    auto half = [&](const std::string& vg, const std::string& v) {   // F(vg, v) при v >= 0
+        const std::string vov = "max(" + vg + " - " + vto + ", 0)";
+        const std::string vm = "min(" + v + ", " + vov + ")";
+        std::string f = beta + "*" + vm + "*(2*" + vov + " - " + vm + ")";
+        if (!lambda.empty()) f += "*(1 + " + lambda + "*" + v + ")";
+        return f;
+    };
+    return "(" + half(vgs, "max(" + vds + ", 0)") + " - " + half(vgd, "max(-" + vds + ", 0)") + ")";
+}
+
 bool dae_dc_operating_point(const System& s, const double* a, int na, double t0, double* X,
                             int* iters, std::string* why) {
     const int N = (int)s.vars.size();
@@ -121,10 +133,20 @@ bool dae_dc_operating_point(const System& s, const double* a, int na, double t0,
         }
         // Ограничение поправки: напряжения на p-n переходах дальше 1 В за шаг не прыгают.
         double dmax = 0, xmax = 0;
-        for (int i = 0; i < N; ++i) { dmax = std::fmax(dmax, std::fabs(dx[i])); xmax = std::fmax(xmax, std::fabs(X[i])); }
+        for (int i = 0; i < N; ++i) {
+            if (!(std::fabs(dx[i]) <= 1e300)) {   // fmax пропустил бы NaN мимо ограничения шага
+                if (why) *why = "the Newton correction is not finite at " + s.vars[(size_t)i] + " (iteration "
+                                + std::to_string(it) + ")";
+                return false;
+            }
+            dmax = std::fmax(dmax, std::fabs(dx[i]));
+            xmax = std::fmax(xmax, std::fabs(X[i]));
+        }
         double lam = dmax > 1.0 + xmax ? (1.0 + xmax) / dmax : 1.0;
         double fnt = HUGE_VAL;
-        for (; lam > 1.0 / 4096; lam *= 0.5) {
+        // 13 попыток от стартового lam (оно уже может быть мало: почти вырожденный якобиан даёт
+        // огромную поправку, и порог по абсолютному lam не дал бы сделать ни одной).
+        for (int tr = 0; tr < 13; ++tr, lam *= 0.5) {
             for (int i = 0; i < N; ++i) Xt[i] = X[i] + lam * dx[i];
             fnt = fnorm(Xt.data(), Ft.data());
             if (fnt <= (1.0 - 1e-4 * lam) * fn || fnt <= 1e-13) break;

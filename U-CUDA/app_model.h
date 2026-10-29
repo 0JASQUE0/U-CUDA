@@ -358,6 +358,7 @@ public:
     std::string dae_stab_alpha = "10";   // уровень C: (d/dt + alpha)^m g = 0 (см. SystemRecord)
     std::string circuit_source;    // ДАУ из схемы: путь к .kicad_sch / .cir (см. SystemRecord)
     std::string circuit_netlist;   // копия netlist'а на момент импорта
+    bool circuit_ideal_opamps = false;   // ОУ — идеальные (см. SystemRecord)
     // Импорт схемы circuit_source: перезаписывает уравнения, x, z, параметры, НУ и шаг.
     // false + err — файл не читается, kicad-cli не сработал или схема не поддержана.
     bool import_circuit(std::string* report, std::string* err);

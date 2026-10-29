@@ -385,7 +385,13 @@ struct Deck {
                 open.pop_back();
                 continue;
             }
-            if (!open.empty()) { open.back()->cards.push_back(c); continue; }
+            // .model внутри .subckt (так пишут вендорские макромодели) — в общую таблицу моделей:
+            // область видимости по имени не различается.
+            if (!open.empty()) {
+                if (k == ".model") directive(c, k);
+                else open.back()->cards.push_back(c);
+                continue;
+            }
             if (k[0] == '.') { directive(c, k); continue; }
             top.push_back(c);
         }
@@ -757,13 +763,14 @@ struct Builder {
         touch(b);
     }
 
-    // Модель прибора по имени; тип проверяется по первой букве ожидаемого ("d" / "npn" и "pnp").
+    // Модель прибора по имени и проверка типа: "d" — D, "npn" — NPN/PNP, "njf" — NJF/PJF.
     const Model& model(const std::string& name, const char* kind, const std::string& at) {
         auto it = deck.models.find(lower(name));
         if (it == deck.models.end()) fail(at + "unknown model " + name);
         const std::string& ty = it->second.type;
-        if (std::string(kind) == "d" ? ty != "d" : (ty != "npn" && ty != "pnp"))
-            fail(at + "model " + name + " has type " + ty);
+        const std::string k = kind;
+        const bool ok = k == "d" ? ty == "d" : k == "npn" ? (ty == "npn" || ty == "pnp") : (ty == "njf" || ty == "pjf");
+        if (!ok) fail(at + "model " + name + " has type " + ty);
         return it->second;
     }
 
@@ -992,8 +999,17 @@ struct Builder {
         case 'h': {
             need(5);
             const int a = node_of(t[1], c), b = node_of(t[2], c);
-            if (lower(t[3]) == "poly") fail(at + "POLY on F/H is not supported");
-            const std::string u = param(name, eval_value(t[4], *c.scope)) + "*" + branch_ref(c.prefix + lower(t[3]));
+            std::string u;
+            if (lower(t[3]) == "poly") {
+                // POLY(n) Vc1 .. Vcn c0 c1 ...: управляющие — токи источников напряжения
+                const int n = (int)eval_value(t[4], *c.scope);
+                if (n < 1 || t.size() < (size_t)(5 + n)) fail(at + "bad POLY");
+                std::vector<std::string> ctl;
+                for (int k = 0; k < n; ++k) ctl.push_back(branch_ref(c.prefix + lower(t[(size_t)(5 + k)])));
+                std::vector<double> coef;
+                for (size_t k = (size_t)(5 + n); k < t.size(); ++k) coef.push_back(eval_value(t[k], *c.scope));
+                u = poly(ctl, coef);
+            } else u = param(name, eval_value(t[4], *c.scope)) + "*" + branch_ref(c.prefix + lower(t[3]));
             if (type == 'h') vbranch(key, name, a, b, u);
             else current(a, b, u);
             ++n_ctl;
@@ -1010,8 +1026,38 @@ struct Builder {
             break;
         }
         case 'x': instance(cd, c, at); break;
-        case 'm': case 'j': case 'z':
-            fail(at + "field-effect transistors (MOSFET, JFET, MESFET) are not supported yet");
+        case 'j': {
+            need(5);
+            // J d g s model [area]
+            const Model& m = model(t[4], "njf", at);
+            const bool pch = m.type == "pjf";
+            const double area = t.size() > 5 && t[5] != "=" && lower(t[5]) != "off"
+                              ? eval_value(lower(t[5]) == "area" && t.size() > 7 ? t[7] : t[5], *c.scope) : 1.0;
+            const auto& mp = model_params(m, { "vto", "beta", "lambda", "is", "rd", "rs", "cgs", "cgd" },
+                                          { -2.0, 1e-4, 0, 1e-14, 0, 0, 0, 0 },
+                                          { "b", "pb", "fc", "kf", "af", "n", "isr", "nr", "alpha", "vk", "m",
+                                            "tnom", "xti", "vtotc", "betatce" });
+            auto sc = [&](const std::string& p) { return area == 1.0 ? p : "(" + fmt(area) + "*" + p + ")"; };
+            auto opt_p = [&](const char* k) { return mp.count(k) ? mp.at(k) : std::string(); };
+            const int nd = internal(node_of(t[1], c), opt_p("rd"), name, "d", area);
+            const int ng = node_of(t[2], c);
+            const int ns = internal(node_of(t[3], c), opt_p("rs"), name, "s", area);
+            // P-канал: те же формулы от vsg, vsd, vdg, токи обратного знака.
+            const std::string vgs = pch ? vdiff(ns, ng) : vdiff(ng, ns), vds = pch ? vdiff(ns, nd) : vdiff(nd, ns),
+                              vgd = pch ? vdiff(nd, ng) : vdiff(ng, nd);
+            const std::string id = jfet_drain_current(vgs, vds, vgd, mp.at("vto"), sc(mp.at("beta")), opt_p("lambda"));
+            const std::string dgs = diode_current(vgs, sc(mp.at("is")), "1"), dgd = diode_current(vgd, sc(mp.at("is")), "1");
+            if (pch) { current(ns, nd, id); current(ns, ng, dgs); current(nd, ng, dgd); }
+            else     { current(nd, ns, id); current(ng, ns, dgs); current(ng, nd, dgd); }
+            conduct(nd, ns);
+            conduct(ng, ns);
+            if (mp.count("cgs")) capacitor(name + "_cgs", ng, ns, sc(mp.at("cgs")), false, 0.0);
+            if (mp.count("cgd")) capacitor(name + "_cgd", ng, nd, sc(mp.at("cgd")), false, 0.0);
+            ++n_dev;
+            break;
+        }
+        case 'm': case 'z':
+            fail(at + "MOSFET / MESFET are not supported yet");
         default:
             fail(at + "element type '" + std::string(1, type) + "' is not supported");
         }
@@ -1035,16 +1081,22 @@ struct Builder {
         }
         const std::string name = c.prefix + t[0];
         const std::string key = c.prefix + lower(t[0]);
-        if (opamp_table(sub)) {
+        // ОУ: "как есть" — подсхема из netlist'а разворачивается по элементам; идеальным он
+        // становится, если так просили (ideal_opamps) или подсхемы в файле нет.
+        const bool defined = deck.subckts.count(lower(sub)) > 0;
+        const bool is_opamp = opamp_table(sub) || lower(sub) == "uc_opamp";
+        if (is_opamp && (opt.ideal_opamps || !defined)) {
             if (nodes.size() != 3 && nodes.size() != 5)
                 fail(at + sub + " as an op-amp needs 3 (in+ in- out) or 5 (in+ in- V+ V- out) pins");
             const int inp = node_of(nodes[0], c), inn = node_of(nodes[1], c), out = node_of(nodes.back(), c);
             nullor(key, name, out, -1, inp, inn);
             notes.push_back(name + ": " + sub + " replaced by an ideal op-amp (nullor)"
+                            + std::string(defined ? "" : ", no .subckt for it in the netlist")
                             + (nodes.size() == 5 ? "; supply pins ignored" : ""));
             ++n_x;
             return;
         }
+        if (is_opamp) notes.push_back(name + ": " + sub + " imported as is (its .subckt model)");
         auto it = deck.subckts.find(lower(sub));
         if (it == deck.subckts.end()) fail(at + "unknown subcircuit " + sub);
         const Subckt& s = it->second;
@@ -1167,7 +1219,7 @@ struct Builder {
         char buf[320];
         std::snprintf(buf, sizeof(buf),
                       "%d nodes; R %d, C %d, L %d, sources %d, controlled %d, B %d, op-amps as nullors %d, "
-                      "diodes/BJT %d, subcircuits %d; DAE: %d differential, %d algebraic, %d parameters",
+                      "semiconductors %d, subcircuits %d; DAE: %d differential, %d algebraic, %d parameters",
                       (int)node_keys.size(), n_r, n_c, n_l, n_src, n_ctl, n_b, n_nullor, n_dev, n_x,
                       (int)xs.size(), (int)alg.size(), (int)params.size());
         r.summary = buf;

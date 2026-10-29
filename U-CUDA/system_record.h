@@ -59,6 +59,7 @@ struct SystemRecord {
     // импорта — запись воспроизводится и без исходного файла. Пусто — уравнения введены руками.
     std::string circuit_source;
     std::string circuit_netlist;
+    bool        circuit_ideal_opamps = false;   // ОУ — идеальные нуллоры, а не их .subckt (копия на идеальных)
     std::string mode;        // "Image" | "LaTeX" | "Plain"
     std::string latex_text;
     std::string plain_text;

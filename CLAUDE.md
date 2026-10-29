@@ -528,9 +528,20 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   Tests: x' = -2x + cos t (order reaches 5, error ~4 tol), Robertson DAE vs Test Set at t = 40 (7e-9,
   2779 steps at rtol 1e-8 - more than LSODE/DASSL, the order/step controller is simple), index-2 refusal.
   Open: GPU kernel, Parametric, order decrease by estimates, index 2-3.
-  Next (stage 9 parts): 9d import "as is" with vendor models
-  (op-amp subcircuits expanded into their D/Q/E/G elements) PLUS a copy on ideal op-amps (the table
-  replacement) - the user wants both, not only the ideal one.
+- Stage 9d, op-amps "as is" plus an ideal copy (user's request): `SpiceImportOptions::ideal_opamps` (record
+  field `circuit_ideal_opamps`, JSON "1"). Off (default): an op-amp from the table or `uc_opamp` whose
+  .subckt is in the netlist is expanded element by element (the vendor model); on: it is a nullor. An op-amp
+  without a .subckt is a nullor either way (reported). The DAE editor: "Ideal op-amps" checkbox (re-imports)
+  and "Save ideal copy" (a new library record "<name> (ideal op-amps)"). For vendor macro models: JFET (J,
+  NJF/PJF, Shichman-Hodges written with min/max - no branches; vds < 0 swaps drain and source; gate diodes;
+  RD/RS internal nodes; CGS/CGD constant; VTO < 0 for both types, the type gives the sign), F/H POLY(n) on
+  source currents, .model inside .subckt (registered globally). DC OP: the line search now always tries
+  13 halvings from the initial (step-limited) lambda - with a nearly singular Jacobian that lambda was
+  already below the old absolute floor 1/4096 and no step was tried; a non-finite correction is refused.
+  Test (spice_test): JFET saturation / linear / P = -N, F POLY(2), an inverting amplifier x(-10) with a
+  JFET-input macro model of my own named TL072: as is -0.999988 V, ideal -1.000000 V.
+  Open after stage 9: BDF index 2-3 (DASSL form), BDF GPU kernel and Parametric, adaptive DAE in sweeps
+  (per-point z0 and clone projection), MOSFET, voltage-dependent junction capacitances, ngspice comparison.
 - Newton for DAE: the predictor of `scheme_implicit_common` (BDF1, Trapezoidal, TR-BDF2, SDIRK2,
   Implicit Midpoint) is X_n for x and z alike, like Radau. The explicit-Euler x predictor the ODE
   schemes keep threw Newton far from the root on stiff circuits: "DAE-1 PUT burst neuron" at h = 5e-4

@@ -224,6 +224,7 @@ bool AppModel::import_circuit(std::string* report, std::string* err) {
     if (!circuit_source_load(circuit_source, net, &log, err)) return false;
     SpiceImportOptions o;
     o.base_dir = std::filesystem::u8path(circuit_source).parent_path().u8string();
+    o.ideal_opamps = circuit_ideal_opamps;
     SpiceImportResult r;
     if (!spice_import(net, o, r, err)) return false;
     // Схема — источник истины: уравнения, номиналы и НУ берутся из неё целиком.
@@ -305,6 +306,7 @@ SystemRecord AppModel::to_record() const {
     r.dae_stab_alpha = dae_stab_alpha;
     r.circuit_source = circuit_source;
     r.circuit_netlist = circuit_netlist;
+    r.circuit_ideal_opamps = circuit_ideal_opamps;
     switch (mode) {
     case InputMode::Image: r.mode = "Image"; break;
     case InputMode::Latex: r.mode = "LaTeX"; break;
@@ -379,6 +381,7 @@ void AppModel::from_record(const SystemRecord& r) {
     dae_stab_alpha = r.dae_stab_alpha;
     circuit_source = r.circuit_source;
     circuit_netlist = r.circuit_netlist;
+    circuit_ideal_opamps = r.circuit_ideal_opamps;
     if (r.mode == "Image") mode = InputMode::Image;
     else if (r.mode == "Plain") mode = InputMode::Plain;
     else mode = InputMode::Latex;
@@ -484,6 +487,7 @@ void AppModel::clear() {
     dae_stab_alpha = "10";
     circuit_source.clear();
     circuit_netlist.clear();
+    circuit_ideal_opamps = false;
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_dopri78_legacy
         = scheme_rk45 = scheme_dop853
         = scheme_cd = scheme_cdfast
