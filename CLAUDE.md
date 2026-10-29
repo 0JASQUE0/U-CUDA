@@ -512,7 +512,23 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   per-point z0 projection nor the LLE/LS clone projection. Tests (dae_test): RC exact u(5) within 1.4e-6 /
   2e-10 at tol 1e-5 / 1e-9 (19 / 163 steps), dense output on a 0.05 grid 6.5e-9 (CPU), the same on the
   GPU, Kepler coupling = fixed Rodas4 h = 1e-3, refusals (index 2, BDF1).
-  Next (stage 9 parts): 9c BDF2-BDF5, 9d import "as is" with vendor models
+- Stage 9c, multistep BDF 1-5 (`multistep_bdf.h`, header-only, its own driver - the user wants a
+  separate multistep kernel for ODEs too): variable order 1..5 and variable step, Nordsieck form (LSODE):
+  Pascal predictor, Newton on w = y_n with the full symbolic Jacobian (`SystemEvaluator`, CPU) -
+  x rows w - x_pred - l0 (h f(w) - h x'_pred) = 0, z rows g(w) = 0 (an ODE has none), l from
+  Pi(1 + x/i) normalised to l1 = 1; LTE = C/(C - C*) (y_n - y_pred), C = -l0/(q+1), C* = 1/(q+1)!; WRMS
+  norm, h^(k-1) by variable index; order +1 after q+1 steps at one h, -1 after two rejections; h changes
+  at most once per q+1 steps (Z[j] *= eta^j); dense output = the Nordsieck polynomial of the last step.
+  Names `kBdfSchemeOde` "BDF 1-5" (always in the ODE scheme list) and `kBdfSchemeDae` "DAE BDF 1-5"
+  (after the DAE methods); `scheme_is_multistep`; adaptive step in Analysis only (`run_adaptive_phase`
+  branch, CPU even with GPU on); fixed step (`krs_for_scheme_impl`) and sweeps
+  (`adaptive_code_for_scheme`) refuse them. Index 1 only: at a constant step BDF3 on the index-2
+  pendulum gives order 2 (the order-1 start and the new Z[q+1] on order raise leave an error index 2
+  does not damp) - needs the DASSL fixed-leading-coefficient / variable-coefficient form.
+  Tests: x' = -2x + cos t (order reaches 5, error ~4 tol), Robertson DAE vs Test Set at t = 40 (7e-9,
+  2779 steps at rtol 1e-8 - more than LSODE/DASSL, the order/step controller is simple), index-2 refusal.
+  Open: GPU kernel, Parametric, order decrease by estimates, index 2-3.
+  Next (stage 9 parts): 9d import "as is" with vendor models
   (op-amp subcircuits expanded into their D/Q/E/G elements) PLUS a copy on ideal op-amps (the table
   replacement) - the user wants both, not only the ideal one.
 - Newton for DAE: the predictor of `scheme_implicit_common` (BDF1, Trapezoidal, TR-BDF2, SDIRK2,

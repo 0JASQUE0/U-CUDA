@@ -4,6 +4,7 @@
 #include "phase_portrait_nvrtc.h"
 #include "integrator.h"
 #include "krs_cpu.h"
+#include "multistep_bdf.h"   // BDF 1-5: свой драйвер многошагового метода
 #include "num_parse.h"   // parse_num — единый разбор числовых полей
 #include <algorithm>
 #include <cstdlib>
@@ -250,7 +251,8 @@ std::string default_h_from_record(const SystemRecord& r) {
 std::string default_scheme_from_record(const SystemRecord& r, std::string current) {
     // ДАУ: схема ОДУ из прошлой системы не подходит — по умолчанию BDF1.
     if (r.is_dae && !r.dae_as_ode)
-        return dae_scheme_from_name(current, nullptr) ? current : std::string("DAE BDF1");
+        return dae_scheme_from_name(current, nullptr) || current == kBdfSchemeDae ? current : std::string("DAE BDF1");
+    if (current == kBdfSchemeDae) return r.is_dae ? std::string("RK4") : std::string(kBdfSchemeOde);
     // Сведено к ОДУ: схема ДАУ от прошлого запуска не подходит.
     if (r.is_dae && dae_scheme_from_name(current, nullptr)) return std::string("RK4");
     return r.is_map ? std::string("Map") : std::move(current);
@@ -268,6 +270,7 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
         for (const auto& n : dae_scheme_names())
             if (std::find(r.dae_schemes_off.begin(), r.dae_schemes_off.end(), n) == r.dae_schemes_off.end())
                 out.push_back(n);
+        out.emplace_back(kBdfSchemeDae);   // многошаговый, свой драйвер: только адаптивный шаг
         return out;
     }
     // Порядок — как в комбо схем: по порядку точности.
@@ -306,6 +309,7 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
     if (r.scheme_gbs2468) out.emplace_back("GBS 2-4-6-8");
     if (r.scheme_gbs246810) out.emplace_back("GBS 2-4-6-8-10");
     if (r.scheme_gbs24681012) out.emplace_back("GBS 2-4-6-8-10-12");
+    out.emplace_back(kBdfSchemeOde);   // многошаговый, свой драйвер: только адаптивный шаг
     return out;
 }
 
@@ -575,6 +579,65 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
     if (!adaptive_scheme_name_ok(in.scheme)) {
         result.error = adaptive_scheme_hint();
         return false;
+    }
+    // Многошаговый BDF 1-5 — свой драйвер (multistep_bdf.h), CPU, тот же вывод, что у адаптивных схем.
+    if (scheme_is_multistep(in.scheme)) {
+        const bool dae = in.sys.dae_nx >= 0;
+        if (dae != (in.scheme == kBdfSchemeDae)) {
+            result.error = dae ? "a DAE needs DAE BDF 1-5" : "DAE BDF 1-5 needs a DAE system";
+            return false;
+        }
+        BdfSettings bs;
+        bs.rtol = parse_val(in.adaptive.rtol, 1e-6);
+        bs.atol.clear();
+        {
+            std::string cur;
+            for (char c : in.adaptive.atol + ",") {
+                if (c == ',' || c == ';') { if (!cur.empty()) bs.atol.push_back(parse_val(cur, 1e-8)); cur.clear(); }
+                else if (c != ' ') cur += c;
+            }
+            if (bs.atol.empty()) bs.atol.push_back(1e-8);
+        }
+        bs.h0 = parse_val(in.adaptive.h0, 0.0);
+        if (!in.adaptive.hmax.empty()) bs.hmax = parse_val(in.adaptive.hmax, bs.hmax);
+        const double t_skip = in.skip_transient ? tskip : 0.0;
+        const bool rawm = in.adaptive.raw_nodes;
+        int max_pts = parse_num_int(in.adaptive.max_points, 1000000);
+        max_pts = std::max(2, std::min(max_pts, 50000000));
+        result.adaptive  = true;
+        result.raw_nodes = rawm;
+        result.step_log.assign((size_t)N, {});
+        result.step_stats.assign((size_t)N, AdaptiveStats());
+        raw.assign((size_t)N, {});
+        times.assign((size_t)N, {});
+        for (int k = 0; k < N; ++k) {
+            BdfStats bst;
+            std::string e;
+            if (!bdf_integrate(in.sys, a.data(), (int)a.size(), &ic_flat[(size_t)k * dim], bs, t_skip, tsim, h, total,
+                               rawm, max_pts, raw[(size_t)k], times[(size_t)k], bst, &e, in.cancel.get())) {
+                result.error = e;
+                return false;
+            }
+            AdaptiveStats& as = result.step_stats[(size_t)k];
+            as.nacc = (double)bst.nacc; as.nrej = (double)bst.nrej; as.nrhs = (double)bst.nrhs;
+            as.hmin = bst.hmin; as.hmax = bst.hmax; as.hmean = bst.nacc ? bst.hsum / (double)bst.nacc : 0.0;
+            as.diverged = bst.diverged; as.truncated = bst.truncated;
+            if (in.cancel && in.cancel->load(std::memory_order_relaxed)) break;
+        }
+        if (in.cancel && in.cancel->load(std::memory_order_relaxed)) {
+            result.cancelled = true;
+            result.error = kNvrtcCancelled;
+            return false;
+        }
+        for (int k = 0; k < N; ++k) {
+            const AdaptiveStats& st = result.step_stats[(size_t)k];
+            if (st.diverged) { calc_ok = false; calc_err = "trajectory '" + in.ic_sets[(size_t)k].label + "' diverged (nan/inf)"; }
+            else if (st.truncated) {
+                calc_ok = false;
+                calc_err = "trajectory '" + in.ic_sets[(size_t)k].label + "' reached max points before the end of the interval";
+            }
+        }
+        return true;
     }
     AdaptiveCode code;
     try { code = adaptive_code_for_scheme(in.custom_schemes, in.sys, in.scheme); }
@@ -1420,6 +1483,9 @@ static std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_s
         if (err) *err = std::move(why);
         return {};
     };
+    if (scheme_is_multistep(scheme) && !sys.is_map)
+        return refuse("'" + scheme + "' is a multistep method with its own driver: switch Integration to "
+                      "Adaptive step (Analysis only for now)");
     // Nothing to choose for a map: the step is always the same whatever the
     // scheme field says (a stale session JSON may hold a previous ODE's scheme).
     if (sys.is_map) {
@@ -1512,6 +1578,8 @@ AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_sc
     // текст непрозрачен: оценки ошибки у неё нет.
     for (const auto& cs : custom_schemes)
         if (cs.name == scheme) throw std::runtime_error(adaptive_scheme_hint());
+    if (scheme_is_multistep(scheme))
+        throw std::runtime_error("'" + scheme + "' is a multistep method with its own driver: Analysis only for now");
     if (sys.dae_nx >= 0) {   // нативная ДАУ: методы ДАУ, вложенная пара есть у Rodas4
         DaeScheme ds;
         if (!dae_scheme_from_name(scheme, &ds))

@@ -6418,8 +6418,13 @@ double scheme_rhs_per_step(const System& s, const std::string& name) {
     }
 }
 
+const char* const kBdfSchemeOde = "BDF 1-5";
+const char* const kBdfSchemeDae = "DAE BDF 1-5";
+bool scheme_is_multistep(const std::string& name) { return name == kBdfSchemeOde || name == kBdfSchemeDae; }
+
 bool adaptive_scheme_name_supported(const std::string& name) {
     if (name == "DAE Rodas4") return true;   // ДАУ: codegen_adaptive_dae
+    if (scheme_is_multistep(name)) return true;   // свой драйвер (multistep_bdf.h)
     if (scheme_supports_adaptive(scheme_from_name(name)) && name != "Euler") return true;
     if (gbs_stage_count(scheme_from_name(name)) >= 2) return true;
     ExtrapolationSpec spec;

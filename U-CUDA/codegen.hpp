@@ -356,6 +356,11 @@ double scheme_rhs_per_step(const System& s, const std::string& name);
 // Схема, у которой есть адаптивный шаг, — по одному имени: RK-пары, GBS 2-4 ..., Extr(база|n)
 // и ExtrZ(база|n) с K >= 2. База проверяется только при сборке кода.
 bool adaptive_scheme_name_supported(const std::string& name);
+// Многошаговые методы со своим драйвером (multistep_bdf.h): "BDF 1-5" (ОДУ), "DAE BDF 1-5" (ДАУ).
+// Тела шага у них нет — только адаптивный шаг в Analysis.
+bool scheme_is_multistep(const std::string& name);
+extern const char* const kBdfSchemeOde;
+extern const char* const kBdfSchemeDae;
 // Порядок оценщика по имени, для значений регулятора по умолчанию (dopri5 / dop853):
 // у Extr с кастомной базой неизвестен — 7.
 int adaptive_scheme_q_guess(const std::string& name);

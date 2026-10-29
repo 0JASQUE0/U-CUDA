@@ -13,10 +13,13 @@
 //   - Metrics двойного маятника на Radau + GGL: GPU = CPU; ось по z отклоняется.
 //  Этап 9b: адаптивный Rodas4 (индекс 1) — RC против точного решения (конец и плотный выход, CPU и GPU),
 //   связь Кеплера против мелкого постоянного шага, отказы (индекс 2, метод без оценки).
+//  Этап 9c: BDF 1-5 (свой многошаговый драйвер): ОДУ с точным решением (порядок до 5, точность по допуску),
+//   Робертсон (ДАУ индекса 1) против Test Set, отказ на индексе 2.
 #include "test_util.h"
 #include "dae_ir.h"
 #include "adaptive_settings.h"
 #include "krs_cpu.h"
+#include "multistep_bdf.h"
 #include "nvrtc_engine.h"
 #include "parametric_engine.h"
 #include <cuda.h>
@@ -346,6 +349,63 @@ void adaptive_cpu() {
     ut::require(adaptive_scheme_name_ok("DAE Rodas4"), "DAE Rodas4 is offered for the adaptive step");
 }
 
+// --- этап 9c: многошаговый BDF 1-5 (свой драйвер, CPU) --------------------------------------
+void bdf_tests() {
+    std::vector<std::vector<double>> tr;
+    std::vector<double> tm;
+    std::string err;
+    {   // ОДУ x' = -2x + cos t, x(0) = 1: x = (2 cos t + sin t)/5 + (3/5) e^(-2t)
+        System s;
+        s.vars = { "x" };
+        s.rhs = { "-2*x + cos(t)" };
+        auto ex = [](double t) { return (2 * std::cos(t) + std::sin(t)) / 5 + 0.6 * std::exp(-2 * t); };
+        const double x0 = 1.0, a0[1] = { 0.5 };
+        double e_prev = 1;
+        for (double tol : { 1e-5, 1e-9 }) {
+            BdfSettings bs;
+            bs.rtol = tol; bs.atol = { tol };
+            BdfStats st;
+            const bool ok = bdf_integrate(s, a0, 1, &x0, bs, 0.0, 10.0, 0.1, 101, false, 0, tr, tm, st, &err);
+            ut::require(ok && tr.size() == 101, "BDF ODE run: " + err);
+            double e = 0;
+            for (int k = 0; k < 101; ++k) e = std::fmax(e, std::fabs(tr[(size_t)k][0] - ex(k * 0.1)));
+            std::printf("  BDF 1-5, ODE, tol %.0e: %lld steps, %lld rejected, max order %d, max error %.2e\n",
+                        tol, st.nacc, st.nrej, st.max_q, e);
+            ut::require(e < 200 * tol, ut::num("BDF ODE error vs tolerance", e, 0, 200 * tol));
+            ut::require(st.max_q == 5, "BDF raises the order to 5 on a smooth problem");
+            ut::require(e < e_prev, "tighter tolerance, smaller error");
+            e_prev = e;
+        }
+    }
+    {   // Робертсон в форме ДАУ индекса 1, эталон Test Set (Бари) при t = 40
+        const System s = parse_dae("y1' = -0.04*y1 + 10000*y2*y3\ny2' = 0.04*y1 - 10000*y2*y3 - 30000000*y2^2\n0 = y1 + y2 + y3 - 1",
+                                   "y1, y2", "y3", "").as_codegen_system();
+        const double y0[3] = { 1, 0, 0 }, a0[1] = { 0.5 };
+        BdfSettings bs;
+        bs.rtol = 1e-8; bs.atol = { 1e-12 };
+        BdfStats st;
+        const bool ok = bdf_integrate(s, a0, 1, y0, bs, 0.0, 40.0, 40.0, 2, false, 0, tr, tm, st, &err);
+        ut::require(ok && tr.size() == 2, "BDF Robertson: " + err);
+        const auto& y = tr[1];
+        std::printf("  DAE BDF 1-5, Robertson to t = 40: %lld steps, %lld rejected, max order %d; y = %.10f %.6e %.10f\n",
+                    st.nacc, st.nrej, st.max_q, y[0], y[1], y[2]);
+        ut::approx(y[0], 0.7158270687193353, 1e-6, "Robertson y1(40)");
+        ut::approx(y[1] / 9.185534764557e-06, 1.0, 1e-4, "Robertson y2(40) relative");
+        ut::approx(y[0] + y[1] + y[2], 1.0, 1e-13, "Robertson constraint");
+        // жёсткость не душит шаг (явный метод взял бы ~1e7 шагов); регулятор порядка ещё прост — запас
+        ut::require(st.nacc < 5000, "stiff problem in a few thousand steps");
+    }
+    {   // индекс 2 пока не поддержан (BDF3 на маятнике индекса 2 даёт лишь второй порядок) — отказ
+        BdfSettings bs;
+        BdfStats st;
+        const bool ok = bdf_integrate(pend(kPend2, "lam=2"), kPendA.data(), (int)kPendA.size(), kPendX0.data(), bs,
+                                      0.0, 1.0, 1.0, 2, false, 0, tr, tm, st, &err);
+        ut::require(!ok && err.find("index 1 only") != std::string::npos, "DAE BDF 1-5 refuses index 2: " + err);
+    }
+    // имена в списке схем; постоянный шаг на них отказывает (krs_for_scheme_impl)
+    ut::require(scheme_is_multistep("DAE BDF 1-5") && adaptive_scheme_name_ok("BDF 1-5"), "BDF names registered");
+}
+
 void adaptive_gpu() {
     const System rc = rc_sys();
     const AdaptiveCode code = codegen_adaptive_dae(rc, DaeScheme::Rodas4);
@@ -371,6 +431,7 @@ int main() {
         set_nvrtc_rdc(true);   // как в приложении с _app_config.json: модули ДАУ без rdc собираются минутами
         cpu_tests();
         adaptive_cpu();
+        bdf_tests();
         if (cuInit(0) != CUDA_SUCCESS) { std::printf("no CUDA device: GPU part skipped\n"); return ut::kSkip; }
         gpu_tests();
         adaptive_gpu();
