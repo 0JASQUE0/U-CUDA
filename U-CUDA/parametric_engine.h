@@ -167,6 +167,9 @@ struct AdaptiveRequest {
     int    peak_interp = 2;              // узлы шага: 0 — узел, 1 — парабола, 2 — Эрмит по f
     std::string rhs, emb, dprep, deval;  // тела AdaptiveCode
     std::string ctrl_body;               // C body пользовательского регулятора, иначе пусто
+    // #define'ы перед текстом модуля (и прелюдия CPU-DLL). У BDF 1-5 — UCUDA_BDF_DRIVER, UCUDA_BDF_NX,
+    // UCUDA_BDF_KIDX: драйвер свипов — многошаговый (kernels/ucuda_bdf.cuh), rhs = [f; g], dprep — якобиан.
+    std::string prefix;
     UcudaAdaptParams params{};
     int    axis_kind[2] = { kAdAxisSystem, kAdAxisSystem };
     double tol_ratio = 1e-2;

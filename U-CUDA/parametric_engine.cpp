@@ -2229,6 +2229,7 @@ struct ParametricEngine::Impl {
     std::string src_cudaLibrary_cuh;
     std::string src_cudaMacros_cuh;
     std::string src_ucuda_adaptive_cuh;   // драйвер адаптивного шага (kernels/ucuda_adaptive.cuh)
+    std::string src_ucuda_bdf_cuh;        // BDF 1-5 в форме DASSL (kernels/ucuda_bdf.cuh): свипы на BDF
     std::string src_adaptive_part;        // адаптивные ядра свипов (kernels/adaptive_part.cu)
     std::string src_metrics_adaptive_part; // адаптивное ядро метрик (kernels/metrics_adaptive_part.cu)
     std::string src_lyap_adaptive_part;    // адаптивные LLE/LS (kernels/lyapunov_adaptive_part.cu)
@@ -2614,6 +2615,7 @@ struct ParametricEngine::Impl {
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }
         src_cudaMacros_cuh    = read_text_file(root + "cudaMacros.cuh",            e); if (!e.empty()) { err = e; return false; }
         src_ucuda_adaptive_cuh = read_text_file(root + "ucuda_adaptive.cuh",       e); if (!e.empty()) { err = e; return false; }
+        src_ucuda_bdf_cuh     = read_text_file(root + "ucuda_bdf.cuh",            e); if (!e.empty()) { err = e; return false; }
         src_adaptive_part     = read_text_file(root + "adaptive_part.cu",          e); if (!e.empty()) { err = e; return false; }
         src_metrics_adaptive_part = read_text_file(root + "metrics_adaptive_part.cu", e); if (!e.empty()) { err = e; return false; }
         src_lyap_adaptive_part = read_text_file(root + "lyapunov_adaptive_part.cu", e); if (!e.empty()) { err = e; return false; }
@@ -2628,12 +2630,12 @@ struct ParametricEngine::Impl {
     // load_sources() rewrites configCUDA.h whenever the peak settings change, and reading a
     // std::string while another thread assigns it is a race no matter how rare.
     struct SrcSnapshot {
-        std::string tmpl, lib_cu, lib_cuh, macros_cuh, config_h, adaptive_cuh;
+        std::string tmpl, lib_cu, lib_cuh, macros_cuh, config_h, adaptive_cuh, bdf_cuh;
     };
 
     SrcSnapshot snapshot_sources(const std::string& tmpl) const {
         return { tmpl, src_cudaLibrary_cu, src_cudaLibrary_cuh, src_cudaMacros_cuh, src_configCUDA_h,
-                 src_ucuda_adaptive_cuh };
+                 src_ucuda_adaptive_cuh, src_ucuda_bdf_cuh };
     }
 
     // Функции модуля КРС при раздельной сборке. Шаблон держит тело каждой под своим
@@ -2744,9 +2746,9 @@ struct ParametricEngine::Impl {
 
         const std::vector<const char*> hs = { snap.lib_cu.c_str(), snap.lib_cuh.c_str(),
                                               snap.macros_cuh.c_str(), snap.config_h.c_str(),
-                                              snap.adaptive_cuh.c_str() };
+                                              snap.adaptive_cuh.c_str(), snap.bdf_cuh.c_str() };
         const std::vector<const char*> hn = { "cudaLibrary.cu", "cudaLibrary.cuh",
-                                              "cudaMacros.cuh", "configCUDA.h", "ucuda_adaptive.cuh" };
+                                              "cudaMacros.cuh", "configCUDA.h", "ucuda_adaptive.cuh", "ucuda_bdf.cuh" };
         CachedLibPtx fresh;
         fresh.key = lib_key;
         const bool ok = compile_ptx(src, src_name, hs, hn, name_exprs, true,
@@ -2957,6 +2959,7 @@ struct ParametricEngine::Impl {
             snap.macros_cuh.c_str(),
             snap.config_h.c_str(),
             snap.adaptive_cuh.c_str(),
+            snap.bdf_cuh.c_str(),
         };
         const char* header_names[] = {
             "cudaLibrary.cu",
@@ -2964,8 +2967,9 @@ struct ParametricEngine::Impl {
             "cudaMacros.cuh",
             "configCUDA.h",
             "ucuda_adaptive.cuh",
+            "ucuda_bdf.cuh",
         };
-        constexpr int n_headers = 5;
+        constexpr int n_headers = 6;
 
         nvrtcProgram prog = nullptr;
         nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), src_name,
@@ -3103,7 +3107,7 @@ struct ParametricEngine::Impl {
                               int par_or_var, std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         // Узлы шага — свой модуль без плотного выхода (UCUDA_AD_NO_DENSE): состояние нити
         // легче на D, Xp, Fp, а стадии живут только внутри попытки. Своё имя исходника — от
         // него зависит ключ PTX библиотеки при раздельной сборке.
@@ -3115,7 +3119,7 @@ struct ParametricEngine::Impl {
             std::vector<std::string> mg;
             const std::string tmpl = (nodes ? std::string(kAdNodesModulePrefix) : std::string())
                                    + src_template_bif2d + "\n" + src_adaptive_part;
-            if (!build_module(snapshot_sources(time_prefix(ad.rhs) + tmpl), nodes ? "adaptive_sweep_nodes.cu" : "adaptive_sweep.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), nodes ? "adaptive_sweep_nodes.cu" : "adaptive_sweep.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
@@ -3145,14 +3149,14 @@ struct ParametricEngine::Impl {
                                    std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         const std::string key = hash_key(bodies, amountOfX) + ":ad_cont";
         return compile_into(pool_ad_cont, key, cached_ad_cont, activate, [&](CachedSimpleContModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
             const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_CONT_KERNEL 1\n"
                                    + src_template_bif2d + "\n" + src_adaptive_part;
-            if (!build_module(snapshot_sources(time_prefix(ad.rhs) + tmpl), "adaptive_cont.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), "adaptive_cont.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      "1" },
@@ -3176,7 +3180,7 @@ struct ParametricEngine::Impl {
                                    int par_or_var, std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         const std::string key = hash_key(bodies, amountOfX) + ":lyap_ad:pov" + std::to_string(par_or_var);
         return compile_into(pool_lyap_ad, key, cached_lyap_ad, activate, [&](CachedLyapAdModule& fresh) {
             CUmodule mod = nullptr;
@@ -3184,13 +3188,13 @@ struct ParametricEngine::Impl {
             const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_NO_DENSE 1\n"
                                      "#define UCUDA_AD_LYAPUNOV 1\n"
                                    + src_template_bif2d + "\n" + src_adaptive_part + "\n" + src_lyap_adaptive_part;
-            if (!build_module(snapshot_sources(time_prefix(ad.rhs) + tmpl), "lyapunov_adaptive.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), "lyapunov_adaptive.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
                                 { "{{KRS_RHS_BODY}}",    ad.rhs },
                                 { "{{KRS_EMB_BODY}}",    ad.emb },
-                                { "{{KRS_DPREP_BODY}}",  "" },
+                                { "{{KRS_DPREP_BODY}}",  ad.prefix.empty() ? std::string() : ad.dprep },
                                 { "{{KRS_DEVAL_BODY}}",  "" },
                                 { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
                               { "lyapunovLLEAdCUDA", "lyapunovLSAdCUDA" },
@@ -3212,7 +3216,7 @@ struct ParametricEngine::Impl {
                                         std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         const std::string key = hash_key(bodies, amountOfX) + ":lyap_ad_cont";
         return compile_into(pool_lyap_ad_cont, key, cached_lyap_ad_cont, activate, [&](CachedLyapAdModule& fresh) {
             CUmodule mod = nullptr;
@@ -3220,13 +3224,13 @@ struct ParametricEngine::Impl {
             const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_NO_DENSE 1\n"
                                      "#define UCUDA_AD_LYAPUNOV 1\n#define UCUDA_LYAP_AD_CONT_ONLY 1\n"
                                    + src_template_bif2d + "\n" + src_adaptive_part + "\n" + src_lyap_adaptive_part;
-            if (!build_module(snapshot_sources(time_prefix(ad.rhs) + tmpl), "lyapunov_adaptive_cont.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), "lyapunov_adaptive_cont.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      "1" },
                                 { "{{KRS_RHS_BODY}}",    ad.rhs },
                                 { "{{KRS_EMB_BODY}}",    ad.emb },
-                                { "{{KRS_DPREP_BODY}}",  "" },
+                                { "{{KRS_DPREP_BODY}}",  ad.prefix.empty() ? std::string() : ad.dprep },
                                 { "{{KRS_DEVAL_BODY}}",  "" },
                                 { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
                               { "lyapunovLLEAdContCUDA", "lyapunovLSAdContCUDA" },
@@ -3272,7 +3276,7 @@ struct ParametricEngine::Impl {
             AdaptiveCpuModule mod;
             std::vector<KrsCpuDiag> diags;
             // Те же аргументы, что у БД 1D (run_bif1d_cpu_ad), — одна DLL на все адаптивные CPU-ветки.
-            if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, n, peak_config_defines(), diags)) {
+            if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, n, ad.prefix + peak_config_defines(), diags)) {
                 err = "CPU adaptive module:";
                 for (const KrsCpuDiag& d : diags)
                     err += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
@@ -3444,7 +3448,7 @@ struct ParametricEngine::Impl {
         {
             std::vector<KrsCpuDiag> diags;
             if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, req.amountOfX,
-                             peak_config_defines(), diags) || !mod.bif()) {
+                             ad.prefix + peak_config_defines(), diags) || !mod.bif()) {
                 std::string e = "CPU adaptive module:";
                 for (const KrsCpuDiag& d : diags)
                     e += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
@@ -8377,7 +8381,7 @@ struct ParametricEngine::Impl {
                                       int par_or_var, std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         // Узлы шага — модуль без плотного выхода, как у БД (см. compile_ad_if_needed).
         const bool nodes = ad_nodes_module(ad);
         const std::string key = hash_key(bodies, amountOfX) + ":metrics_ad:pov" + std::to_string(par_or_var)
@@ -8390,7 +8394,7 @@ struct ParametricEngine::Impl {
                                    + "#define SIGM_MINMAX_INTERP 1\n#define UCUDA_AD_NO_SWEEP_KERNELS 1\n"
                                    + src_template_metrics + "\n"
                                    + src_adaptive_part + "\n" + src_metrics_adaptive_part;
-            if (!build_module(snapshot_sources(time_prefix(ad.rhs) + tmpl), nodes ? "signal_metrics_ad_nodes.cu" : "signal_metrics_ad.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), nodes ? "signal_metrics_ad_nodes.cu" : "signal_metrics_ad.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
@@ -8986,7 +8990,7 @@ struct ParametricEngine::Impl {
         {
             std::vector<KrsCpuDiag> diags;
             if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, req.amountOfX,
-                             peak_config_defines(), diags) || !mod.metrics()) {
+                             ad.prefix + peak_config_defines(), diags) || !mod.metrics()) {
                 std::string e = "CPU adaptive module:";
                 for (const KrsCpuDiag& d : diags)
                     e += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
@@ -10007,7 +10011,7 @@ struct ParametricEngine::Impl {
         if (!ad.setup_error.empty()) return;
         AdaptiveCpuModule mod;
         std::vector<KrsCpuDiag> diags;
-        (void)mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, amountOfX, peak_config_defines(), diags);
+        (void)mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, amountOfX, ad.prefix + peak_config_defines(), diags);
     }
 
     void prewarm_bif1d(const Bifurcation1DRequest& req) {

@@ -5040,13 +5040,13 @@ AdaptiveCode codegen_adaptive_dae(const System& s, DaeScheme sch) {
     return c;
 }
 
-void codegen_bdf_bodies(const System& s, std::string& res, std::string& jac) {
+void codegen_bdf_bodies(const System& s, std::string& res, std::string& jac, const char* jname) {
     const int N = (int)s.vars.size();
     res = adaptive_rhs_body(s);   // F[i] = [f; g](X, ucuda_t)
     const auto J = jac_over(s, "X", time_name(s));
     std::ostringstream o;
     for (int i = 0; i < N; ++i)
-        for (int j = 0; j < N; ++j) o << "    J[" << i * N + j << "] = " << J[(size_t)i * N + j] << ";\n";
+        for (int j = 0; j < N; ++j) o << "    " << jname << "[" << i * N + j << "] = " << J[(size_t)i * N + j] << ";\n";
     jac = o.str();
 }
 

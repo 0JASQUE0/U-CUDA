@@ -1757,6 +1757,18 @@ static int parse_i(const std::string& s, int def) {
 // вернёт её вместо расчёта, как любую другую ошибку запуска. span — длина всего
 // интервала интегрирования (транзиент + запись), нужна выбору h0. ax0 / ax1 —
 // коды адаптивных осей (AdaptiveAxisKind), 0 — обычная цель свипа.
+// Тело постоянного шага для запроса свипа. У BDF 1-5 тела нет, а шаблон модуля его требует: с
+// адаптивным шагом ядра постоянного шага модуля не зовутся, поэтому подставляется BDF1 (ДАУ) или
+// Euler (ОДУ). Без адаптивного шага — прежний отказ compute_krs_for_scheme.
+static std::string sweep_krs(const std::vector<CustomScheme>& cs, const System& sys, const std::string& scheme,
+                             const AdaptiveSettings& ad) {
+    if (scheme_is_multistep(scheme) && ad.enabled && !sys.is_map && !sys.rhs.empty()) {
+        try { return sys.dae_nx >= 0 ? codegen_dae_scheme(sys, DaeScheme::BDF1) : codegen_scheme(sys, Scheme::Euler); }
+        catch (const std::exception&) { return {}; }
+    }
+    return compute_krs_for_scheme(cs, sys, scheme);
+}
+
 static void fill_adaptive_request(const std::vector<CustomScheme>& custom_schemes,
                                   const System& sys, const std::string& scheme,
                                   const AdaptiveSettings& st, int n, double span,
@@ -1768,6 +1780,43 @@ static void fill_adaptive_request(const std::vector<CustomScheme>& custom_scheme
     out.peak_interp  = st.peak_interp;
     out.axis_kind[0] = ax0;
     out.axis_kind[1] = ax1;
+    // BDF 1-5: драйвер свипов — многошаговый (kernels/ucuda_bdf.cuh, UCUDA_BDF_DRIVER) с тем же
+    // интерфейсом, что у адаптивного; в слотах модуля rhs = [f; g], dprep — якобиан. z0 точки свипа
+    // и клонов LLE/LS он согласует сам (проекция на g = 0 при старте).
+    if (scheme_is_multistep(scheme)) {
+        const bool dae = sys.dae_nx >= 0;
+        if (dae != (scheme == kBdfSchemeDae)) {
+            out.setup_error = dae ? "a DAE needs DAE BDF 1-5" : "DAE BDF 1-5 needs a DAE system";
+            return;
+        }
+        if (dae && dae_structural_index(sys) > 2) {
+            out.setup_error = "DAE BDF 1-5 in sweeps: index 1-2 (index 3 goes through GGL, which adds variables - "
+                              "Analysis only for now)";
+            return;
+        }
+        AdaptiveCode code;
+        try { codegen_bdf_bodies(sys, code.rhs, code.dprep, "D"); }
+        catch (const std::exception& e) { out.setup_error = std::string("BDF codegen: ") + e.what(); return; }
+        code.p = 5; code.q = 4; code.nlo = 1; code.emb_rhs = 1; code.dense_order = 3;
+        std::string err;
+        if (!adaptive_build_params(st, code, n, span, out.params, err, &out.ctrl_body)) { out.setup_error = err; return; }
+        out.ctrl_body.clear();   // шаг и порядок выбирает сам BDF (DASSL), регулятор не нужен
+        out.rhs = code.rhs; out.dprep = code.dprep;
+        // Плотный выход у BDF свой (DDATRP); непустое тело — признак "плотный выход есть" для CPU-модуля.
+        out.deval = "    (void)D; (void)th; (void)Yo;\n";
+        const int N = (int)sys.vars.size();
+        std::string kidx;
+        for (int i = 0; i < N; ++i)
+            kidx += (i ? "," : "") + std::to_string(i < (int)sys.dae_index.size() && sys.dae_index[(size_t)i] > 1
+                                                    ? sys.dae_index[(size_t)i] : 1);
+        out.prefix = "#define UCUDA_BDF_DRIVER 1\n#define UCUDA_BDF_NX " + std::to_string(dae ? sys.dae_nx : N)
+                   + "\n#define UCUDA_BDF_KIDX {" + kidx + "}\n";
+        out.tol_ratio = out.params.rtol > 0 ? out.params.atol[0] / out.params.rtol : 1.0;
+        out.lyap_renorm = st.lyap_renorm;
+        out.desc = scheme + " (multistep, DASSL form), rtol " + st.rtol + ", atol " + st.atol
+                 + (st.hmax.empty() ? std::string() : ", h_max " + st.hmax);
+        return;
+    }
     // Нативная ДАУ: в адаптивных модулях свипов нет согласования z0 в каждой точке (шаг с h = 0
     // фиксированных модулей) и проекции клонов LLE/LS — числа вышли бы правдоподобными, но
     // неверными. Адаптивный Rodas4 на ДАУ пока только в Analysis.
@@ -1802,7 +1851,7 @@ static void fill_adaptive_request(const std::vector<CustomScheme>& custom_scheme
 static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession& s,
                                                 const BifurcationDiagramConfig& bd) {
     Bifurcation1DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, bd.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, bd.scheme, bd.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -1860,7 +1909,7 @@ static void apply_bif1d_result(BifurcationDiagramConfig& bd, Bifurcation1DResult
 static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession& s,
                                                 const BifurcationDiagramConfig& bd) {
     Bifurcation2DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, bd.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, bd.scheme, bd.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -2139,7 +2188,7 @@ static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     req.continuation         = c.continuation;
     req.continuation_reverse = c.continuation_reverse;
     req.use_cpu              = !c.use_gpu;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -2194,7 +2243,7 @@ static void apply_lle1d_result(LLECurveConfig& c, LLE1DResult&& r) {
 static LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
                                         const LLECurveConfig& c) {
     LLE2DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -2692,7 +2741,7 @@ void BasinsAnalysisSession::remove_config(int i) {
 static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
                                           const BasinsConfig& c) {
     BasinsRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -3631,7 +3680,7 @@ static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
     req.continuation         = c.continuation;
     req.continuation_reverse = c.continuation_reverse;
     req.use_cpu              = !c.use_gpu;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -3684,7 +3733,7 @@ static void apply_ls1d_result(LSCurveConfig& c, LS1DResult&& r) {
 static LS2DRequest build_ls2d_request(const LyapunovSpectrumAnalysisSession& s,
                                       const LSCurveConfig& c) {
     LS2DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -3957,7 +4006,7 @@ void SignalMetricsAnalysisSession::remove_config(int i) {
 static SignalMetricsRequest build_metrics_request(const SignalMetricsAnalysisSession& s,
                                                   const SignalMetricsConfig& c) {
     SignalMetricsRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
     req.dimension = c.mode_2d ? 2 : 1;
 

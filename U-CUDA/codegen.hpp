@@ -457,7 +457,9 @@ AdaptiveCode codegen_adaptive_dae(const System& s, DaeScheme sch);
 // Тела для BDF 1-5 на GPU (kernels/ucuda_bdf.cuh): res — F[i] = [f; g](X, ucuda_t), jac — полный
 // символьный якобиан J[i*N + j] = d[f; g]_i / dX_j. Система — ОДУ или ДАУ индекса 1-2 (индекс 3
 // сначала сводится GGL, см. bdf_prepare_system).
-void codegen_bdf_bodies(const System& s, std::string& res, std::string& jac);
+// jname — имя массива якобиана: "J" у ядра Analysis, "D" в свипах (тело встаёт в слот dprep
+// адаптивного модуля, где выход называется D).
+void codegen_bdf_bodies(const System& s, std::string& res, std::string& jac, const char* jname = "J");
 // Метка числа x в теле шага метода ДАУ: LLE/LS по ней возмущают клоны только по x
 // (UCUDA_LYAP_NX), z клона решает сам метод. Тело входит в ключ кэша модулей.
 constexpr const char* kDaeNxTag = "// @ucuda-dae-nx ";

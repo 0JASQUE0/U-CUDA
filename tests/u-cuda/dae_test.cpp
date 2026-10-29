@@ -16,6 +16,7 @@
 //  Этап 9c: BDF 1-5 (свой многошаговый драйвер): ОДУ с точным решением (порядок до 5, точность по допуску),
 //   Робертсон (ДАУ индекса 1) против Test Set, маятник индекса 2 при tol 1e-6..1e-10 против Radau, индекс 3 через GGL против Radau IIA + GGL.
 //   GPU: BDF 1-5 в модуле NVRTC (kernels/ucuda_bdf.cuh) = CPU на маятниках индекса 2 и 3 и Робертсоне.
+//   Свипы на BDF (драйвер UCUDA_BDF_DRIVER): Metrics на ДАУ с z0 по точкам, БД 1D Ван дер Поля, LLE / LS на ДАУ.
 #include "test_util.h"
 #include "dae_ir.h"
 #include "adaptive_settings.h"
@@ -485,6 +486,124 @@ void bdf_gpu() {
     }
 }
 
+// Свипы Parametric на BDF 1-5: запрос — как fill_adaptive_request (analysis_session.cpp).
+AdaptiveRequest bdf_sweep_request(const System& s, double tol, double span) {
+    AdaptiveRequest a;
+    a.enabled = true;
+    AdaptiveCode code;
+    codegen_bdf_bodies(s, code.rhs, code.dprep, "D");
+    code.p = 5; code.q = 4; code.nlo = 1; code.emb_rhs = 1; code.dense_order = 3;
+    AdaptiveSettings st;
+    st.enabled = true;
+    char tb[32];
+    std::snprintf(tb, sizeof(tb), "%g", tol);
+    st.rtol = tb;
+    st.atol = tb;
+    std::string err;
+    const int n = (int)s.vars.size();
+    { const bool ok_ = adaptive_build_params(st, code, n, span, a.params, err); ut::require(ok_, "BDF params: " + err); }
+    a.rhs = code.rhs; a.dprep = code.dprep;
+    a.deval = "    (void)D; (void)th; (void)Yo;\n";
+    std::string kidx;
+    for (int i = 0; i < n; ++i)
+        kidx += (i ? "," : "") + std::to_string(i < (int)s.dae_index.size() && s.dae_index[(size_t)i] > 1 ? s.dae_index[(size_t)i] : 1);
+    a.prefix = "#define UCUDA_BDF_DRIVER 1\n#define UCUDA_BDF_NX " + std::to_string(s.dae_nx >= 0 ? s.dae_nx : n)
+             + "\n#define UCUDA_BDF_KIDX {" + kidx + "}\n";
+    return a;
+}
+
+void bdf_sweeps() {
+    ParametricEngine eng;
+    // Metrics: связь зависит от параметра, z0 = 0 несогласован — проекция в каждой точке
+    {
+        const System s = parse_dae("x' = -x + z\n0 = z - p*(cos(x) + 1)", "x", "z", "p", "").as_codegen_system();
+        for (int cpu_side = 0; cpu_side < 2; ++cpu_side) {
+            SignalMetricsRequest q;
+            q.krs_body = codegen_dae_scheme(s, DaeScheme::BDF1);
+            q.amountOfX = 2; q.initial_conditions = { 0.3, 0.0 }; q.base_values = tail({ 0.5, 1.0 });
+            q.param_index = 1; q.param_lo = 0.5; q.param_hi = 2.0; q.n_pts = 4; q.use_cpu = cpu_side;
+            q.h = 0.05; q.t_max = 2;
+            q.adaptive = bdf_sweep_request(s, 1e-9, 2.0);
+            const auto A = eng.run_signal_metrics(q);
+            ut::require(A.ok, std::string("BDF metrics sweep (") + (cpu_side ? "CPU" : "GPU") + "): " + A.error);
+            for (int j = 0; j < 4; ++j) {
+                const double p = 0.5 + 1.5 * j / 3;
+                SignalMetricsRequest b = q;
+                b.param_lo = b.param_hi = p; b.n_pts = 1; b.initial_conditions = { 0.3, p * (std::cos(0.3) + 1) };
+                const auto B = eng.run_signal_metrics(b);
+                ut::require(B.ok, "BDF metrics single point: " + B.error);
+                for (int m = 0; m < SIGM_COUNT; ++m) {
+                    if (A.values[m].size() <= (size_t)j || B.values[m].empty() || std::isnan(B.values[m][0])) continue;
+                    ut::approx(A.values[m][(size_t)j], B.values[m][0], 1e-8,
+                               cpu_side ? "BDF sweep: z0 per point (CPU)" : "BDF sweep: z0 per point (GPU)");
+                }
+            }
+        }
+        std::printf("  BDF 1-5 Metrics sweep on a DAE: z0 made consistent per point (GPU and CPU)\n");
+    }
+    // БД 1D (ОДУ): Ван дер Поль, mu = 1 — пики x предельного цикла 2.00862 (классика, continuation, CPU)
+    {
+        System s;
+        s.vars = { "x", "y" };
+        s.params = { "mu" };
+        s.rhs = { "y", "mu*(1 - x^2)*y - x" };
+        for (int mode = 0; mode < 3; ++mode) {
+            Bifurcation1DRequest b;
+            b.krs_body = codegen_scheme(s, Scheme::Euler);
+            b.amountOfX = 2; b.initial_conditions = { 0.5, 0.0 }; b.base_values = tail({ 0.5, 1.0 });
+            b.param_index = 1; b.param_lo = 1.0; b.param_hi = 1.0; b.n_pts = 2; b.writable_var = 0;
+            b.h = 0.01; b.transient_time = 60; b.t_max = 30;
+            b.continuation = mode >= 1; b.use_cpu = mode == 2;
+            b.adaptive = bdf_sweep_request(s, 1e-9, 90.0);
+            const auto r = eng.run_bifurcation_1d(b);
+            ut::require(r.ok && !r.bifurcation_points.empty(), "BDF BD 1D: " + r.error);
+            double pk = 0;
+            int cnt = 0;
+            for (double v : r.bifurcation_points[0]) if (std::isfinite(v)) { pk = std::fmax(pk, v); ++cnt; }
+            const char* name = mode == 0 ? "classic GPU" : mode == 1 ? "continuation GPU" : "continuation CPU";
+            std::printf("  BDF 1-5 BD 1D (van der Pol), %s: %d peaks, max %.6f (limit cycle 2.008620)\n", name, cnt, pk);
+            ut::require(cnt >= 3, "BDF BD 1D: peaks found");
+            ut::approx(pk, 2.00862, 1e-4, "BDF BD 1D: van der Pol peak");
+        }
+    }
+    // LLE / LS: x1' = -x1 + z, x2' = -2 x2, 0 = z - 0.5 x1  =>  спектр {-0.5, -2}
+    {
+        const System s = parse_dae("x1' = -x1 + z\nx2' = -2*x2\n0 = z - 0.5*x1", "x1, x2", "z", "p", "").as_codegen_system();
+        LLE1DRequest l;
+        l.krs_body = codegen_dae_scheme(s, DaeScheme::BDF1);
+        l.amountOfX = 3; l.initial_conditions = { 1, 1, 0.5 }; l.base_values = tail({ 0.5, 0.0 });
+        l.param_index = 1; l.param_lo = 0; l.param_hi = 1; l.n_pts = 2; l.h = 0.01; l.t_max = 40; l.NT = 0.5; l.eps = 1e-6;
+        l.vector_transient = 10;
+        l.adaptive = bdf_sweep_request(s, 1e-9, 45.0);
+        const auto g = eng.run_lle_1d(l);
+        ut::require(g.ok, "BDF LLE GPU: " + g.error);
+        l.use_cpu = true;
+        const auto c = eng.run_lle_1d(l);
+        ut::require(c.ok, "BDF LLE CPU: " + c.error);
+        std::printf("  BDF 1-5 LLE on a DAE: GPU %.6f, CPU %.6f (exact -0.5)\n", g.lyapunov[0], c.lyapunov[0]);
+        ut::approx(g.lyapunov[0], -0.5, 2e-3, "BDF LLE");
+        // клоны BDF интегрируются независимо: их точность относительно возмущения ~ tol / eps = 1e-3,
+        // и разное округление CPU / GPU сдвигает показатель на ~1e-5 (у адаптивного шага ошибку клонов
+        // держит общий регулятор — там 1e-9)
+        ut::approx(c.lyapunov[0], g.lyapunov[0], 1e-4, "BDF LLE CPU vs GPU");
+        LS1DRequest q;
+        q.krs_body = l.krs_body;
+        q.amountOfX = 3; q.initial_conditions = { 1, 1, 0.5 }; q.base_values = tail({ 0.5, 0.0 });
+        q.param_index = 1; q.param_lo = 0; q.param_hi = 1; q.n_pts = 2; q.h = 0.01; q.t_max = 40; q.NT = 0.5; q.eps = 1e-6;
+        q.vector_transient = 10;
+        q.adaptive = l.adaptive;
+        for (int cont = 0; cont < 2; ++cont) {
+            q.continuation = cont;
+            const auto r = eng.run_ls_1d(q);
+            ut::require(r.ok && r.spectrum.size() == 2 && r.spectrum[0].size() == 2, "BDF LS: " + r.error);
+            std::printf("  BDF 1-5 LS on a DAE%s: %.6f %.6f (exact -0.5 -2)\n", cont ? " (continuation)" : "",
+                        r.spectrum[0][0], r.spectrum[0][1]);
+            ut::approx(r.spectrum[0][0], -0.5, 2e-3, "BDF LS lambda1");
+            ut::approx(r.spectrum[0][1], -2.0, 2e-3, "BDF LS lambda2");
+        }
+    }
+}
+
 void adaptive_gpu() {
     const System rc = rc_sys();
     const AdaptiveCode code = codegen_adaptive_dae(rc, DaeScheme::Rodas4);
@@ -515,6 +634,7 @@ int main() {
         gpu_tests();
         adaptive_gpu();
         bdf_gpu();
+        bdf_sweeps();
         return 0;
     });
 }

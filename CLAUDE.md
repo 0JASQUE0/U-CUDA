@@ -526,9 +526,9 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   lambda at index 2 - at tol 1e-7 / 1e-9 the pendulum locked into h ~ tol (3156 / 31015 steps, error
   7e-4 / 7e-5) while 1e-6 / 1e-8 / 1e-10 were fine; Robertson took 2779 steps.
   Names `kBdfSchemeOde` "BDF 1-5" (always in the ODE scheme list) and `kBdfSchemeDae` "DAE BDF 1-5"
-  (after the DAE methods); `scheme_is_multistep`; adaptive step in Analysis only (`run_adaptive_phase`
+  (after the DAE methods); `scheme_is_multistep`; adaptive step only (Analysis: `run_adaptive_phase`
   branch; GPU when "use GPU" is on); fixed step (`krs_for_scheme_impl`) and sweeps
-  (`adaptive_code_for_scheme`) refuse them.
+  (`adaptive_code_for_scheme`) refuse them; sweeps take them through `fill_adaptive_request` (below).
   Tests: x' = -2x + cos t (order reaches 5, error ~1-2 tol, 89 / 339 steps at 1e-5 / 1e-9), Robertson DAE
   vs Test Set at t = 40 (rtol 1e-8: 326 steps, y1 to 9e-9), index-2 pendulum vs Radau IIA at tol 1e-6 ..
   1e-10 (87..322 steps, x error ~20 tol, lambda ~100 tol), index-3 pendulum via GGL.
@@ -538,7 +538,28 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   thread per trajectory, DASSL workspace in thread-local memory; `computePhasePortraitsBdfNVRTC`). Index 3 is
   turned into GGL on the host (`bdf_prepare_system`), mu start at 0 and are cut from the output; h_min failure
   comes back in stats slot 2. GPU = CPU on the stands: the same step counts (164 / 196 / 326), max diff ~2e-12.
-  Open: Parametric (sweeps) with BDF.
+  Sweeps (Parametric: BD 1D/2D classic and continuation, Metrics, basins, LLE/LS): the adaptive sweep
+  modules run on BDF without new kernels - `ucuda_adaptive.cuh` switches to the BDF section of
+  `ucuda_bdf.cuh` under `UCUDA_BDF_DRIVER` (the same names `UcudaAdaptState`, `ucuda_ad_init / restart /
+  step / eval / advance_to`; S.F0 = y' of the DDATRP interpolant at the node; steps stop exactly at tEnd -
+  DASSL TSTOP), and replaces `UcudaLyapClones` / `ucuda_lyap_point` by a BDF version: per block of NT the
+  base trajectory steps to the block end, each clone restarts BDF (order 1, z projected) from its
+  renormalised state and steps to the same end. Without the macro the header text the compiler sees is the
+  old one. `fill_adaptive_request` builds the BDF request: `codegen_bdf_bodies(.., "D")` - rhs = [f; g],
+  dprep slot = the Jacobian written into D, a stub deval (the CPU module reads an empty one as "no dense
+  output"), no controller, `AdaptiveRequest::prefix` = `#define UCUDA_BDF_DRIVER 1`, `UCUDA_BDF_NX`,
+  `UCUDA_BDF_KIDX {..}`; the engine puts the prefix before the module text, into the cache keys and into the
+  CPU DLL prelude, and registers `ucuda_bdf.cuh` as a virtual NVRTC header. The template still needs a
+  fixed-step body: `sweep_krs` gives BDF1 (DAE) / Euler (ODE) when the adaptive step is on (its kernels are
+  never called); with a fixed step the multistep names are refused as before. Every sweep point starts with
+  z projected onto g = 0 (Newton in z, x fixed), so a DAE sweep from one z0 = a run from a consistent z0 per
+  point. Index 3 (GGL adds variables) stays Analysis-only. LLE/LS note: clones are independent BDF
+  trajectories, so their accuracy relative to the perturbation is ~ tol / eps - take tol << eps (the
+  adaptive step controls the clone error jointly; BDF cannot).
+  Tests (dae_test): Metrics on x' = -x + z, 0 = z - p (cos x + 1) from z0 = 0 = per-point consistent runs
+  (1e-8, GPU and CPU); BD 1D van der Pol mu = 1: peak 2.008620 (classic GPU, continuation GPU and CPU); LLE
+  and LS on x1' = -x1 + z, x2' = -2 x2, 0 = z - 0.5 x1: -0.4985 / -2.0007 (exact -0.5 / -2), CPU vs GPU 1e-5.
+  Not tested: basins and BD 2D (same driver).
 - Stage 9d, op-amps "as is" plus an ideal copy (user's request): `SpiceImportOptions::ideal_opamps` (record
   field `circuit_ideal_opamps`, JSON "1"). Off (default): an op-amp from the table or `uc_opamp` whose
   .subckt is in the netlist is expanded element by element (the vendor model); on: it is a nullor. An op-amp

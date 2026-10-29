@@ -775,6 +775,13 @@ struct UcudaKrsFns {
 #endif
 #endif
 
+#ifdef UCUDA_BDF_DRIVER
+// Свипы на многошаговом BDF 1-5: тот же интерфейс драйвера, шаг — форма DASSL (kernels/ucuda_bdf.cuh).
+#define UCUDA_BDF_DRIVER_SECTION
+#include "ucuda_bdf.cuh"
+#undef UCUDA_BDF_DRIVER_SECTION
+#else
+
 struct UcudaAdaptState {
     numb t;                                        // t_n
     numb h;                                        // предложенный следующий шаг
@@ -1122,6 +1129,8 @@ UCUDA_HD inline void ucuda_ad_advance_to(UcudaAdaptState& S, const K& k, const n
 }
 #endif // UCUDA_AD_NO_DENSE
 
+#endif // UCUDA_BDF_DRIVER
+
 #endif // UCUDA_ADAPTIVE_DRIVER_DONE
 
 // ---- LLE / LS с адаптивным шагом: общий для GPU и CPU код --------------------------
@@ -1252,6 +1261,7 @@ UCUDA_HD inline void ucuda_lyap_renorm(const numb* x, const numb eps, numb* y, n
 #endif
 #define UCUDA_NUMB_EPS (sizeof(numb) == 4 ? 1.1920928955078125e-7 : 2.220446049250313e-16)
 
+#ifndef UCUDA_BDF_DRIVER
 // Клоны как добавка к шагу (см. UcudaAdNoExtra): на попытке — вложенный шаг каждого клона
 // и норма ошибки возмущения, на принятии — клоны становятся новыми.
 template <int NC>
@@ -1387,6 +1397,12 @@ UCUDA_HD inline int ucuda_lyap_point(UcudaAdaptState& S, const K& Kf, const numb
     for (int c = 0; c < NC; ++c) res[c] = acc[c] / tIntegrated;
     return 1;
 }
+
+#else  // UCUDA_BDF_DRIVER: клоны — свои траектории BDF (kernels/ucuda_bdf.cuh)
+#define UCUDA_BDF_LYAP_SECTION
+#include "ucuda_bdf.cuh"
+#undef UCUDA_BDF_LYAP_SECTION
+#endif // UCUDA_BDF_DRIVER
 
 // Свип 1D по цепочке точек — continuation (каждая точка стартует с конечного состояния
 // предыдущей; переносятся x, шаг и память регулятора — ucuda_ad_restart — и прикреплённые
