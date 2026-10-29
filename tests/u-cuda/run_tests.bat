@@ -17,7 +17,7 @@ xcopy /e /i /q /y "%HERE%..\..\x64\Release\kernels" "%OUT%\kernels" >nul
 
 rem Engine tests: the computation objects only.
 set ENG=
-for %%o in (parametric_engine data_export krs_cpu codegen sysparse system_library nvrtc_engine integrator spice_parse circuit_synth circuit_solver circuit_netlist) do set ENG=!ENG! "%OBJ%\%%o.obj"
+for %%o in (parametric_engine data_export krs_cpu codegen sysparse system_library nvrtc_engine integrator spice_parse dae_devices circuit_synth circuit_solver circuit_netlist) do set ENG=!ENG! "%OBJ%\%%o.obj"
 rem Full application (sessions, AppModel): every object except the entry point and the circuit
 rem runner (both define exe_dir, which the test provides).
 set APP=

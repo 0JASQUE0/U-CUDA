@@ -4955,7 +4955,9 @@ bool dae_consistent_z(const System& s, const double* a, int na, double t0, doubl
         for (; lam > 1e-8; lam *= 0.5) {
             for (int k = 0; k < nz; ++k) X[nx + k] = zt[k] - lam * r[k];
             const double gt = gnorm();
-            if (gt <= 1e300 && (gt < gn || gn == 0)) break;
+            // У корня max|g| стоит на уровне округления и строго не убывает: полный шаг
+            // принимается и тогда, иначе дробление не давало выйти по сходимости ниже.
+            if (gt <= 1e300 && (gt < gn || gn == 0 || dn <= 1e-12 * (1.0 + zn))) break;
         }
         if (!(lam > 1e-8)) { for (int k = 0; k < nz; ++k) X[nx + k] = zt[k] - r[k]; }
         if (lam == 1.0 && dn <= 1e-14 * (1.0 + zn)) return true;

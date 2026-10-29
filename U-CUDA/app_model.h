@@ -361,6 +361,9 @@ public:
     // Импорт схемы circuit_source: перезаписывает уравнения, x, z, параметры, НУ и шаг.
     // false + err — файл не читается, kicad-cli не сработал или схема не поддержана.
     bool import_circuit(std::string* report, std::string* err);
+    // Рабочая точка ДАУ (x' = 0, g = 0; у схемы — расчёт по постоянному току) из текущих полей:
+    // старт — НУ записи, результат пишется в init_conditions всех переменных.
+    bool dae_operating_point(std::string* report, std::string* err);
     // ДАУ решается схемами ОДУ (сведение включено) — тогда всё как у ОДУ.
     bool dae_native() const { return is_dae && !dae_as_ode; }
     InputMode mode = InputMode::Image;

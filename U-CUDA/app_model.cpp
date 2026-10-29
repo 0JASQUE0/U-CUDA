@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include "sysparse.hpp"
 #include "dae_ir.h"       // build_system для ДАУ
+#include "dae_devices.h"  // dae_dc_operating_point
 #include "kicad_import.h"
 #include "spice_parse.h"  // import_circuit
 #include <filesystem>
@@ -240,15 +241,56 @@ bool AppModel::import_circuit(std::string* report, std::string* err) {
     if (!r.step_h.empty()) step_h = r.step_h;
     circuit_netlist = net;
     if (note.empty() && !r.title.empty()) note = r.title;
+    // Без UIC и без НУ SPICE стартует переходный процесс из рабочей точки — так же и здесь.
+    std::string op;
+    if (r.uic) op = "initial values: as given (UIC)";
+    else if (r.has_ic) op = "initial values: IC= / .ic (no DC operating point)";
+    else {
+        std::string orep, oerr;
+        op = dae_operating_point(&orep, &oerr) ? "initial values: " + orep
+                                               : "initial values: zero; DC operating point failed: " + oerr;
+    }
     if (report) {
         std::string s = r.summary;
         if (!r.t_stop.empty()) s += "\n.tran: h = " + r.step_h + " s, T = " + r.t_stop + " s";
+        s += "\n" + op;
         for (const std::string& n : r.notes) s += "\n" + n;
         s += "\nnodes:";
         for (const auto& kv : r.node_vars) s += " " + kv.first + "=" + kv.second;
         *report = s;
     }
     return true;
+}
+
+bool AppModel::dae_operating_point(std::string* report, std::string* err) {
+    try {
+        FuncDefs funcs;
+        if (use_aux_funcs && !func_defs_text.empty()) funcs = parse_func_defs(func_defs_text);
+        const DaeSystem d = parse_dae(plain_text, vars_text, alg_text, params_text, dae_index_text, funcs);
+        const System s = d.as_codegen_system();
+        std::vector<double> a = { 0.5 };
+        for (const std::string& p : d.params) {
+            auto it = param_values.find(p);
+            a.push_back(it == param_values.end() || it->second.empty() ? 0.0 : std::stod(it->second));
+        }
+        std::vector<double> X;
+        for (const std::string& v : s.vars) {
+            auto it = init_conditions.find(v);
+            X.push_back(it == init_conditions.end() || it->second.empty() ? 0.0 : std::stod(it->second));
+        }
+        int it = 0;
+        std::string why;
+        if (!dae_dc_operating_point(s, a.data(), (int)a.size(), 0.0, X.data(), &it, &why)) {
+            if (err) *err = why;
+            return false;
+        }
+        for (size_t i = 0; i < s.vars.size(); ++i) init_conditions[s.vars[i]] = fmt_num_shortest(X[i]);
+        if (report) *report = "DC operating point (" + std::to_string(it) + " Newton iterations)";
+        return true;
+    } catch (const std::exception& e) {
+        if (err) *err = e.what();
+        return false;
+    }
 }
 
 SystemRecord AppModel::to_record() const {

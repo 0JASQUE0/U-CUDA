@@ -18,7 +18,10 @@
 // F, H, B (V= / I=), X (.subckt с параметрами, вложенные), .param, .ic, .tran, .include.
 // ОУ из таблицы замен (TL072, LM741, ...) — идеальный нуллор. E с |усилением| >= 1e4
 // по умолчанию тоже считается нуллором (так эмиттер U-CUDA пишет идеальный ОУ).
-// Полупроводники (D, Q, M, J) — этап 9: отказ с сообщением.
+// Диоды (D) и биполярные транзисторы (Q, NPN/PNP) — по .model, см. dae_devices.h; RS/RB/RC/RE
+// дают внутренние узлы. Полевые транзисторы (M, J) — отказ с сообщением.
+// Проверки топологии: контур из одних источников напряжения и узел только с источниками
+// тока — ошибка; узел без пути к земле по постоянному току — замечание в отчёте.
 
 #include <map>
 #include <string>
@@ -46,6 +49,10 @@ struct SpiceImportResult {
     std::map<std::string, std::string> param_values;
     std::string step_h;        // из .tran (пусто — директивы нет)
     std::string t_stop;
+    bool uic = false;          // .tran ... UIC
+    bool has_ic = false;       // в netlist'е есть IC= или .ic
+    // Без UIC и без НУ SPICE начинает переходный процесс с рабочей точки — так и импорт
+    // (AppModel::import_circuit через dae_dc_operating_point).
     // Диагностика: замены моделей, пропущенные директивы, контуры C-V.
     std::vector<std::string> notes;
     std::string summary;       // "узлов N, R .., C .., ..."

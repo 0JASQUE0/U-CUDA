@@ -157,6 +157,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClCompile Include="circuit_nvrtc.cpp" />
     <ClCompile Include="circuit_solver.cpp" />
     <ClCompile Include="circuit_synth.cpp" />
+    <ClCompile Include="dae_devices.cpp" />
     <ClCompile Include="kicad_import.cpp" />
     <ClCompile Include="spice_parse.cpp" />
     <ClCompile Include="codegen.cpp" />
@@ -197,6 +198,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClInclude Include="circuit_nvrtc.h" />
     <ClInclude Include="circuit_solver.h" />
     <ClInclude Include="circuit_synth.h" />
+    <ClInclude Include="dae_devices.h" />
     <ClInclude Include="kicad_import.h" />
     <ClInclude Include="spice_parse.h" />
     <ClInclude Include="codegen.hpp" />

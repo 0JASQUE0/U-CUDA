@@ -480,6 +480,28 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   (same topology signature) -> DAE: Radau IIA = `circuit_simulate` to 1e-5 V at t = 1.
   Not done: the KiCad exporter command (`U-CUDA.exe --import-netlist` into a running instance),
   L-I cutset detection, mutual inductance K, conditionals in B expressions.
+- Stage 9a, devices and DC OP (`dae_devices.cpp/.h`): diodes (D, SPICE level 1 DC: IS, N, RS -> internal
+  node `<name>#a`, CJO as a constant capacitor) and BJTs (Q, NPN/PNP: Ebers-Moll transport form with Early
+  VAF/VAR, IS/BF/BR/NF/NR, RB/RC/RE -> internal nodes, CJE/CJC constant) from `.model`; area factor. Model
+  parameters become a[] parameters `<model>_<param>` once per model (zero-default ones like RS/VAF only if
+  given); parameters that are set but not modelled (BV, TT, IKF, ISE, ...) are listed in the notes.
+  Exponentials go through `dev_explim` (exp up to 40, tangent line above) - without it Newton from a far
+  start overflows. MOSFET/JFET are refused. Numbers in generated DAE text never use e-notation
+  (`fmt` / `num` print `(m*10^(k))`): the equation parser reads `1e-12` as `1*e - 12`.
+  Topology at import: a loop of voltage sources or a node with only current sources -> error; a node with no
+  DC path to ground -> note. `dae_dc_operating_point` (any DAE: f = 0 and g = 0 in all variables; for a
+  circuit capacitor currents and inductor voltages zero): Newton with row scaling (a circuit mixes 1/C ~ 1e9
+  and 1/R ~ 1e-6 in one Jacobian), step limit and Armijo backtracking. `AppModel::import_circuit` uses it when
+  the netlist has neither UIC nor IC= / .ic (as SPICE does); the DAE editor has a "DC operating point" button.
+  `dae_consistent_z`: the line search now also accepts a full step when the correction is already below
+  1e-12 (at the root max|g| sits at round-off and does not strictly decrease; the transistor stage from
+  vc = 0 never left the loop). Tests (spice_test): rectifier vs the scalar ODE, CE stage NPN/PNP OP vs an
+  independent 2D Newton (and PNP = -NPN), diode RS, topology errors, Chua with a negative G and antiparallel
+  diodes = the same system written as an ODE (1e-6 at 1 ms). The ngspice comparison of the plan is not
+  done (no ngspice on the machine).
+  Next (stage 9 parts): 9b adaptive Rosenbrock for DAE, 9c BDF2-BDF5, 9d import "as is" with vendor models
+  (op-amp subcircuits expanded into their D/Q/E/G elements) PLUS a copy on ideal op-amps (the table
+  replacement) - the user wants both, not only the ideal one.
 - Newton for DAE: the predictor of `scheme_implicit_common` (BDF1, Trapezoidal, TR-BDF2, SDIRK2,
   Implicit Midpoint) is X_n for x and z alike, like Radau. The explicit-Euler x predictor the ODE
   schemes keep threw Newton far from the root on stiff circuits: "DAE-1 PUT burst neuron" at h = 5e-4

@@ -5326,14 +5326,22 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
                 cst.circuit_import_now = false;
                 std::string rep, e;
                 if (buf.import_circuit(&rep, &e)) { cst.circuit_report = rep; cst.circuit_error.clear(); }
-                else cst.circuit_error = e;
+                else cst.circuit_error = "Import failed: " + e;
                 cst.circuit_path = buf.circuit_source;
                 cst.circuit_mtime = circuit_source_mtime(buf.circuit_source);
             }
-            if (!buf.circuit_source.empty()) {
+            if (ImGui::Button("DC operating point##dae")) {
+                std::string rep, e;
+                if (buf.dae_operating_point(&rep, &e)) { cst.circuit_report = rep; cst.circuit_error.clear(); }
+                else cst.circuit_error = "DC operating point: " + e;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Initial values from x' = 0, g = 0 (for a circuit: capacitor currents and inductor\n"
+                                  "voltages zero). Newton starts from the current initial values.");
+            if (!cst.circuit_error.empty() || !cst.circuit_report.empty()) {
                 if (!cst.circuit_error.empty())
-                    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Import failed: %s", cst.circuit_error.c_str());
-                if (!cst.circuit_report.empty() && ImGui::TreeNode("Import report##dae_circuit")) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", cst.circuit_error.c_str());
+                if (!cst.circuit_report.empty() && ImGui::TreeNode("Report##dae_circuit")) {
                     ImGui::TextWrapped("%s", cst.circuit_report.c_str());
                     ImGui::TreePop();
                 }

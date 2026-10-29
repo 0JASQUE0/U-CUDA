@@ -1,4 +1,5 @@
 ﻿#include "spice_parse.h"
+#include "dae_devices.h"
 
 #include <algorithm>
 #include <cctype>
@@ -26,10 +27,15 @@ std::string lower(std::string s) {
     return s;
 }
 
+// Число для текста ДАУ: парсер уравнений читает "1e-12" как 1*e - 12, поэтому показатель —
+// через 10^(k).
 std::string fmt(double v) {
-    char b[40];
+    char b[48];
     std::snprintf(b, sizeof(b), "%.17g", v);
-    return b;
+    std::string s = b;
+    const size_t e = s.find('e');
+    if (e == std::string::npos) return s;
+    return "(" + s.substr(0, e) + "*10^(" + std::to_string(std::atoi(s.c_str() + e + 1)) + "))";
 }
 
 // Короткая запись для номиналов в записи: 1e-08, а не 1.0000000000000001e-08.
@@ -324,13 +330,19 @@ std::string sanitize(const std::string& s) {
     return o;
 }
 
+struct Model {
+    std::string name, type;                     // type: d, npn, pnp, ...
+    std::map<std::string, double> p;            // параметры в нижнем регистре
+};
+
 // Всё, что читает файл: подсхемы, модели, параметры, директивы. Общее для импорта в ДАУ
 // и для кругового теста.
 struct Deck {
     std::string title;
     std::vector<Card> top;                      // элементы верхнего уровня
     std::map<std::string, Subckt> subckts;      // ключ — имя в нижнем регистре
-    std::map<std::string, std::string> models;  // имя -> тип
+    std::map<std::string, Model> models;        // ключ — имя в нижнем регистре
+    bool uic = false;                           // .tran ... UIC: без рабочей точки
     Scope global;
     double tstep = 0.0, tstop = 0.0;
     std::vector<std::pair<std::string, double>> ic_nodes;   // .ic V(узел) = ...
@@ -392,13 +404,21 @@ struct Deck {
             if (t.size() < 3) fail(at + ".tran needs TSTEP TSTOP");
             tstep = eval_value(t[1], global);
             tstop = eval_value(t[2], global);
+            for (size_t i = 3; i < t.size(); ++i) if (lower(t[i]) == "uic") uic = true;
         } else if (k == ".ic") {
             for (size_t i = 1; i + 3 < t.size(); i += 4) {
                 if (lower(t[i]) != "v" || t[i + 2] != "=") fail(at + ".ic expects V(node)=value");
                 ic_nodes.push_back({ t[i + 1], eval_value(t[i + 3], global) });
             }
         } else if (k == ".model") {
-            if (t.size() >= 3) models[lower(t[1])] = lower(t[2]);
+            if (t.size() < 3) fail(at + ".model needs a name and a type");
+            Model& m = models[lower(t[1])];
+            m.name = t[1];
+            m.type = lower(t[2]);
+            for (size_t i = 3; i + 2 < t.size(); i += 3) {
+                if (t[i + 1] != "=") fail(at + "bad .model parameter list");
+                m.p[lower(t[i])] = eval_value(t[i + 2], global);
+            }
         } else if (k == ".include" || k == ".inc" || k == ".lib") {
             if (t.size() < 2) fail(at + k + " without a file");
             std::filesystem::path p = std::filesystem::u8path(t[1]);
@@ -697,6 +717,8 @@ struct Builder {
         current(a, b, i);
         branch[key] = i;
         v_edges.push_back({ a, b, name });
+        vsrc_edges.push_back({ a, b, name });
+        conduct(a, b);
         return i;
     }
 
@@ -706,8 +728,91 @@ struct Builder {
         gs.push_back(lin(inp, inn));
         current(out_p, out_n, i);
         branch[key] = i;
+        conduct(out_p, out_n);
         ++n_nullor;
     }
+
+    // Конденсатор с номиналом p (выражение): x = vc, z = ic, vc' = ic/p, Va - Vb - vc = 0.
+    // НУ: IC= элемента, иначе .ic V(a) - V(b) (неназванный узел — 0, как в SPICE с UIC).
+    void capacitor(const std::string& name, int a, int b, const std::string& p, bool has_ic, double v0) {
+        const std::string x = uniq("vc_" + sanitize(name)), i = uniq("ic_" + sanitize(name));
+        xs.push_back(x);
+        x_rhs.push_back(i + "/" + p);
+        zs.push_back(i);
+        gs.push_back(lin(a, b) + " - " + x);
+        current(a, b, i);
+        if (!has_ic) {
+            double va = 0.0, vb = 0.0;
+            for (const auto& kv : deck.ic_nodes) {
+                const std::string k = node_key(kv.first, Ctx{});
+                if (a >= 0 && k == node_keys[(size_t)a]) { va = kv.second; has_ic = true; }
+                if (b >= 0 && k == node_keys[(size_t)b]) { vb = kv.second; has_ic = true; }
+            }
+            v0 = va - vb;
+        }
+        if (has_ic) any_ic = true;
+        ic[x] = fmt_short(v0);
+        v_edges.push_back({ a, b, name });
+        touch(a);
+        touch(b);
+    }
+
+    // Модель прибора по имени; тип проверяется по первой букве ожидаемого ("d" / "npn" и "pnp").
+    const Model& model(const std::string& name, const char* kind, const std::string& at) {
+        auto it = deck.models.find(lower(name));
+        if (it == deck.models.end()) fail(at + "unknown model " + name);
+        const std::string& ty = it->second.type;
+        if (std::string(kind) == "d" ? ty != "d" : (ty != "npn" && ty != "pnp"))
+            fail(at + "model " + name + " has type " + ty);
+        return it->second;
+    }
+
+    // Параметры модели -> параметры a[] "<модель>_<имя>", один раз на модель. Нулевое умолчание
+    // значит "нет" (RS, CJO, VAF, ...): такой параметр создаётся, только если модель его задала.
+    // Заданные, но не моделируемые параметры — в отчёт.
+    std::map<std::string, std::map<std::string, std::string>> model_cache;
+    const std::map<std::string, std::string>& model_params(const Model& m, const std::vector<std::string>& keys,
+                                                           const std::vector<double>& defs,
+                                                           const std::vector<std::string>& ignored) {
+        auto it = model_cache.find(lower(m.name));
+        if (it != model_cache.end()) return it->second;
+        std::map<std::string, std::string>& out = model_cache[lower(m.name)];
+        for (size_t i = 0; i < keys.size(); ++i) {
+            auto v = m.p.find(keys[i]);
+            const double val = v != m.p.end() ? v->second : defs[i];
+            if (defs[i] == 0.0 && val == 0.0) continue;
+            out[keys[i]] = param(m.name + "_" + keys[i], val);
+        }
+        std::string skip;
+        for (const auto& kv : m.p)
+            if (std::find(ignored.begin(), ignored.end(), kv.first) != ignored.end()) skip += " " + kv.first;
+            else if (std::find(keys.begin(), keys.end(), kv.first) == keys.end()) skip += " " + kv.first + "(?)";
+        if (!skip.empty()) notes.push_back("model " + m.name + ": not modelled:" + skip);
+        if (m.p.count("cjo") || m.p.count("cje") || m.p.count("cjc"))
+            notes.push_back("model " + m.name + ": junction capacitances are taken as constant");
+        return out;
+    }
+
+    // Внутренний узел за последовательным сопротивлением r/area (RS диода, RB/RC/RE транзистора).
+    int internal(int n, const std::string& r, const std::string& name, const char* suf, double area) {
+        if (r.empty()) return n;
+        const std::string key = lower(name) + "#" + suf;
+        const int j = node(key, name + "#" + suf);
+        const std::string rr = area == 1.0 ? r : "(" + r + "/" + fmt(area) + ")";
+        current(n, j, vdiff(n, j) + "/" + rr);
+        conduct(n, j);
+        return j;
+    }
+
+    // Топология: ветви с путём по постоянному току и узлы, к которым подключено что-то кроме
+    // источников тока.
+    std::vector<std::pair<int, int>> dc_edges;
+    std::vector<Edge> vsrc_edges;
+    std::set<int> solid;
+    bool any_ic = false;
+    int n_dev = 0;
+    void touch(int n) { if (n >= 0) solid.insert(n); }
+    void conduct(int a, int b) { dc_edges.push_back({ a, b }); touch(a); touch(b); }
 
     // Текст после имени и двух узлов: "V = ..." у B, "VALUE = ..." у E/G.
     static std::string rest_after_words(const std::string& text, int words) {
@@ -752,6 +857,7 @@ struct Builder {
             const double r = value_at(3, "r");
             if (r == 0.0) fail(at + "zero resistance");
             current(a, b, vdiff(a, b) + "/" + param(name, r));
+            conduct(a, b);
             ++n_r;
             break;
         }
@@ -760,28 +866,60 @@ struct Builder {
             const int a = node_of(t[1], c), b = node_of(t[2], c);
             const double cv = value_at(3, "c");
             if (cv == 0.0) fail(at + "zero capacitance");
-            const std::string p = param(name, cv);
-            const std::string x = uniq("vc_" + sanitize(name)), i = uniq("ic_" + sanitize(name));
-            xs.push_back(x);
-            x_rhs.push_back(i + "/" + p);
-            zs.push_back(i);
-            gs.push_back(lin(a, b) + " - " + x);
-            current(a, b, i);
             double v0 = 0.0;
-            if (ic_of(&v0)) ic[x] = fmt_short(v0);
-            else {
-                // .ic V(a), V(b): неназванный узел — 0, как в SPICE с UIC
-                double va = 0.0, vb = 0.0;
-                bool any = false;
-                for (const auto& kv : deck.ic_nodes) {
-                    const std::string k = node_key(kv.first, Ctx{});
-                    if (a >= 0 && k == node_keys[(size_t)a]) { va = kv.second; any = true; }
-                    if (b >= 0 && k == node_keys[(size_t)b]) { vb = kv.second; any = true; }
-                }
-                ic[x] = fmt_short(any ? va - vb : 0.0);
-            }
-            v_edges.push_back({ a, b, name });
+            const bool has = ic_of(&v0);
+            capacitor(name, a, b, param(name, cv), has, v0);
             ++n_c;
+            break;
+        }
+        case 'd': {
+            need(4);
+            const int a = node_of(t[1], c), k = node_of(t[2], c);
+            const Model& m = model(t[3], "d", at);
+            const double area = t.size() > 4 && t[4] != "=" && lower(t[4]) != "off" && lower(t[4]) != "ic"
+                              ? eval_value(lower(t[4]) == "area" && t.size() > 6 ? t[6] : t[4], *c.scope) : 1.0;
+            const auto& mp = model_params(m, { "is", "n", "rs", "cjo" }, { 1e-14, 1, 0, 0 },
+                                          { "bv", "ibv", "tt", "vj", "m", "eg", "xti", "kf", "af", "fc" });
+            auto sc = [&](const std::string& p) { return area == 1.0 ? p : "(" + fmt(area) + "*" + p + ")"; };
+            const int j = internal(a, mp.count("rs") ? mp.at("rs") : std::string(), name, "a", area);
+            current(j, k, diode_current(vdiff(j, k), sc(mp.at("is")), mp.at("n")));
+            conduct(j, k);
+            if (mp.count("cjo")) capacitor(name + "_cj", j, k, sc(mp.at("cjo")), false, 0.0);
+            ++n_dev;
+            break;
+        }
+        case 'q': {
+            need(5);
+            // Q c b e [s] model [area]
+            size_t mi = 4;
+            if (!deck.models.count(lower(t[4])) && t.size() > 5) mi = 5;
+            const Model& m = model(t[mi], "npn", at);
+            const bool pnp = m.type == "pnp";
+            if (!pnp && m.type != "npn") fail(at + "model " + m.name + " is not NPN/PNP");
+            const double area = t.size() > mi + 1 && t[mi + 1] != "=" && lower(t[mi + 1]) != "off"
+                              ? eval_value(lower(t[mi + 1]) == "area" && t.size() > mi + 3 ? t[mi + 3] : t[mi + 1], *c.scope) : 1.0;
+            const auto& mp = model_params(m, { "is", "bf", "br", "nf", "nr", "vaf", "var", "rb", "rc", "re", "cje", "cjc" },
+                                          { 1e-16, 100, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0 },
+                                          { "ikf", "ikr", "ise", "isc", "ne", "nc", "tf", "tr", "vje", "vjc", "mje", "mjc",
+                                            "xtf", "itf", "vtf", "ptf", "eg", "xti", "xtb", "irb", "rbm", "cjs", "kf", "af",
+                                            "fc", "nk", "iss", "ns", "bvcbo" });
+            auto sc = [&](const std::string& p) { return area == 1.0 ? p : "(" + fmt(area) + "*" + p + ")"; };
+            auto opt_p = [&](const char* k) { return mp.count(k) ? mp.at(k) : std::string(); };
+            const int nc = internal(node_of(t[1], c), opt_p("rc"), name, "c", area);
+            const int nb = internal(node_of(t[2], c), opt_p("rb"), name, "b", area);
+            const int ne = internal(node_of(t[3], c), opt_p("re"), name, "e", area);
+            auto inv = [&](const char* k) { return mp.count(k) ? "(1/" + mp.at(k) + ")" : std::string(); };
+            // NPN: vbe, vbc; PNP: veb, vcb и токи обратного знака (из коллектора и базы).
+            const std::string v1 = pnp ? vdiff(ne, nb) : vdiff(nb, ne), v2 = pnp ? vdiff(nc, nb) : vdiff(nb, nc);
+            const BjtCurrents q = bjt_currents(v1, v2, sc(mp.at("is")), mp.at("bf"), mp.at("br"), mp.at("nf"),
+                                               mp.at("nr"), inv("vaf"), inv("var"));
+            if (pnp) { current(ne, nc, q.ic); current(ne, nb, q.ib); }
+            else     { current(nc, ne, q.ic); current(nb, ne, q.ib); }
+            conduct(nc, ne);
+            conduct(nb, ne);
+            if (mp.count("cje")) capacitor(name + "_cje", nb, ne, sc(mp.at("cje")), false, 0.0);
+            if (mp.count("cjc")) capacitor(name + "_cjc", nb, nc, sc(mp.at("cjc")), false, 0.0);
+            ++n_dev;
             break;
         }
         case 'l': {
@@ -795,8 +933,11 @@ struct Builder {
             x_rhs.push_back(vdiff(a, b) + "/" + p);
             current(a, b, x);
             double v0 = 0.0;
-            ic[x] = fmt_short(ic_of(&v0) ? v0 : 0.0);
+            if (ic_of(&v0)) any_ic = true;
+            else v0 = 0.0;
+            ic[x] = fmt_short(v0);
             branch[key] = x;
+            conduct(a, b);
             ++n_l;
             break;
         }
@@ -869,8 +1010,8 @@ struct Builder {
             break;
         }
         case 'x': instance(cd, c, at); break;
-        case 'd': case 'q': case 'm': case 'j': case 'z':
-            fail(at + "semiconductor devices (diodes, transistors) are not supported yet - stage 9 of the plan");
+        case 'm': case 'j': case 'z':
+            fail(at + "field-effect transistors (MOSFET, JFET, MESFET) are not supported yet");
         default:
             fail(at + "element type '" + std::string(1, type) + "' is not supported");
         }
@@ -949,6 +1090,26 @@ struct Builder {
                                         + ": index 2 (their voltages are not independent)");
             else par[(size_t)a] = b;
         }
+        // Контур из одних источников напряжения — матрица вырождена при любом методе.
+        for (size_t i = 0; i < par.size(); ++i) par[i] = (int)i;
+        for (const Edge& e : vsrc_edges) {
+            const int a = find(e.a + 1), b = find(e.b + 1);
+            if (a == b) fail("loop of voltage sources closed by " + e.name + ": their voltages contradict each other "
+                             "or the branch currents are undetermined");
+            par[(size_t)a] = b;
+        }
+        // Узел, к которому подходят только источники тока: потенциал не определён.
+        for (size_t n = 0; n < node_keys.size(); ++n)
+            if (!solid.count((int)n)) fail("node " + node_disp[n] + " is connected only to current sources");
+        // Путь к земле по постоянному току: без него рабочая точка не определена (переходный
+        // процесс при этом считается — потенциал держат конденсаторы).
+        for (size_t i = 0; i < par.size(); ++i) par[i] = (int)i;
+        for (const auto& e : dc_edges) par[(size_t)find(e.first + 1)] = find(e.second + 1);
+        std::string floating;
+        for (size_t n = 0; n < node_keys.size(); ++n)
+            if (find((int)n + 1) != find(0)) floating += " " + node_disp[n];
+        if (!floating.empty())
+            notes.push_back("no DC path to ground:" + floating + " (the DC operating point is undefined)");
     }
 
     std::string resolve(std::string s) const {
@@ -1006,11 +1167,13 @@ struct Builder {
         char buf[320];
         std::snprintf(buf, sizeof(buf),
                       "%d nodes; R %d, C %d, L %d, sources %d, controlled %d, B %d, op-amps as nullors %d, "
-                      "subcircuits %d; DAE: %d differential, %d algebraic, %d parameters",
-                      (int)node_keys.size(), n_r, n_c, n_l, n_src, n_ctl, n_b, n_nullor, n_x,
+                      "diodes/BJT %d, subcircuits %d; DAE: %d differential, %d algebraic, %d parameters",
+                      (int)node_keys.size(), n_r, n_c, n_l, n_src, n_ctl, n_b, n_nullor, n_dev, n_x,
                       (int)xs.size(), (int)alg.size(), (int)params.size());
         r.summary = buf;
         r.title = deck.title;
+        r.uic = deck.uic;
+        r.has_ic = any_ic || !deck.ic_nodes.empty();
     }
 };
 
