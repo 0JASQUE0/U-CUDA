@@ -15,6 +15,7 @@
 //   связь Кеплера против мелкого постоянного шага, отказы (индекс 2, метод без оценки).
 //  Этап 9c: BDF 1-5 (свой многошаговый драйвер): ОДУ с точным решением (порядок до 5, точность по допуску),
 //   Робертсон (ДАУ индекса 1) против Test Set, маятник индекса 2 при tol 1e-6..1e-10 против Radau, индекс 3 через GGL против Radau IIA + GGL.
+//   GPU: BDF 1-5 в модуле NVRTC (kernels/ucuda_bdf.cuh) = CPU на маятниках индекса 2 и 3 и Робертсоне.
 #include "test_util.h"
 #include "dae_ir.h"
 #include "adaptive_settings.h"
@@ -431,6 +432,59 @@ void bdf_tests() {
     ut::require(scheme_is_multistep("DAE BDF 1-5") && adaptive_scheme_name_ok("BDF 1-5"), "BDF names registered");
 }
 
+// BDF 1-5 на GPU (kernels/ucuda_bdf.cuh в модуле NVRTC) против той же формы DASSL на CPU.
+void bdf_gpu() {
+    struct Case { const char* name; System s; std::vector<double> y0, a; double T, tol; };
+    std::vector<Case> cases;
+    cases.push_back({ "pendulum index 2", pend(kPend2, "lam=2"), kPendX0, kPendA, 1.0, 1e-8 });
+    cases.push_back({ "pendulum index 3 (GGL)", pend(kPend3, ""), kPendX0, kPendA, 1.0, 1e-8 });
+    cases.push_back({ "Robertson", parse_dae("y1' = -0.04*y1 + 10000*y2*y3\ny2' = 0.04*y1 - 10000*y2*y3 - 30000000*y2^2\n"
+                                             "0 = y1 + y2 + y3 - 1", "y1, y2", "y3", "").as_codegen_system(),
+                      { 1, 0, 0 }, { 0.5 }, 40.0, 1e-8 });
+    NvrtcEngine eng;
+    for (const Case& c : cases) {
+        const int dim = (int)c.y0.size(), total = 41;
+        const double dt = c.T / (total - 1);
+        BdfSettings bs;
+        bs.rtol = c.tol; bs.atol = { c.tol * (c.name[0] == 'R' ? 1e-4 : 1.0) };
+        std::vector<std::vector<double>> tr;
+        std::vector<double> tm;
+        BdfStats st;
+        std::string err;
+        { const bool ok_ = bdf_integrate(c.s, c.a.data(), (int)c.a.size(), c.y0.data(), bs, 0.0, c.T, dt, total, false, 0,
+                                         tr, tm, st, &err); ut::require(ok_, std::string("CPU BDF ") + c.name + ": " + err); }
+        System sp;
+        { const bool ok_ = bdf_prepare_system(c.s, sp, &err); ut::require(ok_, err); }
+        BdfGpuRequest rq;
+        codegen_bdf_bodies(sp, rq.res, rq.jac);
+        const int ng = (int)sp.vars.size();
+        rq.amountOfX = ng;
+        rq.nx = sp.dae_nx < 0 ? ng : sp.dae_nx;
+        rq.kidx.assign((size_t)ng, 1);
+        for (int i = 0; i < ng && i < (int)sp.dae_index.size(); ++i) rq.kidx[(size_t)i] = std::max(1, sp.dae_index[(size_t)i]);
+        rq.atol.assign((size_t)ng, bs.atol[0]);
+        rq.rtol = bs.rtol;
+        rq.N = 2;   // две одинаковые траектории — нити не мешают друг другу
+        rq.ic_flat.assign((size_t)2 * ng, 0.0);
+        for (int k = 0; k < 2; ++k) for (int i = 0; i < dim; ++i) rq.ic_flat[(size_t)k * ng + i] = c.y0[(size_t)i];
+        rq.values = c.a;
+        rq.t_rec = c.T; rq.dt = dt; rq.total = total;
+        PhaseAdaptiveResult out;
+        const bool ok = eng.run_phase_portraits_bdf(rq, out);
+        ut::require(ok, std::string("GPU BDF ") + c.name + ": " + eng.error());
+        ut::require((int)out.traj[0].size() == total && (int)tr.size() == total, "GPU BDF: every grid point");
+        double d = 0, d01 = 0;
+        for (int k = 0; k < total; ++k)
+            for (int i = 0; i < dim; ++i) {
+                d = std::fmax(d, std::fabs(out.traj[0][(size_t)k][(size_t)i] - tr[(size_t)k][(size_t)i]));
+                d01 = std::fmax(d01, std::fabs(out.traj[0][(size_t)k][(size_t)i] - out.traj[1][(size_t)k][(size_t)i]));
+            }
+        std::printf("  BDF 1-5 GPU vs CPU, %s: steps %.0f / %lld, max |GPU - CPU| = %.2e\n", c.name, out.stats[0].nacc,
+                    st.nacc, d);
+        ut::require(d < 100 * c.tol && d01 == 0, ut::num((std::string("BDF GPU = CPU, ") + c.name).c_str(), d, 0, 100 * c.tol));
+    }
+}
+
 void adaptive_gpu() {
     const System rc = rc_sys();
     const AdaptiveCode code = codegen_adaptive_dae(rc, DaeScheme::Rodas4);
@@ -460,6 +514,7 @@ int main() {
         if (cuInit(0) != CUDA_SUCCESS) { std::printf("no CUDA device: GPU part skipped\n"); return ut::kSkip; }
         gpu_tests();
         adaptive_gpu();
+        bdf_gpu();
         return 0;
     });
 }

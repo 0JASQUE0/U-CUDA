@@ -527,12 +527,18 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   7e-4 / 7e-5) while 1e-6 / 1e-8 / 1e-10 were fine; Robertson took 2779 steps.
   Names `kBdfSchemeOde` "BDF 1-5" (always in the ODE scheme list) and `kBdfSchemeDae` "DAE BDF 1-5"
   (after the DAE methods); `scheme_is_multistep`; adaptive step in Analysis only (`run_adaptive_phase`
-  branch, CPU even with GPU on); fixed step (`krs_for_scheme_impl`) and sweeps
+  branch; GPU when "use GPU" is on); fixed step (`krs_for_scheme_impl`) and sweeps
   (`adaptive_code_for_scheme`) refuse them.
   Tests: x' = -2x + cos t (order reaches 5, error ~1-2 tol, 89 / 339 steps at 1e-5 / 1e-9), Robertson DAE
   vs Test Set at t = 40 (rtol 1e-8: 326 steps, y1 to 9e-9), index-2 pendulum vs Radau IIA at tol 1e-6 ..
   1e-10 (87..322 steps, x error ~20 tol, lambda ~100 tol), index-3 pendulum via GGL.
-  Open: GPU kernel, Parametric.
+  GPU: the algorithm lives in `kernels/ucuda_bdf.cuh` - one text for CPU and GPU, a template over a provider
+  (res / jac / emit / cancelled): CPU = `multistep_bdf.h` (SystemEvaluator), GPU = `NvrtcEngine::run_phase_portraits_bdf`
+  (`BdfGpuRequest`, bodies from `codegen_bdf_bodies`: F = [f; g] and the full symbolic J, kernel `bdf_phase_kernel`,
+  thread per trajectory, DASSL workspace in thread-local memory; `computePhasePortraitsBdfNVRTC`). Index 3 is
+  turned into GGL on the host (`bdf_prepare_system`), mu start at 0 and are cut from the output; h_min failure
+  comes back in stats slot 2. GPU = CPU on the stands: the same step counts (164 / 196 / 326), max diff ~2e-12.
+  Open: Parametric (sweeps) with BDF.
 - Stage 9d, op-amps "as is" plus an ideal copy (user's request): `SpiceImportOptions::ideal_opamps` (record
   field `circuit_ideal_opamps`, JSON "1"). Off (default): an op-amp from the table or `uc_opamp` whose
   .subckt is in the netlist is expanded element by element (the vendor model); on: it is a nullor. An op-amp

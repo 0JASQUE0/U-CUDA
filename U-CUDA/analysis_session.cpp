@@ -610,6 +610,46 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
         result.step_stats.assign((size_t)N, AdaptiveStats());
         raw.assign((size_t)N, {});
         times.assign((size_t)N, {});
+        if (in.use_gpu) {
+            // GPU: тот же алгоритм (kernels/ucuda_bdf.cuh), тела F и J — кодоген над системой после GGL
+            System sp;
+            std::string e;
+            if (!bdf_prepare_system(in.sys, sp, &e)) { result.error = e; return false; }
+            BdfGpuRequest rq;
+            try { codegen_bdf_bodies(sp, rq.res, rq.jac); }
+            catch (const std::exception& ex) { result.error = std::string("BDF codegen: ") + ex.what(); return false; }
+            const int ng = (int)sp.vars.size();
+            rq.amountOfX = ng;
+            rq.nx = sp.dae_nx < 0 ? ng : sp.dae_nx;
+            rq.kidx.assign((size_t)ng, 1);
+            for (int i = 0; i < ng && i < (int)sp.dae_index.size(); ++i) rq.kidx[(size_t)i] = std::max(1, sp.dae_index[(size_t)i]);
+            for (int i = 0; i < ng; ++i) rq.atol.push_back(bs.atol[(size_t)std::min(i, (int)bs.atol.size() - 1)]);
+            rq.rtol = bs.rtol; rq.h0 = bs.h0; rq.hmax = std::isfinite(bs.hmax) ? bs.hmax : 0.0; rq.maxk = bs.max_order;
+            rq.N = N;
+            rq.ic_flat.assign((size_t)N * ng, 0.0);   // mu системы GGL — с нуля
+            for (int k = 0; k < N; ++k)
+                for (int i = 0; i < dim; ++i) rq.ic_flat[(size_t)k * ng + i] = ic_flat[(size_t)k * dim + i];
+            rq.values = a;
+            rq.raw = rawm; rq.t_skip = t_skip; rq.t_rec = tsim; rq.dt = h; rq.total = total; rq.max_pts = max_pts;
+            rq.cancel = in.cancel;
+            PhaseAdaptiveResult out;
+            if (!computePhasePortraitsBdfNVRTC(rq, out, &e)) {
+                if (e == kNvrtcCancelled) { result.cancelled = true; result.error = e; }
+                else result.error = "GPU: " + e;
+                return false;
+            }
+            for (int k = 0; k < N; ++k) {
+                raw[(size_t)k] = std::move(out.traj[(size_t)k]);
+                for (auto& row : raw[(size_t)k]) row.resize((size_t)dim);   // без mu
+                if (rawm) times[(size_t)k] = std::move(out.times[(size_t)k]);
+                result.step_stats[(size_t)k] = out.stats[(size_t)k];
+                if (out.stats[(size_t)k].nforced != 0) {   // h ниже h_min (поле занято под этот признак)
+                    result.error = "BDF: step size below h_min";
+                    return false;
+                }
+                result.step_stats[(size_t)k].nforced = 0;
+            }
+        } else
         for (int k = 0; k < N; ++k) {
             BdfStats bst;
             std::string e;
