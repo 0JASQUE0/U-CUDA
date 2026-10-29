@@ -619,7 +619,7 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
         result.step_log   = std::move(out.log);
         result.step_stats = out.stats;
     }
-    else if (!scheme_supports_adaptive(scheme_from_name(in.scheme)) || system_uses_time(in.sys)
+    else if (in.sys.dae_nx >= 0 || !scheme_supports_adaptive(scheme_from_name(in.scheme)) || system_uses_time(in.sys)
              || !in.sys.out_exprs.empty() || !in.sys.zb_g.empty()) {   // z (Solve as ODE) — тоже: вычислитель их не знает
         // Экстраполятор (Extr, GBS): CPU-драйвер exe считает по таблицам Бутчера и тело базы в
         // стадиях не выразит. Те же тела, что у GPU, собирает cl.exe в DLL адаптивного модуля
@@ -1512,6 +1512,13 @@ AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_sc
     // текст непрозрачен: оценки ошибки у неё нет.
     for (const auto& cs : custom_schemes)
         if (cs.name == scheme) throw std::runtime_error(adaptive_scheme_hint());
+    if (sys.dae_nx >= 0) {   // нативная ДАУ: методы ДАУ, вложенная пара есть у Rodas4
+        DaeScheme ds;
+        if (!dae_scheme_from_name(scheme, &ds))
+            throw std::runtime_error("a DAE needs a DAE method; adaptive step: DAE Rodas4");
+        return codegen_adaptive_dae(sys, ds);
+    }
+    if (scheme == "DAE Rodas4") throw std::runtime_error("DAE Rodas4 needs a DAE system");
     const Scheme sch = scheme_from_name(scheme);
     if (scheme_supports_adaptive(sch)) return codegen_adaptive(sys, sch);
     if (const int K = gbs_stage_count(sch); K >= 2) return codegen_adaptive_gbs(sys, K);
@@ -1653,6 +1660,14 @@ static void fill_adaptive_request(const std::vector<CustomScheme>& custom_scheme
     out.peak_interp  = st.peak_interp;
     out.axis_kind[0] = ax0;
     out.axis_kind[1] = ax1;
+    // Нативная ДАУ: в адаптивных модулях свипов нет согласования z0 в каждой точке (шаг с h = 0
+    // фиксированных модулей) и проекции клонов LLE/LS — числа вышли бы правдоподобными, но
+    // неверными. Адаптивный Rodas4 на ДАУ пока только в Analysis.
+    if (sys.dae_nx >= 0) {
+        out.setup_error = "adaptive step on a DAE: Analysis only for now (sweeps need z0 made consistent at every "
+                          "point); use a fixed-step DAE method here";
+        return;
+    }
     if (!adaptive_scheme_name_ok(scheme)) {
         out.setup_error = adaptive_scheme_hint();
         return;

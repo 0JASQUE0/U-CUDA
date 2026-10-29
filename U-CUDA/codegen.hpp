@@ -444,6 +444,11 @@ bool dae_stabilized_index1(const System& s, double alpha, System& out, std::stri
 bool dae_ggl_system(const System& s, System& out, std::string* why);
 // Тело заканчивается меткой dae_nx_tag(s.dae_nx) — см. dae_nx_from_body.
 std::string codegen_dae_scheme(const System& s, DaeScheme sch);
+// Адаптивный шаг на ДАУ (этап 9b): Rodas4 как вложенная пара — Y по 6 стадиям (порядок 4),
+// E = u_6 (оценка порядка 3, rodas.f), плотный выход rodas.f порядка 3 по x и z. Только
+// индекс 1 (норма ошибки драйвера не масштабирует переменные индекса >= 2). Бросает на
+// другом методе / индексе.
+AdaptiveCode codegen_adaptive_dae(const System& s, DaeScheme sch);
 // Метка числа x в теле шага метода ДАУ: LLE/LS по ней возмущают клоны только по x
 // (UCUDA_LYAP_NX), z клона решает сам метод. Тело входит в ключ кэша модулей.
 constexpr const char* kDaeNxTag = "// @ucuda-dae-nx ";

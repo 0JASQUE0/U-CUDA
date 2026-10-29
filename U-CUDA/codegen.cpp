@@ -2112,6 +2112,10 @@ namespace { // внутренняя линковка: всё ниже не ви�
         double gamma;
         std::vector<double> alpha, gt, m;
         std::vector<std::vector<double>> a, c;   // строго нижнетреугольные, a[i][j], j < i
+        // Вложенная пара (адаптивный шаг): E = sum (m - mhat) u; пусто — оценки нет.
+        // Плотный выход rodas.f: y(th) = (1-th) y0 + th (y1 + (1-th) (d2.u + th d3.u)).
+        std::vector<double> mhat, d2, d3;
+        int q = 0;                               // порядок оценщика
     };
     // ROS3P (Lang, Verwer 2001): порядок 3 и по x, и по z индекса 1, A-устойчив, gamma = 1/2 + sqrt(3)/6.
     const RosTab& ros3p_tab() {
@@ -2144,10 +2148,19 @@ namespace { // внутренняя линковка: всё ниже не ви�
               { -0.1073529058151375e+00, -0.9594562251023355e+01, -0.2047028614809616e+02 },
               { 0.7496443313967647e+01, -0.1024680431464352e+02, -0.3399990352819905e+02, 0.1170890893206160e+02 },
               { 0.8083246795921522e+01, -0.7981132988064893e+01, -0.3152159432874371e+02, 0.1631930543123136e+02,
-                -0.6058818238834054e+01 } } };
+                -0.6058818238834054e+01 } },
+            // вложенное решение порядка 3 — вход 6-й стадии, E = u_6 (rodas.f: ERR = AK6)
+            { A51, A52, A53, A54, 1.0, 0.0 },
+            { 0.1012623508344586e+02, -0.7487995877610167e+01, -0.3480091861555747e+02,
+              -0.7992771707568823e+01, 0.1025137723295662e+01, 0.0 },
+            { -0.6762803392801253e+00, 0.6087714651680015e+01, 0.1643084320892478e+02,
+              0.2476722511418386e+02, -0.6594389125716872e+01, 0.0 },
+            3 };
         return t;
     }
-    std::string dae_rosenbrock(const System& s, const RosTab& T) {
+    // emb = true — тело попытки адаптивного шага (ucuda_krs_emb): X константный вход, пишутся
+    // Y, E = sum (m - mhat) u, стадии для плотного выхода в W и F1 = f(t + h, Y).
+    std::string dae_rosenbrock(const System& s, const RosTab& T, bool emb = false) {
         const bool ht = system_uses_time(s);
         const int N = (int)s.vars.size(), nx = s.dae_nx, S = T.S;
         const auto J = jac_over(s, "X", time_name(s));
@@ -2216,11 +2229,50 @@ namespace { // внутренняя линковка: всё ниже не ви�
                  "        }\n    }\n";
         }
         for (int i = 0; i < N; ++i) {
-            o << "    X[" << i << "] = X[" << i << "]";
+            o << "    " << (emb ? "Y[" : "X[") << i << "] = X[" << i << "]";
             for (int j = 0; j < S; ++j)
                 if (T.m[j] != 0.0) o << " + (numb)(" << fmtnum(T.m[j]) << ") * U[" << j * N + i << "]";
             o << ";\n";
         }
+        if (emb) {
+            o << "    (void)F0;\n";
+            for (int i = 0; i < N; ++i) {
+                o << "    E[" << i << "] = (numb)0";
+                for (int j = 0; j < S; ++j)
+                    if (T.m[j] != T.mhat[j]) o << " + (numb)(" << fmtnum(T.m[j] - T.mhat[j]) << ") * U[" << j * N + i << "]";
+                o << ";\n";
+            }
+            o << "    for (ik = 0; ik < " << S * N << "; ik++) W[ik] = U[ik];\n";
+            const auto fy = rhs_over(s, "Y", time_name(s, "(ucuda_t + h)"));
+            for (int i = 0; i < N; ++i) o << "    F1[" << i << "] = (" << fy[(size_t)i] << ");\n";
+        }
+        return o.str();
+    }
+
+    // Плотный выход Rosenbrock (rodas.f, CONTRO): D = [y0, y1, d2.u, d3.u].
+    std::string ros_dprep_body(const System& s, const RosTab& T) {
+        const int N = (int)s.vars.size();
+        std::ostringstream o;
+        o << "    (void)F0; (void)F1; (void)a; (void)h;\n";
+        for (int i = 0; i < N; ++i) {
+            o << "    D[" << i << "] = X[" << i << "]; D[" << N + i << "] = Y[" << i << "];\n";
+            o << "    D[" << 2 * N + i << "] = (numb)0";
+            for (int j = 0; j < T.S; ++j)
+                if (T.d2[j] != 0.0) o << " + (numb)(" << fmtnum(T.d2[j]) << ") * W[" << j * N + i << "]";
+            o << ";\n    D[" << 3 * N + i << "] = (numb)0";
+            for (int j = 0; j < T.S; ++j)
+                if (T.d3[j] != 0.0) o << " + (numb)(" << fmtnum(T.d3[j]) << ") * W[" << j * N + i << "]";
+            o << ";\n";
+        }
+        return o.str();
+    }
+    std::string ros_deval_body(const System& s) {
+        std::ostringstream o;
+        o << "    int N = " << s.vars.size() << ";\n";
+        o << "    for (int l = 0; l < N; ++l) {\n";
+        o << "        const numb s1 = (numb)1 - th;\n";
+        o << "        Yo[l] = D[l] * s1 + th * (D[N + l] + s1 * (D[2 * N + l] + th * D[3 * N + l]));\n";
+        o << "    }\n";
         return o.str();
     }
 
@@ -4968,6 +5020,26 @@ bool dae_consistent_z(const System& s, const double* a, int na, double t0, doubl
     return false;
 }
 
+AdaptiveCode codegen_adaptive_dae(const System& s, DaeScheme sch) {
+    if (s.dae_nx < 0) throw std::runtime_error("adaptive DAE method on a system that is not a DAE");
+    if (sch != DaeScheme::Rodas4)
+        throw std::runtime_error("adaptive step on a DAE: only DAE Rodas4 has an embedded error estimate");
+    // Норма ошибки драйвера одна на все переменные; у индекса >= 2 её надо масштабировать h^(k-1)
+    // по индексу переменной (как в RADAU5) — этого в драйвере нет, а Rodas4 — метод индекса 1.
+    if (s.dae_nx < (int)s.vars.size() && dae_structural_index(s) != 1)
+        throw std::runtime_error("adaptive DAE Rodas4: index 1 only (the constraints must determine z)");
+    const RosTab& T = rodas4_tab();
+    AdaptiveCode c;
+    c.rhs = adaptive_rhs_body(s);   // [f; g]: g-строки нужны лишь стартовой оценке шага
+    c.emb = dae_rosenbrock(s, T, true);
+    c.dprep = ros_dprep_body(s, T);
+    c.deval = ros_deval_body(s);
+    c.p = 4; c.q = T.q; c.nlo = 1;
+    c.wstages = T.S; c.dsize = 4;
+    c.emb_rhs = T.S + 1; c.dprep_rhs = 0; c.dense_order = 3;
+    return c;
+}
+
 const std::vector<std::string>& dae_scheme_names() {
     // Порядок — как в комбо: неявные (любой индекс), затем явные с решением связи (индекс 1).
     static const std::vector<std::string> n = { "DAE BDF1", "DAE Trapezoidal", "DAE TR-BDF2",
@@ -6347,6 +6419,7 @@ double scheme_rhs_per_step(const System& s, const std::string& name) {
 }
 
 bool adaptive_scheme_name_supported(const std::string& name) {
+    if (name == "DAE Rodas4") return true;   // ДАУ: codegen_adaptive_dae
     if (scheme_supports_adaptive(scheme_from_name(name)) && name != "Euler") return true;
     if (gbs_stage_count(scheme_from_name(name)) >= 2) return true;
     ExtrapolationSpec spec;
@@ -6355,6 +6428,7 @@ bool adaptive_scheme_name_supported(const std::string& name) {
 
 int adaptive_scheme_q_guess(const std::string& name) {
     if (name == "RK45") return 4;
+    if (name == "DAE Rodas4") return 3;
     const int K = gbs_stage_count(scheme_from_name(name));
     if (K >= 2) return 2 * (K - 1);
     ExtrapolationSpec spec;

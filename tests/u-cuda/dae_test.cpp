@@ -11,9 +11,13 @@
 //   - z0 согласуется в каждой точке свипа (Metrics: свип с z0 = 0 = отдельные согласованные старты);
 //   - LLE / LS на ДАУ дают показатели приведённой ОДУ, GPU = CPU, продолжение;
 //   - Metrics двойного маятника на Radau + GGL: GPU = CPU; ось по z отклоняется.
+//  Этап 9b: адаптивный Rodas4 (индекс 1) — RC против точного решения (конец и плотный выход, CPU и GPU),
+//   связь Кеплера против мелкого постоянного шага, отказы (индекс 2, метод без оценки).
 #include "test_util.h"
 #include "dae_ir.h"
+#include "adaptive_settings.h"
 #include "krs_cpu.h"
+#include "nvrtc_engine.h"
 #include "parametric_engine.h"
 #include <cuda.h>
 #include <map>
@@ -246,14 +250,130 @@ void gpu_tests() {
     }
 }
 
+// --- этап 9b: адаптивный Rodas4 на ДАУ индекса 1 ------------------------------------------------
+// RC: u' = i/C, 0 = E - R i - u; u = E (1 - e^(-t/RC)), i = (E - u)/R.
+const char* kRc = "u' = i/C\n0 = E - R*i - u";
+System rc_sys() { return parse_dae(kRc, "u", "i", "R, C, E").as_codegen_system(); }
+const std::vector<double> kRcA = tail({ 0.5, 2.0, 0.5, 3.0 });   // R C E, RC = 1
+double rc_u(double t) { return 3.0 * (1 - std::exp(-t)); }
+
+UcudaAdaptParams ad_params(const AdaptiveCode& code, int n, double span, const char* rtol, const char* atol) {
+    AdaptiveSettings st;
+    st.enabled = true;
+    st.rtol = rtol;
+    st.atol = atol;
+    UcudaAdaptParams P{};
+    std::string err;
+    const bool ok = adaptive_build_params(st, code, n, span, P, err);
+    ut::require(ok, "adaptive_build_params: " + err);
+    return P;
+}
+
+struct AdCpu {
+    AdaptiveCpuModule mod;
+    explicit AdCpu(const AdaptiveCode& c, int n) {
+        std::vector<KrsCpuDiag> d;
+        const bool ok = mod.compile(c.rhs, c.emb, c.dprep, c.deval, "", n, "", d);
+        std::string m;
+        for (auto& x : d) m += "\n  line " + std::to_string(x.line) + ": " + x.message;
+        ut::require(ok && mod.endpoint() && mod.phase(), "adaptive DAE module (CPU) builds:" + m);
+    }
+};
+
+void adaptive_cpu() {
+    const System rc = rc_sys();
+    const AdaptiveCode code = codegen_adaptive_dae(rc, DaeScheme::Rodas4);
+    AdCpu m(code, 2);
+    std::vector<double> x0 = { 0.0, 1.5 };   // согласовано: i = (E - u)/R
+    {   // конечная точка: точность по допуску, число шагов растёт при ужесточении
+        double y[2], st[8];
+        long steps[2];
+        const char* tol[2] = { "1e-5", "1e-9" };
+        for (int k = 0; k < 2; ++k) {
+            const UcudaAdaptParams P = ad_params(code, 2, 5.0, tol[k], tol[k]);
+            m.mod.endpoint()(x0.data(), kRcA.data(), &P, 5.0, y, st, nullptr);
+            steps[k] = (long)st[0];
+            const double eu = std::fabs(y[0] - rc_u(5.0)), ei = std::fabs(y[1] - (3.0 - y[0]) / 2.0);
+            std::printf("  Rodas4 adaptive, tol %s: %ld steps, %ld rejected, |u - u*| = %.2e, |g| = %.2e\n",
+                        tol[k], steps[k], (long)st[1], eu, ei);
+            ut::require(eu < (k ? 1e-7 : 1e-3), ut::num("RC, adaptive Rodas4: u(5)", y[0], rc_u(5.0), k ? 1e-7 : 1e-3));
+            ut::require(ei < 1e-12, "RC, adaptive Rodas4: constraint holds at the end");
+        }
+        ut::require(steps[1] > 2 * steps[0], "tighter tolerance takes more steps");
+    }
+    {   // плотный выход: равномерная сетка 0.05 при длинных шагах
+        const UcudaAdaptParams P = ad_params(code, 2, 5.0, "1e-8", "1e-8");
+        const int total = 100;
+        std::vector<double> data((size_t)2 * total), times(total), logs(4), stats(9);
+        int log_count = 0;
+        double fh = 0;
+        const int n = m.mod.phase()(x0.data(), kRcA.data(), &P, 0.0, 5.0, 0.05, total, 0, total, 0, data.data(),
+                                    times.data(), logs.data(), &log_count, stats.data(), &fh, nullptr);
+        ut::require(n == total, "dense output gives every grid point");
+        double eu = 0, ei = 0;
+        for (int k = 0; k < total; ++k) {   // data[k * dim + c]
+            const double t = k * 0.05, u = data[(size_t)2 * k], i = data[(size_t)2 * k + 1];
+            eu = std::fmax(eu, std::fabs(u - rc_u(t)));
+            ei = std::fmax(ei, std::fabs(i - (3.0 - rc_u(t)) / 2.0));
+        }
+        std::printf("  Rodas4 dense output on 0.05 grid (%.0f steps): max |u - u*| = %.2e, max |i - i*| = %.2e\n",
+                    stats[0], eu, ei);
+        ut::require(eu < 1e-6 && ei < 1e-6, ut::num("dense output, x and z", std::fmax(eu, ei), 0, 1e-6));
+    }
+    {   // нелинейная связь Кеплера: 0 = z + b sin z - x, x' = -x + z (индекс 1) против мелкого шага
+        const System k1 = parse_dae("x' = -x + z\n0 = z + b*sin(z) - x", "x", "z", "b").as_codegen_system();
+        const AdaptiveCode ck = codegen_adaptive_dae(k1, DaeScheme::Rodas4);
+        AdCpu mk(ck, 2);
+        std::vector<double> X = { 2.0, 0.0 };
+        std::string why;
+        const bool zok = dae_consistent_z(k1, tail({ 0.5, 0.5 }).data(), 6, 0.0, X.data(), &why);
+        ut::require(zok, "Kepler z0: " + why);
+        const auto ref = cpu.run(codegen_dae_scheme(k1, DaeScheme::Rodas4), X, tail({ 0.5, 0.5 }), 1e-3, 3.0);
+        const UcudaAdaptParams P = ad_params(ck, 2, 3.0, "1e-9", "1e-9");
+        double y[2], st[8];
+        const std::vector<double> a = tail({ 0.5, 0.5 });
+        mk.mod.endpoint()(X.data(), a.data(), &P, 3.0, y, st, nullptr);
+        ut::approx(y[0], ref[0], 1e-7, "Kepler, adaptive Rodas4: x(3)");
+        ut::approx(y[1], ref[1], 1e-7, "Kepler, adaptive Rodas4: z(3)");
+    }
+    // отказы
+    bool threw = false;
+    try { codegen_adaptive_dae(pend(kPend2, ""), DaeScheme::Rodas4); } catch (const std::exception&) { threw = true; }
+    ut::require(threw, "adaptive Rodas4 refuses index 2");
+    threw = false;
+    try { codegen_adaptive_dae(rc, DaeScheme::BDF1); } catch (const std::exception&) { threw = true; }
+    ut::require(threw, "adaptive step refuses a DAE method without an embedded estimate");
+    ut::require(adaptive_scheme_name_ok("DAE Rodas4"), "DAE Rodas4 is offered for the adaptive step");
+}
+
+void adaptive_gpu() {
+    const System rc = rc_sys();
+    const AdaptiveCode code = codegen_adaptive_dae(rc, DaeScheme::Rodas4);
+    NvrtcEngine eng;
+    PhaseAdaptiveRequest rq;
+    rq.rhs = code.rhs; rq.emb = code.emb; rq.dprep = code.dprep; rq.deval = code.deval;
+    rq.amountOfX = 2; rq.ic_flat = { 0.0, 1.5 }; rq.N = 1; rq.values = kRcA;
+    rq.params = ad_params(code, 2, 5.0, "1e-8", "1e-8");
+    rq.t_rec = 5.0; rq.dt = 0.05; rq.total = 100;
+    PhaseAdaptiveResult out;
+    const bool ok = eng.run_phase_portraits_adaptive(rq, out);
+    ut::require(ok, "GPU adaptive DAE Rodas4: " + eng.error());
+    double eu = 0;
+    for (int k = 0; k < 100 && k < (int)out.traj[0].size(); ++k)
+        eu = std::fmax(eu, std::fabs(out.traj[0][(size_t)k][0] - rc_u(k * 0.05)));
+    ut::require(out.traj[0].size() == 100 && eu < 1e-6, ut::num("GPU adaptive Rodas4, dense u", eu, 0, 1e-6));
+}
+
 }  // namespace
 
 int main() {
     return ut::run_main("dae", []() -> int {
         set_nvrtc_rdc(true);   // как в приложении с _app_config.json: модули ДАУ без rdc собираются минутами
         cpu_tests();
+        adaptive_cpu();
         if (cuInit(0) != CUDA_SUCCESS) { std::printf("no CUDA device: GPU part skipped\n"); return ut::kSkip; }
         gpu_tests();
+        adaptive_gpu();
         return 0;
     });
 }

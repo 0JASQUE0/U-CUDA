@@ -499,7 +499,20 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   independent 2D Newton (and PNP = -NPN), diode RS, topology errors, Chua with a negative G and antiparallel
   diodes = the same system written as an ODE (1e-6 at 1 ms). The ngspice comparison of the plan is not
   done (no ngspice on the machine).
-  Next (stage 9 parts): 9b adaptive Rosenbrock for DAE, 9c BDF2-BDF5, 9d import "as is" with vendor models
+- Stage 9b, adaptive step on a DAE: `codegen_adaptive_dae(s, DaeScheme::Rodas4)` (`adaptive_code_for_scheme`
+  routes every native DAE there; `adaptive_scheme_name_supported("DAE Rodas4")`). The emb body is
+  `dae_rosenbrock(s, T, emb = true)` - the same stages, `Y` instead of `X`, E = sum (m - mhat) u = u6
+  (`RosTab::mhat`, rodas.f ERR = AK6, estimator order 3), all stages into W, F1 = [f; g](t + h, Y); the
+  fixed-step text is unchanged (emb defaults to false). Dense output is rodas.f CONTRO:
+  D = [y0, y1, d2.u, d3.u], y(th) = (1-th) y0 + th (y1 + (1-th)(D2 + th D3)) (`RosTab::d2/d3`), order 3
+  in x AND z (Hermite from F would use g as a derivative). Index 1 only (the driver's error norm has
+  no h^(k-1) scaling by variable index). Analysis only: CPU through the adaptive DLL (`dae_nx >= 0` goes to
+  `AdaptiveCpuModule`), GPU through the usual phase_kernel_ad; z0 is made consistent on the CPU before the
+  run, as for fixed steps. Sweeps refuse it (`fill_adaptive_request`): the adaptive modules have neither the
+  per-point z0 projection nor the LLE/LS clone projection. Tests (dae_test): RC exact u(5) within 1.4e-6 /
+  2e-10 at tol 1e-5 / 1e-9 (19 / 163 steps), dense output on a 0.05 grid 6.5e-9 (CPU), the same on the
+  GPU, Kepler coupling = fixed Rodas4 h = 1e-3, refusals (index 2, BDF1).
+  Next (stage 9 parts): 9c BDF2-BDF5, 9d import "as is" with vendor models
   (op-amp subcircuits expanded into their D/Q/E/G elements) PLUS a copy on ideal op-amps (the table
   replacement) - the user wants both, not only the ideal one.
 - Newton for DAE: the predictor of `scheme_implicit_common` (BDF1, Trapezoidal, TR-BDF2, SDIRK2,
