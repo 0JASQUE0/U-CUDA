@@ -17,6 +17,7 @@
 //             DASSL; начальная фаза: порядок +1 и шаг x2 на каждом принятом шаге;
 //   норма     WRMS с rtol/atol, у переменной индекса k >= 2 — множитель h^(k-1) (как в RADAU5);
 //   плотный выход — интерполяция DDATRP по phi последнего шага.
+// Индекс 3 — через GGL (dae_ggl_system сводит к индексу 2; множители mu в выход не идут).
 
 #include <algorithm>
 #include <atomic>
@@ -72,7 +73,7 @@ inline bool lu_solve(std::vector<double>& A, std::vector<double>& b, int n) {
 
 // Траектория от y0 (t = 0) до t_skip + t_rec. raw = false — равномерная сетка total точек через
 // dt от t_skip; raw = true — узлы шага после t_skip (не больше max_pts). traj[k][i], times[k].
-// false + err — система не поддержана (нет якобиана, индекс 3) или шаг сорвался ниже h_min.
+// false + err — система не поддержана (нет якобиана, индекс выше 3) или шаг сорвался ниже h_min.
 inline bool bdf_integrate(const System& s, const double* a, int na, const double* y0, const BdfSettings& st,
                           double t_skip, double t_rec, double dt, int total, bool raw, int max_pts,
                           std::vector<std::vector<double>>& traj, std::vector<double>& times, BdfStats& stats,
@@ -80,10 +81,21 @@ inline bool bdf_integrate(const System& s, const double* a, int na, const double
     using namespace bdf_detail;
     const int N = (int)s.vars.size();
     const int nx = s.dae_nx < 0 ? N : s.dae_nx;
-    // Индекс 3 BDF не решает (DASSL — до индекса 2); для него — Radau IIA или GGL.
+    // Индекс 3: BDF (как DASSL) держит индекс до 2 — система сводится GGL (dae_ggl_system: множители
+    // mu в конце состояния, x' = f - G^T mu, 0 = g, 0 = dg/dt, индекс 2, mu = 0 на решении). mu
+    // стартуют с 0 и в вывод не идут.
     if (nx < N && dae_structural_index(s) > 2) {
-        if (err) *err = "DAE BDF 1-5: index 3 is not supported (BDF handles index 1-2); use Radau IIA or a GGL method";
-        return false;
+        System g;
+        std::string why;
+        if (!dae_ggl_system(s, g, &why)) { if (err) *err = "DAE BDF 1-5, index 3 via GGL: " + why; return false; }
+        if (dae_structural_index(g) > 2) { if (err) *err = "DAE BDF 1-5: index above 3 after GGL"; return false; }
+        const int Ng = (int)g.vars.size();   // dae_index у g уже: x — 1, z и mu — 2
+        std::vector<double> yg(y0, y0 + N);
+        yg.resize((size_t)Ng, 0.0);
+        const bool ok = bdf_integrate(g, a, na, yg.data(), st, t_skip, t_rec, dt, total, raw, max_pts, traj, times,
+                                      stats, err, cancel);
+        for (auto& row : traj) row.resize((size_t)N);
+        return ok;
     }
     System e = s;
     e.dae_nx = -1;

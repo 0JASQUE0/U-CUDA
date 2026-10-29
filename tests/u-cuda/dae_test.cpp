@@ -14,7 +14,7 @@
 //  Этап 9b: адаптивный Rodas4 (индекс 1) — RC против точного решения (конец и плотный выход, CPU и GPU),
 //   связь Кеплера против мелкого постоянного шага, отказы (индекс 2, метод без оценки).
 //  Этап 9c: BDF 1-5 (свой многошаговый драйвер): ОДУ с точным решением (порядок до 5, точность по допуску),
-//   Робертсон (ДАУ индекса 1) против Test Set, маятник индекса 2 при tol 1e-6..1e-10 против Radau, отказ на индексе 3.
+//   Робертсон (ДАУ индекса 1) против Test Set, маятник индекса 2 при tol 1e-6..1e-10 против Radau, индекс 3 через GGL против Radau IIA + GGL.
 #include "test_util.h"
 #include "dae_ir.h"
 #include "adaptive_settings.h"
@@ -410,11 +410,22 @@ void bdf_tests() {
                         "|x - ref| = %.2e, |lam - ref| = %.2e\n", tol, st.nacc, st.nrej, st.max_q, ex, el);
             ut::require(ex < 100 * tol && el < 1000 * tol, ut::num("BDF index 2 follows the tolerance", ex, 0, 100 * tol));
         }
-        BdfSettings bs;
-        BdfStats st;
-        const bool ok = bdf_integrate(pend(kPend3, ""), kPendA.data(), (int)kPendA.size(), kPendX0.data(), bs,
-                                      0.0, 1.0, 1.0, 2, false, 0, tr, tm, st, &err);
-        ut::require(!ok && err.find("index 3") != std::string::npos, "DAE BDF 1-5 refuses index 3: " + err);
+        // индекс 3 — через GGL (сведение к индексу 2, mu в выход не идут) против Radau IIA + GGL
+        const System s3 = pend(kPend3, "");
+        const auto ref3 = cpu.run(codegen_dae_scheme(s3, DaeScheme::Radau5GGL), kPendX0, kPendA, 1e-3, 1.0);
+        for (double tol : { 1e-7, 1e-9 }) {
+            BdfSettings bs;
+            bs.rtol = tol; bs.atol = { tol };
+            BdfStats st;
+            const bool ok = bdf_integrate(s3, kPendA.data(), (int)kPendA.size(), kPendX0.data(), bs, 0.0, 1.0, 1.0, 2,
+                                          false, 0, tr, tm, st, &err);
+            ut::require(ok && tr[1].size() == 5, "BDF pendulum index 3 (GGL): " + err);
+            const double ex = dist(tr[1], ref3, 0, 4), el = std::fabs(tr[1][4] - ref3[4]),
+                         g = std::fabs(tr[1][0] * tr[1][0] + tr[1][1] * tr[1][1] - 1);
+            std::printf("  DAE BDF 1-5, pendulum index 3 via GGL, tol %.0e: %lld steps, |x - ref| = %.2e, "
+                        "|lam - ref| = %.2e, |g| = %.1e\n", tol, st.nacc, ex, el, g);
+            ut::require(ex < 100 * tol && el < 1000 * tol && g < 10 * tol, ut::num("BDF index 3 via GGL", ex, 0, 100 * tol));
+        }
     }
     // имена в списке схем; постоянный шаг на них отказывает (krs_for_scheme_impl)
     ut::require(scheme_is_multistep("DAE BDF 1-5") && adaptive_scheme_name_ok("BDF 1-5"), "BDF names registered");

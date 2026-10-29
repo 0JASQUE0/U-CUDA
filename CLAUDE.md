@@ -519,7 +519,9 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   y' = y'_pred + cj (y - y_pred), x rows y'_x - f(y) = 0, z rows g(y) = 0 (an ODE has none), Newton with
   the full symbolic Jacobian (`SystemEvaluator`, CPU), matrix cj I - f_y | g_y; err = ck ||y - y_pred||;
   order k-1 / k / k+1 from the sigma estimates, initial phase (order +1, h x2 per step); WRMS norm with
-  h^(k-1) by variable index; dense output = DDATRP interpolation. Index 1-2; index 3 is refused.
+  h^(k-1) by variable index; dense output = DDATRP interpolation. Index 1-2 directly; index 3 through
+  `dae_ggl_system` (multipliers mu appended to the state from 0, dropped from the output) - pendulum
+  index 3 at tol 1e-7 / 1e-9: 117 / 240 steps, x 4e-7 / 1.2e-8 against Radau IIA + GGL, |g| 2e-10 / 3e-12.
   The first version was a Nordsieck form (LSODE): its rescale Z[j] *= eta^j left an undamped sawtooth of
   lambda at index 2 - at tol 1e-7 / 1e-9 the pendulum locked into h ~ tol (3156 / 31015 steps, error
   7e-4 / 7e-5) while 1e-6 / 1e-8 / 1e-10 were fine; Robertson took 2779 steps.
@@ -529,8 +531,8 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   (`adaptive_code_for_scheme`) refuse them.
   Tests: x' = -2x + cos t (order reaches 5, error ~1-2 tol, 89 / 339 steps at 1e-5 / 1e-9), Robertson DAE
   vs Test Set at t = 40 (rtol 1e-8: 326 steps, y1 to 9e-9), index-2 pendulum vs Radau IIA at tol 1e-6 ..
-  1e-10 (87..322 steps, x error ~20 tol, lambda ~100 tol), index-3 refusal.
-  Open: GPU kernel, Parametric, index 3 (GGL wrapper for BDF).
+  1e-10 (87..322 steps, x error ~20 tol, lambda ~100 tol), index-3 pendulum via GGL.
+  Open: GPU kernel, Parametric.
 - Stage 9d, op-amps "as is" plus an ideal copy (user's request): `SpiceImportOptions::ideal_opamps` (record
   field `circuit_ideal_opamps`, JSON "1"). Off (default): an op-amp from the table or `uc_opamp` whose
   .subckt is in the netlist is expanded element by element (the vendor model); on: it is a nullor. An op-amp
