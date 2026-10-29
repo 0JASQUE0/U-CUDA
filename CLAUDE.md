@@ -513,21 +513,24 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   2e-10 at tol 1e-5 / 1e-9 (19 / 163 steps), dense output on a 0.05 grid 6.5e-9 (CPU), the same on the
   GPU, Kepler coupling = fixed Rodas4 h = 1e-3, refusals (index 2, BDF1).
 - Stage 9c, multistep BDF 1-5 (`multistep_bdf.h`, header-only, its own driver - the user wants a
-  separate multistep kernel for ODEs too): variable order 1..5 and variable step, Nordsieck form (LSODE):
-  Pascal predictor, Newton on w = y_n with the full symbolic Jacobian (`SystemEvaluator`, CPU) -
-  x rows w - x_pred - l0 (h f(w) - h x'_pred) = 0, z rows g(w) = 0 (an ODE has none), l from
-  Pi(1 + x/i) normalised to l1 = 1; LTE = C/(C - C*) (y_n - y_pred), C = -l0/(q+1), C* = 1/(q+1)!; WRMS
-  norm, h^(k-1) by variable index; order +1 after q+1 steps at one h, -1 after two rejections; h changes
-  at most once per q+1 steps (Z[j] *= eta^j); dense output = the Nordsieck polynomial of the last step.
+  separate multistep kernel for ODEs too): variable order 1..5 and variable step in the DASSL form
+  (DDASTP): history = modified divided differences phi on the real nodes, coefficients alpha / beta /
+  gamma / sigma / psi recomputed after a step or order change, no history rescale; corrector
+  y' = y'_pred + cj (y - y_pred), x rows y'_x - f(y) = 0, z rows g(y) = 0 (an ODE has none), Newton with
+  the full symbolic Jacobian (`SystemEvaluator`, CPU), matrix cj I - f_y | g_y; err = ck ||y - y_pred||;
+  order k-1 / k / k+1 from the sigma estimates, initial phase (order +1, h x2 per step); WRMS norm with
+  h^(k-1) by variable index; dense output = DDATRP interpolation. Index 1-2; index 3 is refused.
+  The first version was a Nordsieck form (LSODE): its rescale Z[j] *= eta^j left an undamped sawtooth of
+  lambda at index 2 - at tol 1e-7 / 1e-9 the pendulum locked into h ~ tol (3156 / 31015 steps, error
+  7e-4 / 7e-5) while 1e-6 / 1e-8 / 1e-10 were fine; Robertson took 2779 steps.
   Names `kBdfSchemeOde` "BDF 1-5" (always in the ODE scheme list) and `kBdfSchemeDae` "DAE BDF 1-5"
   (after the DAE methods); `scheme_is_multistep`; adaptive step in Analysis only (`run_adaptive_phase`
   branch, CPU even with GPU on); fixed step (`krs_for_scheme_impl`) and sweeps
-  (`adaptive_code_for_scheme`) refuse them. Index 1 only: at a constant step BDF3 on the index-2
-  pendulum gives order 2 (the order-1 start and the new Z[q+1] on order raise leave an error index 2
-  does not damp) - needs the DASSL fixed-leading-coefficient / variable-coefficient form.
-  Tests: x' = -2x + cos t (order reaches 5, error ~4 tol), Robertson DAE vs Test Set at t = 40 (7e-9,
-  2779 steps at rtol 1e-8 - more than LSODE/DASSL, the order/step controller is simple), index-2 refusal.
-  Open: GPU kernel, Parametric, order decrease by estimates, index 2-3.
+  (`adaptive_code_for_scheme`) refuse them.
+  Tests: x' = -2x + cos t (order reaches 5, error ~1-2 tol, 89 / 339 steps at 1e-5 / 1e-9), Robertson DAE
+  vs Test Set at t = 40 (rtol 1e-8: 326 steps, y1 to 9e-9), index-2 pendulum vs Radau IIA at tol 1e-6 ..
+  1e-10 (87..322 steps, x error ~20 tol, lambda ~100 tol), index-3 refusal.
+  Open: GPU kernel, Parametric, index 3 (GGL wrapper for BDF).
 - Stage 9d, op-amps "as is" plus an ideal copy (user's request): `SpiceImportOptions::ideal_opamps` (record
   field `circuit_ideal_opamps`, JSON "1"). Off (default): an op-amp from the table or `uc_opamp` whose
   .subckt is in the netlist is expanded element by element (the vendor model); on: it is a nullor. An op-amp

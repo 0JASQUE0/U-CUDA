@@ -5,17 +5,18 @@
 // SystemEvaluator, символьный якобиан); внутренний цикл — простые массивы, чтобы его можно было
 // перенести в GPU-ядро.
 //
-// Форма Нордсика (как LSODE): Z[j] = h^j y^(j) / j!, j = 0..q. Шаг:
-//   прогноз  — Z <- Z P (треугольник Паскаля);
-//   коррекция — w = y_n: x-строки  w_x - x_pred - l0 (h f(w) - h x'_pred) = 0,
-//               z-строки  g(w) = 0 (у ОДУ z-строк нет); Ньютон с полным якобианом;
-//   e = (w - y_pred)/l0, Z[j] += l[j] e;
-//   l — коэффициенты Pi_{i=1..q}(1 + x/i), нормированные к l1 = 1 (l0 = 1, 2/3, 6/11, 12/25, 60/137).
-// Ошибка: LTE = C/(C - C*) (y_n - y_pred), C = -l0/(q+1) (BDF), C* = 1/(q+1)! (прогноз Тейлора);
-// у переменной индекса k >= 2 — множитель h^(k-1) (как в RADAU5). Норма — WRMS с rtol/atol.
-// Порядок: старт с 1, повышение на 1 после q+1 принятых шагов без смены h (новый Z[q+1] = l_q e/(q+1));
-// после двух отказов подряд — понижение. Шаг меняется не чаще раза в q+1 шагов (кроме отказа):
-// пересчёт Z[j] *= eta^j. Плотный выход — полином Нордсика последнего шага.
+// Форма DASSL (DDASTP, Brenan-Campbell-Petzold): история — модифицированные разделённые разности
+// phi[1..k+1] по РЕАЛЬНЫМ узлам, коэффициенты alpha, beta, gamma, sigma, psi пересчитываются после
+// смены шага / порядка; сама история при смене шага не масштабируется. (Первая версия была в форме
+// Нордсика, как LSODE: пересчёт Z[j] *= eta^j на ДАУ индекса 2 раскачивал "пилу" lambda — при
+// tol 1e-7 / 1e-9 маятник застревал на h ~ tol с ошибкой 7e-4 / 7e-5.)
+//   прогноз   y = sum phi*_j, y' = sum gamma_j phi*_j (phi* = beta phi);
+//   коррекция y' = y'_pred + cj (y - y_pred), cj = -alphas/h; x-строки y'_x - f(y) = 0, z-строки
+//             g(y) = 0 (у ОДУ z-строк нет); Ньютон с полным якобианом, матрица cj I - f_y | g_y;
+//   ошибка    err = ck ||e||, e = y - y_pred; порядок k-1 / k / k+1 — по оценкам sigma ||.||, как в
+//             DASSL; начальная фаза: порядок +1 и шаг x2 на каждом принятом шаге;
+//   норма     WRMS с rtol/atol, у переменной индекса k >= 2 — множитель h^(k-1) (как в RADAU5);
+//   плотный выход — интерполяция DDATRP по phi последнего шага.
 
 #include <algorithm>
 #include <atomic>
@@ -44,8 +45,6 @@ struct BdfStats {
 namespace bdf_detail {
 
 inline bool lu_solve(std::vector<double>& A, std::vector<double>& b, int n) {
-    double amax = 0;
-    for (double v : A) amax = std::fmax(amax, std::fabs(v));
     for (int k = 0; k < n; ++k) {
         int p = k;
         for (int i = k + 1; i < n; ++i) if (std::fabs(A[(size_t)i * n + k]) > std::fabs(A[(size_t)p * n + k])) p = i;
@@ -66,23 +65,14 @@ inline bool lu_solve(std::vector<double>& A, std::vector<double>& b, int n) {
         for (int j = k + 1; j < n; ++j) r -= A[(size_t)k * n + j] * b[(size_t)j];
         b[(size_t)k] = r / A[(size_t)k * n + k];
     }
-    (void)amax;
     return true;
-}
-
-// l[0..q]: Pi_{i=1..q}(1 + x/i), нормировка l[1] = 1.
-inline void bdf_l(int q, double* l) {
-    double c[7] = { 1, 0, 0, 0, 0, 0, 0 };
-    for (int i = 1; i <= q; ++i)
-        for (int j = i; j >= 1; --j) c[j] += c[j - 1] / i;
-    for (int j = 0; j <= q; ++j) l[j] = c[j] / c[1];
 }
 
 }  // namespace bdf_detail
 
 // Траектория от y0 (t = 0) до t_skip + t_rec. raw = false — равномерная сетка total точек через
 // dt от t_skip; raw = true — узлы шага после t_skip (не больше max_pts). traj[k][i], times[k].
-// false + err — система не поддержана (нет якобиана) или шаг сорвался ниже h_min.
+// false + err — система не поддержана (нет якобиана, индекс 3) или шаг сорвался ниже h_min.
 inline bool bdf_integrate(const System& s, const double* a, int na, const double* y0, const BdfSettings& st,
                           double t_skip, double t_rec, double dt, int total, bool raw, int max_pts,
                           std::vector<std::vector<double>>& traj, std::vector<double>& times, BdfStats& stats,
@@ -90,12 +80,9 @@ inline bool bdf_integrate(const System& s, const double* a, int na, const double
     using namespace bdf_detail;
     const int N = (int)s.vars.size();
     const int nx = s.dae_nx < 0 ? N : s.dae_nx;
-    // Индекс 2 (маятник с ограничением на скорость): при постоянном шаге BDF3 даёт лишь второй
-    // порядок — разгон с порядка 1 и новый Z[q+1] вносят ошибку, которую индекс 2 не гасит. Нужна
-    // форма DASSL (переменные коэффициенты, без пересчёта Нордсика); пока — индекс 1.
-    if (nx < N && dae_structural_index(s) != 1) {
-        if (err) *err = "DAE BDF 1-5: index 1 only for now (the constraints must determine z); for index 2-3 use "
-                        "Radau IIA or a GGL method";
+    // Индекс 3 BDF не решает (DASSL — до индекса 2); для него — Radau IIA или GGL.
+    if (nx < N && dae_structural_index(s) > 2) {
+        if (err) *err = "DAE BDF 1-5: index 3 is not supported (BDF handles index 1-2); use Radau IIA or a GGL method";
         return false;
     }
     System e = s;
@@ -105,177 +92,233 @@ inline bool bdf_integrate(const System& s, const double* a, int na, const double
     ae.resize((size_t)M + 1, 0.0);
     const bool ht = system_uses_time(s);
     if (ht) { e.params.push_back("t"); ae.push_back(0.0); }
-    double& tpar = ht ? ae.back() : ae[0];   // без t — не используется
     SystemEvaluator ev(e);
     if (!ev.has_jacobian()) { if (err) *err = "BDF needs the Jacobian (non-differentiable function in the system)"; return false; }
-    auto set_t = [&](double t) { if (ht) tpar = t; };
+    auto set_t = [&](double tt) { if (ht) ae.back() = tt; };
     std::vector<int> kidx((size_t)N, 1);
     for (int i = 0; i < N && i < (int)s.dae_index.size(); ++i) kidx[(size_t)i] = std::max(1, s.dae_index[(size_t)i]);
     auto atol_of = [&](int i) { return st.atol.empty() ? 1e-8 : st.atol[(size_t)std::min(i, (int)st.atol.size() - 1)]; };
 
     const double tend = t_skip + t_rec;
-    const int QM = std::max(1, std::min(5, st.max_order));
-    std::vector<double> Z((size_t)(QM + 2) * N, 0.0), Zs(Z.size()), F((size_t)N), J((size_t)N * N), A((size_t)N * N),
-        R((size_t)N), w((size_t)N), yp((size_t)N), hyp((size_t)N), ecor((size_t)N), wt((size_t)N), y((size_t)N);
-    auto z = [&](int j) { return &Z[(size_t)j * N]; };
+    const int MAXK = std::max(1, std::min(5, st.max_order));
+    // phi[j], j = 1..MAXK+2 (как в DASSL, с единицы); коэффициенты — по 1..MAXK+1
+    std::vector<double> phi((size_t)(MAXK + 3) * N, 0.0), F((size_t)N), J((size_t)N * N), A((size_t)N * N),
+        R((size_t)N), y((size_t)N), yp((size_t)N), ypr((size_t)N), yprp((size_t)N), ev_((size_t)N), wt((size_t)N),
+        dl((size_t)N), out((size_t)N);
+    auto P = [&](int j) { return &phi[(size_t)j * N]; };
+    double alpha[8] = {}, beta[8] = {}, gamma[8] = {}, sigma[8] = {}, psi[8] = {};
+    double h_norm_scale = 1;   // h^(k-1) по индексу — от текущего h
     auto wrms = [&](const double* v) {
         double s2 = 0;
-        for (int i = 0; i < N; ++i) { const double q = v[i] * wt[(size_t)i]; s2 += q * q; }
+        for (int i = 0; i < N; ++i) {
+            double q = v[i] * wt[(size_t)i];
+            if (kidx[(size_t)i] > 1) q *= std::pow(h_norm_scale, kidx[(size_t)i] - 1);
+            s2 += q * q;
+        }
         return std::sqrt(s2 / N);
-    };
-    auto weights = [&](const double* yy) {
-        for (int i = 0; i < N; ++i) wt[(size_t)i] = 1.0 / (st.rtol * std::fabs(yy[i]) + atol_of(i));
     };
     auto finite = [&](const double* v) {
         for (int i = 0; i < N; ++i) if (!(std::fabs(v[i]) <= 1e300)) return false;
         return true;
     };
 
-    // старт
-    for (int i = 0; i < N; ++i) z(0)[i] = y0[i];
+    // старт: y0 согласован (z из связей — вызывающий); y'0: x-строки f, z-строки 0 — первый шаг
+    // порядка 1 это переносит (как DASSL с приблизительной y').
+    for (int i = 0; i < N; ++i) y[(size_t)i] = y0[i];
     set_t(0.0);
-    ev.eval(z(0), ae.data(), F.data());
+    ev.eval(y.data(), ae.data(), F.data());
     ++stats.nrhs;
-    weights(z(0));
+    for (int i = 0; i < N; ++i) {
+        yp[(size_t)i] = i < nx ? F[(size_t)i] : 0.0;
+        wt[(size_t)i] = 1.0 / (st.rtol * std::fabs(y[(size_t)i]) + atol_of(i));
+    }
     double h = st.h0;
-    if (!(h > 0)) {
-        double d0 = 0, d1 = 0;
-        for (int i = 0; i < nx; ++i) { d0 = std::fmax(d0, std::fabs(z(0)[i]) * wt[(size_t)i]); d1 = std::fmax(d1, std::fabs(F[(size_t)i]) * wt[(size_t)i]); }
-        h = (d0 < 1e-5 || d1 < 1e-5) ? 1e-6 * std::fmax(tend, 1e-6) : 0.01 * d0 / d1;
-        h = std::fmin(h, 1e-2 * std::fmax(tend, 1e-12));
+    if (!(h > 0)) {   // DASSL: h0 = min(1e-3 |tout - t|, 0.5 / ||y'||)
+        h_norm_scale = 1;
+        const double ypn = wrms(yp.data());
+        h = 1e-3 * std::fmax(tend, 1e-12);
+        if (ypn > 0.5 / h) h = 0.5 / ypn;
     }
     h = std::fmin(h, st.hmax);
-    for (int i = 0; i < nx; ++i) z(1)[i] = h * F[(size_t)i];
+    for (int i = 0; i < N; ++i) { P(1)[i] = y[(size_t)i]; P(2)[i] = h * yp[(size_t)i]; }
+    psi[1] = h;
 
     traj.clear();
     times.clear();
-    int q = 1, since_change = 0, fails = 0, out_k = 0;
-    double t = 0.0, hlast = h;
-    double l[7];
+    int k = 1, kold = 0, ns = 0, iphase = 0, nef = 0, out_k = 0;
+    double t = 0.0, hold = 0.0, cj = 0.0;
     const double eps = std::numeric_limits<double>::epsilon();
     auto emit = [&](double tt, const double* yy) {
         traj.emplace_back(yy, yy + N);
         if (raw) times.push_back(tt);
     };
-    // t = 0 входит в вывод, если транзиента нет
-    if (t_skip <= 0) {
-        if (raw) emit(0.0, z(0));
-        else { emit(0.0, z(0)); out_k = 1; }
-    }
+    if (t_skip <= 0) { emit(0.0, y.data()); if (!raw) out_k = 1; }
     auto done_out = [&] { return raw ? (int)traj.size() >= max_pts : out_k >= total; };
     long long iter = 0;
     while (t < tend && !done_out()) {
         if (cancel && (++iter & 1023) == 0 && cancel->load(std::memory_order_relaxed)) return true;
         const double hmin = 10 * eps * std::fmax(std::fabs(t), 1.0);
         if (h < hmin) { if (err) *err = "BDF: step size below h_min at t = " + std::to_string(t); stats.diverged = true; return false; }
-        bdf_l(q, l);
-        Zs.assign(Z.begin(), Z.end());
-        // прогноз
-        for (int k = 0; k < q; ++k)
-            for (int j = q - 1; j >= k; --j)
-                for (int i = 0; i < N; ++i) z(j)[i] += z(j + 1)[i];
-        for (int i = 0; i < N; ++i) { yp[(size_t)i] = z(0)[i]; hyp[(size_t)i] = z(1)[i]; w[(size_t)i] = yp[(size_t)i]; }
-        weights(yp.data());
-        // коррекция: Ньютон по w
-        set_t(t + h);
+        const int kp1 = k + 1, kp2 = k + 2, km1 = k - 1;
+        // --- коэффициенты (DDASTP, блок 200) ---
+        if (h != hold || k != kold) ns = 0;
+        ns = std::min(ns + 1, kold + 2);
+        const int nsp1 = ns + 1;
+        if (kp1 >= ns) {
+            beta[1] = 1; alpha[1] = 1; gamma[1] = 0; sigma[1] = 1;
+            double temp1 = h;
+            for (int i = 2; i <= kp1; ++i) {
+                const double temp2 = psi[i - 1];
+                psi[i - 1] = temp1;
+                beta[i] = beta[i - 1] * psi[i - 1] / temp2;
+                temp1 = temp2 + h;
+                alpha[i] = h / temp1;
+                sigma[i] = (i - 1) * sigma[i - 1] * alpha[i];
+                gamma[i] = gamma[i - 1] + alpha[i - 1] / h;
+            }
+            psi[kp1] = temp1;
+        }
+        double alphas = 0, alpha0 = 0;
+        for (int i = 1; i <= k; ++i) { alphas -= 1.0 / i; alpha0 -= alpha[i]; }
+        cj = -alphas / h;
+        const double ck = std::fmax(std::fabs(alpha[kp1] + alphas - alpha0), alpha[kp1]);
+        if (kp1 >= nsp1)
+            for (int j = nsp1; j <= kp1; ++j) for (int i = 0; i < N; ++i) P(j)[i] *= beta[j];
+        // --- прогноз ---
+        const double told = t;
+        t = told + h;
+        set_t(t);
+        for (int i = 0; i < N; ++i) {
+            double yy = 0, yyp = 0;
+            for (int j = 1; j <= kp1; ++j) { yy += P(j)[i]; yyp += gamma[j] * P(j)[i]; }
+            ypr[(size_t)i] = yy; yprp[(size_t)i] = yyp; y[(size_t)i] = yy;
+        }
+        h_norm_scale = h;
+        // --- коррекция: Ньютон по y ---
         bool conv = false;
         for (int it = 0; it < 6; ++it) {
-            ev.eval(w.data(), ae.data(), F.data());
+            ev.eval(y.data(), ae.data(), F.data());
             ++stats.nrhs;
             if (!finite(F.data())) break;
             for (int i = 0; i < N; ++i)
-                R[(size_t)i] = i < nx ? -(w[(size_t)i] - yp[(size_t)i] - l[0] * (h * F[(size_t)i] - hyp[(size_t)i])) : -F[(size_t)i];
-            ev.eval_jacobian(w.data(), ae.data(), J.data());
+                R[(size_t)i] = i < nx ? -(yprp[(size_t)i] + cj * (y[(size_t)i] - ypr[(size_t)i]) - F[(size_t)i]) : -F[(size_t)i];
+            ev.eval_jacobian(y.data(), ae.data(), J.data());
             ++stats.njac;
             for (int i = 0; i < N; ++i)
                 for (int j = 0; j < N; ++j) {
                     const double v = J[(size_t)i * N + j];
-                    A[(size_t)i * N + j] = i < nx ? (i == j ? 1.0 : 0.0) - l[0] * h * v : v;
+                    A[(size_t)i * N + j] = i < nx ? (i == j ? cj : 0.0) - v : v;
                 }
             if (!lu_solve(A, R, N)) break;
-            for (int i = 0; i < N; ++i) {
-                w[(size_t)i] += R[(size_t)i];
-                if (kidx[(size_t)i] > 1) R[(size_t)i] *= std::pow(h, kidx[(size_t)i] - 1);
-            }
-            if (!finite(w.data())) break;
+            for (int i = 0; i < N; ++i) y[(size_t)i] += R[(size_t)i];
+            if (!finite(y.data())) break;
             if (wrms(R.data()) < 1e-3) { conv = true; break; }
         }
-        double errn = HUGE_VAL;
+        double enorm = HUGE_VAL, erkm1 = 0, terkm1 = 0, est = 0, terk = 0;
+        int knew = k;
         if (conv) {
-            const double C = l[0] / (q + 1);
-            double fact = 1;
-            for (int j = 2; j <= q + 1; ++j) fact *= j;
-            const double ratio = C / (C + 1.0 / fact);
-            for (int i = 0; i < N; ++i) {
-                ecor[(size_t)i] = (w[(size_t)i] - yp[(size_t)i]) / l[0];
-                double le = ratio * (w[(size_t)i] - yp[(size_t)i]);
-                if (kidx[(size_t)i] > 1) le *= std::pow(h, kidx[(size_t)i] - 1);
-                R[(size_t)i] = le;
+            for (int i = 0; i < N; ++i) ev_[(size_t)i] = y[(size_t)i] - ypr[(size_t)i];
+            enorm = wrms(ev_.data());
+            const double erk = sigma[k + 1] * enorm;
+            terk = (k + 1) * erk;
+            est = erk;
+            if (k > 1) {   // оценка для порядка k-1 (DDASTP, блок 400)
+                for (int i = 0; i < N; ++i) dl[(size_t)i] = P(kp1)[i] + ev_[(size_t)i];
+                erkm1 = sigma[k] * wrms(dl.data());
+                terkm1 = k * erkm1;
+                bool lower = false;
+                if (k > 2) {
+                    for (int i = 0; i < N; ++i) dl[(size_t)i] += P(k)[i];
+                    const double erkm2 = sigma[k - 1] * wrms(dl.data());
+                    lower = std::fmax(terkm1, (k - 1) * erkm2) <= terk;
+                } else lower = terkm1 <= 0.5 * terk;
+                if (lower) { knew = km1; est = erkm1; }
             }
-            errn = wrms(R.data());
         } else ++stats.nnewton_fail;
-        if (!(errn <= 1.0)) {   // отказ: история назад, шаг меньше
-            Z.assign(Zs.begin(), Zs.end());
+        const double errv = conv ? ck * enorm : HUGE_VAL;
+        if (!(errv <= 1.0)) {
+            // --- отказ: история назад (DDASTP, блок 690) ---
+            t = told;
+            set_t(t);
+            if (kp1 >= nsp1)
+                for (int j = nsp1; j <= kp1; ++j) for (int i = 0; i < N; ++i) P(j)[i] /= beta[j];
+            for (int i = 2; i <= kp1; ++i) psi[i - 1] = psi[i] - h;
             ++stats.nrej;
-            ++fails;
-            double eta = conv ? 0.9 * std::pow(errn, -1.0 / (q + 1)) : 0.25;
-            eta = std::fmax(0.1, std::fmin(0.9, eta));
-            if (fails >= 2 && q > 1) {   // два отказа подряд — порядок ниже
-                --q;
-                for (int i = 0; i < N; ++i) z(q + 1)[i] = 0;
+            if (!conv) h *= 0.25;
+            else {
+                ++nef;
+                if (nef == 1) {
+                    k = knew;
+                    double r = 0.9 * std::pow(2 * est + 1e-4, -1.0 / (k + 1));
+                    r = std::fmax(0.25, std::fmin(0.9, r));
+                    h *= r;
+                } else if (nef == 2) { k = knew; h *= 0.25; }
+                else { k = 1; h *= 0.25; }
             }
-            for (int j = 1; j <= q; ++j) { const double f = std::pow(eta, j); for (int i = 0; i < N; ++i) z(j)[i] *= f; }
-            h *= eta;
-            since_change = 0;
+            iphase = 1;
+            hold = 0;   // коэффициенты пересчитать
             continue;
         }
-        // принят
-        fails = 0;
-        for (int j = 0; j <= q; ++j) for (int i = 0; i < N; ++i) z(j)[i] += l[j] * ecor[(size_t)i];
-        const double tn = t + h;
+        // --- принят (DDASTP, блок 500) ---
+        nef = 0;
+        const int kold_step = k;
+        kold = k;
+        hold = h;
         ++stats.nacc;
         stats.hmin = stats.nacc == 1 ? h : std::fmin(stats.hmin, h);
         stats.hmax = std::fmax(stats.hmax, h);
         stats.hsum += h;
-        stats.max_q = std::max(stats.max_q, q);
-        if (!finite(z(0))) { stats.diverged = true; return true; }
-        // вывод: полином Нордсика на (t, tn]
+        stats.max_q = std::max(stats.max_q, k);
+        if (knew == km1 || k == MAXK) iphase = 1;
+        double hnew = h;
+        if (iphase == 0) {
+            k = kp1;
+            hnew = 2 * h;
+        } else {
+            if (knew == km1) { k = km1; est = erkm1; }
+            else if (kp1 <= ns && k < MAXK) {
+                for (int i = 0; i < N; ++i) dl[(size_t)i] = ev_[(size_t)i] - P(kp2)[i];
+                const double terkp1 = wrms(dl.data()), erkp1 = terkp1 / (k + 2);
+                if (k > 1) {
+                    if (terkm1 <= std::fmin(terk, terkp1)) { k = km1; est = erkm1; }
+                    else if (!(terkp1 >= terk)) { k = kp1; est = erkp1; }
+                } else if (!(terkp1 >= 0.5 * terk)) { k = kp1; est = erkp1; }
+            }
+            const double r = std::pow(2 * est + 1e-4, -1.0 / (k + 1));
+            if (r >= 2.0) hnew = 2 * h;
+            else if (r <= 1.0) hnew = h * std::fmax(0.5, std::fmin(0.9, r));
+        }
+        hnew = std::fmin(hnew, st.hmax);
+        // разности для следующего шага (kp1, kp2 — от порядка этого шага)
+        if (kold_step < MAXK) for (int i = 0; i < N; ++i) P(kp2)[i] = ev_[(size_t)i];
+        for (int i = 0; i < N; ++i) P(kp1)[i] += ev_[(size_t)i];
+        for (int j = kp1 - 1; j >= 1; --j) for (int i = 0; i < N; ++i) P(j)[i] += P(j + 1)[i];
+        if (!finite(y.data())) { stats.diverged = true; return true; }
+        for (int i = 0; i < N; ++i) wt[(size_t)i] = 1.0 / (st.rtol * std::fabs(y[(size_t)i]) + atol_of(i));
+        // --- вывод: интерполяция DDATRP по phi и psi этого шага ---
+        auto interp = [&](double tout, double* yo) {
+            const double temp1 = tout - t;
+            for (int i = 0; i < N; ++i) yo[i] = P(1)[i];
+            double c = 1, gam = temp1 / psi[1];
+            for (int j = 2; j <= kold_step + 1; ++j) {
+                c *= gam;
+                gam = (temp1 + psi[j - 1]) / psi[j];
+                for (int i = 0; i < N; ++i) yo[i] += c * P(j)[i];
+            }
+        };
         if (raw) {
-            if (tn >= t_skip) emit(tn, z(0));
+            if (t >= t_skip) emit(t, y.data());
         } else {
             for (;;) {
                 const double ts = t_skip + out_k * dt;
-                if (out_k >= total || ts > tn) break;
-                const double th = (ts - tn) / h;
-                for (int i = 0; i < N; ++i) {
-                    double v = z(q)[i];
-                    for (int j = q - 1; j >= 0; --j) v = v * th + z(j)[i];
-                    y[(size_t)i] = v;
-                }
-                emit(ts, y.data());
+                if (out_k >= total || ts > t) break;
+                interp(ts, out.data());
+                emit(ts, out.data());
                 ++out_k;
             }
         }
-        t = tn;
-        hlast = h;
-        ++since_change;
-        // порядок и шаг
-        if (since_change >= q + 1) {
-            double eta = 0.9 * std::pow(std::fmax(errn, 1e-10), -1.0 / (q + 1));
-            if (q < QM && eta > 1.0) {   // выше порядок: новый Z[q+1] = l_q e / (q+1)
-                for (int i = 0; i < N; ++i) z(q + 1)[i] = l[q] * ecor[(size_t)i] / (q + 1);
-                ++q;
-                since_change = 0;
-            } else if (eta > 1.2 || eta < 0.9) {
-                eta = std::fmin(5.0, std::fmax(0.2, eta));
-                if (h * eta > st.hmax) eta = st.hmax / h;
-                for (int j = 1; j <= q; ++j) { const double f = std::pow(eta, j); for (int i = 0; i < N; ++i) z(j)[i] *= f; }
-                h *= eta;
-                since_change = 0;
-            }
-        }
+        h = hnew;
     }
-    (void)hlast;
     if (raw && (int)traj.size() >= max_pts && t < tend) stats.truncated = true;
     return true;
 }
