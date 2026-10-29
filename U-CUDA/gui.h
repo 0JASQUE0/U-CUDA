@@ -15,6 +15,8 @@ struct GuiCallbacks {
     // коэффициентов композиции в конструкторе схем (System tab). Возвращает
     // абсолютный путь либо пустую строку при отмене.
     std::function<std::string()> pick_open_file_text;
+    // Диалог открытия схемы для вкладки DAE: SPICE-netlist или .kicad_sch.
+    std::function<std::string()> pick_open_file_circuit;
 };
 
 // Рисует один кадр интерфейса. lib — библиотека систем (вкладка Library).

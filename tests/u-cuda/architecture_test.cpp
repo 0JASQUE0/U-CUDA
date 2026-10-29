@@ -8,9 +8,12 @@
 // Линкуется со всем приложением (сессии тянут типы окон графиков), поэтому собирается с /DUT_FULL_APP.
 #include "test_util.h"
 #include "app_model.h"
+#include "dae_ir.h"
 #include "session_io.h"
 #include "system_library.h"
 #include <atomic>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 
 namespace {
@@ -95,10 +98,14 @@ void records() {
     d.dae_schemes_off = { "DAE Trapezoidal", "DAE CD" };
     d.init_conditions = { { "x", "1" }, { "z", "0.5" } };
     d.param_values = { { "p", "0.5" } };
+    d.circuit_source = "D:\\схемы\\rc \"1\".cir";
+    d.circuit_netlist = "* rc\nV1 in 0 DC 5\nR1 in out 1k\nC1 out 0 1m\n";
     const SystemRecord r = record_from_json(record_to_json(d));
     ut::require(r.is_dae && r.plain_text == d.plain_text && r.alg_text == "z" && r.dae_index_text == "z=1" &&
                 r.dae_as_ode && r.dae_stab_alpha == "25" && r.dae_schemes_off == d.dae_schemes_off &&
                 r.init_conditions.at("z") == "0.5", "DAE record lost fields in the round trip");
+    ut::require(r.circuit_source == d.circuit_source && r.circuit_netlist == d.circuit_netlist,
+                "circuit source / netlist copy lost in the round trip");
 
     // ДАУ-запись до этапов 5-7: без dae_schemes_off / dae_stab_alpha — все методы включены, alpha по умолчанию
     const SystemRecord older = record_from_json(
@@ -106,6 +113,25 @@ void records() {
         "\"vars_text\":\"x\",\"params_text\":\"\"}");
     ut::require(older.is_dae && older.dae_schemes_off.empty() && older.dae_stab_alpha == "10" && !older.dae_as_ode,
                 "older DAE record defaults");
+
+    // Импорт схемы в модель (вкладка DAE): поля ДАУ, номиналы, НУ, шаг и копия netlist'а.
+    const std::filesystem::path cir = std::filesystem::temp_directory_path() / "ucuda_arch_rc.cir";
+    {
+        std::ofstream f(cir, std::ios::binary);
+        f << "* rc from a file\nV1 in 0 DC 5\nR1 in out 1k\nC1 out 0 1m IC=1\n.tran 1m 5\n";
+    }
+    AppModel m([](const std::vector<unsigned char>&) { return std::string{}; });
+    m.circuit_source = cir.u8string();
+    std::string rep, err;
+    ut::require(m.import_circuit(&rep, &err), "import_circuit: " + err);
+    ut::require(m.is_dae && m.vars_text == "vc_c1" && m.param_values.at("r1") == "1000" &&
+                m.init_conditions.at("vc_c1") == "1" && m.step_h == "0.001" &&
+                m.circuit_netlist.find("R1 in out 1k") != std::string::npos && m.note == "rc from a file",
+                "import_circuit fills the DAE fields: " + rep);
+    const DaeSystem s = parse_dae(m.plain_text, m.vars_text, m.alg_text, m.params_text);
+    ut::require(s.diff.size() == 1 && s.alg.size() == 4 && s.structural_index_hint == 1,
+                "imported circuit parses as an index-1 DAE");
+    std::filesystem::remove(cir);
 }
 
 }  // namespace

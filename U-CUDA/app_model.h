@@ -349,13 +349,18 @@ public:
     // редактируемые UI-поля (UI читает/пишет напрямую)
     // Discrete map x_{n+1} = f(x_n): no integration scheme, h is pinned to 1.
     bool is_map = false;
-    // ДАУ: живёт на вкладке Library → DAE, в анализ пока не идёт (решателей нет).
-    // alg_text — алгебраические переменные (z), vars_text у ДАУ — дифференциальные (x).
+    // ДАУ: вкладка Library → DAE. alg_text — алгебраические переменные (z),
+    // vars_text у ДАУ — дифференциальные (x).
     bool is_dae = false;
     std::string alg_text;
     std::string dae_index_text;    // "x=1, lambda=3", см. SystemRecord
     bool dae_as_ode = false;       // ДАУ -> ОДУ подстановкой z (см. SystemRecord)
     std::string dae_stab_alpha = "10";   // уровень C: (d/dt + alpha)^m g = 0 (см. SystemRecord)
+    std::string circuit_source;    // ДАУ из схемы: путь к .kicad_sch / .cir (см. SystemRecord)
+    std::string circuit_netlist;   // копия netlist'а на момент импорта
+    // Импорт схемы circuit_source: перезаписывает уравнения, x, z, параметры, НУ и шаг.
+    // false + err — файл не читается, kicad-cli не сработал или схема не поддержана.
+    bool import_circuit(std::string* report, std::string* err);
     // ДАУ решается схемами ОДУ (сведение включено) — тогда всё как у ОДУ.
     bool dae_native() const { return is_dae && !dae_as_ode; }
     InputMode mode = InputMode::Image;
@@ -595,6 +600,13 @@ public:
         bool        level_c = false;        // сводится только уровнем C (индекс 2-3, стабилизация alpha)
         std::string latex;                  // уравнения для превью: \dot{x} = f, 0 = g (по строке)
         int         latex_lines = 0;
+        // Импорт схемы: отчёт / ошибка последнего импорта, слежение за файлом.
+        std::string circuit_report, circuit_error;
+        std::string circuit_path;           // путь, для которого запомнен circuit_mtime
+        long long   circuit_mtime = -1;
+        double      circuit_poll_t = 0.0;   // ImGui::GetTime() последней проверки
+        bool        circuit_watch = true;   // перечитывать при сохранении файла
+        bool        circuit_import_now = false;
     };
     DaeEditorState dae_editor;
 

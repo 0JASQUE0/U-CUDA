@@ -7,6 +7,9 @@
 #include <cstdlib>
 #include "sysparse.hpp"
 #include "dae_ir.h"       // build_system для ДАУ
+#include "kicad_import.h"
+#include "spice_parse.h"  // import_circuit
+#include <filesystem>
 #include <stdexcept>
 
 // Строит System из текущего режима ввода и алфавита.
@@ -214,6 +217,40 @@ bool AppModel::refresh_symbols() {
     }
 }
 
+bool AppModel::import_circuit(std::string* report, std::string* err) {
+    if (circuit_source.empty()) { if (err) *err = "no circuit file"; return false; }
+    std::string net, log;
+    if (!circuit_source_load(circuit_source, net, &log, err)) return false;
+    SpiceImportOptions o;
+    o.base_dir = std::filesystem::u8path(circuit_source).parent_path().u8string();
+    SpiceImportResult r;
+    if (!spice_import(net, o, r, err)) return false;
+    // Схема — источник истины: уравнения, номиналы и НУ берутся из неё целиком.
+    is_dae = true;
+    mode = InputMode::Plain;
+    plain_text = r.plain_text;
+    vars_text = r.vars_text;
+    alg_text = r.alg_text;
+    params_text = r.params_text;
+    param_order = ParamOrder::AsInAlphabet;
+    dae_index_text.clear();
+    use_aux_funcs = false;
+    init_conditions = r.init_conditions;
+    param_values = r.param_values;
+    if (!r.step_h.empty()) step_h = r.step_h;
+    circuit_netlist = net;
+    if (note.empty() && !r.title.empty()) note = r.title;
+    if (report) {
+        std::string s = r.summary;
+        if (!r.t_stop.empty()) s += "\n.tran: h = " + r.step_h + " s, T = " + r.t_stop + " s";
+        for (const std::string& n : r.notes) s += "\n" + n;
+        s += "\nnodes:";
+        for (const auto& kv : r.node_vars) s += " " + kv.first + "=" + kv.second;
+        *report = s;
+    }
+    return true;
+}
+
 SystemRecord AppModel::to_record() const {
     SystemRecord r;
     r.name = name;
@@ -224,6 +261,8 @@ SystemRecord AppModel::to_record() const {
     r.dae_index_text = dae_index_text;
     r.dae_as_ode = dae_as_ode;
     r.dae_stab_alpha = dae_stab_alpha;
+    r.circuit_source = circuit_source;
+    r.circuit_netlist = circuit_netlist;
     switch (mode) {
     case InputMode::Image: r.mode = "Image"; break;
     case InputMode::Latex: r.mode = "LaTeX"; break;
@@ -296,6 +335,8 @@ void AppModel::from_record(const SystemRecord& r) {
     dae_index_text = r.dae_index_text;
     dae_as_ode = r.dae_as_ode;
     dae_stab_alpha = r.dae_stab_alpha;
+    circuit_source = r.circuit_source;
+    circuit_netlist = r.circuit_netlist;
     if (r.mode == "Image") mode = InputMode::Image;
     else if (r.mode == "Plain") mode = InputMode::Plain;
     else mode = InputMode::Latex;
@@ -399,6 +440,8 @@ void AppModel::clear() {
     dae_index_text.clear();
     dae_as_ode = false;
     dae_stab_alpha = "10";
+    circuit_source.clear();
+    circuit_netlist.clear();
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_dopri78_legacy
         = scheme_rk45 = scheme_dop853
         = scheme_cd = scheme_cdfast

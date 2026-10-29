@@ -1,6 +1,7 @@
 ﻿#include "gui.h"
 #include "circuit_netlist.h"
 #include "dae_ir.h"
+#include "kicad_import.h"   // circuit_source_mtime — слежение за файлом схемы (вкладка DAE)
 #include <fstream>
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder* API — needed for Custom Workspace per-tab dockspaces.
@@ -5287,6 +5288,57 @@ static void draw_library_editor(AppModel& model, SystemLibrary& lib,
         ImGui::TextWrapped("x' = f(x, z, t),  0 = g(x, z, t). One equation per line: "
                            "x' = ... for each differential variable, 0 = ... for each "
                            "algebraic one. min(a, b) / max(a, b) are available.");
+        // Источник — схема: SPICE-netlist или .kicad_sch (через kicad-cli). Импорт перезаписывает
+        // уравнения, переменные, параметры (номиналы) и НУ ниже.
+        {
+            AppModel::DaeEditorState& cst = model.dae_editor;
+            ImGui::Text("Circuit:"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 15.0f);
+            InputTextStr("##dae_circuit", buf.circuit_source);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("SPICE netlist (.cir, .net, .sp) or KiCad schematic (.kicad_sch, needs kicad-cli\n"
+                                  "from KiCad 7+). Empty: the equations below are typed by hand.");
+            ImGui::SameLine();
+            if (ImGui::Button("Open...##dae_circuit") && cb.pick_open_file_circuit) {
+                const std::string p = cb.pick_open_file_circuit();
+                if (!p.empty()) { buf.circuit_source = p; cst.circuit_import_now = true; }
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(buf.circuit_source.empty());
+            if (ImGui::Button("Re-read##dae_circuit")) cst.circuit_import_now = true;
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::Checkbox("Watch##dae_circuit", &cst.circuit_watch);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Re-import when the file is saved (checked once a second).");
+            if (!buf.circuit_source.empty() && cst.circuit_watch) {
+                const double now = ImGui::GetTime();
+                if (now - cst.circuit_poll_t > 1.0) {
+                    cst.circuit_poll_t = now;
+                    const long long mt = circuit_source_mtime(buf.circuit_source);
+                    if (cst.circuit_path != buf.circuit_source) {   // новый путь: только запомнить время
+                        cst.circuit_path = buf.circuit_source;
+                        cst.circuit_mtime = mt;
+                    } else if (mt >= 0 && mt != cst.circuit_mtime) cst.circuit_import_now = true;
+                }
+            }
+            if (cst.circuit_import_now && !buf.circuit_source.empty()) {
+                cst.circuit_import_now = false;
+                std::string rep, e;
+                if (buf.import_circuit(&rep, &e)) { cst.circuit_report = rep; cst.circuit_error.clear(); }
+                else cst.circuit_error = e;
+                cst.circuit_path = buf.circuit_source;
+                cst.circuit_mtime = circuit_source_mtime(buf.circuit_source);
+            }
+            if (!buf.circuit_source.empty()) {
+                if (!cst.circuit_error.empty())
+                    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Import failed: %s", cst.circuit_error.c_str());
+                if (!cst.circuit_report.empty() && ImGui::TreeNode("Import report##dae_circuit")) {
+                    ImGui::TextWrapped("%s", cst.circuit_report.c_str());
+                    ImGui::TreePop();
+                }
+            }
+        }
         ImGui::Text("Equations:");
         InputTextMultilineStr("##dae_eqs", buf.plain_text, ImVec2(-1, 160));
         // Вспомогательные функции — как у ОДУ: подставляются в уравнения при разборе.

@@ -259,6 +259,13 @@ static std::string pick_open_text_file_win() {
     return com_file_dialog(false, f, 2, nullptr);
 }
 
+// Диалог открытия схемы (вкладка DAE): SPICE-netlist или схема KiCad.
+static std::string pick_open_circuit_file_win() {
+    static const COMDLG_FILTERSPEC f[] = {
+        { L"Circuits", L"*.cir;*.net;*.sp;*.spice;*.kicad_sch" }, { L"All files", L"*.*" } };
+    return com_file_dialog(false, f, 2, nullptr);
+}
+
 // Диалог сохранения SPICE-netlist'а.
 static std::string pick_save_netlist_file_win() {
     static const COMDLG_FILTERSPEC f[] = {
@@ -336,6 +343,7 @@ int main() {
     cb.pick_save_file_csv = pick_save_csv_file_win;
     cb.pick_save_file_netlist = pick_save_netlist_file_win;
     cb.pick_open_file_text = pick_open_text_file_win;
+    cb.pick_open_file_circuit = pick_open_circuit_file_win;
 
     // Право-клик "Copy image to clipboard" на любой диаграмме стекается
     // сюда (см. plot_axis.h set_screenshot_request_sink).

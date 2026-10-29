@@ -454,6 +454,32 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   7e-12, Radau IIA 2e-10, Radau + GGL 8e-14 — the stage 5-6 bodies compile and run under NVRTC. Not done:
   a NaN mark for points where Newton finds no root (the step cannot report it), DFT on the GPU (no
   projection there), adaptive DAE methods (none exist).
+- Stage 8, circuits: `spice_parse.cpp/.h` turns a SPICE netlist into the TEXT of a semi-explicit DAE
+  (the same record fields a user types: equations, x, z, params, IC, h), so a circuit is just a DAE
+  record and goes everywhere a DAE goes. MNA form: x = capacitor voltages `vc_<C>` and inductor
+  currents `il_<L>`; z = node potentials `v_<node>`, capacitor currents `ic_<C>`, currents of
+  voltage-defined branches `i_<name>` (V, E, H, B with V=, nullor outputs); rows: vc' = ic/C,
+  il' = (Va - Vb)/L, KCL per node (sum of leaving currents), Va - Vb - vc = 0 per capacitor, the
+  branch voltage equation per branch. Element values (R, C, L, gains, DC, SIN vo/va/f) are
+  parameters named after the element (`r1`, `x2_c1` inside subcircuits) - sweepable. Supported:
+  R C L, V/I with DC / SIN / PULSE (periodic: unrolled up to TSTOP, max 200) / PWL / EXP (all as
+  min/max/exp of t, no fmod - implicit methods need derivatives), E/G (gain, VALUE=, POLY(n) in the
+  SPICE 2 term order), F/H, B (V=/I=, V(a,b), I(Vx), time), X with .subckt params, .param, .ic,
+  .tran, .include/.lib. E with |gain| >= 1e4 becomes a nullor (V+ = V-, free output current) - that
+  is how `emit_spice_netlist` writes an ideal op-amp; op-amp subcircuits by name (TL072, LM741, ...,
+  3 or 5 pins) are replaced by a nullor too, reported in the notes. D/Q/M/J are refused (stage 9).
+  Loops of capacitors / voltage sources are reported (index 2). `spice_to_circuit_graph` reads an
+  emitted netlist back into a `CircuitGraph` (round-trip test). `kicad_import.cpp/.h`: `.kicad_sch`
+  goes through `kicad-cli sch export netlist --format spice` (found via UCUDA_KICAD_CLI, PATH,
+  Program Files\KiCad\<ver>\bin; it blocks the UI thread for the export, ~1-2 s).
+  Record fields `circuit_source` (path) and `circuit_netlist` (copy at import time);
+  `AppModel::import_circuit` overwrites the DAE fields; the DAE editor has Circuit / Open / Re-read /
+  Watch (mtime polled once a second) and an import report. Tests: `tests/u-cuda/spice_test.cpp` -
+  RC with SIN / PULSE / PWL against RK4 of the scalar ODE (1e-8), integrator on TL072 inside a
+  .subckt, F/H, refusals, and the round trip Lorenz -> synthesis -> netlist (B and POLY) -> graph
+  (same topology signature) -> DAE: Radau IIA = `circuit_simulate` to 1e-5 V at t = 1.
+  Not done: the KiCad exporter command (`U-CUDA.exe --import-netlist` into a running instance),
+  L-I cutset detection, mutual inductance K, conditionals in B expressions.
 - Newton for DAE: the predictor of `scheme_implicit_common` (BDF1, Trapezoidal, TR-BDF2, SDIRK2,
   Implicit Midpoint) is X_n for x and z alike, like Radau. The explicit-Euler x predictor the ODE
   schemes keep threw Newton far from the root on stiff circuits: "DAE-1 PUT burst neuron" at h = 5e-4

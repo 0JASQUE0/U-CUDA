@@ -136,6 +136,8 @@ std::string record_to_json(const SystemRecord& r) {
         kv(o, "dae_index_text", r.dae_index_text);
         kv(o, "dae_as_ode", r.dae_as_ode ? "1" : "0");   // строкой — см. "kind"
         kv(o, "dae_stab_alpha", r.dae_stab_alpha);
+        if (!r.circuit_source.empty()) kv(o, "circuit_source", r.circuit_source);
+        if (!r.circuit_netlist.empty()) kv(o, "circuit_netlist", r.circuit_netlist);
     }
     kv(o, "mode", r.mode);
     kv(o, "latex_text", r.latex_text);
@@ -368,6 +370,8 @@ SystemRecord record_from_json(const std::string& json) {
             else if (key == "dae_index_text") r.dae_index_text = val;
             else if (key == "dae_as_ode") r.dae_as_ode = (val == "1" || val == "true");
             else if (key == "dae_stab_alpha") r.dae_stab_alpha = val;
+            else if (key == "circuit_source") r.circuit_source = val;
+            else if (key == "circuit_netlist") r.circuit_netlist = val;
             else if (key == "mode") r.mode = val;
             else if (key == "latex_text") r.latex_text = val;
             else if (key == "plain_text") r.plain_text = val;

@@ -55,7 +55,11 @@ struct SystemRecord {
     // Уровень C (индекс 2-3 при dae_as_ode): связи дифференцируются и стабилизируются
     // (d/dt + alpha)^m g = 0 — alpha здесь (см. dae_stabilized_index1).
     std::string dae_stab_alpha = "10";
-    std::string mode;         // "Image" | "LaTeX" | "Plain"
+    // ДАУ из схемы (этап 8): путь к .kicad_sch / .cir и копия netlist'а на момент
+    // импорта — запись воспроизводится и без исходного файла. Пусто — уравнения введены руками.
+    std::string circuit_source;
+    std::string circuit_netlist;
+    std::string mode;        // "Image" | "LaTeX" | "Plain"
     std::string latex_text;
     std::string plain_text;
     std::string alphabet_text;       // legacy: один список (vars + params вперемешку)
