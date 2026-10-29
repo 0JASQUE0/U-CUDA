@@ -383,7 +383,13 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   TR-BDF2), DAE Implicit Midpoint (`scheme_implicit_common` Midpoint with dae_nx — a control method: it
   does not hold an index-2 constraint and diverges on index 3, as the plan says), DAE Radau IIA (5)
   (`dae_radau5`: 3 stages, full Newton on 3N unknowns, x rows Y_i - x_n - h sum a_ij f(Y_j), constraint
-  rows g(Y_i) = 0, loop-form LU 3N x 3N; RADAU5's simplified Newton with the A^-1 transform is not done).
+  rows g(Y_i) = 0, loop-form LU 3N x 3N). With newton_full = 0 the body first runs RADAU5's simplified Newton
+  (Hairer-Wanner IV.8): J at X once per step, T^-1 A^-1 T = diag(gamma, [[alpha, -beta], [beta, alpha]]) (T and
+  the eigenvalues computed in codegen from the table and checked), a real N x N system (gamma/h M - J) and the
+  complex one ((alpha + i beta)/h M - J) as a real 2N x 2N; if it diverges / is singular / does not converge in
+  nmax, the same step goes through the old Newton from the predictor (`rd_done`). newton_full = 1 (DAE default)
+  runs the old text. Orders unchanged (index 1: 5/5, 2: 5/3, 3 + GGL: 5/3), = full Newton to 6e-13 on the
+  index-2 pendulum, converges without the fallback (dae_test). Speed not measured (stage 10).
   `System::dae_index` (from `dae_index_text`, `DaeSystem::as_codegen_system`) weights the Newton
   correction of an index-k variable by h^(k-1) (`dae_norm_w`), in `scheme_implicit_common` and Radau;
   index <= 1 systems print the old text. Orders (headless probe, self-convergence): Radau IIA index 1:
@@ -451,9 +457,14 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   GGL bodies write the extended state into `ucuda_xg[]` (not a shadowed `X`): `krs_cpu_check_indices`
   rejects X[i] beyond N. Headless GPU probe: a sweep from z0 = 0 equals per-point runs from a consistent
   z0 to 4e-15 (GPU, CPU, classic, continuation); double pendulum Metrics GPU vs CPU: BDF1 (sparse LU)
-  7e-12, Radau IIA 2e-10, Radau + GGL 8e-14 — the stage 5-6 bodies compile and run under NVRTC. Not done:
-  a NaN mark for points where Newton finds no root (the step cannot report it), DFT on the GPU (no
-  projection there), adaptive DAE methods (none exist).
+  7e-12, Radau IIA 2e-10, Radau + GGL 8e-14 — the stage 5-6 bodies compile and run under NVRTC. No root:
+  the projection (h = 0 branch of `codegen_dae_scheme`) writes NaN into z when its Newton ends singular, non-finite
+  or with a correction > 1e-3 |X| after all iterations; the sweep loops see that as divergence (dae_test
+  `dae_no_root_point`: 0 = z^2 + p, p = 1 -> NaN / flag 0, p <= 0 measured; GPU and CPU). Steps with h > 0 are
+  unchanged (an unconverged step is still accepted). DFT: classic GPU goes through
+  `calculateDiscreteModelCUDA` (projected), the h-sweep and continuation templates (`dft1d_hsweep`, `dft1d_cont`)
+  project too (the step with h = 0 under `UCUDA_LYAP_NX`; dae_test `dft_dae`: z0 = 0 equals a consistent z0 to
+  the last bit on all six paths, GPU vs CPU 2e-8 - FMA in the trapezoid Newton).
 - Stage 8, circuits: `spice_parse.cpp/.h` turns a SPICE netlist into the TEXT of a semi-explicit DAE
   (the same record fields a user types: equations, x, z, params, IC, h), so a circuit is just a DAE
   record and goes everywhere a DAE goes. MNA form: x = capacitor voltages `vc_<C>` and inductor
@@ -481,12 +492,12 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   Not done: the KiCad exporter command (`U-CUDA.exe --import-netlist` into a running instance),
   L-I cutset detection, mutual inductance K, conditionals in B expressions.
 - Stage 9a, devices and DC OP (`dae_devices.cpp/.h`): diodes (D, SPICE level 1 DC: IS, N, RS -> internal
-  node `<name>#a`, CJO as a constant capacitor) and BJTs (Q, NPN/PNP: Ebers-Moll transport form with Early
+  node `<name>#a`, CJO - see "Stage 9 tails") and BJTs (Q, NPN/PNP: Ebers-Moll transport form with Early
   VAF/VAR, IS/BF/BR/NF/NR, RB/RC/RE -> internal nodes, CJE/CJC constant) from `.model`; area factor. Model
   parameters become a[] parameters `<model>_<param>` once per model (zero-default ones like RS/VAF only if
   given); parameters that are set but not modelled (BV, TT, IKF, ISE, ...) are listed in the notes.
   Exponentials go through `dev_explim` (exp up to 40, tangent line above) - without it Newton from a far
-  start overflows. MOSFET/JFET are refused. Numbers in generated DAE text never use e-notation
+  start overflows. MOSFET / JFET: stage 9d and "Stage 9 tails". Numbers in generated DAE text never use e-notation
   (`fmt` / `num` print `(m*10^(k))`): the equation parser reads `1e-12` as `1*e - 12`.
   Topology at import: a loop of voltage sources or a node with only current sources -> error; a node with no
   DC path to ground -> note. `dae_dc_operating_point` (any DAE: f = 0 and g = 0 in all variables; for a
@@ -497,8 +508,7 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   1e-12 (at the root max|g| sits at round-off and does not strictly decrease; the transistor stage from
   vc = 0 never left the loop). Tests (spice_test): rectifier vs the scalar ODE, CE stage NPN/PNP OP vs an
   independent 2D Newton (and PNP = -NPN), diode RS, topology errors, Chua with a negative G and antiparallel
-  diodes = the same system written as an ODE (1e-6 at 1 ms). The ngspice comparison of the plan is not
-  done (no ngspice on the machine).
+  diodes = the same system written as an ODE (1e-6 at 1 ms). ngspice comparison: see "KiCad and ngspice".
 - Stage 9b, adaptive step on a DAE: `codegen_adaptive_dae(s, DaeScheme::Rodas4)` (`adaptive_code_for_scheme`
   routes every native DAE there; `adaptive_scheme_name_supported("DAE Rodas4")`). The emb body is
   `dae_rosenbrock(s, T, emb = true)` - the same stages, `Y` instead of `X`, E = sum (m - mhat) u = u6
@@ -508,8 +518,14 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   in x AND z (Hermite from F would use g as a derivative). Index 1 only (the driver's error norm has
   no h^(k-1) scaling by variable index). Analysis only: CPU through the adaptive DLL (`dae_nx >= 0` goes to
   `AdaptiveCpuModule`), GPU through the usual phase_kernel_ad; z0 is made consistent on the CPU before the
-  run, as for fixed steps. Sweeps refuse it (`fill_adaptive_request`): the adaptive modules have neither the
-  per-point z0 projection nor the LLE/LS clone projection. Tests (dae_test): RC exact u(5) within 1.4e-6 /
+  run, as for fixed steps. Sweeps: `fill_adaptive_request` adds `AdaptiveRequest::prefix` =
+  `#define UCUDA_AD_DAE_NX nx`; then the driver (`ucuda_adaptive.cuh`) projects z onto g = 0 in `ucuda_ad_init` /
+  `ucuda_ad_restart` (`ucuda_ad_dae_project`: Newton in z, dg/dz by forward differences of the rhs body [f; g],
+  the module has no Jacobian) and every LLE/LS clone after placement / renormalisation; clone directions and
+  their Gram-Schmidt are in x only (z part copied from the base, then projected). Without the macro the text is
+  the old one. The same macro is set for DAE BDF sweeps (x-only clones). Tests (dae_test `dae_sweeps` run for
+  BDF and Rodas4): Metrics from z0 = 0 = per-point consistent (1e-8), BD 2D, basins, LLE / LS -0.500000 /
+  -2.000000 GPU = CPU. Tests (dae_test): RC exact u(5) within 1.4e-6 /
   2e-10 at tol 1e-5 / 1e-9 (19 / 163 steps), dense output on a 0.05 grid 6.5e-9 (CPU), the same on the
   GPU, Kepler coupling = fixed Rodas4 h = 1e-3, refusals (index 2, BDF1).
 - Stage 9c, multistep BDF 1-5 (`multistep_bdf.h`, header-only, its own driver - the user wants a
@@ -553,13 +569,17 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   fixed-step body: `sweep_krs` gives BDF1 (DAE) / Euler (ODE) when the adaptive step is on (its kernels are
   never called); with a fixed step the multistep names are refused as before. Every sweep point starts with
   z projected onto g = 0 (Newton in z, x fixed), so a DAE sweep from one z0 = a run from a consistent z0 per
-  point. Index 3 (GGL adds variables) stays Analysis-only. LLE/LS note: clones are independent BDF
+  point. Index 3: `fill_adaptive_request` builds the bodies over `bdf_prepare_system` (GGL) and sets
+  `AdaptiveRequest::extra_x` = number of multipliers; every sweep builder calls `sweep_extend_state` (amountOfX
+  + extra_x, IC tail = 0), results are read by the old indices (dae_test `bdf_index3_sweep`: pendulum Metrics
+  max x = sin 1 = Analysis, GPU and CPU). LLE/LS note: clones are independent BDF
   trajectories, so their accuracy relative to the perturbation is ~ tol / eps - take tol << eps (the
   adaptive step controls the clone error jointly; BDF cannot).
   Tests (dae_test): Metrics on x' = -x + z, 0 = z - p (cos x + 1) from z0 = 0 = per-point consistent runs
   (1e-8, GPU and CPU); BD 1D van der Pol mu = 1: peak 2.008620 (classic GPU, continuation GPU and CPU); LLE
   and LS on x1' = -x1 + z, x2' = -2 x2, 0 = z - 0.5 x1: -0.4985 / -2.0007 (exact -0.5 / -2), CPU vs GPU 1e-5.
-  Not tested: basins and BD 2D (same driver).
+  BD 2D (DAE van der Pol mu x k: equilibrium / period 1) and basins (r' = -r (r^2 - 0.36)(r^2 - 1.44): equilibrium
+  inside r = 0.6, cycle outside) on BDF and on adaptive Rodas4.
 - Stage 9d, op-amps "as is" plus an ideal copy (user's request): `SpiceImportOptions::ideal_opamps` (record
   field `circuit_ideal_opamps`, JSON "1"). Off (default): an op-amp from the table or `uc_opamp` whose
   .subckt is in the netlist is expanded element by element (the vendor model); on: it is a nullor. An op-amp
@@ -572,8 +592,39 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   already below the old absolute floor 1/4096 and no step was tried; a non-finite correction is refused.
   Test (spice_test): JFET saturation / linear / P = -N, F POLY(2), an inverting amplifier x(-10) with a
   JFET-input macro model of my own named TL072: as is -0.999988 V, ideal -1.000000 V.
-  Open after stage 9: BDF index 2-3 (DASSL form), BDF GPU kernel and Parametric, adaptive DAE in sweeps
-  (per-point z0 and clone projection), MOSFET, voltage-dependent junction capacitances, ngspice comparison.
+- Stage 9 tails (devices): MOSFET level 1 (M d g s b, NMOS/PMOS, W/L/M, `mosfet_drain_current` = the JFET
+  half-formula with BETA = KP W/(2L) and a separate threshold per half - vbs forward, vbd reverse - for the body
+  effect GAMMA/PHI, `mosfet_threshold`; RD/RS, constant overlap CGSO/CGDO; LEVEL != 1 is refused, not
+  replaced). Junction capacitances of D (CJO/VJ/M/FC), Q (CJE/VJE/MJE, CJC/VJC/MJC) and J (CGS/CGD/PB/M) are
+  voltage-dependent (`junction_capacitance`: the SPICE depletion formula, tangent above FC*VJ, min/max form;
+  `capacitor()` takes an expression with "@V" = its own voltage; PNP / P-JFET pass "(-@V)"). Mutual inductance
+  K (any groups): coupled inductors get z `dl_<L>` = il' and rows V = L dl + sum k sqrt(Li Lj) dl_j (index 1,
+  |k| < 1). Tests (spice_test `devices_tails`): MOSFET saturation / linear / PMOS / body effect exact,
+  diode C(v) charging to -5 V and +1 V = scalar ODE to 1e-9, transformer K = 2D ODE to 1e-9.
+  Conditionals in B / VALUE= (`CondRewriter` in spice_parse.cpp): comparisons, && || !, c ? a : b, if(c, a, b),
+  u(), uramp(), limit(), sgn() become branch-free expressions with st(u) = (1 + copysign(1, u))/2 (a >= b:
+  st(a - b); a > b: 1 - st(b - a); == exact via st(a-b) st(b-a)); expressions without them print as before.
+  `pn_diff` now differentiates copysign(a, b) (sgn a sgn b da). L-I cutsets (`loops()`): contract every branch
+  except inductors and current sources; an inductor between different super-nodes is reported (index 2).
+  Tests (spice_test `b_conditionals`, `li_cutsets`): comparator -> RC = scalar ODE (4e-6, the jump costs O(h)),
+  an if/&&/!/limit/uramp node exact, single '=' refused; series L-L through a bare node reported, RL not.
+- KiCad and ngspice (live, KiCad 10.0.6 in %LOCALAPPDATA%\Programs\KiCad, found by `kicad_find_cli`): test
+  `tests/u-cuda/kicad_test.cpp` (skip 77 without KiCad). (1) Every demo of share\kicad\demos\simulation goes
+  .kicad_sch -> kicad-cli -> `spice_import`: 11 of 20 import; refused with a reason: XSPICE A elements (5),
+  VDMOS (2), TRNOISE, PULSE with 29750 periods; Q17 fails in kicad-cli itself (KiCad's own library). (2) ngspice:
+  no separate install - KiCad's `bin\ngspice.dll` (shared ngspice) loaded at run time, the API declared in the
+  test; the same netlist runs in ngspice (gear, reltol 1e-7, maxstep = our h) and in our import (Radau IIA, DC OP
+  or UIC as AppModel). Max diff / signal range: KiCad rectifier 5e-5, KiCad generic_opamp_bip 9e-5, BJT CE with
+  C(v) 1.3e-5, MOSFET with body effect 1e-7, JFET 4e-8, K 1.4e-5, B ?: 8e-5, SFFM 1.4e-4. AM: this ngspice build
+  returns a constant VA for AM(..) at t > 0 (not the manual formula, which the import follows) - the test prints
+  it and does not compare. Probe mode: UCUDA_NG_PROBE=<netlist> UCUDA_NG_NODE UCUDA_NG_T [UCUDA_NG_N].
+  Import changes for the demos: .model parameters are kept as text and evaluated per use in the instance scope
+  (Is={Ices/2} with .subckt params; a model from a .subckt is per instance, its a[] names prefixed; unused XSPICE /
+  text-field models no longer break loading), .param of a .subckt evaluated before its elements (PSpice LM317),
+  R with an expression value (r='TIME > 350m ? 8 : 89' -> I = V/R(t, V)), "DC ac=1" key=value on sources, SINE,
+  AM, SFFM, PSpice "VALUE {..}" without '=', K with |k| = 1 (ideal transformer, index-2 note), clear refusals
+  for A elements, VDMOS and noise sources.
+  Still open: GUI check.
 - Newton for DAE: the predictor of `scheme_implicit_common` (BDF1, Trapezoidal, TR-BDF2, SDIRK2,
   Implicit Midpoint) is X_n for x and z alike, like Radau. The explicit-Euler x predictor the ODE
   schemes keep threw Newton far from the root on stiff circuits: "DAE-1 PUT burst neuron" at h = 5e-4

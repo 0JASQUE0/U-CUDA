@@ -148,8 +148,8 @@ void subcircuits() {
     // Отказы.
     SpiceImportResult r;
     std::string err;
-    ut::require(!spice_import("* m\nV1 a 0 1\nM1 a a 0 0 nmod\nC1 a 0 1u\n", {}, r, &err) &&
-                err.find("MOSFET") != std::string::npos, "MOSFET refused: " + err);
+    ut::require(!spice_import("* z\nV1 a 0 1\nZ1 a a 0 zmod\nC1 a 0 1u\n", {}, r, &err) &&
+                err.find("MESFET") != std::string::npos, "MESFET refused: " + err);
     ut::require(!spice_import("* d\nV1 a 0 1\nD1 a b nomodel\nC1 b 0 1u\n", {}, r, &err) &&
                 err.find("unknown model") != std::string::npos, "diode without .model refused: " + err);
     ut::require(!spice_import("* x\nX1 a b nosuch\nC1 a 0 1u\nR1 b 0 1k\n", {}, r, &err) &&
@@ -414,6 +414,137 @@ void chua() {
 
 }  // namespace
 
+// --- хвосты этапа 9: MOSFET level 1, ёмкости переходов C(v), взаимная индуктивность K ----------------
+void devices_tails() {
+    // MOSFET: BETA = KP W / (2 L) = 1e-3; насыщение, линейная область, PMOS зеркально, эффект подложки.
+    auto mos = [&](double vds, double vgs, double vb, bool p, const char* extra) {
+        const char* s = p ? "-" : "";
+        Imported m;
+        char net[512];
+        std::snprintf(net, sizeof(net), "* mos\nVd d 0 DC %s%g\nVg g 0 DC %s%g\nVb b 0 DC %s%g\nM1 d g 0 b mm W=10u L=10u\n"
+                      "C1 d 0 1n\n.model mm %s(LEVEL=1 VTO=%s1 KP=2e-3 LAMBDA=0.01%s)\n",
+                      s, vds, s, vgs, s, vb, p ? "PMOS" : "NMOS", s, extra);
+        const auto X = op_point(net, m);
+        return -X[(size_t)m.idx("i_vd")];
+    };
+    ut::approx(mos(5, 2, 0, false, ""), 1e-3 * 1 * (1 + 0.05), 1e-10, "NMOS saturation: BETA (vgs - VT)^2 (1 + LAMBDA vds)");
+    ut::approx(mos(0.5, 3, 0, false, ""), 1e-3 * 0.5 * (4 - 0.5) * (1 + 0.005), 1e-10, "NMOS linear region");
+    ut::approx(mos(5, 2, 0, true, ""), -1e-3 * 1 * (1 + 0.05), 1e-10, "PMOS = -NMOS");
+    const double vt = 1 + 0.5 * (std::sqrt(0.6 + 1) - std::sqrt(0.6));
+    ut::approx(mos(5, 3, -1, false, " GAMMA=0.5 PHI=0.6"), 1e-3 * (3 - vt) * (3 - vt) * (1 + 0.05), 1e-10,
+               "NMOS body effect: VT = VTO + GAMMA (sqrt(PHI - vbs) - sqrt(PHI))");
+    {   // LEVEL 3 — отказ, а не тихая подмена level 1
+        SpiceImportResult r;
+        std::string err;
+        const bool ok = spice_import("* l3\nVd d 0 DC 1\nM1 d d 0 0 mm\nC1 d 0 1n\n.model mm NMOS(LEVEL=3)\n", {}, r, &err);
+        ut::require(!ok && err.find("LEVEL") != std::string::npos, "MOSFET level 3 is refused: " + err);
+    }
+    std::printf("  MOSFET level 1: saturation, linear region, PMOS = -NMOS, body effect - exact\n");
+
+    // Ёмкость перехода диода C(v): заряд через R до -5 В (обратное смещение) и до +1 В (выше FC VJ —
+    // линейное продолжение), против скалярной ОДУ C(v) v' = (Vs - v)/R - Id(v).
+    for (double vs : { -5.0, 1.0 }) {
+        char net[256];
+        std::snprintf(net, sizeof(net), "* cj\nV1 in 0 DC %g\nR1 in a 1k\nD1 a 0 dm\n.model dm D(IS=1e-14 CJO=10p VJ=0.7 M=0.5)\n"
+                      ".tran 1n 50n uic\n", vs);
+        const Imported m = import(net);
+        const auto y = run(m, DaeScheme::Radau5, 1e-11, 50e-9);
+        const double Vt = 0.025864186384551, cj0 = 10e-12, vj = 0.7, mj = 0.5, fc = 0.5;
+        auto C = [&](double v) {
+            const double vm = std::fmin(v, fc * vj);
+            return cj0 * std::pow(1 - vm / vj, -mj) + cj0 * mj / (vj * std::pow(1 - fc, 1 + mj)) * std::fmax(v - fc * vj, 0.0);
+        };
+        auto Id = [&](double v) { const double u = v / Vt; return 1e-14 * ((u <= 40 ? std::exp(u) : std::exp(40.0) * (1 + u - 40)) - 1) + 1e-12 * v; };
+        const double ref = ode_ref([&](double, double v) { return ((vs - v) / 1e3 - Id(v)) / C(v); }, 0.0, 50e-9, 50000);
+        const double got = y[(size_t)m.idx("vc_d1_cj")];
+        std::printf("  diode junction C(v), charge to %+g V: v(50 ns) = %.9f (ODE %.9f)\n", vs, got, ref);
+        ut::approx(got, ref, 1e-6, vs < 0 ? "junction capacitance, reverse bias" : "junction capacitance above FC*VJ");
+    }
+
+    // K: L1 (1 мГн) от 1 В через 10 Ом, L2 (4 мГн) на 50 Ом, k = 0.9 — против ОДУ L i' = V(i).
+    {
+        const Imported m = import("* k\nV1 in 0 DC 1\nR1 in a 10\nL1 a 0 1m\nL2 b 0 4m\nR2 b 0 50\nK1 L1 L2 0.9\n.tran 1u 100u uic\n");
+        ut::require(m.r.alg_text.find("dl_l1") != std::string::npos, "K: inductor derivatives become z");
+        const auto y = run(m, DaeScheme::Radau5, 1e-8, 100e-6);
+        const double L1 = 1e-3, L2 = 4e-3, M = 0.9 * std::sqrt(L1 * L2), det = L1 * L2 - M * M;
+        auto f = [&](const double* i, double* d) {
+            const double v1 = 1 - 10 * i[0], v2 = -50 * i[1];
+            d[0] = (L2 * v1 - M * v2) / det;
+            d[1] = (L1 * v2 - M * v1) / det;
+        };
+        double i[2] = { 0, 0 };
+        const int n = 100000;
+        const double h = 100e-6 / n;
+        for (int s = 0; s < n; ++s) {
+            double k1[2], k2[2], k3[2], k4[2], t[2];
+            f(i, k1);
+            for (int c = 0; c < 2; ++c) t[c] = i[c] + h / 2 * k1[c];
+            f(t, k2);
+            for (int c = 0; c < 2; ++c) t[c] = i[c] + h / 2 * k2[c];
+            f(t, k3);
+            for (int c = 0; c < 2; ++c) t[c] = i[c] + h * k3[c];
+            f(t, k4);
+            for (int c = 0; c < 2; ++c) i[c] += h / 6 * (k1[c] + 2 * k2[c] + 2 * k3[c] + k4[c]);
+        }
+        const double i1 = y[(size_t)m.idx("il_l1")], i2 = y[(size_t)m.idx("il_l2")];
+        std::printf("  mutual inductance K: i1 = %.9f, i2 = %.9f (ODE %.9f %.9f)\n", i1, i2, i[0], i[1]);
+        ut::approx(i1, i[0], 1e-7, "K: primary current");
+        ut::approx(i2, i[1], 1e-7, "K: secondary current");
+        SpiceImportResult r;
+        std::string err;
+        const bool ok = spice_import("* k1\nV1 a 0 DC 1\nL1 a 0 1m\nL2 b 0 1m\nR2 b 0 1\nK1 L1 L2 1.5\n", {}, r, &err);
+        ut::require(!ok, "|K| > 1 is refused");
+        SpiceImportResult r1;
+        const bool ok1 = spice_import("* k1\nV1 a 0 DC 1\nL1 a 0 1m\nL2 b 0 1m\nR2 b 0 1\nK1 L1 L2 1\n", {}, r1, &err);
+        std::string nt;
+        for (const auto& s : r1.notes) nt += s;
+        ut::require(ok1 && nt.find("index 2") != std::string::npos, "K = 1: imported with an index-2 note: " + err);
+    }
+}
+
+// Условия в B: компаратор с гистерезисом нет — просто порог; ступенька copysign, без ветвлений.
+void b_conditionals() {
+    const double kPi = 3.14159265358979323846;
+    const Imported m = import("* cond\nV1 in 0 SIN(0 1 1k)\nB1 a 0 V = V(in) > 0.5 ? 2 : -1\nR1 a c 1k\nC1 c 0 100n\n"
+                              "B2 b 0 V = if(V(in) > 0 && !(V(in) >= 0.8), limit(5*V(in), 0, 3), uramp(-V(in)) + u(V(in) - 2))\n"
+                              "R2 b 0 1k\n.tran 1u 0.7m uic\n");
+    const double T = 0.7e-3;
+    const auto y = run(m, DaeScheme::Radau5, 1e-8, T);
+    auto s = [&](double t) { return std::sin(2 * kPi * 1e3 * t) > 0.5 ? 2.0 : -1.0; };
+    const double ref = ode_ref([&](double t, double v) { return (s(t) - v) / 1e-4; }, 0.0, T, 700000);
+    const double got = y[(size_t)m.idx("vc_c1")];
+    const double vin = std::sin(2 * kPi * 1e3 * T);
+    const double bref = (vin > 0 && !(vin >= 0.8)) ? std::fmin(std::fmax(5 * vin, 0.0), 3.0) : std::fmax(-vin, 0.0);
+    const double bgot = y[(size_t)m.idx("v_b")];
+    std::printf("  B conditionals: comparator -> RC v(0.7 ms) = %.7f (ODE %.7f); if/&&/!/limit/uramp node %.9f (%.9f)\n",
+                got, ref, bgot, bref);
+    ut::approx(got, ref, 2e-4, "B comparator ?: drives RC as the step function");   // разрыв: O(h) у обоих
+    ut::approx(bgot, bref, 1e-9, "B if(), &&, !, limit(), uramp(), u()");
+    SpiceImportResult r;
+    std::string err;
+    const bool ok = spice_import("* bad\nV1 in 0 1\nB1 a 0 V = V(in) = 1\nR1 a 0 1\nC1 a 0 1n\n", {}, r, &err);
+    ut::require(!ok && err.find("==") != std::string::npos, "single '=' in B is refused: " + err);
+}
+
+// Сечения L-I: две катушки последовательно через узел без других ветвей; катушка с источником тока.
+void li_cutsets() {
+    auto notes = [](const std::string& net) {
+        SpiceImportResult r;
+        std::string err;
+        { const bool ok_ = spice_import(net, {}, r, &err); ut::require(ok_, "import: " + err); }
+        std::string all;
+        for (const auto& n : r.notes) all += n + "\n";
+        return all;
+    };
+    const std::string a = notes("* ll\nV1 in 0 DC 1\nR1 in a 10\nL1 a b 1m\nL2 b 0 2m\n");
+    ut::require(a.find("cutset") != std::string::npos && a.find("L1") != std::string::npos, "series L-L node: cutset\n" + a);
+    const std::string b = notes("* li\nI1 0 a DC 1m\nL1 a 0 1m\nR1 a c 1k\nC1 c 0 1n\nL2 c 0 1m\n");
+    ut::require(b.find("cutset") == std::string::npos, "R joins the node: no cutset\n" + b);
+    const std::string c = notes("* rl\nV1 in 0 DC 1\nR1 in a 10\nL1 a 0 1m\nR2 a 0 5\n");
+    ut::require(c.find("cutset") == std::string::npos, "RL: no cutset\n" + c);
+    std::printf("  L-I cutsets: series inductors through a bare node reported (index 2), RL circuits not\n");
+}
+
 int main() {
     return ut::run_main("spice", []() -> int {
         sources();
@@ -422,6 +553,9 @@ int main() {
         devices();
         chua();
         devices_9d();
+        devices_tails();
+        b_conditionals();
+        li_cutsets();
         return 0;
     });
 }

@@ -150,6 +150,10 @@ extern "C" __global__ void dft1dHSweepKernel(
     for (int i = 0; i < amountOfX; ++i)      x[i] = baseX[i];
     for (int i = 0; i < amountOfValues; ++i) a[i] = baseValues[i];
     UCUDA_NVAR(ucudaStep, 0)
+#ifdef UCUDA_LYAP_NX
+    // ДАУ: z0 из настроек мог быть несогласован — шаг метода при h = 0 (Ньютон по z), как у БД.
+    calculateDiscreteModel(x, UCUDA_TA((numb)0) a, (numb)0);
+#endif
 
     numb* myData = d_data + (size_t)idx * (size_t)maxPointsInBlock;
 

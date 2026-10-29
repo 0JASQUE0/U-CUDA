@@ -113,6 +113,32 @@ void cpu_tests() {
     order_at_least(k1, DaeScheme::ROS3P, k1x, tail({ 0.5 }), 1.0, 0.05, 2.7, 2.7, "ROS3P, index 1");
     order_at_least(k1, DaeScheme::Rodas4, k1x, tail({ 0.5 }), 1.0, 0.05, 3.7, 3.7, "Rodas4, index 1");
 
+    // 2b. упрощённый Ньютон RADAU5 (newton_full = 0): порядки те же, решение = полному Ньютону до допуска
+    {
+        std::vector<double> as = kPendA;
+        as.back() = 0;   // newton_full
+        order_at_least(p2, DaeScheme::Radau5, kPendX0, as, 2.0, 0.04, 4.5, 2.7, "Radau IIA simplified Newton, index 2");
+        order_at_least(p3, DaeScheme::Radau5GGL, kPendX0, as, 2.0, 0.04, 4.5, 2.7, "Radau IIA + GGL simplified Newton, index 3");
+        order_at_least(k1, DaeScheme::Radau5, k1x, std::vector<double>{ 0.5, 4, 1e-12, 25, 0 }, 1.0, 0.05, 4.5, 4.5,
+                       "Radau IIA simplified Newton, index 1");
+        const std::string b = codegen_dae_scheme(p2, DaeScheme::Radau5);
+        ut::require(b.find("RADAU5 simplified Newton") != std::string::npos, "Radau body has the RADAU5 path");
+        const auto yf = cpu.run(b, kPendX0, kPendA, 0.01, 2.0), ys = cpu.run(b, kPendX0, as, 0.01, 2.0);
+        double d = 0;
+        for (size_t i = 0; i < yf.size(); ++i) d = std::fmax(d, std::fabs(yf[i] - ys[i]));
+        std::printf("  Radau IIA, pendulum index 2, h = 0.01: |simplified - full Newton| = %.1e\n", d);
+        ut::require(d < 1e-8, ut::num("RADAU5 simplified Newton = full Newton", d, 0, 1e-8));
+        // запасной полный Ньютон вырезан: результат тот же — сходится сам упрощённый
+        std::string nb = b;
+        const size_t k = nb.find("if (!rd_done) {");
+        ut::require(k != std::string::npos, "fallback branch present");
+        nb.replace(k, 15, "if (0) {");
+        const auto yn = cpu.run(nb, kPendX0, as, 0.01, 2.0);
+        double dn = 0;
+        for (size_t i = 0; i < yf.size(); ++i) dn = std::fmax(dn, std::fabs(yf[i] - yn[i]));
+        ut::require(dn < 1e-8, ut::num("RADAU5 simplified Newton converges without the fallback", dn, 0, 1e-8));
+    }
+
     // 3. связь индекса 3 на длинном прогоне (BDF1, Radau)
     for (DaeScheme m : { DaeScheme::BDF1, DaeScheme::Radau5 }) {
         const auto y = cpu.run(codegen_dae_scheme(p3, m), kPendX0, kPendA, 0.01, 20.0);
@@ -512,7 +538,28 @@ AdaptiveRequest bdf_sweep_request(const System& s, double tol, double span) {
     return a;
 }
 
-void bdf_sweeps() {
+// Адаптивный DAE Rodas4 в свипах — как fill_adaptive_request: пара из codegen_adaptive_dae, регулятор
+// Хайрера, UCUDA_AD_DAE_NX (z0 точки и клонов — проекцией в драйвере).
+AdaptiveRequest rodas_sweep_request(const System& s, double tol, double span) {
+    AdaptiveRequest a;
+    a.enabled = true;
+    const AdaptiveCode code = codegen_adaptive_dae(s, DaeScheme::Rodas4);
+    AdaptiveSettings st;
+    st.enabled = true;
+    char tb[32];
+    std::snprintf(tb, sizeof(tb), "%g", tol);
+    st.rtol = tb;
+    st.atol = tb;
+    std::string err;
+    { const bool ok_ = adaptive_build_params(st, code, (int)s.vars.size(), span, a.params, err, &a.ctrl_body);
+      ut::require(ok_, "Rodas4 params: " + err); }
+    a.rhs = code.rhs; a.emb = code.emb; a.dprep = code.dprep; a.deval = code.deval;
+    a.prefix = "#define UCUDA_AD_DAE_NX " + std::to_string(s.dae_nx) + "\n";
+    a.tol_ratio = 1.0;
+    return a;
+}
+
+void dae_sweeps(AdaptiveRequest (*mk)(const System&, double, double), const char* tag, bool ode) {
     ParametricEngine eng;
     // Metrics: связь зависит от параметра, z0 = 0 несогласован — проекция в каждой точке
     {
@@ -523,7 +570,7 @@ void bdf_sweeps() {
             q.amountOfX = 2; q.initial_conditions = { 0.3, 0.0 }; q.base_values = tail({ 0.5, 1.0 });
             q.param_index = 1; q.param_lo = 0.5; q.param_hi = 2.0; q.n_pts = 4; q.use_cpu = cpu_side;
             q.h = 0.05; q.t_max = 2;
-            q.adaptive = bdf_sweep_request(s, 1e-9, 2.0);
+            q.adaptive = mk(s, 1e-9, 2.0);
             const auto A = eng.run_signal_metrics(q);
             ut::require(A.ok, std::string("BDF metrics sweep (") + (cpu_side ? "CPU" : "GPU") + "): " + A.error);
             for (int j = 0; j < 4; ++j) {
@@ -539,9 +586,9 @@ void bdf_sweeps() {
                 }
             }
         }
-        std::printf("  BDF 1-5 Metrics sweep on a DAE: z0 made consistent per point (GPU and CPU)\n");
+        std::printf("  %s Metrics sweep on a DAE: z0 made consistent per point (GPU and CPU)\n", tag);
     }
-    // БД 1D (ОДУ): Ван дер Поль, mu = 1 — пики x предельного цикла 2.00862 (классика, continuation, CPU)
+    if (ode)   // БД 1D (ОДУ): Ван дер Поль, mu = 1 — пики x предельного цикла 2.00862 (классика, continuation, CPU)
     {
         System s;
         s.vars = { "x", "y" };
@@ -554,17 +601,59 @@ void bdf_sweeps() {
             b.param_index = 1; b.param_lo = 1.0; b.param_hi = 1.0; b.n_pts = 2; b.writable_var = 0;
             b.h = 0.01; b.transient_time = 60; b.t_max = 30;
             b.continuation = mode >= 1; b.use_cpu = mode == 2;
-            b.adaptive = bdf_sweep_request(s, 1e-9, 90.0);
+            b.adaptive = mk(s, 1e-9, 90.0);
             const auto r = eng.run_bifurcation_1d(b);
             ut::require(r.ok && !r.bifurcation_points.empty(), "BDF BD 1D: " + r.error);
             double pk = 0;
             int cnt = 0;
             for (double v : r.bifurcation_points[0]) if (std::isfinite(v)) { pk = std::fmax(pk, v); ++cnt; }
             const char* name = mode == 0 ? "classic GPU" : mode == 1 ? "continuation GPU" : "continuation CPU";
-            std::printf("  BDF 1-5 BD 1D (van der Pol), %s: %d peaks, max %.6f (limit cycle 2.008620)\n", name, cnt, pk);
+            std::printf("  %s BD 1D (van der Pol), %s: %d peaks, max %.6f (limit cycle 2.008620)\n", tag, name, cnt, pk);
             ut::require(cnt >= 3, "BDF BD 1D: peaks found");
             ut::approx(pk, 2.00862, 1e-4, "BDF BD 1D: van der Pol peak");
         }
+    }
+    // БД 2D (ДАУ, z0 = 0 несогласован): Ван дер Поль с z = k x; mu < 0 — равновесие, mu > 0 — цикл периода 1
+    {
+        const System s = parse_dae("x' = y\ny' = mu*(1 - x^2)*y - z\n0 = z - k*x", "x, y", "z", "mu, k", "").as_codegen_system();
+        Bifurcation2DRequest b;
+        b.krs_body = codegen_dae_scheme(s, DaeScheme::BDF1);
+        b.amountOfX = 3; b.initial_conditions = { 0.5, 0.0, 0.0 }; b.base_values = tail({ 0.5, 1.0, 1.0 });
+        b.param_index = 1; b.param_lo = -2; b.param_hi = 2;
+        b.param_index_2 = 2; b.param_lo_2 = 0.5; b.param_hi_2 = 2;
+        b.n_pts = 4; b.writable_var = 0; b.h = 0.01; b.transient_time = 60; b.t_max = 40;
+        b.adaptive = mk(s, 1e-9, 100.0);
+        const auto r = eng.run_bifurcation_2d(b);
+        ut::require(r.ok && r.values.size() == 16, "BDF BD 2D: " + r.error);
+        for (int iy = 0; iy < 4; ++iy)
+            for (int ix = 0; ix < 4; ++ix) {
+                const double v = r.values[(size_t)iy * 4 + ix];
+                ut::approx(v, ix < 2 ? -1.0 : 1.0, 0.0, "BDF BD 2D: equilibrium for mu < 0, period 1 for mu > 0");
+            }
+        std::printf("  %s BD 2D on a DAE (van der Pol, mu x k 4x4): equilibrium for mu < 0, period 1 for mu > 0\n", tag);
+    }
+    // Бассейны (ДАУ, z = r^2): r' = -r (r^2 - 0.36)(r^2 - 1.44) — равновесие при r < 0.6, цикл r = 1.2 при r > 0.6
+    {
+        const System s = parse_dae("x' = -x*(z - 0.36)*(z - 1.44) - y\ny' = -y*(z - 0.36)*(z - 1.44) + x\n0 = z - x^2 - y^2",
+                                   "x, y", "z", "p", "").as_codegen_system();
+        BasinsRequest q;
+        q.krs_body = codegen_dae_scheme(s, DaeScheme::BDF1);
+        q.amountOfX = 3; q.initial_conditions = { 0, 0, 0 }; q.base_values = tail({ 0.5, 0.0 });
+        q.axis_x_var = 0; q.axis_y_var = 1;
+        q.axis_x_lo = q.axis_y_lo = -1; q.axis_x_hi = q.axis_y_hi = 1; q.n_pts = 5;
+        q.h = 0.01; q.transient_time = 100; q.t_max = 30;
+        q.adaptive = mk(s, 1e-9, 130.0);
+        const auto r = eng.run_basins(q);
+        ut::require(r.ok && r.helpful_array.size() == 25, "BDF basins: " + r.error);
+        int fp = 0, osc = 0;
+        for (int iy = 0; iy < 5; ++iy)
+            for (int ix = 0; ix < 5; ++ix) {
+                const double x = -1 + 0.5 * ix, y = -1 + 0.5 * iy;
+                const int want = x * x + y * y < 0.36 ? -1 : 1, got = r.helpful_array[(size_t)iy * 5 + ix];
+                (want < 0 ? fp : osc) += got == want;
+                ut::require(got == want, ut::num("BDF basins: regime by radius, cell", iy * 5 + ix, 0, 0));
+            }
+        std::printf("  %s basins on a DAE: %d equilibrium cells (r < 0.6), %d cycle cells, as expected\n", tag, fp, osc);
     }
     // LLE / LS: x1' = -x1 + z, x2' = -2 x2, 0 = z - 0.5 x1  =>  спектр {-0.5, -2}
     {
@@ -574,13 +663,13 @@ void bdf_sweeps() {
         l.amountOfX = 3; l.initial_conditions = { 1, 1, 0.5 }; l.base_values = tail({ 0.5, 0.0 });
         l.param_index = 1; l.param_lo = 0; l.param_hi = 1; l.n_pts = 2; l.h = 0.01; l.t_max = 40; l.NT = 0.5; l.eps = 1e-6;
         l.vector_transient = 10;
-        l.adaptive = bdf_sweep_request(s, 1e-9, 45.0);
+        l.adaptive = mk(s, 1e-9, 45.0);
         const auto g = eng.run_lle_1d(l);
         ut::require(g.ok, "BDF LLE GPU: " + g.error);
         l.use_cpu = true;
         const auto c = eng.run_lle_1d(l);
         ut::require(c.ok, "BDF LLE CPU: " + c.error);
-        std::printf("  BDF 1-5 LLE on a DAE: GPU %.6f, CPU %.6f (exact -0.5)\n", g.lyapunov[0], c.lyapunov[0]);
+        std::printf("  %s LLE on a DAE: GPU %.6f, CPU %.6f (exact -0.5)\n", tag, g.lyapunov[0], c.lyapunov[0]);
         ut::approx(g.lyapunov[0], -0.5, 2e-3, "BDF LLE");
         // клоны BDF интегрируются независимо: их точность относительно возмущения ~ tol / eps = 1e-3,
         // и разное округление CPU / GPU сдвигает показатель на ~1e-5 (у адаптивного шага ошибку клонов
@@ -596,12 +685,117 @@ void bdf_sweeps() {
             q.continuation = cont;
             const auto r = eng.run_ls_1d(q);
             ut::require(r.ok && r.spectrum.size() == 2 && r.spectrum[0].size() == 2, "BDF LS: " + r.error);
-            std::printf("  BDF 1-5 LS on a DAE%s: %.6f %.6f (exact -0.5 -2)\n", cont ? " (continuation)" : "",
+            std::printf("  %s LS on a DAE%s: %.6f %.6f (exact -0.5 -2)\n", tag, cont ? " (continuation)" : "",
                         r.spectrum[0][0], r.spectrum[0][1]);
             ut::approx(r.spectrum[0][0], -0.5, 2e-3, "BDF LS lambda1");
             ut::approx(r.spectrum[0][1], -2.0, 2e-3, "BDF LS lambda2");
         }
     }
+}
+
+// BDF 1-5 в свипах на индексе 3: тела над системой GGL (bdf_prepare_system), состояние длиннее на mu
+// (AdaptiveRequest::extra_x, сборщики analysis_session — sweep_extend_state). Метрики x маятника против
+// той же траектории в Analysis (bdf_integrate на сетке h), GPU и CPU.
+void bdf_index3_sweep() {
+    const System s = pend(kPend3, "");
+    System sp;
+    { std::string e; const bool ok_ = bdf_prepare_system(s, sp, &e); ut::require(ok_, e); }
+    const int ng = (int)sp.vars.size();
+    ut::require(ng > (int)s.vars.size(), "GGL adds multipliers");
+    const double h = 0.01, T = 4.0, tol = 1e-9;
+    BdfSettings bs;
+    bs.rtol = tol; bs.atol = { tol };
+    std::vector<std::vector<double>> tr;
+    std::vector<double> tm;
+    BdfStats st;
+    std::string err;
+    { const bool ok_ = bdf_integrate(s, kPendA.data(), (int)kPendA.size(), kPendX0.data(), bs, 0.0, T, h,
+                                     (int)std::lround(T / h) + 1, false, 0, tr, tm, st, &err); ut::require(ok_, err); }
+    double xmax = -1e300, xmin = 1e300;
+    for (const auto& y : tr) { xmax = std::fmax(xmax, y[0]); xmin = std::fmin(xmin, y[0]); }
+    ParametricEngine eng;
+    for (int cpu_side = 0; cpu_side < 2; ++cpu_side) {
+        SignalMetricsRequest q;
+        q.krs_body = codegen_dae_scheme(s, DaeScheme::BDF1);   // как sweep_krs: шаблону нужно тело постоянного шага
+        q.amountOfX = ng;
+        q.initial_conditions = kPendX0;
+        q.initial_conditions.resize((size_t)ng, 0.0);
+        q.base_values = kPendA;
+        q.param_index = 2; q.param_lo = q.param_hi = 9.81; q.n_pts = 2; q.use_cpu = cpu_side;
+        q.writable_var = 0; q.h = h; q.t_max = T;
+        q.adaptive = bdf_sweep_request(sp, tol, T);
+        const auto r = eng.run_signal_metrics(q);
+        ut::require(r.ok, std::string("BDF index 3 sweep (") + (cpu_side ? "CPU" : "GPU") + "): " + r.error);
+        std::printf("  BDF 1-5 Metrics sweep, pendulum index 3 via GGL (%s): max x %.9f, min x %.9f "
+                    "(Analysis %.9f %.9f, |x| <= sin 1 = %.9f)\n", cpu_side ? "CPU" : "GPU", r.values[SIGM_MAX][0],
+                    r.values[SIGM_MIN][0], xmax, xmin, std::sin(1.0));
+        for (int j = 0; j < 2; ++j) {
+            ut::approx(r.values[SIGM_MAX][(size_t)j], xmax, 1e-6, "BDF index 3 sweep: max x = Analysis");
+            ut::approx(r.values[SIGM_MIN][(size_t)j], xmin, 1e-6, "BDF index 3 sweep: min x = Analysis");
+        }
+    }
+}
+
+// Точка свипа без корня связи: 0 = z^2 + p не решается при p > 0 — проекция пишет NaN в z, метрика
+// точки — NaN / не колебание, соседние точки (p <= 0, у p = 0 двойной корень) — числа. GPU и CPU.
+void dae_no_root_point() {
+    const System s = parse_dae("x' = -x + z\n0 = z^2 + p", "x", "z", "p", "").as_codegen_system();
+    ParametricEngine eng;
+    for (int cpu_side = 0; cpu_side < 2; ++cpu_side) {
+        SignalMetricsRequest q;
+        q.krs_body = codegen_dae_scheme(s, DaeScheme::BDF1);
+        q.amountOfX = 2; q.initial_conditions = { 0.3, 0.5 }; q.base_values = tail({ 0.5, 0.0 });
+        q.param_index = 1; q.param_lo = -1.0; q.param_hi = 1.0; q.n_pts = 3; q.use_cpu = cpu_side;
+        q.h = 0.01; q.t_max = 1;
+        const auto r = eng.run_signal_metrics(q);
+        ut::require(r.ok && r.values[SIGM_MEAN].size() == 3, "no-root sweep: " + r.error);
+        const auto& m = r.values[SIGM_MEAN];
+        std::printf("  DAE sweep, 0 = z^2 + p (%s): mean x at p = -1, 0, 1: %.6f %.6f %s (flags %d %d %d)\n",
+                    cpu_side ? "CPU" : "GPU", m[0], m[1], std::isnan(m[2]) ? "NaN" : std::to_string(m[2]).c_str(),
+                    r.flags.size() > 2 ? r.flags[0] : 9, r.flags.size() > 2 ? r.flags[1] : 9, r.flags.size() > 2 ? r.flags[2] : 9);
+        ut::require(std::isfinite(m[0]) && std::isfinite(m[1]), "points with a root are measured");
+        ut::require(!std::isfinite(m[2]) || (r.flags.size() > 2 && r.flags[2] != r.flags[0]),
+                    "the point without a root is not a number");
+    }
+}
+
+// DFT по параметру на ДАУ: каждый путь (классика, continuation, h-свип; GPU и CPU) с z0 = 0 даёт то же,
+// что с согласованным z0 = k x0 — z проецируется на связь в начале точки. Трапеция берёт f(x_n, z_n),
+// поэтому без проекции первая же ступень пошла бы с неверной z (транзиента нет).
+void dft_dae() {
+    const System s = parse_dae("x' = y\ny' = mu*(1 - x^2)*y - z\n0 = z - k*x", "x, y", "z", "mu, k", "").as_codegen_system();
+    ParametricEngine eng;
+    const char* names[] = { "classic GPU", "continuation GPU", "h-sweep GPU", "h-sweep continuation GPU", "classic CPU",
+                            "continuation CPU" };
+    std::vector<double> gpu0, cpu0;
+    for (int mode = 0; mode < 6; ++mode) {
+        Dft1DRequest q;
+        q.krs_body = codegen_dae_scheme(s, DaeScheme::Trapezoidal);
+        q.amountOfX = 3; q.base_values = tail({ 0.5, 1.0, 2.0 });
+        q.param_index = 1; q.param_lo = 0.5; q.param_hi = 1.5; q.n_pts = 3;
+        q.continuation = mode == 1 || mode == 3 || mode == 5;
+        q.use_cpu = mode >= 4;
+        if (mode == 2 || mode == 3) { q.sweep_over_h = true; q.param_lo = 0.01; q.param_hi = 0.02; }
+        q.h = 0.01; q.transient_time = 0; q.t_max = 20; q.n_freq = 16; q.freq_lo = 0; q.freq_hi = 1;
+        std::vector<double> r[2];
+        for (int cons = 0; cons < 2; ++cons) {
+            q.initial_conditions = { 0.5, 0.0, cons ? 2.0 * 0.5 : 0.0 };
+            const auto d = eng.run_dft_1d(q);
+            ut::require(d.ok && !d.ak_cos.empty(), std::string("DFT on a DAE, ") + names[mode] + ": " + d.error);
+            r[cons] = d.ak_cos;
+            r[cons].insert(r[cons].end(), d.bk_sin.begin(), d.bk_sin.end());
+        }
+        double dz = 0, mx = 0;
+        for (size_t i = 0; i < r[0].size(); ++i) { dz = std::fmax(dz, std::fabs(r[0][i] - r[1][i])); mx = std::fmax(mx, std::fabs(r[1][i])); }
+        std::printf("  DFT on a DAE, %s: max |A(z0 = 0) - A(z0 consistent)| = %.1e (max |A| %.2f)\n", names[mode], dz, mx);
+        ut::require(mx > 0.01 && dz <= 1e-9 * (1 + mx), ut::num((std::string("DFT DAE z0 projection, ") + names[mode]).c_str(), dz, 0, 1e-9));
+        if (mode == 0) gpu0 = r[1];
+        if (mode == 4) cpu0 = r[1];
+    }
+    double d = 0;
+    for (size_t i = 0; i < gpu0.size() && i < cpu0.size(); ++i) d = std::fmax(d, std::fabs(gpu0[i] - cpu0[i]));
+    // FMA в Ньютоне трапеции (GPU) против CPU, накопленное по 2000 отсчётам: ~2e-8 при |A| ~ 1
+    ut::require(gpu0.size() == cpu0.size() && d < 1e-7, ut::num("DFT DAE GPU = CPU", d, 0, 1e-7));
 }
 
 void adaptive_gpu() {
@@ -634,7 +828,11 @@ int main() {
         gpu_tests();
         adaptive_gpu();
         bdf_gpu();
-        bdf_sweeps();
+        dft_dae();
+        bdf_index3_sweep();
+        dae_no_root_point();
+        dae_sweeps(bdf_sweep_request, "BDF 1-5", true);
+        dae_sweeps(rodas_sweep_request, "adaptive DAE Rodas4", false);
         return 0;
     });
 }

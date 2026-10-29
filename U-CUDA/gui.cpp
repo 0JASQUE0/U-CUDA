@@ -1146,12 +1146,21 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
     // ДАУ: сессия получила только схемы ДАУ (enabled_builtins_from_record) — их и показываем,
     // схемы ОДУ на такой системе не строятся.
     if (enabled_builtins && !enabled_builtins->empty()
-        && dae_scheme_from_name((*enabled_builtins)[0], nullptr)) {
+        && (dae_scheme_from_name((*enabled_builtins)[0], nullptr) || (*enabled_builtins)[0] == kBdfSchemeDae)) {
         ImGui::SetNextItemWidth(kComboW);
         if (ImGui::BeginCombo(label, scheme.c_str())) {
             ImGui::SeparatorText("DAE");
-            for (const auto& nm : *enabled_builtins)
+            bool ms_header = false;
+            for (const auto& nm : *enabled_builtins) {
+                if (scheme_is_multistep(nm) && !ms_header) {
+                    ImGui::SeparatorText("multistep (adaptive step only)");
+                    ms_header = true;
+                }
                 if (ImGui::Selectable(nm.c_str(), scheme == nm)) choose(nm);
+                if (scheme_is_multistep(nm) && ImGui::IsItemHovered())
+                    ImGui::SetTooltip("BDF orders 1-5 with variable step (DASSL form), its own driver.\n"
+                                      "Needs Integration -> Adaptive step; index 3 goes through GGL.");
+            }
             ImGui::EndCombo();
         }
         return picked;
@@ -1181,6 +1190,15 @@ static bool draw_scheme_combo(const char* label, std::string& scheme,
                 shown_group = scheme_group_title(b);
             }
             if (ImGui::Selectable(b.name, scheme == b.name)) choose(b.name);
+        }
+        // Многошаговый BDF 1-5 — свой драйвер, флага scheme_* у него нет: показывается всегда
+        // (enabled_builtins_from_record его тоже всегда добавляет), только с адаптивным шагом.
+        if (is_enabled(kBdfSchemeOde) || scheme == kBdfSchemeOde) {
+            ImGui::SeparatorText("Multistep (adaptive step only)");
+            if (ImGui::Selectable(kBdfSchemeOde, scheme == kBdfSchemeOde)) choose(kBdfSchemeOde);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("BDF orders 1-5 with variable step (DASSL form), its own driver.\n"
+                                  "Needs Integration -> Adaptive step; stiff problems.");
         }
         // Своя шапка, а не голая черта: у групп порядка и у обёрток заголовки
         // есть, и без неё кастомные читались как хвост последней Order-группы.
@@ -4378,27 +4396,44 @@ static void draw_dae_method_checkboxes(AppModel& model) {
     ImGui::Text("DAE methods to generate:");
     if (ImGui::Button("Select all##dae")) model.dae_schemes_off.clear();
     ImGui::SameLine();
-    if (ImGui::Button("Clear all##dae")) model.dae_schemes_off = dae_scheme_names();
-    // Группы: неявные (любой индекс) и с решением связи при каждом x (только индекс 1).
-    static const char* const kTips[] = {
-        "Implicit Euler on [x; z], one Newton per step. Order 1, L-stable, any index.",
-        "Trapezoid in x, constraint at the new node. Order 2, not L-stable (index 3 diverges).",
-        "TR-BDF2: trapezoid to t + gamma h, then BDF2. Order 2, L-stable.",
-        "Rosenbrock ROS2: linearly implicit, one LU per step, no Newton. Order 2, L-stable.",
-        "Rosenbrock ROS3P (Lang-Verwer): order 3 in x and z, A-stable, one LU per step.",
-        "Rodas4 (Hairer-Wanner): order 4, stiffly accurate, L-stable, one LU per step.",
-        "CD for DAE (level B): explicit forward half with z re-solved after every x update, implicit\n"
-        "reverse half with one Newton on (x_i, z). Order 2 at s = 0.5. Index 1 only.",
-        "Yoshida composition of three CD steps: order 4 at s = 0.5. Index 1 only.",
-        "Explicit Euler with z solved from the constraint at every stage. Index 1, non-stiff.",
-        "Explicit midpoint with z solved at every stage. Order 2, index 1, non-stiff.",
-        "RK4 with z solved at every stage. Order 4, index 1, non-stiff.",
+    if (ImGui::Button("Clear all##dae")) {
+        model.dae_schemes_off = dae_scheme_names();
+        model.dae_schemes_off.push_back(kBdfSchemeDae);
+    }
+    // Группы: неявные (любой индекс), с решением связи при каждом x (только индекс 1), многошаговый.
+    // Подсказки — по имени (список методов рос, по номеру они съезжали).
+    static const std::map<std::string, const char*> kTips = {
+        { "DAE BDF1", "Implicit Euler on [x; z], one Newton per step. Order 1, L-stable, any index." },
+        { "DAE Trapezoidal", "Trapezoid in x, constraint at the new node. Order 2, not L-stable (index 3 diverges)." },
+        { "DAE TR-BDF2", "TR-BDF2: trapezoid to t + gamma h, then BDF2. Order 2, L-stable." },
+        { "DAE SDIRK2", "SDIRK2 (Alexander): two implicit Euler stages with gamma h. Order 2 (z: 1 on index 2), L-stable." },
+        { "DAE Implicit Midpoint", "Implicit midpoint: control method, does not hold an index-2 constraint, diverges on index 3." },
+        { "DAE Radau IIA (5)", "Radau IIA, 3 stages: order 5 (index 1), x 5 / z 3 (index 2), x 3 / z 2 (index 3).\n"
+                               "Newton full = 0 in Integration: RADAU5 simplified Newton (one J per step)." },
+        { "DAE BDF1 + GGL", "BDF1 on the GGL-stabilised system (index 3 -> 2, multipliers local to the step)." },
+        { "DAE Radau IIA + GGL", "Radau IIA on the GGL-stabilised system: index 3 with x 5 / lambda 3." },
+        { "DAE Rosenbrock ROS2", "Rosenbrock ROS2: linearly implicit, one LU per step, no Newton. Order 2, L-stable." },
+        { "DAE Rosenbrock ROS3P", "Rosenbrock ROS3P (Lang-Verwer): order 3 in x and z, A-stable, one LU per step." },
+        { "DAE Rodas4", "Rodas4 (Hairer-Wanner): order 4, stiffly accurate, L-stable, one LU per step.\n"
+                        "With Integration -> Adaptive step: embedded error estimate (index 1)." },
+        { "DAE CD", "CD for DAE (level B): explicit forward half with z re-solved after every x update, implicit\n"
+                    "reverse half with one Newton on (x_i, z). Order 2 at s = 0.5. Index 1 only." },
+        { "DAE CD + Yoshida-4", "Yoshida composition of three CD steps: order 4 at s = 0.5. Index 1 only." },
+        { "DAE CD (index 2)", "CD with z constant per half-step, chosen so that g holds at its end. Index 2 only." },
+        { "DAE Explicit Euler", "Explicit Euler with z solved from the constraint at every stage. Index 1, non-stiff." },
+        { "DAE Explicit Midpoint", "Explicit midpoint with z solved at every stage. Order 2, index 1, non-stiff." },
+        { "DAE RK4", "RK4 with z solved at every stage. Order 4, index 1, non-stiff." },
+        { kBdfSchemeDae, "BDF orders 1-5 with variable step (DASSL form), its own multistep driver.\n"
+                         "Adaptive step only (Analysis on CPU / GPU, Parametric sweeps). Index 1-2 directly,\n"
+                         "index 3 through GGL. Generate prints its residual [f; g] and Jacobian." },
     };
-    const auto& names = dae_scheme_names();
+    std::vector<std::string> names = dae_scheme_names();
+    names.push_back(kBdfSchemeDae);
     bool first_in_line = true;
     for (size_t i = 0; i < names.size(); ++i) {
         if (i == 0) ImGui::SeparatorText("implicit, any index");
         if (names[i] == "DAE CD") { ImGui::SeparatorText("constraint solved whenever x changes, index 1"); first_in_line = true; }
+        if (names[i] == kBdfSchemeDae) { ImGui::SeparatorText("multistep, adaptive step only"); first_in_line = true; }
         if (!first_in_line) ImGui::SameLine();
         first_in_line = false;
         bool on = model.dae_scheme_on(names[i]);
@@ -4407,7 +4442,8 @@ static void draw_dae_method_checkboxes(AppModel& model) {
             off.erase(std::remove(off.begin(), off.end(), names[i]), off.end());
             if (!on) off.push_back(names[i]);
         }
-        if (i < sizeof(kTips) / sizeof(kTips[0]) && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kTips[i]);
+        auto tip = kTips.find(names[i]);
+        if (tip != kTips.end() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip->second);
     }
 }
 
@@ -17228,21 +17264,26 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         if (model.dae_native()) {
             for (const auto& n : dae_scheme_names())
                 if (model.dae_scheme_on(n)) enabled_now.push_back(n);
+            if (model.dae_scheme_on(kBdfSchemeDae)) enabled_now.push_back(kBdfSchemeDae);   // как enabled_builtins_from_record
         }
-        else
+        else {
             for (const auto& b : kBuiltinSchemes)
                 if (model.*b.flag) enabled_now.push_back(b.name);
+            // флага нет: всегда, как enabled_builtins_from_record (пустой список встроенных остаётся пустым —
+            // у draw_scheme_combo это "без фильтра")
+            if (!enabled_now.empty()) enabled_now.push_back(kBdfSchemeOde);
+        }
+        // BDF 1-5 — только там, где есть адаптивный шаг (Analysis, БД, LLE/LS, Metrics, бассейны); DFT, FastSync,
+        // Order и Network многошагового драйвера не имеют — им список без него.
+        std::vector<std::string> enabled_fixed;
+        for (const auto& n : enabled_now) if (!scheme_is_multistep(n)) enabled_fixed.push_back(n);
         for (std::vector<std::string>* dst : {
                  &model.phase_session.enabled_builtin_schemes,
                  &model.bifurcation_session.enabled_builtin_schemes,
                  &model.lle_session.enabled_builtin_schemes,
                  &model.ls_session.enabled_builtin_schemes,
                  &model.metrics_session.enabled_builtin_schemes,
-                 &model.dft1d_session.enabled_builtin_schemes,
                  &model.basins_session.enabled_builtin_schemes,
-                 &model.fastsync_session.enabled_builtin_schemes,
-                 &model.order_session.enabled_builtin_schemes,
-                 &model.network_session.enabled_builtin_schemes,
                  &model.custom_session.enabled_builtin_schemes,
                  &model.custom_session.bif_session.enabled_builtin_schemes,
                  &model.custom_session.lle_session.enabled_builtin_schemes,
@@ -17250,6 +17291,12 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                  &model.custom_session.phase_session.enabled_builtin_schemes,
                  &model.custom_session.basins_session.enabled_builtin_schemes })
             if (*dst != enabled_now) *dst = enabled_now;
+        for (std::vector<std::string>* dst : {
+                 &model.dft1d_session.enabled_builtin_schemes,
+                 &model.fastsync_session.enabled_builtin_schemes,
+                 &model.order_session.enabled_builtin_schemes,
+                 &model.network_session.enabled_builtin_schemes })
+            if (*dst != enabled_fixed) *dst = enabled_fixed;
     }
 
     // Auto-labels: pre-frame refresh so all label-consumers (tab-bar names,

@@ -905,6 +905,68 @@ UCUDA_HD inline numb ucuda_ad_h0_hairer(const K& k, int n, UCUDA_TP(const numb t
     return fmin((numb)100 * fabs(h), fmin(h1, hmax));
 }
 
+// Нативная ДАУ индекса 1 в свипах (DAE Rodas4; UCUDA_AD_DAE_NX = число x, движок ставит его только
+// при z в состоянии): точка свипа, новая точка continuation и клон LLE/LS стартуют с z из
+// g(x, z) = 0 при фиксированном x. Ньютон; dg/dz — разностями по телу rhs = [f; g] (якобиана в
+// модуле нет), сходимость линейная с множителем ~sqrt(eps), до 20 итераций. Связь зависит от
+// параметров точки, поэтому z0 из настроек — только старт Ньютона (правило ветви), как у
+// постоянного шага (шаг с h = 0 в ucudaSetupSweepPoint).
+#ifdef UCUDA_AD_DAE_NX
+#define UCUDA_AD_DAE_EPS (sizeof(numb) == 4 ? 1.1920928955078125e-7 : 2.220446049250313e-16)
+UCUDA_HD inline bool ucuda_ad_lu_solve(numb* A, numb* b, int n) {   // копия ucuda_bdf_lu_solve
+    for (int k = 0; k < n; ++k) {
+        int p = k;
+        for (int i = k + 1; i < n; ++i) if (fabs(A[i * n + k]) > fabs(A[p * n + k])) p = i;
+        if (!(fabs(A[p * n + k]) > (numb)1e-300)) return false;
+        if (p != k) {
+            for (int j = 0; j < n; ++j) { const numb s = A[k * n + j]; A[k * n + j] = A[p * n + j]; A[p * n + j] = s; }
+            const numb s = b[k]; b[k] = b[p]; b[p] = s;
+        }
+        for (int i = k + 1; i < n; ++i) {
+            const numb m = A[i * n + k] / A[k * n + k];
+            if (m == (numb)0) continue;
+            for (int j = k; j < n; ++j) A[i * n + j] -= m * A[k * n + j];
+            b[i] -= m * b[k];
+        }
+    }
+    for (int k = n - 1; k >= 0; --k) {
+        numb r = b[k];
+        for (int j = k + 1; j < n; ++j) r -= A[k * n + j] * b[j];
+        b[k] = r / A[k * n + k];
+    }
+    return true;
+}
+
+template <class K>
+UCUDA_HD inline void ucuda_ad_dae_project(const K& k, numb* X, UCUDA_TP(const numb t) const numb* a) {
+    constexpr int nx = UCUDA_AD_DAE_NX, nz = AMOUNTOFX - UCUDA_AD_DAE_NX;
+    numb F[AMOUNTOFX], F2[AMOUNTOFX], A[nz * nz], R[nz];
+    const numb sq = sqrt((numb)UCUDA_AD_DAE_EPS);
+    for (int it = 0; it < 20; ++it) {
+        k.rhs(X, UCUDA_TA(t) a, F);
+        numb gn = 0;
+        for (int q = 0; q < nz; ++q) { R[q] = -F[nx + q]; gn = fabs(F[nx + q]) > gn ? fabs(F[nx + q]) : gn; }
+        if (!(gn <= (numb)1e300) || gn == 0) return;
+        for (int q = 0; q < nz; ++q) {
+            const numb z0 = X[nx + q], d = sq * ((numb)1 + fabs(z0));
+            X[nx + q] = z0 + d;
+            k.rhs(X, UCUDA_TA(t) a, F2);
+            X[nx + q] = z0;
+            const numb id = (numb)1 / d;
+            for (int p = 0; p < nz; ++p) A[p * nz + q] = (F2[nx + p] - F[nx + p]) * id;
+        }
+        if (!ucuda_ad_lu_solve(A, R, nz)) return;
+        numb dn = 0, zn = 0;
+        for (int q = 0; q < nz; ++q) {
+            X[nx + q] += R[q];
+            dn = fabs(R[q]) > dn ? fabs(R[q]) : dn;
+            zn = fabs(X[nx + q]) > zn ? fabs(X[nx + q]) : zn;
+        }
+        if (dn <= (numb)1e-14 * ((numb)1 + zn)) return;
+    }
+}
+#endif
+
 // Старт с (t0, X0). log — буфер на log_cap записей по 4 numb или nullptr.
 template <class K>
 UCUDA_HD inline void ucuda_ad_init(UcudaAdaptState& S, const K& k, int n, const numb* X0, numb t0,
@@ -915,6 +977,9 @@ UCUDA_HD inline void ucuda_ad_init(UcudaAdaptState& S, const K& k, int n, const 
     S.st.nacc = 0; S.st.nrej = 0; S.st.nforced = 0; S.st.nrhs = 1;
     for (int i = 0; i < n; ++i) S.X[i] = X0[i];
     S.t = t0;
+#ifdef UCUDA_AD_DAE_NX
+    ucuda_ad_dae_project(k, S.X, UCUDA_TA(t0) a);
+#endif
     k.rhs(S.X, UCUDA_TA(t0) a, S.F0);
 #ifndef UCUDA_AD_NO_DENSE
     for (int i = 0; i < n; ++i) { S.Xp[i] = S.X[i]; S.Fp[i] = S.F0[i]; }
@@ -946,6 +1011,9 @@ UCUDA_HD inline void ucuda_ad_restart(UcudaAdaptState& S, const K& k, numb t0,
     S.st.hmin = 0; S.st.hmax = 0; S.st.hsum = 0;
     S.st.nacc = 0; S.st.nrej = 0; S.st.nforced = 0; S.st.nrhs = 1;
     S.t = t0;
+#ifdef UCUDA_AD_DAE_NX
+    ucuda_ad_dae_project(k, S.X, UCUDA_TA(t0) a);   // новые параметры — связь сдвинулась
+#endif
     k.rhs(S.X, UCUDA_TA(t0) a, S.F0);
 #ifndef UCUDA_AD_NO_DENSE
     for (int i = 0; i < n; ++i) { S.Xp[i] = S.X[i]; S.Fp[i] = S.F0[i]; }
@@ -1213,6 +1281,9 @@ UCUDA_HD inline void ucuda_lyap_init_clones(const numb* x, const numb eps, const
         numb zPower = 0;
         for (int i = 0; i < n; ++i) {
             z[j * n + i] = ucuda_lyap_rng_uniform(state) - 0.5;
+#ifdef UCUDA_AD_DAE_NX
+            if (i >= UCUDA_AD_DAE_NX) z[j * n + i] = 0;   // ДАУ: направления только по x, z клона — проекцией
+#endif
             zPower += z[j * n + i] * z[j * n + i];
         }
         zPower = sqrt(zPower);
@@ -1232,6 +1303,12 @@ UCUDA_HD inline void ucuda_lyap_init_clones(const numb* x, const numb eps, const
 template <int NC>
 UCUDA_HD inline void ucuda_lyap_renorm(const numb* x, const numb eps, numb* y, numb* z, numb* acc) {
     constexpr int n = AMOUNTOFX;
+#ifdef UCUDA_AD_DAE_NX
+    // ДАУ: растяжение и Грам-Шмидт — по x (z возмущения не свободна, её задаёт связь); z клона после
+    // перенормировки — снова проекцией (как ucudaGramSchmidtDae / ucudaDaeProject постоянного шага)
+    for (int k = 0; k < NC; ++k)
+        for (int l = UCUDA_AD_DAE_NX; l < n; ++l) y[k * n + l] = x[l];
+#endif
     if constexpr (NC == 1) {
         numb d = 0;
         for (int l = 0; l < n; ++l) {
@@ -1358,6 +1435,9 @@ UCUDA_HD inline int ucuda_lyap_point(UcudaAdaptState& S, const K& Kf, const numb
             const bool clipped = (k == 0) || (renorm == 0);   // шаг к границе обрезался
             if (k == 0) { if (!carried) ucuda_lyap_init_clones<NC>(S.X, eps, seq, cl.y, z); }
             else        ucuda_lyap_renorm<NC>(S.X, eps, cl.y, z, k > nW ? acc : accWarm);
+#ifdef UCUDA_AD_DAE_NX
+            for (int c = 0; c < NC; ++c) ucuda_ad_dae_project(Kf, cl.y + c * n, UCUDA_TA(S.t) a);
+#endif
             for (int c = 0; c < NC; ++c) Kf.rhs(cl.y + c * n, UCUDA_TA(S.t) a, cl.F + c * n);   // клоны сдвинуты (или новые a) — f заново
             cl.active = true;
             if (clipped) S.h = S.hfree;

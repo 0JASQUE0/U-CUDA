@@ -157,6 +157,10 @@ extern "C" __global__ void dft1dContinuationKernel(
         if (hLocal <= 0 || blockLen <= 2) {
             regime = REGIME_UNBOUND;
         } else {
+#ifdef UCUDA_LYAP_NX
+            // ДАУ: z — на связь при новом параметре (старт — z прошлой точки, та же ветвь), как в bif1d_cont.
+            calculateDiscreteModel(x, UCUDA_TA((numb)ucudaStep * hLocal) a, (numb)0);
+#endif
             // Transient: x[] carried over from the previous point.
             int flag = loopCalculateDiscreteModel_int(
                 x, a, hLocal, transientSteps, amountOfX, 1, 0,

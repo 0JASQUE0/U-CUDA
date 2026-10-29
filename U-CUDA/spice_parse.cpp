@@ -330,9 +330,16 @@ std::string sanitize(const std::string& s) {
     return o;
 }
 
+// Параметры модели хранятся текстом и вычисляются при использовании (Builder::model) в области
+// видимости экземпляра: вендорские подсхемы пишут Is={Ices/2} с параметрами .subckt, а библиотеки
+// KiCad держат модели XSPICE и с текстовыми полями (mfg=Diotec) — неиспользуемая модель не мешает.
 struct Model {
     std::string name, type;                     // type: d, npn, pnp, ...
-    std::map<std::string, double> p;            // параметры в нижнем регистре
+    std::map<std::string, double> p;            // вычисленные параметры (у экземпляра Builder::model)
+    std::map<std::string, std::string> raw;     // как в файле, ключи в нижнем регистре
+    std::set<std::string> flags;                // слова без значения (nchan, pchan)
+    std::set<std::string> bad;                  // не вычислились (у экземпляра)
+    bool in_subckt = false;
 };
 
 // Всё, что читает файл: подсхемы, модели, параметры, директивы. Общее для импорта в ДАУ
@@ -388,7 +395,10 @@ struct Deck {
             // .model внутри .subckt (так пишут вендорские макромодели) — в общую таблицу моделей:
             // область видимости по имени не различается.
             if (!open.empty()) {
-                if (k == ".model") directive(c, k);
+                if (k == ".model") {
+                    directive(c, k);
+                    if (c.tok.size() > 1) models[lower(c.tok[1])].in_subckt = true;
+                }
                 else open.back()->cards.push_back(c);
                 continue;
             }
@@ -419,11 +429,12 @@ struct Deck {
         } else if (k == ".model") {
             if (t.size() < 3) fail(at + ".model needs a name and a type");
             Model& m = models[lower(t[1])];
+            m = Model{};
             m.name = t[1];
             m.type = lower(t[2]);
-            for (size_t i = 3; i + 2 < t.size(); i += 3) {
-                if (t[i + 1] != "=") fail(at + "bad .model parameter list");
-                m.p[lower(t[i])] = eval_value(t[i + 2], global);
+            for (size_t i = 3; i < t.size();) {
+                if (i + 2 < t.size() && t[i + 1] == "=") { m.raw[lower(t[i])] = t[i + 2]; i += 3; }
+                else m.flags.insert(lower(t[i++]));   // nchan / pchan у VDMOS, скобки сняты токенизатором
             }
         } else if (k == ".include" || k == ".inc" || k == ".lib") {
             if (t.size() < 2) fail(at + k + " without a file");
@@ -451,6 +462,120 @@ struct Deck {
     }
 };
 
+// --- условия в выражениях B / VALUE= ----------------------------------------------------
+// Сравнения, && || !, c ? a : b, if(c, a, b), u(), uramp(), limit(), sgn() — без ветвлений: истина — 1,
+// ложь — 0 через ступеньку st(u) = (1 + copysign(1, u))/2 (st(+0) = 1). a >= b: st(a - b); a > b:
+// 1 - st(b - a); a == b: st(a - b) st(b - a) (x - x = +0, равенство точное); c ? a : b: b + (a - b) c.
+// Производная ступеньки — 0 (неявные методы видят выбранную ветвь), сама функция разрывна, как в SPICE.
+// Вход — токены translate() (атомы уже в синтаксисе U-CUDA, операторы — отдельными токенами).
+struct CondRewriter {
+    const std::vector<std::string>& tk;
+    const std::string& at;
+    size_t p = 0;
+    struct V { std::string s; bool boolean; };
+
+    static std::string step(const std::string& u) { return "(0.5 + 0.5*copysign(1, " + u + "))"; }
+    static std::string truth(const V& v) {   // число -> истинность (не ноль)
+        return v.boolean ? v.s : "(1 - " + step(v.s) + "*" + step("-" + v.s) + ")";
+    }
+    bool is(const char* op) const { return p < tk.size() && tk[p] == op; }
+    void expect(const char* op) {
+        if (!is(op)) fail(at + "expected '" + op + "' in a conditional expression");
+        ++p;
+    }
+    V expr() {
+        V c = lor();
+        if (!is("?")) return c;
+        ++p;
+        const V a = expr();
+        expect(":");
+        const V b = expr();
+        return { "(" + b.s + " + (" + a.s + " - " + b.s + ")*" + truth(c) + ")", a.boolean && b.boolean };
+    }
+    V lor() {
+        V a = land();
+        while (is("||")) { ++p; const V b = land(); a = { "max(" + truth(a) + ", " + truth(b) + ")", true }; }
+        return a;
+    }
+    V land() {
+        V a = cmp();
+        while (is("&&")) { ++p; const V b = cmp(); a = { "(" + truth(a) + "*" + truth(b) + ")", true }; }
+        return a;
+    }
+    V cmp() {
+        const V a = add();
+        for (const char* op : { "<=", ">=", "==", "!=", "<", ">" })
+            if (is(op)) {
+                ++p;
+                const V b = add();
+                const std::string d = "(" + a.s + " - " + b.s + ")", r = "(" + b.s + " - " + a.s + ")";
+                const std::string o = op;
+                std::string s;
+                if (o == ">=") s = step(d);
+                else if (o == "<=") s = step(r);
+                else if (o == ">") s = "(1 - " + step(r) + ")";
+                else if (o == "<") s = "(1 - " + step(d) + ")";
+                else if (o == "==") s = "(" + step(d) + "*" + step(r) + ")";
+                else s = "(1 - " + step(d) + "*" + step(r) + ")";
+                return { s, true };
+            }
+        return a;
+    }
+    V add() {
+        V a = mul();
+        while (is("+") || is("-")) { const std::string op = tk[p++]; const V b = mul(); a = { "(" + a.s + " " + op + " " + b.s + ")", false }; }
+        return a;
+    }
+    V mul() {
+        V a = unary();
+        while (is("*") || is("/")) { const std::string op = tk[p++]; const V b = unary(); a = { "(" + a.s + op + b.s + ")", false }; }
+        return a;
+    }
+    V unary() {
+        if (is("-")) { ++p; const V a = unary(); return { "(-" + a.s + ")", false }; }
+        if (is("+")) { ++p; return unary(); }
+        if (is("!")) { ++p; const V a = unary(); return { "(1 - " + truth(a) + ")", true }; }
+        return power();
+    }
+    V power() {
+        const V a = primary();
+        if (!is("^")) return a;
+        ++p;
+        const V b = unary();
+        return { "(" + a.s + "^" + b.s + ")", false };
+    }
+    std::vector<V> args() {
+        expect("(");
+        std::vector<V> v;
+        if (is(")")) { ++p; return v; }
+        for (;;) {
+            v.push_back(expr());
+            if (is(",")) { ++p; continue; }
+            expect(")");
+            return v;
+        }
+    }
+    V primary() {
+        if (p >= tk.size()) fail(at + "unexpected end of expression");
+        const std::string t = tk[p++];
+        if (t == "(") { const V v = expr(); expect(")"); return { "(" + v.s + ")", v.boolean }; }
+        static const std::set<std::string> ops = { ")", ",", "?", ":", "*", "/", "^", "&&", "||", "<", ">", "<=", ">=",
+                                                   "==", "!=" };
+        if (ops.count(t)) fail(at + "unexpected '" + t + "'");
+        if (!is("(")) return { t, false };   // атом: число, параметр, V(..), ток ветви, t
+        const std::vector<V> a = args();
+        auto need = [&](size_t n) { if (a.size() != n) fail(at + t + "() takes " + std::to_string(n) + " argument(s)"); };
+        if (t == "if") { need(3); return { "(" + a[2].s + " + (" + a[1].s + " - " + a[2].s + ")*" + truth(a[0]) + ")", false }; }
+        if (t == "u") { need(1); return { step(a[0].s), true }; }
+        if (t == "uramp") { need(1); return { "max(" + a[0].s + ", 0)", false }; }
+        if (t == "limit") { need(3); return { "min(max(" + a[0].s + ", " + a[1].s + "), " + a[2].s + ")", false }; }
+        if (t == "sgn") { need(1); return { "copysign(1, " + a[0].s + ")", false }; }
+        std::string s = t + "(";
+        for (size_t i = 0; i < a.size(); ++i) s += (i ? ", " : "") + a[i].s;
+        return { s + ")", false };
+    }
+};
+
 // --- сборка ДАУ ----------------------------------------------------------------------
 
 struct Builder {
@@ -468,6 +593,48 @@ struct Builder {
     std::map<std::string, std::string> pvals, ic;
     std::map<std::string, std::string> branch;       // ключ элемента -> переменная тока
     std::vector<std::string> notes;
+    // Индуктивности (для K): строка x_rhs, узлы, параметр L; связи K — после всех элементов (couple()).
+    struct Inductor { size_t row; int a, b; std::string p, name; };
+    std::map<std::string, Inductor> inductors;
+    struct Coupling { std::string name, at, k; std::vector<std::string> inductors; };
+    std::vector<Coupling> couplings;
+    std::set<size_t> l_dc_edges;   // номера ветвей индуктивностей в dc_edges (сечения L-I в loops())
+
+    // Взаимная индуктивность: у связанных катушек il_i' — алгебраические z dl_i (il_i' = dl_i) с
+    // строками Va - Vb = L_i dl_i + sum_j k_ij sqrt(L_i L_j) dl_j. Матрица индуктивностей невырождена
+    // при |k| < 1, поэтому индекс 1 — без обращения матрицы в тексте и для любых групп катушек.
+    void couple() {
+        if (couplings.empty()) return;
+        std::map<std::string, std::vector<std::pair<std::string, std::string>>> mutual;   // L -> (L', k)
+        for (const Coupling& cp : couplings) {
+            for (const std::string& l : cp.inductors)
+                if (!inductors.count(l)) fail(cp.at + "no inductor " + l);
+            for (size_t i = 0; i < cp.inductors.size(); ++i)
+                for (size_t j = 0; j < cp.inductors.size(); ++j)
+                    if (i != j) {
+                        if (cp.inductors[i] == cp.inductors[j]) fail(cp.at + "an inductor is coupled with itself");
+                        mutual[cp.inductors[i]].push_back({ cp.inductors[j], cp.k });
+                    }
+        }
+        std::map<std::string, std::string> dl;
+        for (const auto& kv : mutual) {
+            const Inductor& L = inductors.at(kv.first);
+            dl[kv.first] = uniq("dl_" + sanitize(L.name));
+            zs.push_back(dl[kv.first]);
+            x_rhs[L.row] = dl[kv.first];
+        }
+        for (const auto& kv : mutual) {
+            const Inductor& L = inductors.at(kv.first);
+            std::string g = lin(L.a, L.b) + " - " + L.p + "*" + dl[kv.first];
+            for (const auto& mk : kv.second) {
+                const Inductor& L2 = inductors.at(mk.first);
+                g += " - " + mk.second + "*sqrt(" + L.p + "*" + L2.p + ")*" + dl[mk.first];
+            }
+            gs.push_back(g);
+        }
+        notes.push_back(std::to_string(couplings.size()) + " mutual inductance(s) K: inductor derivatives are "
+                        "algebraic variables dl_* (index 1)");
+    }
 
     struct Edge { int a, b; std::string name; };
     std::vector<Edge> v_edges;                        // C и ветви, заданные напряжением
@@ -546,23 +713,35 @@ struct Builder {
 
     // Выражение B / VALUE= в синтаксис U-CUDA: V(a), V(a,b) -> потенциалы, I(Vx) -> ток
     // ветви, time -> t, ** -> ^, ln -> log; параметры и числа с множителями — числами.
+    // Условия и сравнения — CondRewriter (выражение без них печатается как раньше).
     std::string translate(const std::string& s, const Ctx& c, const std::string& at) {
         static const std::set<std::string> funcs = {
             "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp", "log",
-            "log10", "sqrt", "abs", "pow", "atan2", "min", "max",
+            "log10", "sqrt", "abs", "pow", "atan2", "min", "max", "if", "u", "uramp", "limit", "sgn",
         };
-        std::string o;
+        static const std::set<std::string> cond = { "<", ">", "<=", ">=", "==", "!=", "&&", "||", "!", "?", ":",
+                                                    "if", "u", "uramp", "limit", "sgn" };
+        std::vector<std::string> tk;
+        bool has_cond = false;
+        auto emit = [&](const std::string& x) { tk.push_back(x); if (cond.count(x)) has_cond = true; };
         size_t i = 0;
         while (i < s.size()) {
             const char ch = s[i];
             double v;
             if (std::isspace((unsigned char)ch) || ch == '{' || ch == '}' || ch == '\'') { ++i; continue; }
-            if (read_number(s, i, v)) { o += fmt(v); continue; }
-            if (ch == '*' && i + 1 < s.size() && s[i + 1] == '*') { o += '^'; i += 2; continue; }
-            if (std::strchr("+-*/^(),", ch)) { o += ch; ++i; continue; }
+            if (read_number(s, i, v)) { emit(fmt(v)); continue; }
+            if (ch == '*' && i + 1 < s.size() && s[i + 1] == '*') { emit("^"); i += 2; continue; }
+            if (std::strchr("+-*/^(),", ch)) { emit(std::string(1, ch)); ++i; continue; }
+            if (std::strchr("<>=!&|?:", ch)) {
+                const std::string two = s.substr(i, 2);
+                if (two == "<=" || two == ">=" || two == "==" || two == "!=" || two == "&&" || two == "||") {
+                    emit(two); i += 2; continue;
+                }
+                if (ch == '=' || ch == '&' || ch == '|') fail(at + "'" + std::string(1, ch) + "' in an expression: use ==, &&, ||");
+                emit(std::string(1, ch)); ++i; continue;
+            }
             if (!ident_start(ch))
-                fail(at + "'" + std::string(1, ch) + "' in an expression is not supported "
-                     "(conditionals and comparisons are not)");
+                fail(at + "'" + std::string(1, ch) + "' in an expression is not supported");
             size_t j = i;
             while (j < s.size() && ident_char(s[j])) ++j;
             const std::string id = lower(s.substr(i, j - i));
@@ -577,10 +756,10 @@ struct Builder {
                     if (args.empty() || args.size() > 2) fail(at + "V() takes one or two nodes");
                     const int a = node_of(args[0], c);
                     const int b = args.size() == 2 ? node_of(args[1], c) : -1;
-                    o += vdiff(a, b);
+                    emit(vdiff(a, b));
                 } else {
                     if (args.size() != 1) fail(at + "I() takes one source name");
-                    o += branch_ref(c.prefix + lower(args[0]));
+                    emit(branch_ref(c.prefix + lower(args[0])));
                 }
                 i = e + 1;
                 continue;
@@ -588,16 +767,24 @@ struct Builder {
             if (call) {
                 std::string f = id == "ln" ? "log" : id == "pwr" ? "pow" : id;
                 if (!funcs.count(f)) fail(at + "function " + id + "() is not supported");
-                o += f;
+                emit(f);
                 i = j;
                 continue;
             }
-            if (id == "time") o += "t";
-            else if (id == "pi") o += fmt(kPi);
-            else if (c.scope->get(id, v)) o += "(" + fmt(v) + ")";
+            if (id == "time") emit("t");
+            else if (id == "pi") emit(fmt(kPi));
+            else if (c.scope->get(id, v)) emit("(" + fmt(v) + ")");
             else fail(at + "unknown symbol '" + id + "'");
             i = j;
         }
+        if (has_cond) {
+            CondRewriter r{ tk, at };
+            const std::string e = r.expr().s;
+            if (r.p != tk.size()) fail(at + "unexpected '" + tk[r.p] + "' in an expression");
+            return "(" + e + ")";
+        }
+        std::string o;
+        for (const std::string& x : tk) o += x;
         return "(" + o + ")";
     }
 
@@ -607,21 +794,33 @@ struct Builder {
         const auto& t = cd.tok;
         auto is_kw = [](const std::string& s) {
             const std::string l = lower(s);
-            return l == "dc" || l == "ac" || l == "sin" || l == "pulse" || l == "pwl" || l == "exp"
-                || l == "distof1" || l == "distof2" || l == "sffm" || l == "am" || l == "trrandom";
+            return l == "dc" || l == "ac" || l == "sin" || l == "sine" || l == "pulse" || l == "pwl" || l == "exp"
+                || l == "distof1" || l == "distof2" || l == "sffm" || l == "am" || l == "trrandom" || l == "trnoise";
         };
         double dc = 0.0;
         std::string kind;
         std::vector<double> a;
         for (size_t i = from; i < t.size();) {
             const std::string l = lower(t[i]);
+            // key = value (KiCad пишет "DC ac=1 AC 1"): DC — значение, остальное (ac, ...) — без влияния
+            if (i + 2 < t.size() && t[i + 1] == "=") {
+                if (l == "dc") dc = eval_value(t[i + 2], *c.scope);
+                i += 3;
+                continue;
+            }
             if (!is_kw(t[i])) { dc = eval_value(t[i], *c.scope); ++i; continue; }
             ++i;
             std::vector<double> nums;
-            while (i < t.size() && !is_kw(t[i])) nums.push_back(eval_value(t[i++], *c.scope));
+            while (i < t.size() && !is_kw(t[i]) && !(i + 1 < t.size() && t[i + 1] == "="))
+                nums.push_back(eval_value(t[i++], *c.scope));
             if (l == "dc") { if (!nums.empty()) dc = nums[0]; }
             else if (l == "ac" || l == "distof1" || l == "distof2") {}
-            else if (l == "sin" || l == "pulse" || l == "pwl" || l == "exp") { kind = l; a = nums; }
+            else if (l == "sin" || l == "sine" || l == "pulse" || l == "pwl" || l == "exp" || l == "am" || l == "sffm") {
+                kind = l == "sine" ? "sin" : l;
+                a = nums;
+            }
+            else if (l == "trnoise" || l == "trrandom")
+                fail(at + l + ": noise / random sources are not supported (the DAE is deterministic)");
             else fail(at + l + " sources are not supported");
         }
         auto arg = [&](size_t k, double def) { return k < a.size() ? a[k] : def; };
@@ -644,6 +843,19 @@ struct Builder {
             e += "*sin(" + fmt(2.0 * kPi) + "*" + fr + "*" + tt;
             if (ph != 0.0) e += " + " + fmt(ph * kPi / 180.0);
             return e + "))";
+        }
+        if (kind == "am") {   // AM(VA VO MF FC TD): VA (VO + sin(2 pi MF tt)) sin(2 pi FC tt), tt = t - TD, 0 до TD
+            if (a.size() < 4) fail(at + "AM needs VA VO MF FC");
+            const double td = arg(4, 0.0);
+            const std::string tt = td == 0.0 ? std::string("t") : "max(t - " + fmt(td) + ", 0)";
+            return "(" + param(name + "_va", a[0]) + "*(" + param(name + "_vo", a[1]) + " + sin(" + fmt(2.0 * kPi * a[2]) + "*"
+                 + tt + "))*sin(" + fmt(2.0 * kPi * a[3]) + "*" + tt + "))";
+        }
+        if (kind == "sffm") {   // SFFM(VO VA FC MDI FS): VO + VA sin(2 pi FC t + MDI sin(2 pi FS t))
+            if (a.size() < 2) fail(at + "SFFM needs VO and VA");
+            const double fc = arg(2, tstop > 0.0 ? 1.0 / tstop : 0.0), mdi = arg(3, 0.0), fs = arg(4, fc);
+            return "(" + param(name + "_vo", a[0]) + " + " + param(name + "_va", a[1]) + "*sin(" + fmt(2.0 * kPi * fc)
+                 + "*t + " + fmt(mdi) + "*sin(" + fmt(2.0 * kPi * fs) + "*t)))";
         }
         if (kind == "pulse") {
             if (a.size() < 2) fail(at + "PULSE needs at least V1 and V2");
@@ -740,10 +952,13 @@ struct Builder {
 
     // Конденсатор с номиналом p (выражение): x = vc, z = ic, vc' = ic/p, Va - Vb - vc = 0.
     // НУ: IC= элемента, иначе .ic V(a) - V(b) (неназванный узел — 0, как в SPICE с UIC).
+    // p — ёмкость: имя параметра или выражение, где "@V" — напряжение на ней (ёмкость перехода C(v)).
     void capacitor(const std::string& name, int a, int b, const std::string& p, bool has_ic, double v0) {
         const std::string x = uniq("vc_" + sanitize(name)), i = uniq("ic_" + sanitize(name));
         xs.push_back(x);
-        x_rhs.push_back(i + "/" + p);
+        std::string pc = p;
+        for (size_t k = pc.find("@V"); k != std::string::npos; k = pc.find("@V", k + x.size())) pc.replace(k, 2, x);
+        x_rhs.push_back(i + "/" + (pc == p ? p : "(" + pc + ")"));
         zs.push_back(i);
         gs.push_back(lin(a, b) + " - " + x);
         current(a, b, i);
@@ -764,14 +979,29 @@ struct Builder {
     }
 
     // Модель прибора по имени и проверка типа: "d" — D, "npn" — NPN/PNP, "njf" — NJF/PJF.
-    const Model& model(const std::string& name, const char* kind, const std::string& at) {
+    // Параметры вычисляются в области видимости элемента; модель из .subckt — своя у каждого экземпляра
+    // (имя с префиксом экземпляра: параметры a[] тоже свои), общая — одна на весь netlist.
+    std::map<std::string, Model> model_inst;
+    const Model& model(const std::string& name, const char* kind, const std::string& at, const Ctx& c) {
         auto it = deck.models.find(lower(name));
         if (it == deck.models.end()) fail(at + "unknown model " + name);
-        const std::string& ty = it->second.type;
+        const Model& src = it->second;
+        const std::string& ty = src.type;
         const std::string k = kind;
-        const bool ok = k == "d" ? ty == "d" : k == "npn" ? (ty == "npn" || ty == "pnp") : (ty == "njf" || ty == "pjf");
+        if (ty == "vdmos") fail(at + "model " + name + ": VDMOS (power MOSFET) models are not supported");
+        const bool ok = k == "d" ? ty == "d" : k == "npn" ? (ty == "npn" || ty == "pnp")
+                      : k == "nmos" ? (ty == "nmos" || ty == "pmos") : (ty == "njf" || ty == "pjf");
         if (!ok) fail(at + "model " + name + " has type " + ty);
-        return it->second;
+        const std::string key = (src.in_subckt ? c.prefix : std::string()) + lower(name);
+        auto mi = model_inst.find(key);
+        if (mi != model_inst.end()) return mi->second;
+        Model m = src;
+        if (src.in_subckt) m.name = c.prefix + src.name;
+        for (const auto& kv : src.raw) {
+            try { m.p[kv.first] = eval_value(kv.second, *c.scope); }
+            catch (const std::exception&) { m.bad.insert(kv.first); }
+        }
+        return model_inst[key] = m;
     }
 
     // Параметры модели -> параметры a[] "<модель>_<имя>", один раз на модель. Нулевое умолчание
@@ -785,19 +1015,26 @@ struct Builder {
         if (it != model_cache.end()) return it->second;
         std::map<std::string, std::string>& out = model_cache[lower(m.name)];
         for (size_t i = 0; i < keys.size(); ++i) {
+            if (m.bad.count(keys[i]))
+                fail("model " + m.name + ": cannot evaluate " + keys[i] + " = " + m.raw.at(keys[i]));
             auto v = m.p.find(keys[i]);
             const double val = v != m.p.end() ? v->second : defs[i];
             if (defs[i] == 0.0 && val == 0.0) continue;
             out[keys[i]] = param(m.name + "_" + keys[i], val);
         }
         std::string skip;
-        for (const auto& kv : m.p)
-            if (std::find(ignored.begin(), ignored.end(), kv.first) != ignored.end()) skip += " " + kv.first;
+        for (const auto& kv : m.raw)
+            if (kv.first == "mfg" || kv.first == "type" || kv.first == "icrating" || kv.first == "vceo"
+                || kv.first == "vds" || kv.first == "iave" || kv.first == "vpk") continue;   // справочные поля
+            else if (std::find(ignored.begin(), ignored.end(), kv.first) != ignored.end()) skip += " " + kv.first;
             else if (std::find(keys.begin(), keys.end(), kv.first) == keys.end()) skip += " " + kv.first + "(?)";
         if (!skip.empty()) notes.push_back("model " + m.name + ": not modelled:" + skip);
-        if (m.p.count("cjo") || m.p.count("cje") || m.p.count("cjc"))
-            notes.push_back("model " + m.name + ": junction capacitances are taken as constant");
         return out;
+    }
+    // Параметр модели, заданный в .model, иначе — литерал умолчания SPICE (без параметра a[]).
+    static std::string pd(const std::map<std::string, std::string>& mp, const char* k, const char* def) {
+        auto it = mp.find(k);
+        return it != mp.end() ? it->second : std::string(def);
     }
 
     // Внутренний узел за последовательным сопротивлением r/area (RS диода, RB/RC/RE транзистора).
@@ -835,6 +1072,7 @@ struct Builder {
         if (lower(r.substr(0, kw.size())) != kw) return false;
         size_t i = kw.size();
         while (i < r.size() && std::isspace((unsigned char)r[i])) ++i;
+        if (i < r.size() && r[i] == '{' && kw == "value") { r = r.substr(i); return true; }   // PSpice: VALUE {..}
         if (i >= r.size() || r[i] != '=') return false;
         r = r.substr(i + 1);
         return true;
@@ -861,7 +1099,19 @@ struct Builder {
         case 'r': {
             need(4);
             const int a = node_of(t[1], c), b = node_of(t[2], c);
-            const double r = value_at(3, "r");
+            // Значение-выражение от времени / напряжений (KiCad: r='TIME > 350m ? 8 : 89') — проводимость
+            // как у B: I = V / R(t, V); число — как раньше, параметр a[].
+            const std::string rv = lower(t[3]) == "r" && t.size() > 5 && t[4] == "=" ? t[5] : t[3];
+            double r = 0.0;
+            bool num_ok = true;
+            try { r = eval_value(rv, *c.scope); } catch (const std::exception&) { num_ok = false; }
+            if (!num_ok) {
+                current(a, b, vdiff(a, b) + "/" + translate(rv, c, at));
+                conduct(a, b);
+                notes.push_back(name + ": resistance is an expression (" + rv + ")");
+                ++n_r;
+                break;
+            }
             if (r == 0.0) fail(at + "zero resistance");
             current(a, b, vdiff(a, b) + "/" + param(name, r));
             conduct(a, b);
@@ -882,16 +1132,18 @@ struct Builder {
         case 'd': {
             need(4);
             const int a = node_of(t[1], c), k = node_of(t[2], c);
-            const Model& m = model(t[3], "d", at);
+            const Model& m = model(t[3], "d", at, c);
             const double area = t.size() > 4 && t[4] != "=" && lower(t[4]) != "off" && lower(t[4]) != "ic"
                               ? eval_value(lower(t[4]) == "area" && t.size() > 6 ? t[6] : t[4], *c.scope) : 1.0;
-            const auto& mp = model_params(m, { "is", "n", "rs", "cjo" }, { 1e-14, 1, 0, 0 },
-                                          { "bv", "ibv", "tt", "vj", "m", "eg", "xti", "kf", "af", "fc" });
+            const auto& mp = model_params(m, { "is", "n", "rs", "cjo", "vj", "m", "fc" }, { 1e-14, 1, 0, 0, 0, 0, 0 },
+                                          { "bv", "ibv", "tt", "eg", "xti", "kf", "af" });
             auto sc = [&](const std::string& p) { return area == 1.0 ? p : "(" + fmt(area) + "*" + p + ")"; };
             const int j = internal(a, mp.count("rs") ? mp.at("rs") : std::string(), name, "a", area);
             current(j, k, diode_current(vdiff(j, k), sc(mp.at("is")), mp.at("n")));
             conduct(j, k);
-            if (mp.count("cjo")) capacitor(name + "_cj", j, k, sc(mp.at("cjo")), false, 0.0);
+            if (mp.count("cjo"))
+                capacitor(name + "_cj", j, k, junction_capacitance("@V", sc(mp.at("cjo")), pd(mp, "vj", "1"),
+                                                                   pd(mp, "m", "0.5"), pd(mp, "fc", "0.5")), false, 0.0);
             ++n_dev;
             break;
         }
@@ -900,16 +1152,17 @@ struct Builder {
             // Q c b e [s] model [area]
             size_t mi = 4;
             if (!deck.models.count(lower(t[4])) && t.size() > 5) mi = 5;
-            const Model& m = model(t[mi], "npn", at);
+            const Model& m = model(t[mi], "npn", at, c);
             const bool pnp = m.type == "pnp";
             if (!pnp && m.type != "npn") fail(at + "model " + m.name + " is not NPN/PNP");
             const double area = t.size() > mi + 1 && t[mi + 1] != "=" && lower(t[mi + 1]) != "off"
                               ? eval_value(lower(t[mi + 1]) == "area" && t.size() > mi + 3 ? t[mi + 3] : t[mi + 1], *c.scope) : 1.0;
-            const auto& mp = model_params(m, { "is", "bf", "br", "nf", "nr", "vaf", "var", "rb", "rc", "re", "cje", "cjc" },
-                                          { 1e-16, 100, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0 },
-                                          { "ikf", "ikr", "ise", "isc", "ne", "nc", "tf", "tr", "vje", "vjc", "mje", "mjc",
+            const auto& mp = model_params(m, { "is", "bf", "br", "nf", "nr", "vaf", "var", "rb", "rc", "re", "cje", "cjc",
+                                               "vje", "vjc", "mje", "mjc", "fc" },
+                                          { 1e-16, 100, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+                                          { "ikf", "ikr", "ise", "isc", "ne", "nc", "tf", "tr",
                                             "xtf", "itf", "vtf", "ptf", "eg", "xti", "xtb", "irb", "rbm", "cjs", "kf", "af",
-                                            "fc", "nk", "iss", "ns", "bvcbo" });
+                                            "nk", "iss", "ns", "bvcbo" });
             auto sc = [&](const std::string& p) { return area == 1.0 ? p : "(" + fmt(area) + "*" + p + ")"; };
             auto opt_p = [&](const char* k) { return mp.count(k) ? mp.at(k) : std::string(); };
             const int nc = internal(node_of(t[1], c), opt_p("rc"), name, "c", area);
@@ -924,8 +1177,14 @@ struct Builder {
             else     { current(nc, ne, q.ic); current(nb, ne, q.ib); }
             conduct(nc, ne);
             conduct(nb, ne);
-            if (mp.count("cje")) capacitor(name + "_cje", nb, ne, sc(mp.at("cje")), false, 0.0);
-            if (mp.count("cjc")) capacitor(name + "_cjc", nb, nc, sc(mp.at("cjc")), false, 0.0);
+            // Напряжение на ёмкости — vb - ve (vb - vc); прямое смещение перехода у PNP — обратного знака.
+            const std::string vj = pnp ? "(-@V)" : "@V", fc = pd(mp, "fc", "0.5");
+            if (mp.count("cje"))
+                capacitor(name + "_cje", nb, ne, junction_capacitance(vj, sc(mp.at("cje")), pd(mp, "vje", "0.75"),
+                                                                     pd(mp, "mje", "0.33"), fc), false, 0.0);
+            if (mp.count("cjc"))
+                capacitor(name + "_cjc", nb, nc, junction_capacitance(vj, sc(mp.at("cjc")), pd(mp, "vjc", "0.75"),
+                                                                     pd(mp, "mjc", "0.33"), fc), false, 0.0);
             ++n_dev;
             break;
         }
@@ -937,6 +1196,7 @@ struct Builder {
             const std::string p = param(name, lv);
             const std::string x = uniq("il_" + sanitize(name));
             xs.push_back(x);
+            inductors[key] = Inductor{ x_rhs.size(), a, b, p, name };
             x_rhs.push_back(vdiff(a, b) + "/" + p);
             current(a, b, x);
             double v0 = 0.0;
@@ -944,6 +1204,7 @@ struct Builder {
             else v0 = 0.0;
             ic[x] = fmt_short(v0);
             branch[key] = x;
+            l_dc_edges.insert(dc_edges.size());
             conduct(a, b);
             ++n_l;
             break;
@@ -1029,13 +1290,13 @@ struct Builder {
         case 'j': {
             need(5);
             // J d g s model [area]
-            const Model& m = model(t[4], "njf", at);
+            const Model& m = model(t[4], "njf", at, c);
             const bool pch = m.type == "pjf";
             const double area = t.size() > 5 && t[5] != "=" && lower(t[5]) != "off"
                               ? eval_value(lower(t[5]) == "area" && t.size() > 7 ? t[7] : t[5], *c.scope) : 1.0;
-            const auto& mp = model_params(m, { "vto", "beta", "lambda", "is", "rd", "rs", "cgs", "cgd" },
-                                          { -2.0, 1e-4, 0, 1e-14, 0, 0, 0, 0 },
-                                          { "b", "pb", "fc", "kf", "af", "n", "isr", "nr", "alpha", "vk", "m",
+            const auto& mp = model_params(m, { "vto", "beta", "lambda", "is", "rd", "rs", "cgs", "cgd", "pb", "m", "fc" },
+                                          { -2.0, 1e-4, 0, 1e-14, 0, 0, 0, 0, 0, 0, 0 },
+                                          { "b", "kf", "af", "n", "isr", "nr", "alpha", "vk",
                                             "tnom", "xti", "vtotc", "betatce" });
             auto sc = [&](const std::string& p) { return area == 1.0 ? p : "(" + fmt(area) + "*" + p + ")"; };
             auto opt_p = [&](const char* k) { return mp.count(k) ? mp.at(k) : std::string(); };
@@ -1051,13 +1312,87 @@ struct Builder {
             else     { current(nd, ns, id); current(ng, ns, dgs); current(ng, nd, dgd); }
             conduct(nd, ns);
             conduct(ng, ns);
-            if (mp.count("cgs")) capacitor(name + "_cgs", ng, ns, sc(mp.at("cgs")), false, 0.0);
-            if (mp.count("cgd")) capacitor(name + "_cgd", ng, nd, sc(mp.at("cgd")), false, 0.0);
+            const std::string vj = pch ? "(-@V)" : "@V", pb = pd(mp, "pb", "1"), mj = pd(mp, "m", "0.5"),
+                              fc = pd(mp, "fc", "0.5");
+            if (mp.count("cgs"))
+                capacitor(name + "_cgs", ng, ns, junction_capacitance(vj, sc(mp.at("cgs")), pb, mj, fc), false, 0.0);
+            if (mp.count("cgd"))
+                capacitor(name + "_cgd", ng, nd, junction_capacitance(vj, sc(mp.at("cgd")), pb, mj, fc), false, 0.0);
             ++n_dev;
             break;
         }
-        case 'm': case 'z':
-            fail(at + "MOSFET / MESFET are not supported yet");
+        case 'm': {
+            if (t.size() == 5 && deck.models.count(lower(t[4]))) model(t[4], "nmos", at, c);   // 3 вывода: VDMOS — его отказ
+            need(6);
+            // M d g s b model [L=..] [W=..] [M=..] [AD= AS= PD= PS= NRD= NRS= OFF IC=]: level 1
+            const Model& m = model(t[5], "nmos", at, c);
+            const bool pch = m.type == "pmos";
+            auto lv = m.p.find("level");
+            if (lv != m.p.end() && lv->second != 1.0)
+                fail(at + "MOSFET model " + m.name + ": LEVEL " + fmt_short(lv->second) + " is not supported (level 1 only)");
+            double W = 100e-6, L = 100e-6, mult = 1.0;
+            for (size_t i = 6; i + 2 < t.size(); ++i) {
+                if (t[i + 1] != "=") continue;
+                const std::string k = lower(t[i]);
+                if (k == "w") W = eval_value(t[i + 2], *c.scope);
+                else if (k == "l") L = eval_value(t[i + 2], *c.scope);
+                else if (k == "m") mult = eval_value(t[i + 2], *c.scope);
+            }
+            if (!(W > 0) || !(L > 0)) fail(at + "W and L must be > 0");
+            const auto& mp = model_params(m, { "vto", "kp", "lambda", "gamma", "phi", "rd", "rs", "cgso", "cgdo" },
+                                          { 0, 2e-5, 0, 0, 0, 0, 0, 0, 0 },
+                                          { "level", "tox", "u0", "uo", "ld", "nsub", "nss", "nfs", "tpg", "xj", "js", "is",
+                                            "pb", "cj", "mj", "cjsw", "mjsw", "fc", "cbd", "cbs", "cgbo", "rsh", "kf", "af",
+                                            "tnom" });
+            auto opt_p = [&](const char* k) { return mp.count(k) ? mp.at(k) : std::string(); };
+            const int nd = internal(node_of(t[1], c), opt_p("rd"), name, "d", 1.0);
+            const int ng = node_of(t[2], c);
+            const int ns = internal(node_of(t[3], c), opt_p("rs"), name, "s", 1.0);
+            const int nb = node_of(t[4], c);
+            // PMOS: те же формулы от vsg, vsd, vdg, vsb, порог -VTO (SPICE хранит type*VTO), ток обратного знака.
+            const std::string vgs = pch ? vdiff(ns, ng) : vdiff(ng, ns), vds = pch ? vdiff(ns, nd) : vdiff(nd, ns),
+                              vgd = pch ? vdiff(nd, ng) : vdiff(ng, nd), vbs = pch ? vdiff(ns, nb) : vdiff(nb, ns),
+                              vbd = pch ? vdiff(nd, nb) : vdiff(nb, nd);
+            const std::string vt0 = mp.count("vto") ? (pch ? "(-" + mp.at("vto") + ")" : mp.at("vto")) : std::string("0");
+            std::string vts = vt0, vtd = vt0;
+            if (mp.count("gamma")) {
+                const std::string phi = pd(mp, "phi", "0.6");
+                vts = mosfet_threshold(vt0, mp.at("gamma"), phi, vbs);
+                vtd = mosfet_threshold(vt0, mp.at("gamma"), phi, vbd);
+            }
+            const std::string beta = "(" + fmt(mult * W / (2 * L)) + "*" + mp.at("kp") + ")";
+            const std::string id = mosfet_drain_current(vgs, vds, vgd, vts, vtd, beta, opt_p("lambda"));
+            if (pch) current(ns, nd, id); else current(nd, ns, id);
+            conduct(nd, ns);
+            // Затвор изолирован: тока нет, но ёмкости перекрытия CGSO / CGDO (на единицу ширины) — постоянные.
+            if (mp.count("cgso")) capacitor(name + "_cgs", ng, ns, "(" + fmt(mult * W) + "*" + mp.at("cgso") + ")", false, 0.0);
+            if (mp.count("cgdo")) capacitor(name + "_cgd", ng, nd, "(" + fmt(mult * W) + "*" + mp.at("cgdo") + ")", false, 0.0);
+            touch(ng);
+            touch(nb);
+            ++n_dev;
+            break;
+        }
+        case 'k': {
+            // K name L1 L2 [L3 ...] k: взаимная индуктивность M_ij = k sqrt(Li Lj) (см. couple())
+            need(4);
+            Coupling cp;
+            cp.name = name;
+            cp.at = at;
+            for (size_t i = 1; i + 1 < t.size(); ++i) cp.inductors.push_back(c.prefix + lower(t[i]));
+            const double kv = eval_value(t.back(), *c.scope);
+            if (!(std::fabs(kv) <= 1.0)) fail(at + "|k| must be <= 1");
+            // |k| = 1 (идеальная связь, так пишут трансформаторы KiCad): матрица индуктивностей вырождена,
+            // напряжения обмоток связаны алгебраически — индекс 2 (Radau IIA / BDF его держат).
+            if (std::fabs(kv) == 1.0)
+                notes.push_back(name + ": k = 1 (ideal coupling): the inductance matrix is singular - index 2");
+            cp.k = param(name, kv);
+            couplings.push_back(cp);
+            break;
+        }
+        case 'z':
+            fail(at + "MESFET is not supported yet");
+        case 'a':
+            fail(at + "XSPICE code models (A elements: digital, potentiometer, ...) are not supported");
         default:
             fail(at + "element type '" + std::string(1, type) + "' is not supported");
         }
@@ -1115,14 +1450,15 @@ struct Builder {
         for (const auto& kv : s.defaults) sc->v[kv.first] = eval_value(kv.second, *sc);
         for (const auto& kv : over) sc->v[kv.first] = eval_value(kv.second, *c.scope);
         in.scope = sc.get();
+        // .param подсхемы — до её элементов: PSpice-модели (LM317) пишут .PARAM после строк, где он нужен
+        for (const Card& e : s.cards)
+            if (!e.tok.empty() && lower(e.tok[0]) == ".param")
+                for (size_t i = 1; i + 2 < e.tok.size(); i += 3)
+                    if (e.tok[i + 1] == "=") sc->v[lower(e.tok[i])] = eval_value(e.tok[i + 2], *sc);
         for (const Card& e : s.cards) {
             if (e.tok.empty()) continue;
             const std::string k = lower(e.tok[0]);
-            if (k == ".param") {
-                for (size_t i = 1; i + 2 < e.tok.size(); i += 3)
-                    if (e.tok[i + 1] == "=") sc->v[lower(e.tok[i])] = eval_value(e.tok[i + 2], *sc);
-                continue;
-            }
+            if (k == ".param") continue;
             if (k[0] == '.') { deck.ignored.insert(k); continue; }
             element(e, in);
         }
@@ -1153,6 +1489,19 @@ struct Builder {
         // Узел, к которому подходят только источники тока: потенциал не определён.
         for (size_t n = 0; n < node_keys.size(); ++n)
             if (!solid.count((int)n)) fail("node " + node_disp[n] + " is connected only to current sources");
+        // Сечение из индуктивностей и источников тока (двойственно контуру C-V): стянуть все ветви, кроме L
+        // и источников тока (у тех нет записи в dc_edges / v_edges); индуктивность между разными
+        // стянутыми узлами лежит в таком сечении — KCL связывает токи катушек без z, индекс 2.
+        for (size_t i = 0; i < par.size(); ++i) par[i] = (int)i;
+        for (size_t k = 0; k < dc_edges.size(); ++k)
+            if (!l_dc_edges.count(k)) par[(size_t)find(dc_edges[k].first + 1)] = find(dc_edges[k].second + 1);
+        for (const Edge& e : v_edges) par[(size_t)find(e.a + 1)] = find(e.b + 1);
+        std::string cut;
+        for (const auto& kv : inductors)
+            if (find(kv.second.a + 1) != find(kv.second.b + 1)) cut += " " + kv.second.name;
+        if (!cut.empty())
+            notes.push_back("cutset of inductors / current sources through" + cut
+                            + ": index 2 (the inductor currents are not independent)");
         // Путь к земле по постоянному току: без него рабочая точка не определена (переходный
         // процесс при этом считается — потенциал держат конденсаторы).
         for (size_t i = 0; i < par.size(); ++i) par[i] = (int)i;
@@ -1177,6 +1526,7 @@ struct Builder {
     }
 
     void finish(SpiceImportResult& r) {
+        couple();
         loops();
         std::ostringstream eq;
         for (size_t i = 0; i < xs.size(); ++i) eq << xs[i] << "' = " << resolve(x_rhs[i]) << "\n";

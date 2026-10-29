@@ -844,6 +844,11 @@ static std::string lyap_nx_prefix(const std::string& krs_body) {
     return nx > 0 ? "#define UCUDA_LYAP_NX " + std::to_string(nx) + "\n" : std::string();
 }
 
+// Запрос свипа на BDF 1-5 (fill_adaptive_request): в слоте dprep — якобиан, его берут и LLE/LS.
+static bool ad_is_bdf(const AdaptiveRequest& ad) {
+    return ad.prefix.find("UCUDA_BDF_DRIVER") != std::string::npos;
+}
+
 // Явное время t (этап 2): шаг calculateDiscreteModel(X, ucuda_t, a, h), циклы cudaLibrary.cu
 // ведут номер шага (UCUDA_STEP / UCUDA_NA в cudaLibrary.cuh); адаптивные — время драйвера S.t. Ставят только модули, чьи ядра
 // это проводят (БД, LLE/LS, Metrics, бассейны, DFT, Order; фиксированный и адаптивный шаг); build_module отказывает
@@ -3194,7 +3199,7 @@ struct ParametricEngine::Impl {
                                 { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
                                 { "{{KRS_RHS_BODY}}",    ad.rhs },
                                 { "{{KRS_EMB_BODY}}",    ad.emb },
-                                { "{{KRS_DPREP_BODY}}",  ad.prefix.empty() ? std::string() : ad.dprep },
+                                { "{{KRS_DPREP_BODY}}",  ad_is_bdf(ad) ? ad.dprep : std::string() },
                                 { "{{KRS_DEVAL_BODY}}",  "" },
                                 { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
                               { "lyapunovLLEAdCUDA", "lyapunovLSAdCUDA" },
@@ -3230,7 +3235,7 @@ struct ParametricEngine::Impl {
                                 { "{{PAR_OR_VAR}}",      "1" },
                                 { "{{KRS_RHS_BODY}}",    ad.rhs },
                                 { "{{KRS_EMB_BODY}}",    ad.emb },
-                                { "{{KRS_DPREP_BODY}}",  ad.prefix.empty() ? std::string() : ad.dprep },
+                                { "{{KRS_DPREP_BODY}}",  ad_is_bdf(ad) ? ad.dprep : std::string() },
                                 { "{{KRS_DEVAL_BODY}}",  "" },
                                 { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
                               { "lyapunovLLEAdContCUDA", "lyapunovLSAdContCUDA" },

@@ -49,16 +49,34 @@ BjtCurrents bjt_currents(const std::string& vbe, const std::string& vbc,
     return c;
 }
 
-std::string jfet_drain_current(const std::string& vgs, const std::string& vds, const std::string& vgd,
-                               const std::string& vto, const std::string& beta, const std::string& lambda) {
-    auto half = [&](const std::string& vg, const std::string& v) {   // F(vg, v) при v >= 0
-        const std::string vov = "max(" + vg + " - " + vto + ", 0)";
+std::string mosfet_drain_current(const std::string& vgs, const std::string& vds, const std::string& vgd,
+                                 const std::string& vt_s, const std::string& vt_d,
+                                 const std::string& beta, const std::string& lambda) {
+    auto half = [&](const std::string& vg, const std::string& v, const std::string& vt) {   // F(vg, v) при v >= 0
+        const std::string vov = "max(" + vg + " - " + vt + ", 0)";
         const std::string vm = "min(" + v + ", " + vov + ")";
         std::string f = beta + "*" + vm + "*(2*" + vov + " - " + vm + ")";
         if (!lambda.empty()) f += "*(1 + " + lambda + "*" + v + ")";
         return f;
     };
-    return "(" + half(vgs, "max(" + vds + ", 0)") + " - " + half(vgd, "max(-" + vds + ", 0)") + ")";
+    return "(" + half(vgs, "max(" + vds + ", 0)", vt_s) + " - " + half(vgd, "max(-" + vds + ", 0)", vt_d) + ")";
+}
+
+std::string jfet_drain_current(const std::string& vgs, const std::string& vds, const std::string& vgd,
+                               const std::string& vto, const std::string& beta, const std::string& lambda) {
+    return mosfet_drain_current(vgs, vds, vgd, vto, vto, beta, lambda);
+}
+
+std::string mosfet_threshold(const std::string& vt0, const std::string& gamma, const std::string& phi,
+                             const std::string& vbs) {
+    return "(" + vt0 + " + " + gamma + "*(sqrt(max(" + phi + " - " + vbs + ", 0.01*" + phi + ")) - sqrt(" + phi + ")))";
+}
+
+std::string junction_capacitance(const std::string& v, const std::string& cj0, const std::string& vj,
+                                 const std::string& m, const std::string& fc) {
+    const std::string vfc = "(" + fc + "*" + vj + ")";
+    return "(" + cj0 + "*(1 - min(" + v + ", " + vfc + ")/" + vj + ")^(-" + m + ") + " + cj0 + "*" + m + "/(" + vj
+         + "*(1 - " + fc + ")^(1 + " + m + "))*max(" + v + " - " + vfc + ", 0))";
 }
 
 bool dae_dc_operating_point(const System& s, const double* a, int na, double t0, double* X,

@@ -18,6 +18,8 @@
 #include <vector>
 #include <algorithm>
 #include <functional>
+#include <complex>
+#include <array>
 
 namespace { // внутренняя линковка: всё ниже не видно из других .cpp/.cu
 
@@ -638,6 +640,13 @@ namespace { // внутренняя линковка: всё ниже не ви�
             if (pn_is_zero(dw)) return pn_mul(pu, du);
             if (pn_is_zero(du)) return pn_mul(pw, dw);
             return pn_add(pn_mul(pu, du), pn_mul(pw, dw));
+        }
+        if (f == "copysign") {
+            // |a| sgn(b): по a — sgn(a) sgn(b), по b — 0 почти всюду (ступеньки условий импорта схем)
+            if (n->args.size() != 2) throw std::runtime_error("jacobian: copysign needs 2 args");
+            const PN da = pn_diff(n->args[0], v);
+            if (pn_is_zero(da)) return pn_num(0);
+            return pn_mul(pn_mul(pn_call2("copysign", pn_num(1), n->args[0]), pn_call2("copysign", pn_num(1), n->args[1])), da);
         }
         if (f == "atan2") {
             if (n->args.size() != 2) throw std::runtime_error("jacobian: atan2 needs 2 args");
@@ -1847,6 +1856,168 @@ namespace { // внутренняя линковка: всё ниже не ви�
         o << "        for (l = 0; l < " << N << "; l++) W[bi * " << N << " + l] = X[l];\n";
         o << "        for (l = 0; l < " << nx << "; l++) W[bi * " << N << " + l] += RC[bi] * h * Rv[l];\n";
         o << "    }\n";
+        // Упрощённый Ньютон RADAU5 (Hairer-Wanner IV.8) при newton_full = 0: J в X один раз на шаг,
+        // преобразование T^-1 A^-1 T = diag(gamma, [[alpha, -beta], [beta, alpha]]) делит систему 3N на
+        // вещественную N x N (gamma/h M - J) и комплексную ((alpha + i beta)/h M - J), здесь — вещественную
+        // 2N x 2N. Не сошёлся (или матрица вырождена) — тот же шаг полным Ньютоном ниже, с предиктора.
+        // newton_full = 1 (умолчание ДАУ) — прежний текст и прежние числа.
+        {
+            // T и Lambda — из таблицы: A^-1, её собственные числа (кубика) и векторы, T = [v1, Re v, Im v].
+            double Ai[9];
+            {
+                const double* a = A;
+                const double det = a[0] * (a[4] * a[8] - a[5] * a[7]) - a[1] * (a[3] * a[8] - a[5] * a[6])
+                                 + a[2] * (a[3] * a[7] - a[4] * a[6]);
+                Ai[0] = (a[4] * a[8] - a[5] * a[7]) / det; Ai[1] = (a[2] * a[7] - a[1] * a[8]) / det; Ai[2] = (a[1] * a[5] - a[2] * a[4]) / det;
+                Ai[3] = (a[5] * a[6] - a[3] * a[8]) / det; Ai[4] = (a[0] * a[8] - a[2] * a[6]) / det; Ai[5] = (a[2] * a[3] - a[0] * a[5]) / det;
+                Ai[6] = (a[3] * a[7] - a[4] * a[6]) / det; Ai[7] = (a[1] * a[6] - a[0] * a[7]) / det; Ai[8] = (a[0] * a[4] - a[1] * a[3]) / det;
+            }
+            using cd = std::complex<double>;
+            // характеристический многочлен l^3 - c2 l^2 + c1 l - c0
+            const double c2 = Ai[0] + Ai[4] + Ai[8];
+            const double c1 = Ai[0] * Ai[4] - Ai[1] * Ai[3] + Ai[0] * Ai[8] - Ai[2] * Ai[6] + Ai[4] * Ai[8] - Ai[5] * Ai[7];
+            const double c0 = Ai[0] * (Ai[4] * Ai[8] - Ai[5] * Ai[7]) - Ai[1] * (Ai[3] * Ai[8] - Ai[5] * Ai[6])
+                            + Ai[2] * (Ai[3] * Ai[7] - Ai[4] * Ai[6]);
+            double g = 3.6;
+            for (int k = 0; k < 60; ++k) g -= (((g - c2) * g + c1) * g - c0) / ((3 * g - 2 * c2) * g + c1);
+            // l^2 - (c2 - g) l + c0/g
+            const double pb = c2 - g, pc = c0 / g;
+            const double al = pb / 2, be = std::sqrt(pc - al * al);
+            auto nullv = [&](cd lam) {   // ядро A^-1 - lam I: векторное произведение двух строк
+                cd r0[3] = { Ai[0] - lam, Ai[1], Ai[2] }, r1[3] = { Ai[3], Ai[4] - lam, Ai[5] };
+                std::array<cd, 3> v = { r0[1] * r1[2] - r0[2] * r1[1], r0[2] * r1[0] - r0[0] * r1[2], r0[0] * r1[1] - r0[1] * r1[0] };
+                return v;
+            };
+            const auto v1 = nullv(cd(g, 0)), vc = nullv(cd(al, -be));   // lam = al - i be: Lambda = [[al, -be], [be, al]]
+            double T[9], Ti[9];
+            for (int r = 0; r < 3; ++r) { T[r * 3] = v1[(size_t)r].real(); T[r * 3 + 1] = vc[(size_t)r].real(); T[r * 3 + 2] = vc[(size_t)r].imag(); }
+            {
+                const double* a = T;
+                const double det = a[0] * (a[4] * a[8] - a[5] * a[7]) - a[1] * (a[3] * a[8] - a[5] * a[6])
+                                 + a[2] * (a[3] * a[7] - a[4] * a[6]);
+                Ti[0] = (a[4] * a[8] - a[5] * a[7]) / det; Ti[1] = (a[2] * a[7] - a[1] * a[8]) / det; Ti[2] = (a[1] * a[5] - a[2] * a[4]) / det;
+                Ti[3] = (a[5] * a[6] - a[3] * a[8]) / det; Ti[4] = (a[0] * a[8] - a[2] * a[6]) / det; Ti[5] = (a[2] * a[3] - a[0] * a[5]) / det;
+                Ti[6] = (a[3] * a[7] - a[4] * a[6]) / det; Ti[7] = (a[1] * a[6] - a[0] * a[7]) / det; Ti[8] = (a[0] * a[4] - a[1] * a[3]) / det;
+            }
+            // Lambda = Ti Ai T: проверка блочной формы и знаков (alpha, -beta; beta, alpha)
+            double L[9];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    double sacc = 0;
+                    for (int p = 0; p < 3; ++p) for (int q = 0; q < 3; ++q) sacc += Ti[r * 3 + p] * Ai[p * 3 + q] * T[q * 3 + c];
+                    L[r * 3 + c] = sacc;
+                }
+            const double lg = L[0], la = L[4], lb = L[7];
+            if (std::fabs(L[1]) + std::fabs(L[2]) + std::fabs(L[3]) + std::fabs(L[6]) > 1e-10
+                || std::fabs(L[8] - la) > 1e-10 || std::fabs(L[5] + lb) > 1e-10)
+                throw std::runtime_error("Radau IIA: eigen-decomposition of A^-1 failed");
+            const int N2 = 2 * N;
+            o << "    /* RADAU5 simplified Newton (newton_full = 0): gamma " << fmtnum(lg) << ", alpha " << fmtnum(la)
+              << ", beta " << fmtnum(lb) << " */\n";
+            o << "    int rd_done = 0;\n";
+            o << "    if (!nfull) {\n";
+            o << "        const numb RT[9] = { ";
+            for (int k = 0; k < 9; ++k) o << (k ? ", " : "") << "(numb)" << fmtnum(T[k]);
+            o << " };\n        const numb RTI[9] = { ";
+            for (int k = 0; k < 9; ++k) o << (k ? ", " : "") << "(numb)" << fmtnum(Ti[k]);
+            o << " };\n";
+            o << "        const numb rg = (numb)" << fmtnum(lg) << " / h, ra = (numb)" << fmtnum(la) << " / h, rb = (numb)"
+              << fmtnum(lb) << " / h;\n";
+            o << "        numb Zr[" << M << "], Gw[" << M << "], E1[" << N * N << "], E2[" << N2 * N2 << "];\n";
+            o << "        int p1[" << N << "], p2[" << N2 << "], ndim, okn = 0;\n";
+            // J в X
+            o << "        for (l = 0; l < " << N << "; l++) Sv[l] = X[l];\n";
+            if (ht) o << "        ucuda_ts = ucuda_t;\n";
+            for (int i = 0; i < N; ++i)
+                for (int j = 0; j < N; ++j) {
+                    const std::string& d = JS[(size_t)i * N + j];
+                    o << "        Js[" << i * N + j << "] = " << (d == "(numb)0.0" ? std::string("(numb)0.0") : "(" + d + ")") << ";\n";
+                }
+            o << "        for (l = 0; l < " << N << "; l++) for (m = 0; m < " << N << "; m++) {\n";
+            o << "            mlt = (l == m && l < " << nx << ") ? (numb)1.0 : (numb)0.0;\n";
+            o << "            E1[l * " << N << " + m] = rg * mlt - Js[l * " << N << " + m];\n";
+            o << "            E2[l * " << N2 << " + m] = ra * mlt - Js[l * " << N << " + m];\n";
+            o << "            E2[l * " << N2 << " + " << N << " + m] = -rb * mlt;\n";
+            o << "            E2[(" << N << " + l) * " << N2 << " + m] = rb * mlt;\n";
+            o << "            E2[(" << N << " + l) * " << N2 << " + " << N << " + m] = ra * mlt - Js[l * " << N << " + m];\n";
+            o << "        }\n";
+            auto lu = [&](const char* E, const char* P, const char* n) {
+                o << "        ndim = " << n << ";\n";
+                o << "        for (ik = 0; ik < ndim && !sing; ik++) {\n";
+                o << "            ip = ik; mx = fabs(" << E << "[ik * ndim + ik]);\n";
+                o << "            for (ir = ik + 1; ir < ndim; ir++) { av = fabs(" << E << "[ir * ndim + ik]); if (av > mx) { mx = av; ip = ir; } }\n";
+                o << "            " << P << "[ik] = ip;\n";
+                o << "            if (ip != ik) for (ic = ik; ic < ndim; ic++) { mlt = " << E << "[ik * ndim + ic]; " << E
+                  << "[ik * ndim + ic] = " << E << "[ip * ndim + ic]; " << E << "[ip * ndim + ic] = mlt; }\n";
+                o << "            dgn = " << E << "[ik * ndim + ik];\n";
+                o << "            if (fabs(dgn) < (numb)1e-30) { sing = 1; break; }\n";
+                o << "            for (ir = ik + 1; ir < ndim; ir++) {\n";
+                o << "                mlt = " << E << "[ir * ndim + ik] / dgn; " << E << "[ir * ndim + ik] = mlt;\n";
+                o << "                for (ic = ik + 1; ic < ndim; ic++) " << E << "[ir * ndim + ic] -= mlt * " << E << "[ik * ndim + ic];\n";
+                o << "            }\n";
+                o << "        }\n";
+            };
+            auto solve = [&](const char* E, const char* P, const char* n, const char* b) {
+                o << "            ndim = " << n << ";\n";
+                o << "            for (ik = 0; ik < ndim; ik++) {\n";
+                o << "                ip = " << P << "[ik]; if (ip != ik) { mlt = " << b << "[ik]; " << b << "[ik] = " << b << "[ip]; " << b << "[ip] = mlt; }\n";
+                o << "                for (ir = ik + 1; ir < ndim; ir++) " << b << "[ir] -= " << E << "[ir * ndim + ik] * " << b << "[ik];\n";
+                o << "            }\n";
+                o << "            for (ik = ndim - 1; ik >= 0; ik--) {\n";
+                o << "                for (ic = ik + 1; ic < ndim; ic++) " << b << "[ik] -= " << E << "[ik * ndim + ic] * " << b << "[ic];\n";
+                o << "                " << b << "[ik] /= " << E << "[ik * ndim + ik];\n";
+                o << "            }\n";
+            };
+            o << "        sing = 0;\n";
+            lu("E1", "p1", std::to_string(N).c_str());
+            lu("E2", "p2", std::to_string(N2).c_str());
+            o << "        for (ik = 0; ik < " << M << "; ik++) Zr[ik] = W[ik] - X[ik % " << N << "];\n";
+            o << "        prevn = 1e300;\n";
+            o << "        for (it = 0; it < nmax && !sing; it++) {\n";
+            o << "            for (bj = 0; bj < 3; bj++) {\n";
+            o << "                for (l = 0; l < " << N << "; l++) Sv[l] = X[l] + Zr[bj * " << N << " + l];\n";
+            if (ht) o << "                ucuda_ts = ucuda_t + RC[bj] * h;\n";
+            for (int i = 0; i < N; ++i) o << "                Fs[bj * " << N << " + " << i << "] = (" << fS[i] << ");\n";
+            o << "            }\n";
+            // Gw = (T^-1 x I) F - (Lambda x M) (T^-1 x I) Z / h  (Rv — T^-1 Z)
+            o << "            for (l = 0; l < " << N << "; l++) {\n";
+            o << "                for (bi = 0; bi < 3; bi++) {\n";
+            o << "                    Gw[bi * " << N << " + l] = RTI[bi * 3] * Fs[l] + RTI[bi * 3 + 1] * Fs[" << N << " + l] + RTI[bi * 3 + 2] * Fs[" << 2 * N << " + l];\n";
+            o << "                    Rv[bi * " << N << " + l] = RTI[bi * 3] * Zr[l] + RTI[bi * 3 + 1] * Zr[" << N << " + l] + RTI[bi * 3 + 2] * Zr[" << 2 * N << " + l];\n";
+            o << "                }\n";
+            o << "                if (l < " << nx << ") {\n";
+            o << "                    Gw[l] -= rg * Rv[l];\n";
+            o << "                    Gw[" << N << " + l] -= ra * Rv[" << N << " + l] - rb * Rv[" << 2 * N << " + l];\n";
+            o << "                    Gw[" << 2 * N << " + l] -= rb * Rv[" << N << " + l] + ra * Rv[" << 2 * N << " + l];\n";
+            o << "                }\n";
+            o << "            }\n";
+            solve("E1", "p1", std::to_string(N).c_str(), "Gw");
+            o << "            {\n";
+            o << "            numb* const G2 = Gw + " << N << ";\n";
+            solve("E2", "p2", std::to_string(N2).c_str(), "G2");
+            o << "            }\n";
+            // dZ = (T x I) dW
+            o << "            nrm = 0; xx = 0;\n";
+            o << "            for (l = 0; l < " << N << "; l++) for (bi = 0; bi < 3; bi++) {\n";
+            o << "                ik = bi * " << N << " + l;\n";
+            o << "                mlt = RT[bi * 3] * Gw[l] + RT[bi * 3 + 1] * Gw[" << N << " + l] + RT[bi * 3 + 2] * Gw[" << 2 * N << " + l];\n";
+            o << "                Rv[ik] = mlt;\n";
+            o << "            }\n";
+            o << "            for (ik = 0; ik < " << M << "; ik++) {\n";
+            o << "                Zr[ik] += Rv[ik];\n";
+            o << "                mlt = Wt[ik % " << N << "] * Rv[ik]; nrm += mlt * mlt;\n";
+            o << "                mlt = Wt[ik % " << N << "] * (X[ik % " << N << "] + Zr[ik]); xx += mlt * mlt;\n";
+            o << "            }\n";
+            o << "            if (!(nrm == nrm)) break;\n";
+            o << "            if (nrm < ntol * ntol || nrm < ntol * ntol * xx) { okn = 1; break; }\n";
+            o << "            if (sizeof(numb) == 4 && nrm < (numb)3.6e-12f * xx) { okn = 1; break; }\n";
+            o << "            if (it > 0 && nrm > prevn) break;   /* расходится: полный Ньютон */\n";
+            o << "            prevn = nrm;\n";
+            o << "        }\n";
+            o << "        if (okn) { for (ik = 0; ik < " << M << "; ik++) W[ik] = X[ik % " << N << "] + Zr[ik]; rd_done = 1; }\n";
+            o << "    }\n";
+        }
+        o << "    if (!rd_done) {\n";
         o << "    sing = 0; refresh = 1; prevn = 1e300;\n";
         o << "    for (it = 0; it < nmax; it++) {\n";
         // f, g и (при обновлении) якобианы в каждой стадии
@@ -1944,6 +2115,7 @@ namespace { // внутренняя линковка: всё ниже не ви�
         o << "        if (nfull || nrm > (numb)0.25 * prevn) refresh = 1;\n";
         o << "        prevn = nrm;\n";
         o << "    }\n";
+        o << "    }   /* !rd_done */\n";
         o << "    for (l = 0; l < " << N << "; l++) X[l] = W[" << 2 * N << " + l];\n";
         return o.str();
     }
@@ -4520,6 +4692,18 @@ std::string codegen_dae_scheme(const System& s, DaeScheme sch) {
     try {
         dae_require_index1(jac_over(s, "X", system_uses_time(s) ? kStepTimeArg : ""), N, s.dae_nx, "projection");
         proj = scheme_implicit_common(s, ImplicitKind::Euler, s.dae_nx, false);
+        // Корня нет (точка свипа, где связь при этих параметрах не решается; клон, ушедший за ветвь):
+        // z = NaN, и точка честно получает "нет решения" (циклы свипов видят NaN как разлёт), а не
+        // правдоподобное число от недосошедшегося Ньютона. Признак — вырожденная матрица, не конечная
+        // поправка или поправка после всех итераций больше 1e-3 |X| (а не просто выше ntol: малое
+        // nmax при упрощённом Ньютоне не должно давать NaN у почти сошедшейся точки).
+        std::ostringstream f;
+        f << "    if (nmax > 0 && (sing || !(nrm == nrm) || (it >= nmax && nrm > (numb)1e-6 * ((numb)1";
+        for (int i = 0; i < N; ++i) f << " + X[" << i << "] * X[" << i << "]";
+        f << ")))) {\n";
+        for (int i = s.dae_nx; i < N; ++i) f << "        X[" << i << "] = (numb)nan(\"\");\n";
+        f << "    }\n";
+        proj += f.str();
     } catch (const std::runtime_error&) {}
     // Индекс 3 (этап 5): трапеции и средняя точка не L-устойчивы и расходятся (двойной маятник), Rosenbrock —
     // методы индекса 1 (теряют порядок уже на индексе 2). Для индекса 3 — Radau IIA, BDF-подобные или GGL.

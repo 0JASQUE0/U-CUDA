@@ -1161,6 +1161,26 @@ public:
                     catch (const std::exception& e) { out += "// (not available: " + std::string(e.what()) + ")\n"; }
                     out += "\n";
                 }
+                // BDF 1-5: тела постоянного шага нет — драйвер (kernels/ucuda_bdf.cuh) берёт невязку и якобиан
+                if (dae_scheme_on(kBdfSchemeDae)) {
+                    any = true;
+                    out += "// ===== " + std::string(kBdfSchemeDae) + " (multistep driver kernels/ucuda_bdf.cuh: "
+                           "residual F = [f; g] and Jacobian J; adaptive step only) =====\n";
+                    try {
+                        System sp = sys;   // как bdf_prepare_system (multistep_bdf.h): индекс 3 -> GGL
+                        std::string why;
+                        if (dae_structural_index(sys) > 2 && !dae_ggl_system(sys, sp, &why))
+                            throw std::runtime_error("index 3 via GGL: " + why);
+                        if (sp.vars.size() != sys.vars.size())
+                            out += "// index 3: GGL adds " + std::to_string(sp.vars.size() - sys.vars.size())
+                                 + " multiplier(s) to the state\n";
+                        std::string res, jac;
+                        codegen_bdf_bodies(sp, res, jac);
+                        out += "/* F */\n" + res + "/* J */\n" + jac;
+                    }
+                    catch (const std::exception& e) { out += "// (not available: " + std::string(e.what()) + ")\n"; }
+                    out += "\n";
+                }
                 if (!any) { error_message = "no DAE method selected"; return false; }
                 generated_code = out;
                 return true;

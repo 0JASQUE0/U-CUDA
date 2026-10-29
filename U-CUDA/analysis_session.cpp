@@ -270,7 +270,9 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
         for (const auto& n : dae_scheme_names())
             if (std::find(r.dae_schemes_off.begin(), r.dae_schemes_off.end(), n) == r.dae_schemes_off.end())
                 out.push_back(n);
-        out.emplace_back(kBdfSchemeDae);   // многошаговый, свой драйвер: только адаптивный шаг
+        // многошаговый, свой драйвер: только адаптивный шаг; галочка — в том же списке выключенных
+        if (std::find(r.dae_schemes_off.begin(), r.dae_schemes_off.end(), kBdfSchemeDae) == r.dae_schemes_off.end())
+            out.emplace_back(kBdfSchemeDae);
         return out;
     }
     // Порядок — как в комбо схем: по порядку точности.
@@ -1525,7 +1527,7 @@ static std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_s
     };
     if (scheme_is_multistep(scheme) && !sys.is_map)
         return refuse("'" + scheme + "' is a multistep method with its own driver: switch Integration to "
-                      "Adaptive step (Analysis only for now)");
+                      "Adaptive step");
     // Nothing to choose for a map: the step is always the same whatever the
     // scheme field says (a stale session JSON may hold a previous ODE's scheme).
     if (sys.is_map) {
@@ -1619,7 +1621,7 @@ AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_sc
     for (const auto& cs : custom_schemes)
         if (cs.name == scheme) throw std::runtime_error(adaptive_scheme_hint());
     if (scheme_is_multistep(scheme))
-        throw std::runtime_error("'" + scheme + "' is a multistep method with its own driver: Analysis only for now");
+        throw std::runtime_error("'" + scheme + "' is a multistep method with its own driver (BDF), not an embedded pair");
     if (sys.dae_nx >= 0) {   // нативная ДАУ: методы ДАУ, вложенная пара есть у Rodas4
         DaeScheme ds;
         if (!dae_scheme_from_name(scheme, &ds))
@@ -1789,40 +1791,36 @@ static void fill_adaptive_request(const std::vector<CustomScheme>& custom_scheme
             out.setup_error = dae ? "a DAE needs DAE BDF 1-5" : "DAE BDF 1-5 needs a DAE system";
             return;
         }
-        if (dae && dae_structural_index(sys) > 2) {
-            out.setup_error = "DAE BDF 1-5 in sweeps: index 1-2 (index 3 goes through GGL, which adds variables - "
-                              "Analysis only for now)";
-            return;
-        }
+        // Индекс 3 — через GGL (bdf_prepare_system, как в Analysis): множители mu добавляются к состоянию
+        // (extra_x, старт 0; сборщик запроса расширяет amountOfX и НУ), результаты — по прежним индексам.
+        System sp;
+        { std::string e; if (!bdf_prepare_system(sys, sp, &e)) { out.setup_error = e; return; } }
+        out.extra_x = (int)sp.vars.size() - (int)sys.vars.size();
         AdaptiveCode code;
-        try { codegen_bdf_bodies(sys, code.rhs, code.dprep, "D"); }
+        try { codegen_bdf_bodies(sp, code.rhs, code.dprep, "D"); }
         catch (const std::exception& e) { out.setup_error = std::string("BDF codegen: ") + e.what(); return; }
         code.p = 5; code.q = 4; code.nlo = 1; code.emb_rhs = 1; code.dense_order = 3;
         std::string err;
-        if (!adaptive_build_params(st, code, n, span, out.params, err, &out.ctrl_body)) { out.setup_error = err; return; }
+        if (!adaptive_build_params(st, code, n + out.extra_x, span, out.params, err, &out.ctrl_body)) {
+            out.setup_error = err; return;
+        }
         out.ctrl_body.clear();   // шаг и порядок выбирает сам BDF (DASSL), регулятор не нужен
         out.rhs = code.rhs; out.dprep = code.dprep;
         // Плотный выход у BDF свой (DDATRP); непустое тело — признак "плотный выход есть" для CPU-модуля.
         out.deval = "    (void)D; (void)th; (void)Yo;\n";
-        const int N = (int)sys.vars.size();
+        const int N = (int)sp.vars.size();
         std::string kidx;
         for (int i = 0; i < N; ++i)
-            kidx += (i ? "," : "") + std::to_string(i < (int)sys.dae_index.size() && sys.dae_index[(size_t)i] > 1
-                                                    ? sys.dae_index[(size_t)i] : 1);
-        out.prefix = "#define UCUDA_BDF_DRIVER 1\n#define UCUDA_BDF_NX " + std::to_string(dae ? sys.dae_nx : N)
+            kidx += (i ? "," : "") + std::to_string(i < (int)sp.dae_index.size() && sp.dae_index[(size_t)i] > 1
+                                                    ? sp.dae_index[(size_t)i] : 1);
+        out.prefix = "#define UCUDA_BDF_DRIVER 1\n#define UCUDA_BDF_NX " + std::to_string(dae ? sp.dae_nx : N)
                    + "\n#define UCUDA_BDF_KIDX {" + kidx + "}\n";
+        if (dae && sp.dae_nx < N)   // клоны LLE/LS — по x (ucuda_lyap_init_clones / renorm)
+            out.prefix += "#define UCUDA_AD_DAE_NX " + std::to_string(sp.dae_nx) + "\n";
         out.tol_ratio = out.params.rtol > 0 ? out.params.atol[0] / out.params.rtol : 1.0;
         out.lyap_renorm = st.lyap_renorm;
         out.desc = scheme + " (multistep, DASSL form), rtol " + st.rtol + ", atol " + st.atol
                  + (st.hmax.empty() ? std::string() : ", h_max " + st.hmax);
-        return;
-    }
-    // Нативная ДАУ: в адаптивных модулях свипов нет согласования z0 в каждой точке (шаг с h = 0
-    // фиксированных модулей) и проекции клонов LLE/LS — числа вышли бы правдоподобными, но
-    // неверными. Адаптивный Rodas4 на ДАУ пока только в Analysis.
-    if (sys.dae_nx >= 0) {
-        out.setup_error = "adaptive step on a DAE: Analysis only for now (sweeps need z0 made consistent at every "
-                          "point); use a fixed-step DAE method here";
         return;
     }
     if (!adaptive_scheme_name_ok(scheme)) {
@@ -1835,6 +1833,10 @@ static void fill_adaptive_request(const std::vector<CustomScheme>& custom_scheme
     std::string err;
     if (!adaptive_build_params(st, code, n, span, out.params, err, &out.ctrl_body)) { out.setup_error = err; return; }
     out.rhs = code.rhs; out.emb = code.emb; out.dprep = code.dprep; out.deval = code.deval;
+    // Нативная ДАУ (DAE Rodas4, индекс 1): драйвер согласует z0 каждой точки и клонов LLE/LS
+    // (ucuda_ad_dae_project в ucuda_adaptive.cuh), клоны возмущаются по x.
+    if (sys.dae_nx >= 0 && sys.dae_nx < (int)sys.vars.size())
+        out.prefix = "#define UCUDA_AD_DAE_NX " + std::to_string(sys.dae_nx) + "\n";
     // Ось tol держит отношение atol/rtol текущих настроек.
     out.tol_ratio = out.params.rtol > 0 ? out.params.atol[0] / out.params.rtol : 1.0;
     out.lyap_renorm = st.lyap_renorm;
@@ -1842,6 +1844,15 @@ static void fill_adaptive_request(const std::vector<CustomScheme>& custom_scheme
              + (st.hmin.empty() ? std::string() : ", h_min " + st.hmin)
              + (st.hmax.empty() ? std::string() : ", h_max " + st.hmax)
              + (st.max_rej.empty() ? std::string() : ", max rejects " + st.max_rej);
+}
+
+// Тела свипа добавили переменные (BDF индекса 3: множители GGL) — модуль считает amountOfX + extra_x,
+// хвост НУ — нули (mu = 0 на решении). Результаты читаются по прежним индексам x / z.
+template <class R>
+static void sweep_extend_state(R& req) {
+    if (req.adaptive.extra_x <= 0 || !req.adaptive.setup_error.empty()) return;
+    req.amountOfX += req.adaptive.extra_x;
+    req.initial_conditions.resize((size_t)req.amountOfX, 0.0);
 }
 
 // Снапшот текущих GUI-полей конкретной БД в Bifurcation1DRequest. Делается на
@@ -1894,6 +1905,7 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
     req.csv_output_path = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, bd.scheme, bd.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, bd.ad_axis, 0, req.adaptive);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -1966,6 +1978,7 @@ static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession
     req.csv_output_path    = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, bd.scheme, bd.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, bd.ad_axis, bd.ad_axis_2, req.adaptive);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -2226,6 +2239,7 @@ static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -2291,6 +2305,7 @@ static LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
     req.csv_output_path    = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -2792,6 +2807,7 @@ static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
     req.mult2    = (numb)parse_d(c.mult_feature2_text, 1.0);
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, 0, 0, req.adaptive);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -3718,6 +3734,7 @@ static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -3781,6 +3798,7 @@ static LS2DRequest build_ls2d_request(const LyapunovSpectrumAnalysisSession& s,
     req.csv_output_path    = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -4065,6 +4083,7 @@ static SignalMetricsRequest build_metrics_request(const SignalMetricsAnalysisSes
     // узлов (ad_nodes_module смотрит обе оси).
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
                           req.transient_time + req.t_max, c.ad_axis, c.mode_2d ? c.ad_axis_2 : 0, req.adaptive);
+    sweep_extend_state(req);
     return req;
 }
 

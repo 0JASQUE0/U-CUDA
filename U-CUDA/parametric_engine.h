@@ -169,7 +169,11 @@ struct AdaptiveRequest {
     std::string ctrl_body;               // C body пользовательского регулятора, иначе пусто
     // #define'ы перед текстом модуля (и прелюдия CPU-DLL). У BDF 1-5 — UCUDA_BDF_DRIVER, UCUDA_BDF_NX,
     // UCUDA_BDF_KIDX: драйвер свипов — многошаговый (kernels/ucuda_bdf.cuh), rhs = [f; g], dprep — якобиан.
+    // У DAE Rodas4 — UCUDA_AD_DAE_NX (проекция z0 точки и клонов в драйвере).
     std::string prefix;
+    // Переменные, которые тела добавляют к состоянию системы (BDF индекса 3: множители GGL mu, старт 0).
+    // Запрос свипа берёт amountOfX + extra_x и НУ с нулями в хвосте; результаты — по прежним индексам.
+    int extra_x = 0;
     UcudaAdaptParams params{};
     int    axis_kind[2] = { kAdAxisSystem, kAdAxisSystem };
     double tol_ratio = 1e-2;
