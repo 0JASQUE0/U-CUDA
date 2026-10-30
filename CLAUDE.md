@@ -533,7 +533,10 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   L-I cutset detection, mutual inductance K, conditionals in B expressions.
 - Stage 9a, devices and DC OP (`dae_devices.cpp/.h`): diodes (D, SPICE level 1 DC: IS, N, RS -> internal
   node `<name>#a`, CJO - see "Stage 9 tails") and BJTs (Q, NPN/PNP: Ebers-Moll transport form with Early
-  VAF/VAR, IS/BF/BR/NF/NR, RB/RC/RE -> internal nodes, CJE/CJC constant) from `.model`; area factor. Model
+  VAF/VAR, IS/BF/BR/NF/NR, RB/RC/RE -> internal nodes, CJE/CJC constant; Gummel-Poon recombination ISE/NE and
+  ISC/NC in the base current as ngspice, a[] only when the model gives ISE / ISC - they set the PUT valley
+  current: without ISE the 2N6027 latches and the 3-transistor neuron sits at rest, ngspice too) from `.model`;
+  area factor. Model
   parameters become a[] parameters `<model>_<param>` once per model (zero-default ones like RS/VAF only if
   given); parameters that are set but not modelled (BV, TT, IKF, ISE, ...) are listed in the notes.
   Exponentials go through `dev_explim` (exp up to 40, tangent line above) - without it Newton from a far
@@ -635,6 +638,10 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   `dae_sweeps` with fixed BDF (BD 1D peak 2.008620, LLE -0.50006, LS -0.50006 / -1.99997). The start of the fixed
   step forces a step at 100 x the 10-ulp guard (no failure on a steep front), and `ucuda_bdf_start` raises an
   automatic h0 below 100 ulp(t) (a circuit from the zero state: y' ~ 1e15 gave h0 under the guard, 0 for y' = inf).
+  If an automatic h0 below 1e-10 x span still falls under the guard before the first accepted step, the step is
+  retried once at 1e-10 x span (`UcudaBdfCore::hretry`; 3-transistor neuron released from the held DC OP: y' ~ 1e8 V/s,
+  h0 = 100 ulp was rejected twice and the run stopped). Runs that did not stop are unchanged bit for bit (lifting h0
+  itself changed Robertson's start).
   Sweeps (Parametric: BD 1D/2D classic and continuation, Metrics, basins, LLE/LS): the adaptive sweep
   modules run on BDF without new kernels - `ucuda_adaptive.cuh` switches to the BDF section of
   `ucuda_bdf.cuh` under `UCUDA_BDF_DRIVER` (the same names `UcudaAdaptState`, `ucuda_ad_init / restart /

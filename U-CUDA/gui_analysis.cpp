@@ -223,7 +223,9 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                 ImGui::TableSetColumnIndex(0); draw_field_name(p, bc ? &bc->field_labels : nullptr);
                 ImGui::TableSetColumnIndex(1);
                 std::string id = "##ap_" + p;
-                changed |= InputNumStr(id.c_str(), s.param_values[p], 110);
+                changed |= InputNumStr(id.c_str(), s.param_values[p], 110, [&] {
+                    changed |= field_restore_popup("##ap_restore", bc, BroadcastField::Param, p, s.param_values, s.params);
+                });
             }, true);
             ImGui::EndTable();
         }
@@ -254,7 +256,10 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                         ImGui::TableSetColumnIndex(0); draw_field_name(v, labels);
                         ImGui::TableSetColumnIndex(1);
                         std::string id = "##icv_" + v;
-                        changed |= InputNumStr(id.c_str(), ic.values[v], 110);
+                        changed |= InputNumStr(id.c_str(), ic.values[v], 110, [&] {
+                            changed |= field_restore_popup("##icv_restore", bc, BroadcastField::InitCondition, v,
+                                                           ic.values, s.vars);
+                        });
                     }, true);
                     ImGui::EndTable();
                 }
@@ -264,7 +269,10 @@ void draw_phase_controls(PhaseAnalysisSession& s,
             for (const auto& v : bc ? bc->ic_fields(s.vars) : s.vars) {
                 draw_field_name(v, labels); ImGui::SameLine();
                 std::string id = "##icv_" + v;
-                changed |= InputNumStr(id.c_str(), ic.values[v], 60); ImGui::SameLine();
+                changed |= InputNumStr(id.c_str(), ic.values[v], 60, [&] {
+                    changed |= field_restore_popup("##icv_restore", bc, BroadcastField::InitCondition, v,
+                                                   ic.values, s.vars);
+                }); ImGui::SameLine();
             }
             if (ImGui::SmallButton("X")) ic_to_remove = i;
         }

@@ -1537,7 +1537,10 @@ static void draw_parameters_tab(AppModel& model) {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0); draw_field_name(v, &model.field_labels);
                 ImGui::TableSetColumnIndex(1);
-                { std::string id = "##ic_" + v; InputNumStr(id.c_str(), model.init_conditions[v], 140); }
+                { std::string id = "##ic_" + v; InputNumStr(id.c_str(), model.init_conditions[v], 140, [&] {
+                    field_restore_popup("##ic_restore", &model, BroadcastField::InitCondition, v,
+                                        model.init_conditions, model.known_vars);
+                }); }
             }, true);
             ImGui::EndTable();
         }
@@ -1558,7 +1561,10 @@ static void draw_parameters_tab(AppModel& model) {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0); draw_field_name(p, &model.field_labels);
                 ImGui::TableSetColumnIndex(1);
-                { std::string id = "##val_" + p; InputNumStr(id.c_str(), model.param_values[p], 100); }
+                { std::string id = "##val_" + p; InputNumStr(id.c_str(), model.param_values[p], 100, [&] {
+                    field_restore_popup("##val_restore", &model, BroadcastField::Param, p,
+                                        model.param_values, model.known_params);
+                }); }
             }, true);
             ImGui::EndTable();
         }

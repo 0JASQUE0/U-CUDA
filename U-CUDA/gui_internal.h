@@ -124,9 +124,20 @@ bool InputNumStrCommit(const char* label, std::string& text, double& value,
                               float width = 0.0f);
 void do_undo(AppModel& m);
 void do_redo(AppModel& m);
+// extra — свои пункты меню над рассылкой (например, field_restore_menu_items).
 void field_apply_all_menu(AppModel* model, BroadcastField f,
                                  const std::string& name, const std::string& label,
-                                 const std::string& value);
+                                 const std::string& value,
+                                 const std::function<void()>& extra = {});
+// "Restore from library": значения параметров / НУ из записи загруженной системы на диске
+// (model.loaded_name; draw_gui ставит библиотеку каждый кадр). Пункты для поля name и для всего
+// блока names; запись перечитывается при каждом открытии меню. true — что-то поменялось.
+void set_field_library(SystemLibrary* lib);
+bool field_restore_menu_items(const AppModel* model, BroadcastField f, const std::string& name,
+                              std::map<std::string, std::string>& values, const std::vector<std::string>& names);
+// То же своим попапом (поля без рассылки по вкладкам: Analysis, System). Звать сразу после поля.
+bool field_restore_popup(const char* popup_id, const AppModel* model, BroadcastField f, const std::string& name,
+                         std::map<std::string, std::string>& values, const std::vector<std::string>& names);
 
 // Встроенные схемы интегрирования. Один список на весь файл: раньше этот же
 // массив был выписан восемью копиями плюс девятой — для проверки конфликта

@@ -48,7 +48,9 @@ IdealJunction ideal_junction_fit(double is, double n, double rs, double iref) {
 BjtCurrents bjt_currents(const std::string& vbe, const std::string& vbc,
                          const std::string& is, const std::string& bf, const std::string& br,
                          const std::string& nf, const std::string& nr,
-                         const std::string& vaf_inv, const std::string& var_inv) {
+                         const std::string& vaf_inv, const std::string& var_inv,
+                         const std::string& ise, const std::string& ne,
+                         const std::string& isc, const std::string& nc) {
     const std::string ebe = dev_explim(vbe + "/(" + nf + "*" + num(kDeviceVt) + ")");
     const std::string ebc = dev_explim(vbc + "/(" + nr + "*" + num(kDeviceVt) + ")");
     std::string q;
@@ -61,6 +63,16 @@ BjtCurrents bjt_currents(const std::string& vbe, const std::string& vbc,
     c.ic = "(" + ict + " - " + is + "/" + br + "*(" + ebc + " - 1) - " + g + "*" + vbc + ")";
     c.ib = "(" + is + "/" + bf + "*(" + ebe + " - 1) + " + is + "/" + br + "*(" + ebc + " - 1) + "
          + g + "*(" + vbe + " + " + vbc + "))";
+    // Рекомбинация: без ISE / ISC текст прежний.
+    auto leak = [&](const std::string& i0, const std::string& n, const std::string& v) {
+        return i0 + "*(" + dev_explim(v + "/(" + n + "*" + num(kDeviceVt) + ")") + " - 1)";
+    };
+    if (!ise.empty()) c.ib = "(" + c.ib + " + " + leak(ise, ne, vbe) + ")";
+    if (!isc.empty()) {
+        const std::string l = leak(isc, nc, vbc);
+        c.ib = "(" + c.ib + " + " + l + ")";
+        c.ic = "(" + c.ic + " - " + l + ")";
+    }
     return c;
 }
 

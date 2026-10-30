@@ -1285,13 +1285,16 @@ struct Builder {
             const double area = t.size() > mi + 1 && t[mi + 1] != "=" && lower(t[mi + 1]) != "off"
                               ? eval_value(lower(t[mi + 1]) == "area" && t.size() > mi + 3 ? t[mi + 3] : t[mi + 1], *c.scope) : 1.0;
             const bool caps = !opt.no_junction_caps, ideal = opt.ideal_bjts;
-            static const std::vector<std::string> kQIgn = { "ikf", "ikr", "ise", "isc", "ne", "nc", "tf", "tr",
+            static const std::vector<std::string> kQIgn = { "ikf", "ikr", "tf", "tr",
                 "xtf", "itf", "vtf", "ptf", "eg", "xti", "xtb", "irb", "rbm", "cjs", "kf", "af", "nk", "iss", "ns", "bvcbo" };
-            static const std::vector<std::string> kQDc = { "is", "bf", "br", "nf", "nr", "vaf", "var", "rb", "rc", "re" };
+            // ise / isc / ne / nc — нулевое умолчание: параметр a[] только если модель его задала (NE, NC без
+            // ISE / ISC не нужны; не заданные NE / NC — литералы SPICE 1.5 / 2).
+            static const std::vector<std::string> kQDc = { "is", "bf", "br", "nf", "nr", "vaf", "var", "rb", "rc", "re",
+                "ise", "ne", "isc", "nc" };
             static const std::vector<std::string> kQCap = { "cje", "cjc", "vje", "vjc", "mje", "mjc", "fc" };
             std::vector<std::string> keys, ign = kQIgn;
             std::vector<double> defs;
-            if (!ideal) { keys = kQDc; defs = { 1e-16, 100, 1, 1, 1, 0, 0, 0, 0, 0 }; }
+            if (!ideal) { keys = kQDc; defs = { 1e-16, 100, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; }
             else ign.insert(ign.end(), kQDc.begin(), kQDc.end());
             if (caps) { keys.insert(keys.end(), kQCap.begin(), kQCap.end()); defs.insert(defs.end(), kQCap.size(), 0.0); }
             else ign.insert(ign.end(), kQCap.begin(), kQCap.end());
@@ -1319,7 +1322,9 @@ struct Builder {
                 ++n_ideal_q;
             } else
                 q = bjt_currents(v1, v2, sc(mp.at("is")), mp.at("bf"), mp.at("br"), mp.at("nf"),
-                                 mp.at("nr"), inv("vaf"), inv("var"));
+                                 mp.at("nr"), inv("vaf"), inv("var"),
+                                 mp.count("ise") ? sc(mp.at("ise")) : std::string(), pd(mp, "ne", "1.5"),
+                                 mp.count("isc") ? sc(mp.at("isc")) : std::string(), pd(mp, "nc", "2"));
             if (pnp) { current(ne, nc, q.ic); current(ne, nb, q.ib); }
             else     { current(nc, ne, q.ic); current(nb, ne, q.ib); }
             conduct(nc, ne);

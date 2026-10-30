@@ -40,11 +40,15 @@ IdealJunction ideal_junction_fit(double is, double n, double rs, double iref = k
 
 // Токи BJT NPN: ic втекает в коллектор, ib — в базу (эмиттер отдаёт ic + ib). Для PNP вызывать
 // с veb, vcb и менять знак токов. vaf_inv / var_inv — 1/VAF, 1/VAR (пусто — эффекта Эрли нет).
+// ise / ne, isc / nc — токи рекомбинации Гуммеля–Пуна (пусто — нет): Ib += ISE (e^(vbe/(NE Vt)) - 1)
+// + ISC (e^(vbc/(NC Vt)) - 1), Ic -= ISC (..), как в ngspice. Задают ток при малых токах (у PUT — ток долины).
 struct BjtCurrents { std::string ic, ib; };
 BjtCurrents bjt_currents(const std::string& vbe, const std::string& vbc,
                          const std::string& is, const std::string& bf, const std::string& br,
                          const std::string& nf, const std::string& nr,
-                         const std::string& vaf_inv, const std::string& var_inv);
+                         const std::string& vaf_inv, const std::string& var_inv,
+                         const std::string& ise = {}, const std::string& ne = {},
+                         const std::string& isc = {}, const std::string& nc = {});
 
 // Ток стока N-JFET (Шихман–Ходжес, SPICE level 1), втекает в сток: при vds >= 0
 //   Id = BETA vm (2 vov - vm)(1 + LAMBDA vds), vov = max(vgs - VTO, 0), vm = min(vds, vov)

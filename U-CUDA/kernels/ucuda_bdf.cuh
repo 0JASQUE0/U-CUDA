@@ -74,6 +74,9 @@ struct UcudaBdfCore {
     // 0 отвергнут), как у адаптивного драйвера. nullptr — не вести (свипы, клоны).
     numb* log;
     int   log_cap, log_n;
+    // Повтор старта (ucuda_bdf_start, автоматический h0): > 0 — до первого принятого шага шаг, упавший ниже
+    // защитного порога, ещё раз берётся равным hretry = 1e-10 длины интервала, а не обрывает расчёт.
+    numb  hretry;
 };
 
 UCUDA_BDF_HD inline int ucuda_bdf_ws_size(int N) { return UCUDA_BDF_WS(N); }
@@ -230,6 +233,15 @@ UCUDA_BDF_HD inline void ucuda_bdf_start(UcudaBdfCore& C, Fn& fn, int N, int nx,
         const numb h_lo = (numb)100 * (numb)2.220446049250313e-16 * (fabs(t0) > 1 ? fabs(t0) : (numb)1);
         if (!(h >= h_lo)) h = h_lo;
     }
+    // Если и с ним до первого принятого шага шаг упадёт ниже порога — повтор с 1e-10 длины интервала
+    // (ucuda_bdf_step): трёхтранзисторный нейрон, отпущенный из рабочей точки с удержанными узлами
+    // (y' ~ 1e8 В/с), отвергал h0 = 100 ulp дважды и обрывался; с 1e-10 span регулятор сам находит шаг
+    // (там ~5e-14 с). Прогоны, которые не обрывались, идут как раньше.
+    C.hretry = 0;
+    if (!(P.h0 > 0) && !(P.hfix > 0) && span > 0 && (numb)1e-10 * span > h) {
+        C.hretry = (numb)1e-10 * span;
+        if (P.hmax > 0 && C.hretry > P.hmax) C.hretry = P.hmax;
+    }
     for (int i = 0; i < N; ++i) { UCUDA_BDF_PHI(ws, N, 1)[i] = y0[i]; UCUDA_BDF_PHI(ws, N, 2)[i] = h * yp[i]; }
     C.psi[1] = h;
     C.t = t0; C.h = h; C.hold = 0;
@@ -298,6 +310,12 @@ UCUDA_BDF_HD inline int ucuda_bdf_step(UcudaBdfCore& C, Fn& fn, const int* kidx,
         if (C.t + C.h > tstop) C.h = tstop - C.t;   // ровно до tstop (DASSL: TSTOP)
         if (!(C.h >= hmin)) {
             if (C.t + hmin > tstop && tstop > C.t) C.h = tstop - C.t;   // хвост короче h_min — им и шагнуть
+            else if (C.hretry > hmin) {   // старт не удался: один повтор с 1e-10 span (ucuda_bdf_start)
+                C.h = C.hretry;
+                C.hretry = 0;
+                C.k = 1; C.nef = 0;
+                if (C.t + C.h > tstop) C.h = tstop - C.t;
+            }
             else { st.hmin_fail = 1; st.diverged = 1; return 0; }
         }
         const numb h = C.h;
@@ -439,6 +457,7 @@ UCUDA_BDF_HD inline int ucuda_bdf_step(UcudaBdfCore& C, Fn& fn, const int* kidx,
             continue;
         }
         // --- принят (DDASTP, блок 500) ---
+        C.hretry = 0;
         C.nef = 0;
         C.t = t;
         C.kold = k;

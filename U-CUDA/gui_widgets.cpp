@@ -580,7 +580,8 @@ static void draw_undo_menu_item(AppModel* m) {
 // Во всех трёх случаях команда уходит в стек отмены одной записью.
 void field_apply_all_menu(AppModel* model, BroadcastField f,
                                  const std::string& name, const std::string& label,
-                                 const std::string& value) {
+                                 const std::string& value,
+                                 const std::function<void()>& extra) {
     if (!model) return;
     // ID popup'а обязан быть свой у каждого поля: в блоке Integration шесть
     // полей лежат на ОДНОМ уровне ID-стека, и общий идентификатор склеил бы
@@ -589,6 +590,10 @@ void field_apply_all_menu(AppModel* model, BroadcastField f,
     if (!ImGui::BeginPopupContextItem(popup_id.c_str())) return;
     ImGui::TextDisabled("%s = %s", label.c_str(), value.c_str());
     ImGui::Separator();
+    if (extra) {
+        extra();
+        ImGui::Separator();
+    }
 
     // Сухой прогон: сколько конфигов реально РАЗОЙДЁТСЯ с этим значением.
     // Показываем числом, но НЕ гасим по нему команду: серый пункт читается как
@@ -1609,6 +1614,75 @@ static const FieldLabels* g_field_labels = nullptr;
 void set_field_latex(bool on) { g_field_latex = on; }
 void set_field_labels(const FieldLabels* labels) { g_field_labels = labels; }
 
+static SystemLibrary* g_field_lib = nullptr;
+void set_field_library(SystemLibrary* lib) { g_field_lib = lib; }
+
+// Запись загруженной системы с диска. Читается, когда меню открывается (reload) или сменилась система,
+// а не каждый кадр, пока меню открыто.
+static const SystemRecord* field_lib_record(const AppModel* m, bool reload) {
+    static SystemRecord rec;
+    static std::string name;
+    static bool ok = false;
+    if (!g_field_lib || !m || m->loaded_name.empty()) return nullptr;
+    if (reload || name != m->loaded_name) {
+        name = m->loaded_name;
+        ok = false;
+        try { rec = g_field_lib->load(name); ok = true; } catch (...) {}
+    }
+    return ok ? &rec : nullptr;
+}
+
+bool field_restore_menu_items(const AppModel* model, BroadcastField f, const std::string& name,
+                              std::map<std::string, std::string>& values, const std::vector<std::string>& names) {
+    if (f != BroadcastField::Param && f != BroadcastField::InitCondition) return false;
+    const SystemRecord* r = field_lib_record(model, ImGui::IsWindowAppearing());
+    if (!r) {
+        ImGui::BeginDisabled();
+        ImGui::MenuItem("Restore from library (system not in the library)");
+        ImGui::EndDisabled();
+        return false;
+    }
+    const auto& src = f == BroadcastField::Param ? r->param_values : r->init_conditions;
+    bool changed = false;
+    {
+        auto it = src.find(name);
+        auto cur = values.find(name);
+        const bool has = it != src.end();
+        const bool same = has && cur != values.end() && cur->second == it->second;
+        const std::string lbl = has ? "Restore from library (" + it->second + ")" : "Restore from library (no value)";
+        if (ImGui::MenuItem(lbl.c_str(), nullptr, false, has && !same)) {
+            values[name] = it->second;
+            changed = true;
+        }
+    }
+    int differ = 0;
+    for (const std::string& n : names) {
+        auto it = src.find(n);
+        if (it == src.end()) continue;
+        auto cur = values.find(n);
+        if (cur == values.end() || cur->second != it->second) ++differ;
+    }
+    const std::string all = std::string("Restore all ")
+                          + (f == BroadcastField::Param ? "parameters" : "initial conditions")
+                          + " from library (" + std::to_string(differ) + " differ)";
+    if (ImGui::MenuItem(all.c_str(), nullptr, false, differ > 0)) {
+        for (const std::string& n : names) {
+            auto it = src.find(n);
+            if (it != src.end()) values[n] = it->second;
+        }
+        changed = true;
+    }
+    return changed;
+}
+
+bool field_restore_popup(const char* popup_id, const AppModel* model, BroadcastField f, const std::string& name,
+                         std::map<std::string, std::string>& values, const std::vector<std::string>& names) {
+    if (!ImGui::BeginPopupContextItem(popup_id)) return false;
+    const bool changed = field_restore_menu_items(model, f, name, values, names);
+    ImGui::EndPopup();
+    return changed;
+}
+
 std::string field_label(const FieldLabels* labels, const std::string& name) {
     if (!labels) labels = g_field_labels;   // подписи системы, загруженной в модель
     if (labels) {
@@ -1730,7 +1804,8 @@ void draw_named_num_fields(const char* header,
         const bool off = overwritten && overwritten(n);
         if (off) ImGui::BeginDisabled();
         InputNumStr("##v", values[n], kFieldW,
-                    [&] { field_apply_all_menu(bc, field, n, n, values[n]); });
+                    [&] { field_apply_all_menu(bc, field, n, n, values[n],
+                                               [&] { field_restore_menu_items(bc, field, n, values, names); }); });
         ImGui::SameLine();
         draw_field_name(n, labels);
         if (off) ImGui::EndDisabled();
