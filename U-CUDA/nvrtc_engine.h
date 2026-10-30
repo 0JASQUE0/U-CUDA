@@ -70,6 +70,10 @@ struct BdfGpuRequest {
     std::vector<double> atol;             // [amountOfX]
     double rtol = 1e-6, h0 = 0, hmax = 0; // hmax <= 0 — без ограничения
     double hmin = 0;                      // > 0 — h_min пользователя (UcudaBdfParams::hmin)
+    double hfix = 0;                      // > 0 — постоянный шаг без регулятора (UcudaBdfParams::hfix)
+    int    newton_max = 0;                // Ньютон (UcudaBdfParams::nmax / nfull / ntol), 0 — форма DASSL
+    bool   newton_full = true;
+    double newton_tol = 1e-10;
     int    maxk = 5;
     std::vector<double> ic_flat;          // [N*amountOfX]
     int    N = 0;

@@ -6418,6 +6418,104 @@ AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& 
     return c;
 }
 
+// Порядок одношагового метода ДАУ по x (для оценки удвоением шага); 0 — не одношаговый / своя оценка.
+int dae_scheme_order(DaeScheme sch) {
+    switch (sch) {
+    case DaeScheme::BDF1: case DaeScheme::BDF1GGL: case DaeScheme::ExplicitEuler: return 1;
+    case DaeScheme::Trapezoidal: case DaeScheme::TRBDF2: case DaeScheme::SDIRK2: case DaeScheme::ImplicitMidpoint:
+    case DaeScheme::ROS2: case DaeScheme::CD: case DaeScheme::CDIndex2: case DaeScheme::ExplicitMidpoint: return 2;
+    case DaeScheme::ROS3P: return 3;
+    case DaeScheme::CDYoshida4: case DaeScheme::RK4: case DaeScheme::Rodas4: return 4;
+    case DaeScheme::Radau5: case DaeScheme::Radau5GGL: return 5;
+    }
+    return 0;
+}
+
+// Переменный шаг для методов ДАУ без вложенной пары — удвоением шага (Хайрер-Нёрсетт-Ваннер I, II.4):
+// Y — два шага h/2 (то, что идёт дальше), YA — один шаг h, E = (Y - YA)/(2^p - 1) — оценка ошибки Y.
+// Тело шага — то же, что у постоянного шага (codegen_dae_scheme): Ньютон, проекция, индексные веса
+// Ньютона — всё как есть. E переменной индекса k умножается на h^(k-1) (как норма DASSL / RADAU5): иначе
+// на индексе 2-3 шаг падал бы до округления. Плотный выход — парабола через X, середину шага и Y (без
+// производных: для z производной нет). F1 = [f; g](t + h, Y), как у Rodas4.
+AdaptiveCode codegen_adaptive_dae_doubling(const System& s, DaeScheme sch, const std::string& name) {
+    if (s.dae_nx < 0) throw std::runtime_error("adaptive DAE method on a system that is not a DAE");
+    const int p = dae_scheme_order(sch);
+    if (p < 1) throw std::runtime_error("'" + name + "': no adaptive step");
+    const std::string base_body = codegen_dae_scheme(s, sch);   // бросает, если метод к системе не применим
+    const int N = (int)s.vars.size();
+    const bool ht = step_body_uses_time(base_body);
+    const bool inl = wrapper_can_inline(base_body);
+    std::ostringstream o;
+    o << "    // --- adaptive " << name << " by step doubling: Y = two steps of h/2 (order " << p
+      << "), E = (Y - one step of h)/(2^" << p << " - 1) ---\n";
+    o << "    numb X0_sd[" << N << "], YA_sd[" << N << "];\n";
+    o << "    for (int i_sd = 0; i_sd < " << N << "; ++i_sd) X0_sd[i_sd] = X[i_sd];\n";
+    o << "    (void)F0;\n";
+    o << "    {\n";
+    o << "    numb XS_sd[" << N << "];\n";
+    o << "    numb* const X = XS_sd;\n";
+    if (ht) o << "    const numb ucuda_t_sd = ucuda_t;\n";
+    o << "    const numb h_sd = h;\n";
+    if (!inl) {
+        o << "    // base contains return/goto: kept in a lambda, see wrapper_can_inline\n";
+        o << "    auto step_sd = [&](const numb h" << (ht ? ", const numb ucuda_t" : "") << ") {\n";
+        emit_indented(o, base_body, "    ");
+        o << "    };\n";
+    }
+    auto step = [&](const char* hexpr, const char* texpr) {
+        if (inl) {
+            o << "    {\n";
+            o << "        const numb h = " << hexpr << ";\n";
+            if (ht) o << "        const numb ucuda_t = " << texpr << ";\n";
+            emit_indented(o, base_body, "    ");
+            o << "    }\n";
+        } else if (ht) o << "    step_sd(" << hexpr << ", " << texpr << ");\n";
+        else o << "    step_sd(" << hexpr << ");\n";
+    };
+    o << "    // one step of h\n";
+    o << "    for (int i_sd = 0; i_sd < " << N << "; ++i_sd) X[i_sd] = X0_sd[i_sd];\n";
+    step("h_sd", "ucuda_t_sd");
+    o << "    for (int i_sd = 0; i_sd < " << N << "; ++i_sd) YA_sd[i_sd] = X[i_sd];\n";
+    o << "    // two steps of h/2; the midpoint goes to W for the dense output\n";
+    o << "    for (int i_sd = 0; i_sd < " << N << "; ++i_sd) X[i_sd] = X0_sd[i_sd];\n";
+    step("h_sd * (numb)0.5", "ucuda_t_sd");
+    o << "    for (int i_sd = 0; i_sd < " << N << "; ++i_sd) W[i_sd] = X[i_sd];\n";
+    step("h_sd * (numb)0.5", "ucuda_t_sd + h_sd * (numb)0.5");
+    o << "    for (int i_sd = 0; i_sd < " << N << "; ++i_sd) Y[i_sd] = X[i_sd];\n";
+    o << "    }\n";
+    const double c = 1.0 / (std::ldexp(1.0, p) - 1.0);
+    for (int i = 0; i < N; ++i) {
+        const int k = i < (int)s.dae_index.size() ? std::max(1, s.dae_index[(size_t)i]) : 1;
+        o << "    E[" << i << "] = (Y[" << i << "] - YA_sd[" << i << "]) * (numb)(" << fmtnum(c) << ")";
+        for (int e = 1; e < k; ++e) o << " * h";
+        o << ";\n";
+    }
+    const auto fy = rhs_over(s, "Y", time_name(s, "(ucuda_t + h)"));
+    for (int i = 0; i < N; ++i) o << "    F1[" << i << "] = (" << fy[(size_t)i] << ");\n";
+
+    AdaptiveCode a;
+    a.rhs = adaptive_rhs_body(s);
+    a.emb = o.str();
+    {   // парабола Лагранжа через th = 0, 1/2, 1
+        std::ostringstream d;
+        d << "    (void)F0; (void)F1; (void)a; (void)h;\n";
+        for (int i = 0; i < N; ++i)
+            d << "    D[" << i << "] = X[" << i << "]; D[" << N + i << "] = W[" << i << "]; D[" << 2 * N + i
+              << "] = Y[" << i << "];\n";
+        a.dprep = d.str();
+        std::ostringstream e;
+        e << "    int N = " << N << ";\n";
+        e << "    const numb l0 = ((numb)2 * th - (numb)1) * (th - (numb)1), l1 = (numb)4 * th * ((numb)1 - th),\n"
+             "               l2 = th * ((numb)2 * th - (numb)1);\n";
+        e << "    for (int l = 0; l < N; ++l) Yo[l] = l0 * D[l] + l1 * D[N + l] + l2 * D[2 * N + l];\n";
+        a.deval = e.str();
+    }
+    a.p = p; a.q = p; a.nlo = 1;
+    a.wstages = 1; a.dsize = 3;
+    a.emb_rhs = 1; a.dprep_rhs = 0; a.dense_order = 2;
+    return a;
+}
+
 // ExtrZ: стадии и обе суммы — ucmplx, ядро базы шагает по Z[] без Re между подшагами, Re
 // берётся на выходе (как wrap_extrapolation_complex). Веса — симметричные: разложение Re стадии
 // идёт по чётным степеням, поэтому Re младшей комбинации — решение порядка
@@ -6618,6 +6716,10 @@ bool scheme_is_multistep(const std::string& name) { return name == kBdfSchemeOde
 
 bool adaptive_scheme_name_supported(const std::string& name) {
     if (name == "DAE Rodas4") return true;   // ДАУ: codegen_adaptive_dae
+    {   // прочие одношаговые методы ДАУ — удвоением шага (codegen_adaptive_dae_doubling)
+        DaeScheme ds;
+        if (dae_scheme_from_name(name, &ds) && dae_scheme_order(ds) > 0) return true;
+    }
     if (scheme_is_multistep(name)) return true;   // свой драйвер (multistep_bdf.h)
     if (scheme_supports_adaptive(scheme_from_name(name)) && name != "Euler") return true;
     if (gbs_stage_count(scheme_from_name(name)) >= 2) return true;
@@ -6628,6 +6730,10 @@ bool adaptive_scheme_name_supported(const std::string& name) {
 int adaptive_scheme_q_guess(const std::string& name) {
     if (name == "RK45") return 4;
     if (name == "DAE Rodas4") return 3;
+    {
+        DaeScheme ds;
+        if (dae_scheme_from_name(name, &ds) && dae_scheme_order(ds) > 0) return dae_scheme_order(ds);
+    }
     const int K = gbs_stage_count(scheme_from_name(name));
     if (K >= 2) return 2 * (K - 1);
     ExtrapolationSpec spec;

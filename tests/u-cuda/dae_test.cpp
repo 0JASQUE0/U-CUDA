@@ -377,6 +377,105 @@ void adaptive_cpu() {
     ut::require(adaptive_scheme_name_ok("DAE Rodas4"), "DAE Rodas4 is offered for the adaptive step");
 }
 
+// Переменный шаг удвоением шага (codegen_adaptive_dae_doubling) у всех прочих методов ДАУ: RC (индекс 1)
+// по допуску, связь держится; маятник индекса 2 на Radau IIA и BDF1 (E с множителем h^(k-1)).
+void adaptive_doubling_cpu() {
+    const System rc = rc_sys();
+    const std::vector<double> x0 = { 0.0, 1.5 };
+    int n_ok = 0;
+    for (const std::string& name : dae_scheme_names()) {
+        DaeScheme ds;
+        dae_scheme_from_name(name, &ds);
+        if (ds == DaeScheme::Rodas4 || dae_scheme_order(ds) == 0) continue;
+        AdaptiveCode code;
+        try { code = codegen_adaptive_dae_doubling(rc, ds, name); }
+        catch (const std::exception& e) { std::printf("  %s, adaptive: not for RC (%s)\n", name.c_str(), e.what()); continue; }
+        AdCpu m(code, 2);
+        double eu[2], ei[2];
+        long steps[2];
+        const char* tol[2] = { "1e-6", "1e-9" };
+        for (int k = 0; k < 2; ++k) {
+            const UcudaAdaptParams P = ad_params(code, 2, 5.0, tol[k], tol[k]);
+            double y[2], st[8];
+            m.mod.endpoint()(x0.data(), kRcA.data(), &P, 5.0, y, st, nullptr);
+            steps[k] = (long)st[0];
+            eu[k] = std::fabs(y[0] - rc_u(5.0));
+            ei[k] = std::fabs(y[1] - (3.0 - y[0]) / 2.0);
+        }
+        std::printf("  %s adaptive (doubling, p = %d): tol 1e-6 / 1e-9: %ld / %ld steps, |u - u*| = %.2e / %.2e\n",
+                    name.c_str(), code.p, steps[0], steps[1], eu[0], eu[1]);
+        ut::require(eu[1] < 1e-4 && eu[1] < 0.2 * eu[0] + 1e-12, ut::num((name + " adaptive: u(5) follows the tolerance").c_str(), eu[1], 0, 1e-4));   // порядок 1: глобальная ~ sqrt(tol)
+        ut::require(ei[0] < 1e-9 && ei[1] < 1e-9, name + " adaptive: constraint holds");
+        ut::require(steps[1] > steps[0], name + " adaptive: tighter tolerance takes more steps");
+        ++n_ok;
+    }
+    ut::require(n_ok >= 12, "adaptive step on RC for every one-step DAE method of index 1");
+    // индекс 2: маятник, против Radau IIA мелким постоянным шагом
+    const System p2 = pend(kPend2, "lam=2");
+    const auto ref = cpu.run(codegen_dae_scheme(p2, DaeScheme::Radau5), kPendX0, kPendA, 1e-3, 1.0);
+    for (DaeScheme ds : { DaeScheme::Radau5, DaeScheme::BDF1 }) {
+        const AdaptiveCode code = codegen_adaptive_dae_doubling(p2, ds, "pendulum index 2");
+        AdCpu m(code, 5);
+        const double tl = ds == DaeScheme::Radau5 ? 1e-8 : 1e-6;
+        char tb[16];
+        std::snprintf(tb, sizeof(tb), "%g", tl);
+        const UcudaAdaptParams P = ad_params(code, 5, 1.0, tb, tb);
+        double y[5], st[8];
+        m.mod.endpoint()(kPendX0.data(), kPendA.data(), &P, 1.0, y, st, nullptr);
+        const double ex = dist(std::vector<double>(y, y + 5), ref, 0, 4), el = std::fabs(y[4] - ref[4]);
+        std::printf("  %s adaptive on the index-2 pendulum, tol %g: %.0f steps, %.0f rejected, |x - ref| = %.2e, "
+                    "|lam - ref| = %.2e\n", ds == DaeScheme::Radau5 ? "DAE Radau IIA (5)" : "DAE BDF1", tl, st[0], st[1], ex, el);
+        const double bx = ds == DaeScheme::Radau5 ? 1000 * tl : 1e-2;   // BDF1: порядок 1, глобальная ~ sqrt(tol)
+        ut::require(ex < bx && el < 10 * bx, ut::num("adaptive doubling, index 2", ex, 0, bx));
+    }
+    ut::require(adaptive_scheme_name_ok("DAE Trapezoidal") && adaptive_scheme_name_ok("DAE Radau IIA (5)"),
+                "DAE methods are offered for the adaptive step");
+}
+
+// BDF 1-5 с постоянным шагом (без регулятора) и с настройками Ньютона вкладки.
+void bdf_fixed_cpu() {
+    const System s = pend(kPend2, "lam=2");
+    const auto ref = cpu.run(codegen_dae_scheme(s, DaeScheme::Radau5), kPendX0, kPendA, 1e-3, 1.0);
+    std::vector<std::vector<double>> tr;
+    std::vector<double> tm;
+    std::string err;
+    double e_prev = 1;
+    for (double h : { 0.02, 0.01, 0.005 }) {
+        BdfSettings bs;
+        bs.hfix = h;
+        bs.newton_max = 25; bs.newton_full = true; bs.newton_tol = 1e-12;
+        BdfStats st;
+        { const bool ok_ = bdf_integrate(s, kPendA.data(), (int)kPendA.size(), kPendX0.data(), bs, 0.0, 1.0, 1.0, 2,
+                                         false, 0, tr, tm, st, &err);
+          ut::require(ok_, "BDF fixed step: " + err); }
+        const double ex = dist(tr[1], ref, 0, 4);
+        std::printf("  DAE BDF 1-5 fixed step h = %g: %lld steps, %lld rejected, max order %d, |x - ref| = %.2e\n",
+                    h, st.nacc, st.nrej, st.max_q, ex);
+        const long long nfix = std::llround(1.0 / h) - 5;   // после старта (5 точек истории) — шаги h до T = 1
+        ut::require(st.nforced == 0 && st.nacc >= nfix && st.nacc <= nfix + 150 && st.max_q == 5,
+                    "BDF fixed step: error-controlled start over 5h, then every step h at order 5, no controller");
+        ut::require(ex < e_prev, "BDF fixed step: error falls with h");
+        e_prev = ex;
+    }
+    ut::require(e_prev < 1e-6, ut::num("BDF fixed step h = 0.005: accuracy", e_prev, 0, 1e-6));
+    {   // Ньютон вкладки: модифицированный (якобиан раз на попытку) против полного — тот же результат
+        BdfSettings a, b;
+        a.rtol = b.rtol = 1e-8; a.atol = b.atol = { 1e-8 };
+        a.newton_max = b.newton_max = 25; a.newton_tol = b.newton_tol = 1e-12;
+        a.newton_full = true; b.newton_full = false;
+        BdfStats sa, sb;
+        std::vector<std::vector<double>> ta, tb2;
+        { const bool ok_ = bdf_integrate(s, kPendA.data(), (int)kPendA.size(), kPendX0.data(), a, 0.0, 1.0, 1.0, 2,
+                                         false, 0, ta, tm, sa, &err); ut::require(ok_, "BDF full Newton: " + err); }
+        { const bool ok_ = bdf_integrate(s, kPendA.data(), (int)kPendA.size(), kPendX0.data(), b, 0.0, 1.0, 1.0, 2,
+                                         false, 0, tb2, tm, sb, &err); ut::require(ok_, "BDF modified Newton: " + err); }
+        const double d = dist(ta[1], tb2[1], 0, 5);
+        std::printf("  DAE BDF 1-5 Newton from the tab: full %lld Jacobians, modified %lld Jacobians, |full - modified| = %.2e\n",
+                    sa.njac, sb.njac, d);
+        ut::require(sb.njac < sa.njac && d < 1e-6, "BDF modified Newton: fewer Jacobians, same solution");
+    }
+}
+
 // --- этап 9c: многошаговый BDF 1-5 (свой драйвер, CPU) --------------------------------------
 void bdf_tests() {
     std::vector<std::vector<double>> tr;
@@ -522,6 +621,93 @@ void bdf_hmin_and_skip() {
     ut::require(same && out.stats[0].nforced == (double)st.nforced && !out.hmin_fail[0], "BDF h_min: GPU log = CPU log");
     std::printf("  BDF 1-5 h_min = %.3g (free run: min %.3g): %lld accepted, %lld forced, GPU = CPU; step log after "
                 "t_skip = %.1f only\n", bs.hmin, st0.hmin, st.nacc, st.nforced, t_skip);
+}
+
+// Удвоение шага на GPU (phase_kernel_ad) = CPU-модуль; BDF с постоянным шагом и Ньютоном вкладки GPU = CPU.
+void doubling_and_fixed_gpu() {
+    NvrtcEngine eng;
+    {
+        const System rc = rc_sys();
+        const AdaptiveCode code = codegen_adaptive_dae_doubling(rc, DaeScheme::Trapezoidal, "DAE Trapezoidal");
+        PhaseAdaptiveRequest rq;
+        rq.rhs = code.rhs; rq.emb = code.emb; rq.dprep = code.dprep; rq.deval = code.deval;
+        rq.amountOfX = 2; rq.ic_flat = { 0.0, 1.5 }; rq.N = 1; rq.values = kRcA;
+        rq.params = ad_params(code, 2, 5.0, "1e-8", "1e-8");
+        rq.t_rec = 5.0; rq.dt = 0.05; rq.total = 100;
+        PhaseAdaptiveResult out;
+        { const bool ok_ = eng.run_phase_portraits_adaptive(rq, out); ut::require(ok_, "GPU adaptive DAE Trapezoidal: " + eng.error()); }
+        AdCpu m(code, 2);
+        std::vector<double> data(200), times(100), logs(4), stats(9);
+        int log_count = 0;
+        double fh = 0;
+        const std::vector<double> x0 = { 0.0, 1.5 };
+        m.mod.phase()(x0.data(), kRcA.data(), &rq.params, 0.0, 5.0, 0.05, 100, 0, 100, 0, data.data(), times.data(),
+                      logs.data(), &log_count, stats.data(), &fh, nullptr);
+        double eu = 0, d = 0;
+        for (int k = 0; k < 100 && k < (int)out.traj[0].size(); ++k) {
+            eu = std::fmax(eu, std::fabs(out.traj[0][(size_t)k][0] - rc_u(k * 0.05)));
+            d = std::fmax(d, std::fabs(out.traj[0][(size_t)k][0] - data[(size_t)2 * k]));
+        }
+        std::printf("  DAE Trapezoidal adaptive (doubling) on the GPU: %.0f steps (CPU %.0f), dense u error %.2e, "
+                    "|GPU - CPU| = %.2e\n", out.stats[0].nacc, stats[0], eu, d);
+        ut::require(out.traj[0].size() == 100 && eu < 1e-5 && out.stats[0].nacc == stats[0] && d < 1e-9,
+                    "GPU adaptive DAE Trapezoidal = CPU");
+    }
+    {   // BDF с постоянным шагом: GPU = CPU, шагов ровно T/h
+        const System s = pend(kPend2, "lam=2");
+        BdfSettings bs;
+        bs.hfix = 0.01; bs.newton_max = 25; bs.newton_full = false; bs.newton_tol = 1e-12;
+        std::vector<std::vector<double>> tr;
+        std::vector<double> tm;
+        BdfStats st;
+        std::string err;
+        { const bool ok_ = bdf_integrate(s, kPendA.data(), (int)kPendA.size(), kPendX0.data(), bs, 0.0, 1.0, 0.1, 11,
+                                         false, 0, tr, tm, st, &err); ut::require(ok_, "CPU BDF fixed: " + err); }
+        BdfGpuRequest rq;
+        codegen_bdf_bodies(s, rq.res, rq.jac);
+        rq.amountOfX = 5; rq.nx = s.dae_nx;
+        rq.kidx.assign(5, 1);
+        for (int i = 0; i < 5 && i < (int)s.dae_index.size(); ++i) rq.kidx[(size_t)i] = std::max(1, s.dae_index[(size_t)i]);
+        rq.atol.assign(5, 1e-6);
+        rq.hfix = bs.hfix; rq.newton_max = bs.newton_max; rq.newton_full = bs.newton_full; rq.newton_tol = bs.newton_tol;
+        rq.N = 1; rq.ic_flat = kPendX0; rq.values = kPendA;
+        rq.t_rec = 1.0; rq.dt = 0.1; rq.total = 11;
+        PhaseAdaptiveResult out;
+        { const bool ok_ = eng.run_phase_portraits_bdf(rq, out); ut::require(ok_, "GPU BDF fixed: " + eng.error()); }
+        double d = 0;
+        for (int k = 0; k < 11; ++k) d = std::fmax(d, dist(out.traj[0][(size_t)k], tr[(size_t)k], 0, 5));
+        std::printf("  DAE BDF 1-5 fixed step on the GPU: %.0f steps (CPU %lld), max |GPU - CPU| = %.2e\n",
+                    out.stats[0].nacc, st.nacc, d);
+        ut::require(out.stats[0].nacc == (double)st.nacc && out.stats[0].nrej == (double)st.nrej && d < 1e-10, "GPU BDF fixed = CPU");
+    }
+}
+
+AdaptiveRequest bdf_sweep_request(const System& s, double tol, double span);
+
+// Свипы: удвоение шага (DAE Trapezoidal) — как fill_adaptive_request; BDF с постоянным шагом h = 0.002.
+AdaptiveRequest trap_sweep_request(const System& s, double tol, double span) {
+    AdaptiveRequest a;
+    a.enabled = true;
+    const AdaptiveCode code = codegen_adaptive_dae_doubling(s, DaeScheme::Trapezoidal, "DAE Trapezoidal");
+    AdaptiveSettings st;
+    st.enabled = true;
+    char tb[32];
+    std::snprintf(tb, sizeof(tb), "%g", tol * 100);   // порядок 2: 1e-9 дал бы ~1e5 шагов на точку
+    st.rtol = tb;
+    st.atol = tb;
+    std::string err;
+    { const bool ok_ = adaptive_build_params(st, code, (int)s.vars.size(), span, a.params, err, &a.ctrl_body);
+      ut::require(ok_, "Trapezoidal params: " + err); }
+    a.rhs = code.rhs; a.emb = code.emb; a.dprep = code.dprep; a.deval = code.deval;
+    if (s.dae_nx >= 0) a.prefix = "#define UCUDA_AD_DAE_NX " + std::to_string(s.dae_nx) + "\n";
+    a.tol_ratio = 1.0;
+    return a;
+}
+AdaptiveRequest bdf_fixed_sweep_request(const System& s, double, double span) {
+    AdaptiveRequest a = bdf_sweep_request(s, 1e-6, span);
+    a.params.h0 = 0.002;
+    a.prefix += "#define UCUDA_BDF_NSLOT " + std::to_string(newton_slot(s)) + "\n#define UCUDA_BDF_FIXED 1\n";
+    return a;
 }
 
 // BDF 1-5 на GPU (kernels/ucuda_bdf.cuh в модуле NVRTC) против той же формы DASSL на CPU.
@@ -907,7 +1093,9 @@ int main() {
         set_nvrtc_rdc(true);   // как в приложении с _app_config.json: модули ДАУ без rdc собираются минутами
         cpu_tests();
         adaptive_cpu();
+        adaptive_doubling_cpu();
         bdf_tests();
+        bdf_fixed_cpu();
         if (cuInit(0) != CUDA_SUCCESS) { std::printf("no CUDA device: GPU part skipped\n"); return ut::kSkip; }
         gpu_tests();
         adaptive_gpu();
@@ -918,6 +1106,9 @@ int main() {
         dae_no_root_point();
         dae_sweeps(bdf_sweep_request, "BDF 1-5", true);
         dae_sweeps(rodas_sweep_request, "adaptive DAE Rodas4", false);
+        doubling_and_fixed_gpu();
+        dae_sweeps(trap_sweep_request, "adaptive DAE Trapezoidal (doubling)", false);
+        dae_sweeps(bdf_fixed_sweep_request, "BDF 1-5 fixed step", true);
         return 0;
     });
 }

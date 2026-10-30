@@ -308,7 +308,8 @@ static int filter_comma_to_dot(ImGuiInputTextCallbackData* data) {
         return scheme_uses_newton(cspec.base);
     return scheme_name == "Implicit Euler" || scheme_name == "Implicit Midpoint"
         || scheme_name == "Complex Implicit Euler"
-        || dae_scheme_from_name(scheme_name, nullptr);   // DAE BDF1 / Trapezoidal
+        || dae_scheme_from_name(scheme_name, nullptr)    // DAE BDF1 / Trapezoidal
+        || scheme_is_multistep(scheme_name);             // BDF 1-5: корректор — тот же Ньютон
 }
 
 // Auto-labels for BD/LLE/LS configs and Parametric plot windows
@@ -765,13 +766,14 @@ bool draw_scheme_combo(const char* label, std::string& scheme,
             bool ms_header = false;
             for (const auto& nm : *enabled_builtins) {
                 if (scheme_is_multistep(nm) && !ms_header) {
-                    ImGui::SeparatorText("multistep (adaptive step only)");
+                    ImGui::SeparatorText("multistep");
                     ms_header = true;
                 }
                 if (ImGui::Selectable(nm.c_str(), scheme == nm)) choose(nm);
                 if (scheme_is_multistep(nm) && ImGui::IsItemHovered())
-                    ImGui::SetTooltip("BDF orders 1-5 with variable step (DASSL form), its own driver.\n"
-                                      "Needs Integration -> Adaptive step; index 3 goes through GGL.");
+                    ImGui::SetTooltip("BDF orders 1-5 (DASSL form), its own driver; index 3 goes through GGL.\n"
+                                      "Adaptive step: variable step and order. Fixed step: step h, order 1..5\n"
+                                      "ramped up, no step controller. Newton: the tab's Newton fields.");
             }
             ImGui::EndCombo();
         }

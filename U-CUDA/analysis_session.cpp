@@ -616,8 +616,15 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
         bs.h0 = parse_val(in.adaptive.h0, 0.0);
         if (!in.adaptive.hmax.empty()) bs.hmax = parse_val(in.adaptive.hmax, bs.hmax);
         if (!in.adaptive.hmin.empty()) bs.hmin = parse_val(in.adaptive.hmin, 0.0);
+        if (!in.adaptive.enabled) bs.hfix = h;   // переключатель Fixed step: шаг h без регулятора
+        {   // Ньютон — хвост a[] вкладки (scheme_fill_tail): [n, tol, max_iters, full] после p_M
+            const size_t ns = (size_t)newton_slot(in.sys);
+            if (ns + 2 < a.size()) {
+                bs.newton_tol = a[ns]; bs.newton_max = (int)a[ns + 1]; bs.newton_full = a[ns + 2] != 0;
+            }
+        }
         const double t_skip = in.skip_transient ? tskip : 0.0;
-        const bool rawm = in.adaptive.raw_nodes;
+        const bool rawm = in.adaptive.raw_nodes && in.adaptive.enabled;   // постоянный шаг — сетка через h
         int max_pts = parse_num_int(in.adaptive.max_points, 1000000);
         max_pts = std::max(2, std::min(max_pts, 50000000));
         result.adaptive  = true;
@@ -641,7 +648,8 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
             for (int i = 0; i < ng && i < (int)sp.dae_index.size(); ++i) rq.kidx[(size_t)i] = std::max(1, sp.dae_index[(size_t)i]);
             for (int i = 0; i < ng; ++i) rq.atol.push_back(bs.atol[(size_t)std::min(i, (int)bs.atol.size() - 1)]);
             rq.rtol = bs.rtol; rq.h0 = bs.h0; rq.hmax = std::isfinite(bs.hmax) ? bs.hmax : 0.0; rq.maxk = bs.max_order;
-            rq.hmin = bs.hmin;
+            rq.hmin = bs.hmin; rq.hfix = bs.hfix;
+            rq.newton_max = bs.newton_max; rq.newton_full = bs.newton_full; rq.newton_tol = bs.newton_tol;
             rq.N = N;
             rq.ic_flat.assign((size_t)N * ng, 0.0);   // mu системы GGL — с нуля
             for (int k = 0; k < N; ++k)
@@ -663,7 +671,8 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
                 result.step_log[(size_t)k] = std::move(out.log[(size_t)k]);
                 result.step_stats[(size_t)k] = out.stats[(size_t)k];
                 if (out.hmin_fail[(size_t)k]) {
-                    result.error = bs.hmin > 0 ? "BDF: Newton does not converge at h_min - lower h_min"
+                    result.error = bs.hfix > 0 ? "BDF (fixed step): Newton does not converge - lower h or raise Newton max iters"
+                                 : bs.hmin > 0 ? "BDF: Newton does not converge at h_min - lower h_min"
                                                : "BDF: step size below h_min";
                     return false;
                 }
@@ -928,7 +937,7 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     // Явное время t на CPU: фиксированный шаг — через krs_cpu (номер шага ведёт DLL, см.
     // KrsCpuStep::step_index), адаптивный — через DLL адаптивного модуля (run_adaptive_phase).
     const bool timed = system_uses_time(in.sys);
-    if (in.adaptive.enabled && !in.sys.is_map) {
+    if ((in.adaptive.enabled || scheme_is_multistep(in.scheme)) && !in.sys.is_map) {
         if (!run_adaptive_phase(in, dim, N, ic_flat, a, h, tsim, tskip, total, raw, ad_times,
                                 result, calc_ok, calc_err))
             return result;
@@ -1546,8 +1555,8 @@ static std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_s
         return {};
     };
     if (scheme_is_multistep(scheme) && !sys.is_map)
-        return refuse("'" + scheme + "' is a multistep method with its own driver: switch Integration to "
-                      "Adaptive step");
+        return refuse("'" + scheme + "' is a multistep method with its own driver: Analysis and the Parametric "
+                      "sweeps (BD, LLE, LS, Metrics, basins) only");
     // Nothing to choose for a map: the step is always the same whatever the
     // scheme field says (a stale session JSON may hold a previous ODE's scheme).
     if (sys.is_map) {
@@ -1642,11 +1651,12 @@ AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_sc
         if (cs.name == scheme) throw std::runtime_error(adaptive_scheme_hint());
     if (scheme_is_multistep(scheme))
         throw std::runtime_error("'" + scheme + "' is a multistep method with its own driver (BDF), not an embedded pair");
-    if (sys.dae_nx >= 0) {   // нативная ДАУ: методы ДАУ, вложенная пара есть у Rodas4
+    if (sys.dae_nx >= 0) {   // нативная ДАУ: у Rodas4 вложенная пара, у прочих — удвоение шага
         DaeScheme ds;
         if (!dae_scheme_from_name(scheme, &ds))
-            throw std::runtime_error("a DAE needs a DAE method; adaptive step: DAE Rodas4");
-        return codegen_adaptive_dae(sys, ds);
+            throw std::runtime_error("a DAE needs a DAE method (or DAE BDF 1-5)");
+        if (ds == DaeScheme::Rodas4) return codegen_adaptive_dae(sys, ds);
+        return codegen_adaptive_dae_doubling(sys, ds, scheme);
     }
     if (scheme == "DAE Rodas4") throw std::runtime_error("DAE Rodas4 needs a DAE system");
     const Scheme sch = scheme_from_name(scheme);
@@ -1784,7 +1794,8 @@ static int parse_i(const std::string& s, int def) {
 // Euler (ОДУ). Без адаптивного шага — прежний отказ compute_krs_for_scheme.
 static std::string sweep_krs(const std::vector<CustomScheme>& cs, const System& sys, const std::string& scheme,
                              const AdaptiveSettings& ad) {
-    if (scheme_is_multistep(scheme) && ad.enabled && !sys.is_map && !sys.rhs.empty()) {
+    (void)ad;   // BDF и с постоянным шагом идёт через драйвер BDF (fill_adaptive_request)
+    if (scheme_is_multistep(scheme) && !sys.is_map && !sys.rhs.empty()) {
         try { return sys.dae_nx >= 0 ? codegen_dae_scheme(sys, DaeScheme::BDF1) : codegen_scheme(sys, Scheme::Euler); }
         catch (const std::exception&) { return {}; }
     }
@@ -1793,9 +1804,18 @@ static std::string sweep_krs(const std::vector<CustomScheme>& cs, const System& 
 
 static void fill_adaptive_request(const std::vector<CustomScheme>& custom_schemes,
                                   const System& sys, const std::string& scheme,
-                                  const AdaptiveSettings& st, int n, double span,
-                                  int ax0, int ax1, AdaptiveRequest& out) {
+                                  const AdaptiveSettings& st_in, int n, double span,
+                                  int ax0, int ax1, AdaptiveRequest& out, double h_fixed) {
     out = AdaptiveRequest();
+    // BDF 1-5 с постоянным шагом (Fixed step) — тот же драйвер BDF без регулятора (UCUDA_BDF_FIXED):
+    // шаг h, вывод на равномерную сетку.
+    AdaptiveSettings st = st_in;
+    const bool bdf_fixed = !st.enabled && scheme_is_multistep(scheme) && h_fixed > 0;
+    if (bdf_fixed) {
+        char hb[40];
+        std::snprintf(hb, sizeof(hb), "%.17g", h_fixed);
+        st.enabled = true; st.raw_nodes = false; st.h0 = st.hmax = hb; st.hmin.clear();
+    }
     if (!st.enabled || sys.is_map) return;
     out.enabled      = true;
     out.raw_nodes    = st.raw_nodes;
@@ -1834,11 +1854,14 @@ static void fill_adaptive_request(const std::vector<CustomScheme>& custom_scheme
             kidx += (i ? "," : "") + std::to_string(i < (int)sp.dae_index.size() && sp.dae_index[(size_t)i] > 1
                                                     ? sp.dae_index[(size_t)i] : 1);
         out.prefix = "#define UCUDA_BDF_DRIVER 1\n#define UCUDA_BDF_NX " + std::to_string(dae ? sp.dae_nx : N)
-                   + "\n#define UCUDA_BDF_KIDX {" + kidx + "}\n";
+                   + "\n#define UCUDA_BDF_KIDX {" + kidx + "}\n"
+                   + "#define UCUDA_BDF_NSLOT " + std::to_string(newton_slot(sp)) + "\n"   // Ньютон из a[]
+                   + (bdf_fixed ? "#define UCUDA_BDF_FIXED 1\n" : "");
         if (dae && sp.dae_nx < N)   // клоны LLE/LS — по x (ucuda_lyap_init_clones / renorm)
             out.prefix += "#define UCUDA_AD_DAE_NX " + std::to_string(sp.dae_nx) + "\n";
         out.tol_ratio = out.params.rtol > 0 ? out.params.atol[0] / out.params.rtol : 1.0;
         out.lyap_renorm = st.lyap_renorm;
+        if (bdf_fixed) { out.desc = scheme + " (multistep, DASSL form), fixed step " + st.h0; return; }
         out.desc = scheme + " (multistep, DASSL form), rtol " + st.rtol + ", atol " + st.atol
                  + (st.hmax.empty() ? std::string() : ", h_max " + st.hmax);
         return;
@@ -1924,7 +1947,7 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
     req.emit_all_samples = bd.plot_all_iterates;
     req.csv_output_path = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, bd.scheme, bd.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, bd.ad_axis, 0, req.adaptive);
+                          req.transient_time + req.t_max, bd.ad_axis, 0, req.adaptive, req.h);
     sweep_extend_state(req);
     return req;
 }
@@ -1997,7 +2020,7 @@ static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession
     req.mult_interval      = parse_d(bd.mult_interval_text, (double)::mult_interval);
     req.csv_output_path    = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, bd.scheme, bd.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, bd.ad_axis, bd.ad_axis_2, req.adaptive);
+                          req.transient_time + req.t_max, bd.ad_axis, bd.ad_axis_2, req.adaptive, req.h);
     sweep_extend_state(req);
     return req;
 }
@@ -2258,7 +2281,7 @@ static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     req.vector_transient = parse_d(c.vtr_text, 0.0);
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive);
+                          req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive, req.h);
     sweep_extend_state(req);
     return req;
 }
@@ -2324,7 +2347,7 @@ static LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
     req.vector_transient   = parse_d(c.vtr_text, 0.0);
     req.csv_output_path    = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
+                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive, req.h);
     sweep_extend_state(req);
     return req;
 }
@@ -2826,7 +2849,7 @@ static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
     req.mult1    = (numb)parse_d(c.mult_feature1_text, 1.0);
     req.mult2    = (numb)parse_d(c.mult_feature2_text, 1.0);
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, 0, 0, req.adaptive);
+                          req.transient_time + req.t_max, 0, 0, req.adaptive, req.h);
     sweep_extend_state(req);
     return req;
 }
@@ -3753,7 +3776,7 @@ static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
     req.vector_transient = parse_d(c.vtr_text, 0.0);
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive);
+                          req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive, req.h);
     sweep_extend_state(req);
     return req;
 }
@@ -3817,7 +3840,7 @@ static LS2DRequest build_ls2d_request(const LyapunovSpectrumAnalysisSession& s,
     req.vector_transient   = parse_d(c.vtr_text, 0.0);
     req.csv_output_path    = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
+                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive, req.h);
     sweep_extend_state(req);
     return req;
 }
@@ -4102,7 +4125,7 @@ static SignalMetricsRequest build_metrics_request(const SignalMetricsAnalysisSes
     // 1D: вторая ось не участвует, и её код от режима 2D не должен уводить расчёт из модуля
     // узлов (ad_nodes_module смотрит обе оси).
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, c.ad_axis, c.mode_2d ? c.ad_axis_2 : 0, req.adaptive);
+                          req.transient_time + req.t_max, c.ad_axis, c.mode_2d ? c.ad_axis_2 : 0, req.adaptive, req.h);
     sweep_extend_state(req);
     return req;
 }

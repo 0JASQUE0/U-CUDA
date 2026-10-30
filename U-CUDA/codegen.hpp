@@ -454,6 +454,12 @@ std::string codegen_dae_scheme(const System& s, DaeScheme sch);
 // индекс 1 (норма ошибки драйвера не масштабирует переменные индекса >= 2). Бросает на
 // другом методе / индексе.
 AdaptiveCode codegen_adaptive_dae(const System& s, DaeScheme sch);
+// Прочие одношаговые методы ДАУ — переменный шаг удвоением шага: Y = два шага h/2 тела постоянного
+// шага, E = (Y - шаг h)/(2^p - 1), E переменной индекса k — с множителем h^(k-1); плотный выход —
+// парабола через X, середину и Y. Индекс — какой поддерживает сам метод. name — для комментария.
+AdaptiveCode codegen_adaptive_dae_doubling(const System& s, DaeScheme sch, const std::string& name);
+// Порядок одношагового метода ДАУ (по x); 0 — нет.
+int dae_scheme_order(DaeScheme sch);
 // Тела для BDF 1-5 на GPU (kernels/ucuda_bdf.cuh): res — F[i] = [f; g](X, ucuda_t), jac — полный
 // символьный якобиан J[i*N + j] = d[f; g]_i / dX_j. Система — ОДУ или ДАУ индекса 1-2 (индекс 3
 // сначала сводится GGL, см. bdf_prepare_system).

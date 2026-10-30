@@ -28,6 +28,11 @@ struct BdfSettings {
     double hmax = std::numeric_limits<double>::infinity();
     double hmin = 0;                       // > 0 — h_min пользователя (UcudaBdfParams::hmin)
     int    max_order = 5;
+    double hfix = 0;                       // > 0 — постоянный шаг без регулятора (UcudaBdfParams::hfix)
+    // Ньютон (UcudaBdfParams::nmax / nfull / ntol): newton_max <= 0 — форма DASSL.
+    int    newton_max = 0;
+    bool   newton_full = true;
+    double newton_tol = 1e-10;
 };
 
 struct BdfStats {
@@ -98,6 +103,8 @@ inline bool bdf_integrate(const System& s0, const double* a, int na, const doubl
     P.hmax = std::isfinite(st.hmax) ? st.hmax : 0.0;
     P.maxk = st.max_order;
     P.hmin = st.hmin;
+    P.hfix = st.hfix;
+    P.nmax = st.newton_max; P.nfull = st.newton_full ? 1 : 0; P.ntol = st.newton_tol;
     UcudaBdfStats cs;
     std::vector<numb> lg(log != nullptr && log_cap > 0 ? (size_t)log_cap * 4 : 0);
     int nlog = 0;
@@ -109,7 +116,8 @@ inline bool bdf_integrate(const System& s0, const double* a, int na, const doubl
     stats.hmin = cs.hmin; stats.hmax = cs.hmax; stats.hsum = cs.hsum; stats.max_q = cs.max_q;
     stats.diverged = cs.diverged != 0; stats.truncated = cs.truncated != 0;
     if (cs.hmin_fail) {
-        if (err) *err = st.hmin > 0 ? "BDF: Newton does not converge at h_min - lower h_min"
+        if (err) *err = st.hfix > 0 ? "BDF (fixed step): Newton does not converge - lower h or raise Newton max iters"
+                      : st.hmin > 0 ? "BDF: Newton does not converge at h_min - lower h_min"
                                     : "BDF: step size below h_min";
         return false;
     }

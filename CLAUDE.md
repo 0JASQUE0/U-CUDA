@@ -541,6 +541,19 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   -2.000000 GPU = CPU. Tests (dae_test): RC exact u(5) within 1.4e-6 /
   2e-10 at tol 1e-5 / 1e-9 (19 / 163 steps), dense output on a 0.05 grid 6.5e-9 (CPU), the same on the
   GPU, Kepler coupling = fixed Rodas4 h = 1e-3, refusals (index 2, BDF1).
+  Every other one-step DAE method takes the adaptive step too (Integration -> Adaptive step), by step doubling:
+  `codegen_adaptive_dae_doubling(s, sch, name)` (codegen.cpp) prints the fixed-step body of `codegen_dae_scheme`
+  three times into emb (one step of h -> YA, two steps of h/2 -> Y, the midpoint into W), E = (Y - YA)/(2^p - 1)
+  with p = `dae_scheme_order` (x order: BDF1 / Explicit Euler 1, Trapezoidal / TR-BDF2 / SDIRK2 / Implicit Midpoint /
+  ROS2 / CD / CD (index 2) / Explicit Midpoint 2, ROS3P 3, CD + Yoshida-4 / RK4 4, Radau IIA (+ GGL) 5), E of a
+  variable of index k times h^(k-1) (as the DASSL / RADAU5 norms - so index 2-3 work with the generic driver), dense
+  output = the parabola through X, W, Y (no derivative needed for z), F1 = [f; g](t + h, Y). Same Newton, projection
+  and index rules as the fixed step (each method refuses what it refuses there). `adaptive_code_for_scheme` routes
+  every DAE method except Rodas4 there; `adaptive_scheme_name_supported` / `adaptive_scheme_q_guess` know them, so
+  Analysis (GPU phase_kernel_ad, CPU DLL) and the sweeps (UCUDA_AD_DAE_NX projection) take them unchanged. Cost:
+  3 steps per attempt. dae_test `adaptive_doubling_cpu`: all 13 one-step methods on RC follow the tolerance (order 1:
+  global ~ sqrt(tol)), index-2 pendulum Radau IIA 1.2e-9 at tol 1e-8; GPU = CPU (Trapezoidal, same step count,
+  1e-13); `dae_sweeps` on Trapezoidal (LLE -0.500002, LS -0.5 / -2.00001).
 - Stage 9c, multistep BDF 1-5 (`multistep_bdf.h`, header-only, its own driver - the user wants a
   separate multistep kernel for ODEs too): variable order 1..5 and variable step in the DASSL form
   (DDASTP): history = modified divided differences phi on the real nodes, coefficients alpha / beta /
@@ -555,9 +568,9 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   lambda at index 2 - at tol 1e-7 / 1e-9 the pendulum locked into h ~ tol (3156 / 31015 steps, error
   7e-4 / 7e-5) while 1e-6 / 1e-8 / 1e-10 were fine; Robertson took 2779 steps.
   Names `kBdfSchemeOde` "BDF 1-5" (always in the ODE scheme list) and `kBdfSchemeDae` "DAE BDF 1-5"
-  (after the DAE methods); `scheme_is_multistep`; adaptive step only (Analysis: `run_adaptive_phase`
-  branch; GPU when "use GPU" is on); fixed step (`krs_for_scheme_impl`) and sweeps
-  (`adaptive_code_for_scheme`) refuse them; sweeps take them through `fill_adaptive_request` (below).
+  (after the DAE methods); `scheme_is_multistep`; Analysis (`run_adaptive_phase` branch, both Fixed and Adaptive
+  step - fixed step below; GPU when "use GPU" is on) and the sweeps (`fill_adaptive_request`, below); a fixed-step
+  body (`krs_for_scheme_impl`) and `adaptive_code_for_scheme` refuse them, so do the other tabs.
   Tests: x' = -2x + cos t (order reaches 5, error ~1-2 tol, 89 / 339 steps at 1e-5 / 1e-9), Robertson DAE
   vs Test Set at t = 40 (rtol 1e-8: 326 steps, y1 to 9e-9), index-2 pendulum vs Radau IIA at tol 1e-6 ..
   1e-10 (87..322 steps, x error ~20 tol, lambda ~100 tol), index-3 pendulum via GGL.
@@ -578,6 +591,23 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   never goes below it; an attempt at h_min that fails the error test is accepted as forced (code 2, `nforced`), like
   the adaptive driver; Newton not converging at h_min ends the run ("lower h_min"). Sweeps keep hmin = 0 (only the
   10 ulp(t) guard). dae_test `bdf_hmin_and_skip`.
+  Newton of the corrector = the tab's Newton fields (the a[] tail, `newton_slot`): `UcudaBdfParams::nmax / nfull /
+  ntol` - at most nmax iterations, converged when ||dy|| <= ntol ||y|| (as the DAE bodies), nfull = 0 = Jacobian and LU
+  once per attempt (`ucuda_bdf_lu_factor` / `_apply`, LINPACK-style pivots); Analysis reads them from `a`
+  (`BdfSettings::newton_*`, `BdfGpuRequest::newton_*`), sweeps from a[] via `#define UCUDA_BDF_NSLOT`. nmax <= 0 keeps
+  the old DASSL form (6 iterations, WRMS < 1e-3, Jacobian every iteration) - the tests' defaults, bit-identical.
+  Fixed step (Integration -> Fixed step, `UcudaBdfParams::hfix` = h; Analysis `BdfSettings::hfix`, sweeps
+  `fill_adaptive_request(.., h_fixed)` -> settings pinned to h + `#define UCUDA_BDF_FIXED`, `sweep_krs` gives the
+  stub body for BDF in both modes): start = the same BDF with error control (tolerance min(rtol, atol, 1e-10), h <=
+  hfix) up to t0 + 5 hfix, y(t0 + j hfix) taken by DDATRP (`ucuda_bdf_fixed_collect`), the order-5 history built
+  from them as backward differences (constant-step DASSL differences), psi_i = i h; then no controller at all - no
+  error norm, no order choice, no rejections, step hfix, order 5; Newton failure ends the run ("lower h"). Tried and
+  dropped: orders 1..5 on the full h (global order 2: the order-1 first step leaves O(h^2)) and a ramp doubling h
+  from h/1024 (BDF 4-5 are not zero-stable for step ratio 2 - diverged). dae_test `bdf_fixed_cpu`: pendulum index 2
+  at h = 0.02 / 0.01 / 0.005: 1.5e-5 / 4.0e-7 / 1.2e-8 (order 5), start ~75-100 steps; GPU = CPU 3e-13;
+  `dae_sweeps` with fixed BDF (BD 1D peak 2.008620, LLE -0.50006, LS -0.50006 / -1.99997). The start of the fixed
+  step forces a step at 100 x the 10-ulp guard (no failure on a steep front), and `ucuda_bdf_start` raises an
+  automatic h0 below 100 ulp(t) (a circuit from the zero state: y' ~ 1e15 gave h0 under the guard, 0 for y' = inf).
   Sweeps (Parametric: BD 1D/2D classic and continuation, Metrics, basins, LLE/LS): the adaptive sweep
   modules run on BDF without new kernels - `ucuda_adaptive.cuh` switches to the BDF section of
   `ucuda_bdf.cuh` under `UCUDA_BDF_DRIVER` (the same names `UcudaAdaptState`, `ucuda_ad_init / restart /
@@ -590,8 +620,8 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   output"), no controller, `AdaptiveRequest::prefix` = `#define UCUDA_BDF_DRIVER 1`, `UCUDA_BDF_NX`,
   `UCUDA_BDF_KIDX {..}`; the engine puts the prefix before the module text, into the cache keys and into the
   CPU DLL prelude, and registers `ucuda_bdf.cuh` as a virtual NVRTC header. The template still needs a
-  fixed-step body: `sweep_krs` gives BDF1 (DAE) / Euler (ODE) when the adaptive step is on (its kernels are
-  never called); with a fixed step the multistep names are refused as before. Every sweep point starts with
+  fixed-step body: `sweep_krs` gives BDF1 (DAE) / Euler (ODE) for BDF in both modes (its kernels are never
+  called; fixed step goes through the BDF driver with `UCUDA_BDF_FIXED`). Every sweep point starts with
   z projected onto g = 0 (Newton in z, x fixed), so a DAE sweep from one z0 = a run from a consistent z0 per
   point. Index 3: `fill_adaptive_request` builds the bodies over `bdf_prepare_system` (GGL) and sets
   `AdaptiveRequest::extra_x` = number of multipliers; every sweep builder calls `sweep_extend_state` (amountOfX
@@ -648,6 +678,14 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   R with an expression value (r='TIME > 350m ? 8 : 89' -> I = V/R(t, V)), "DC ac=1" key=value on sources, SINE,
   AM, SFFM, PSpice "VALUE {..}" without '=', K with |k| = 1 (ideal transformer, index-2 note), clear refusals
   for A elements, VDMOS and noise sources.
+  `.ic` without UIC follows SPICE: the DC operating point is solved with the .ic nodes HELD (the node's KCL row
+  replaced by v - V = 0, `SpiceImportResult::op_plain_text`), then released - `AppModel::import_circuit` runs
+  `dae_dc_operating_point` on that text and takes all initial values from it; before, the import kept the .ic
+  values and zeros elsewhere (no OP). This is how KiCad's astable multivibrator (`.ic v(/3)=0`) gets its kick: with
+  the fix BDF 1-5 adaptive oscillates like ngspice (v(/1) at t = 0.2 / 0.5 / 0.7 / 1.1 / 1.4 s: 3.814 / 3.428 / 3.694
+  / 3.820 / 3.520 V, ngspice 3.818 / 3.448 / 3.700 / 3.822 / 3.514). Its switching front needs steps down to
+  ~1e-14 s (pF junction capacitances): fixed-step BDF stops there at the same t for any h (2e-6 .. 5e-5; damping
+  the Newton did not help) - use the adaptive step on such circuits. spice_test `ic_without_uic`.
   Still open: GUI check.
 - Stage 12 (planned, not started), NI Multisim import - the same role as KiCad. Found on this machine: Multisim 14.2
   (`%ProgramFiles(x86)%\National Instruments\Circuit Design Suite 14.2`, 133 samples `.ms14` in

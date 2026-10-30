@@ -927,9 +927,10 @@ static void draw_dae_method_checkboxes(AppModel& model) {
         { "DAE Explicit Euler", "Explicit Euler with z solved from the constraint at every stage. Index 1, non-stiff." },
         { "DAE Explicit Midpoint", "Explicit midpoint with z solved at every stage. Order 2, index 1, non-stiff." },
         { "DAE RK4", "RK4 with z solved at every stage. Order 4, index 1, non-stiff." },
-        { kBdfSchemeDae, "BDF orders 1-5 with variable step (DASSL form), its own multistep driver.\n"
-                         "Adaptive step only (Analysis on CPU / GPU, Parametric sweeps). Index 1-2 directly,\n"
-                         "index 3 through GGL. Generate prints its residual [f; g] and Jacobian." },
+        { kBdfSchemeDae, "BDF orders 1-5 (DASSL form), its own multistep driver: Analysis on CPU / GPU and the\n"
+                         "Parametric sweeps. Adaptive step: variable step and order; fixed step: step h, order\n"
+                         "ramped up 1..5, no step controller. Index 1-2 directly, index 3 through GGL.\n"
+                         "Generate prints its residual [f; g] and Jacobian." },
     };
     std::vector<std::string> names = dae_scheme_names();
     names.push_back(kBdfSchemeDae);
@@ -937,7 +938,7 @@ static void draw_dae_method_checkboxes(AppModel& model) {
     for (size_t i = 0; i < names.size(); ++i) {
         if (i == 0) ImGui::SeparatorText("implicit, any index");
         if (names[i] == "DAE CD") { ImGui::SeparatorText("constraint solved whenever x changes, index 1"); first_in_line = true; }
-        if (names[i] == kBdfSchemeDae) { ImGui::SeparatorText("multistep, adaptive step only"); first_in_line = true; }
+        if (names[i] == kBdfSchemeDae) { ImGui::SeparatorText("multistep"); first_in_line = true; }
         if (!first_in_line) ImGui::SameLine();
         first_in_line = false;
         bool on = model.dae_scheme_on(names[i]);

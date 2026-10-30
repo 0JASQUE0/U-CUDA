@@ -720,7 +720,7 @@ static const char* const kBdfPhaseKernel =
     "    int log_cap, numb* logs, int* log_counts) {\n"
     "    const int tid = blockIdx.x * blockDim.x + threadIdx.x;\n"
     "    if (tid >= N) return;\n"
-    "    numb ws[(UCUDA_BDF_MAXK + 3) * AMOUNTOFX + 9 * AMOUNTOFX + 2 * AMOUNTOFX * AMOUNTOFX];\n"
+    "    numb ws[UCUDA_BDF_WS(AMOUNTOFX)];\n"
     "    UcudaBdfGpu fn{ values, data + (size_t)tid * cap * AMOUNTOFX, times + (size_t)tid * cap, raw, cancel };\n"
     "    UcudaBdfStats st;\n"
     "    int nlog = 0;\n"
@@ -826,8 +826,10 @@ bool NvrtcEngine::run_phase_portraits_bdf(const BdfGpuRequest& rq, PhaseAdaptive
     bool cancelled = false;
     if (ok) ok = cancel_flag_reset();
     if (ok) {
-        struct { numb rtol, h0, hmax; int maxk; numb hmin; } par = { (numb)rq.rtol, (numb)rq.h0, (numb)rq.hmax, rq.maxk,
-                                                                    (numb)rq.hmin };   // = UcudaBdfParams
+        // = UcudaBdfParams (тот же порядок и типы полей)
+        struct { numb rtol, h0, hmax; int maxk; numb hmin; int nmax, nfull; numb ntol, hfix; } par = {
+            (numb)rq.rtol, (numb)rq.h0, (numb)rq.hmax, rq.maxk, (numb)rq.hmin,
+            rq.newton_max, rq.newton_full ? 1 : 0, (numb)rq.newton_tol, (numb)rq.hfix };
         int nxd = rq.nx, total = rq.total, raw = rq.raw ? 1 : 0, max_pts = rq.max_pts, capv = cap, n = N, lcap = log_cap;
         numb t_skip = (numb)rq.t_skip, t_rec = (numb)rq.t_rec, dt = (numb)rq.dt;
         CUdeviceptr d_cancel = (CUdeviceptr)cancel_dev_;

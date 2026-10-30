@@ -28,7 +28,7 @@
 #endif
 
 #define UCUDA_BDF_MAXK 5
-#define UCUDA_BDF_WS(N) ((UCUDA_BDF_MAXK + 3) * (N) + 9 * (N) + 2 * (N) * (N))
+#define UCUDA_BDF_WS(N) ((UCUDA_BDF_MAXK + 3) * (N) + 10 * (N) + 2 * (N) * (N) + (UCUDA_BDF_MAXK + 1) * (N))
 
 struct UcudaBdfParams {
     numb rtol;
@@ -39,6 +39,19 @@ struct UcudaBdfParams {
     // вынужденно (код 2 в журнале), как у адаптивного драйвера; Ньютон, не сошедшийся на h_min, — отказ
     // (hmin_fail). 0 — только защитный порог 10 ulp(t) (свипы).
     numb hmin;
+    // Ньютон корректора — настройки вкладки (a[M+2..M+4], как у неявных схем постоянного шага):
+    // nmax > 0 — не больше nmax итераций, сходимость ||dy|| <= ntol ||y|| (как в телах ДАУ), nfull = 0 —
+    // якобиан и LU один раз на попытку шага (модифицированный Ньютон), 1 — на каждой итерации.
+    // nmax <= 0 — форма DASSL: до 6 итераций, WRMS поправки < 1e-3, якобиан на каждой итерации.
+    int  nmax, nfull;
+    numb ntol;
+    // > 0 — постоянный шаг hfix (переключатель Fixed step). Старт: y(t0 + j*hfix), j = 1..maxk, считает
+    // тот же BDF с контролем ошибки (допуск min(rtol, atol, 1e-10), шаг не больше hfix); по этим точкам
+    // строится история порядка maxk с шагом hfix (обратные разности). Дальше регулятора нет — ни оценок
+    // ошибки, ни выбора порядка, ни отказов: порядок maxk, шаг hfix. Ньютон не сошёлся — обрыв (hmin_fail).
+    // (Порядок 1..maxk на полном шаге давал глобальный порядок 2, разгон удвоением h — неустойчивость:
+    // BDF 4-5 не держат отношения шагов 2.)
+    numb hfix;
 };
 
 struct UcudaBdfStats {
@@ -53,6 +66,10 @@ struct UcudaBdfCore {
          sigma[UCUDA_BDF_MAXK + 3], psi[UCUDA_BDF_MAXK + 3];
     numb t, h, hold, hs;
     int  N, nx, maxk, k, kold, ns, iphase, nef;
+    // Старт постоянного шага: fxj > 0 — следующая точка y(fxt0 + fxj*hfix) для истории, -1 — история
+    // построена (или постоянного шага нет).
+    int  fxj;
+    numb fxt0;
     // Журнал попыток (только Analysis, ucuda_bdf_run): по 4 числа — t начала шага, h, err, код (1 принят,
     // 0 отвергнут), как у адаптивного драйвера. nullptr — не вести (свипы, клоны).
     numb* log;
@@ -86,11 +103,45 @@ UCUDA_BDF_HD inline bool ucuda_bdf_lu_solve(numb* A, numb* b, int n) {
     return true;
 }
 
-// Раскладка ws: phi[(j)*N] j = 0..MAXK+2, F, R, y, ypr, yprp, ev, wt, dl, yo, J (N*N), A (N*N).
+// Разложение LU на месте с перестановками строк в piv (номера строк хранятся в numb — рабочая
+// память одна); false — вырождена. ucuda_bdf_lu_apply решает по нему систему (модифицированный Ньютон).
+UCUDA_BDF_HD inline bool ucuda_bdf_lu_factor(numb* A, numb* piv, int n) {
+    for (int k = 0; k < n; ++k) {
+        int p = k;
+        for (int i = k + 1; i < n; ++i) if (fabs(A[i * n + k]) > fabs(A[p * n + k])) p = i;
+        piv[k] = (numb)p;
+        if (!(fabs(A[p * n + k]) > (numb)1e-300)) return false;
+        // Только столбцы >= k: множители прежних столбцов остаются на месте — apply повторяет перестановки
+        // по одной (форма LINPACK; см. «LU bug» в CLAUDE.md).
+        if (p != k) for (int j = k; j < n; ++j) { const numb s = A[k * n + j]; A[k * n + j] = A[p * n + j]; A[p * n + j] = s; }
+        for (int i = k + 1; i < n; ++i) {
+            const numb m = A[i * n + k] / A[k * n + k];
+            A[i * n + k] = m;
+            if (m == (numb)0) continue;
+            for (int j = k + 1; j < n; ++j) A[i * n + j] -= m * A[k * n + j];
+        }
+    }
+    return true;
+}
+UCUDA_BDF_HD inline void ucuda_bdf_lu_apply(const numb* A, const numb* piv, numb* b, int n) {
+    for (int k = 0; k < n; ++k) {
+        const int p = (int)piv[k];
+        if (p != k) { const numb s = b[k]; b[k] = b[p]; b[p] = s; }
+        for (int i = k + 1; i < n; ++i) b[i] -= A[i * n + k] * b[k];
+    }
+    for (int k = n - 1; k >= 0; --k) {
+        numb r = b[k];
+        for (int j = k + 1; j < n; ++j) r -= A[k * n + j] * b[j];
+        b[k] = r / A[k * n + k];
+    }
+}
+
+// Раскладка ws: phi[(j)*N] j = 0..MAXK+2, F, R, y, ypr, yprp, ev, wt, dl, yo, piv, J (N*N), A (N*N).
 #define UCUDA_BDF_PHI(ws, N, j) ((ws) + (j) * (N))
-#define UCUDA_BDF_V(ws, N, k)   ((ws) + (UCUDA_BDF_MAXK + 3) * (N) + (k) * (N))   // k: 0 F,1 R,2 y,3 ypr,4 yprp,5 ev,6 wt,7 dl,8 yo
-#define UCUDA_BDF_J(ws, N)      ((ws) + (UCUDA_BDF_MAXK + 3) * (N) + 9 * (N))
+#define UCUDA_BDF_V(ws, N, k)   ((ws) + (UCUDA_BDF_MAXK + 3) * (N) + (k) * (N))   // k: 0 F,1 R,2 y,3 ypr,4 yprp,5 ev,6 wt,7 dl,8 yo,9 piv
+#define UCUDA_BDF_J(ws, N)      ((ws) + (UCUDA_BDF_MAXK + 3) * (N) + 10 * (N))
 #define UCUDA_BDF_A(ws, N)      (UCUDA_BDF_J(ws, N) + (N) * (N))
+#define UCUDA_BDF_SB(ws, N)     (UCUDA_BDF_A(ws, N) + (N) * (N))   // (MAXK+1)*N: y(t0 + j*hfix) старта
 
 UCUDA_BDF_HD inline numb ucuda_bdf_wrms(const UcudaBdfCore& C, const numb* ws, const int* kidx, const numb* v) {
     const int N = C.N;
@@ -112,6 +163,12 @@ UCUDA_BDF_HD inline bool ucuda_bdf_finite(const numb* v, int N) {
 UCUDA_BDF_HD inline void ucuda_bdf_weights(const UcudaBdfCore& C, numb* ws, const numb* atol, const UcudaBdfParams& P,
                                            const numb* v) {
     numb* wt = UCUDA_BDF_V(ws, C.N, 6);
+    if (P.hfix > 0 && C.fxj > 0) {   // старт постоянного шага: история должна быть точнее шага h
+        const numb lim = (numb)1e-10;
+        const numb rt = P.rtol < lim ? P.rtol : lim;
+        for (int i = 0; i < C.N; ++i) wt[i] = (numb)1 / (rt * fabs(v[i]) + (atol[i] < lim ? atol[i] : lim));
+        return;
+    }
     for (int i = 0; i < C.N; ++i) wt[i] = (numb)1 / (P.rtol * fabs(v[i]) + atol[i]);
 }
 
@@ -155,6 +212,9 @@ UCUDA_BDF_HD inline void ucuda_bdf_start(UcudaBdfCore& C, Fn& fn, int N, int nx,
     fn.res(y0, t0, F);
     ++st.nrhs;
     for (int i = 0; i < N; ++i) yp[i] = i < nx ? F[i] : (numb)0;
+    C.fxj = P.hfix > 0 ? 1 : -1;
+    C.fxt0 = t0;
+    if (P.hfix > 0) for (int i = 0; i < N; ++i) UCUDA_BDF_SB(ws, N)[i] = y0[i];
     ucuda_bdf_weights(C, ws, atol, P, y0);
     C.hs = 1;
     numb h = P.h0;
@@ -164,10 +224,45 @@ UCUDA_BDF_HD inline void ucuda_bdf_start(UcudaBdfCore& C, Fn& fn, int N, int nx,
         if (ypn > (numb)0.5 / h) h = (numb)0.5 / ypn;
     }
     if (P.hmax > 0 && h > P.hmax) h = P.hmax;
+    if (P.hfix > 0 && h > P.hfix) h = P.hfix;   // старт постоянного шага — не крупнее hfix
+    {   // огромная y' (схема из нулевого состояния: ток в pF-емкости перехода) давала h0 ниже защитного
+        // порога 10 ulp(t) (или 0 при y' = inf) — первый же шаг обрывал расчёт; берём сам порог с запасом
+        const numb h_lo = (numb)100 * (numb)2.220446049250313e-16 * (fabs(t0) > 1 ? fabs(t0) : (numb)1);
+        if (!(h >= h_lo)) h = h_lo;
+    }
     for (int i = 0; i < N; ++i) { UCUDA_BDF_PHI(ws, N, 1)[i] = y0[i]; UCUDA_BDF_PHI(ws, N, 2)[i] = h * yp[i]; }
     C.psi[1] = h;
     C.t = t0; C.h = h; C.hold = 0;
     C.k = 1; C.kold = 0; C.ns = 0; C.iphase = 0; C.nef = 0;
+}
+
+UCUDA_BDF_HD inline void ucuda_bdf_interp(const UcudaBdfCore& C, const numb* ws, numb tout, numb* yo, numb* ypo);
+
+// Старт постоянного шага (UcudaBdfParams::hfix): после каждого шага с контролем ошибки снимает пройденные
+// точки y(fxt0 + j*hfix); когда снята последняя (j = maxk — шаг кончился в ней, tstop), строит историю
+// порядка maxk на равных шагах: для постоянного h модифицированные разности DASSL — обратные,
+// phi_1 = y_n, phi_{m+1} = nabla^m y_n, psi_i = i*h.
+UCUDA_BDF_HD inline void ucuda_bdf_fixed_collect(UcudaBdfCore& C, numb* ws, const UcudaBdfParams& P) {
+    const int N = C.N, K = C.maxk;
+    const numb h = P.hfix;
+    numb* Yb = UCUDA_BDF_SB(ws, N);
+    while (C.fxj > 0 && C.fxj <= K) {
+        const numb ts = C.fxt0 + (numb)C.fxj * h;
+        if (ts > C.t + (numb)1e-9 * h) return;
+        ucuda_bdf_interp(C, ws, ts, Yb + (size_t)C.fxj * N, nullptr);
+        ++C.fxj;
+    }
+    if (C.fxj <= K) return;
+    for (int i = 0; i < N; ++i) UCUDA_BDF_PHI(ws, N, 1)[i] = Yb[(size_t)K * N + i];
+    for (int m = 1; m <= K; ++m) {
+        for (int j = K; j >= m; --j)
+            for (int i = 0; i < N; ++i) Yb[(size_t)j * N + i] -= Yb[(size_t)(j - 1) * N + i];
+        for (int i = 0; i < N; ++i) UCUDA_BDF_PHI(ws, N, m + 1)[i] = Yb[(size_t)K * N + i];
+    }
+    for (int i = 1; i <= K + 1; ++i) C.psi[i] = (numb)i * h;
+    C.t = C.fxt0 + (numb)K * h;
+    C.k = K; C.kold = K; C.hold = 0; C.ns = 0; C.h = h; C.iphase = 1;
+    C.fxj = -1;
 }
 
 // Один принятый шаг (попытки повторяются после отказов). Шаг не заходит за tstop. 1 — принят;
@@ -189,7 +284,16 @@ UCUDA_BDF_HD inline int ucuda_bdf_step(UcudaBdfCore& C, Fn& fn, const int* kidx,
     const numb eps = (numb)2.220446049250313e-16;
     for (;;) {
         const numb hmin = 10 * eps * (fabs(C.t) > 1 ? fabs(C.t) : (numb)1);
-        const numb hfloor = P.hmin > hmin ? P.hmin : (numb)0;   // h_min пользователя
+        const bool fixed = P.hfix > 0 && C.fxj < 0;     // постоянный шаг после старта
+        const bool fstart = P.hfix > 0 && C.fxj > 0;    // старт: шаги с контролем ошибки до fxt0 + maxk*hfix
+        // h_min пользователя; на старте постоянного шага — 100 x защитный порог с вынужденным принятием: строгий
+        // допуск старта на крутом фронте (схема, отпущенная из рабочей точки) просил шагов ниже 10 ulp(t)
+        const numb hfloor = fstart ? (numb)100 * hmin : P.hfix > 0 ? (numb)0 : (P.hmin > hmin ? P.hmin : (numb)0);
+        if (fstart) {
+            const numb t1 = C.fxt0 + (numb)C.maxk * P.hfix;
+            if (t1 < tstop) tstop = t1;
+        }
+        if (fixed) C.h = P.hfix;
         if (C.h < hfloor) C.h = hfloor;
         if (C.t + C.h > tstop) C.h = tstop - C.t;   // ровно до tstop (DASSL: TSTOP)
         if (!(C.h >= hmin)) {
@@ -232,23 +336,56 @@ UCUDA_BDF_HD inline int ucuda_bdf_step(UcudaBdfCore& C, Fn& fn, const int* kidx,
             ypr[i] = a0; yprp[i] = a1; y[i] = a0;
         }
         C.hs = h;
-        // --- коррекция: Ньютон ---
+        // --- коррекция: Ньютон (настройки — UcudaBdfParams::nmax / nfull / ntol) ---
         bool conv = false;
-        for (int it = 0; it < 6; ++it) {
+        const bool user_nw = P.nmax > 0;
+        const int itmax = user_nw ? P.nmax : 6;
+        const bool full = !user_nw || P.nfull != 0;
+        numb* piv = UCUDA_BDF_V(ws, N, 9);
+        for (int it = 0; it < itmax; ++it) {
             fn.res(y, t, F);
             ++st.nrhs;
             if (!ucuda_bdf_finite(F, N)) break;
             for (int i = 0; i < N; ++i)
                 R[i] = i < nx ? -(yprp[i] + cj * (y[i] - ypr[i]) - F[i]) : -F[i];
-            fn.jac(y, t, J);
-            ++st.njac;
-            for (int i = 0; i < N; ++i)
-                for (int j = 0; j < N; ++j)
-                    A[i * N + j] = i < nx ? (i == j ? cj : (numb)0) - J[i * N + j] : J[i * N + j];
-            if (!ucuda_bdf_lu_solve(A, R, N)) break;
+            if (it == 0 || full) {
+                fn.jac(y, t, J);
+                ++st.njac;
+                for (int i = 0; i < N; ++i)
+                    for (int j = 0; j < N; ++j)
+                        A[i * N + j] = i < nx ? (i == j ? cj : (numb)0) - J[i * N + j] : J[i * N + j];
+                if (!ucuda_bdf_lu_factor(A, piv, N)) break;
+            }
+            ucuda_bdf_lu_apply(A, piv, R, N);
             for (int i = 0; i < N; ++i) y[i] += R[i];
             if (!ucuda_bdf_finite(y, N)) break;
-            if (ucuda_bdf_wrms(C, ws, kidx, R) < (numb)1e-3) { conv = true; break; }
+            if (user_nw) {
+                numb d2 = 0, y2 = 0;
+                for (int i = 0; i < N; ++i) { d2 += R[i] * R[i]; y2 += y[i] * y[i]; }
+                if (d2 <= P.ntol * P.ntol * y2) { conv = true; break; }
+            } else if (ucuda_bdf_wrms(C, ws, kidx, R) < (numb)1e-3) { conv = true; break; }
+        }
+        if (fixed) {   // постоянный шаг: без регулятора — шаг принят, если Ньютон сошёлся
+            if (!conv) { ++st.nnewton_fail; st.hmin_fail = 1; st.diverged = 1; return 0; }
+            for (int i = 0; i < N; ++i) ev[i] = y[i] - ypr[i];
+            if (C.log != nullptr && C.log_n < C.log_cap) {
+                numb* r = C.log + 4 * C.log_n++;
+                r[0] = C.t; r[1] = h; r[2] = 0; r[3] = 1;
+            }
+            C.nef = 0; C.t = t; C.kold = k; C.hold = h;
+            ++st.nacc;
+            st.hmin = st.nacc == 1 ? h : (h < st.hmin ? h : st.hmin);
+            if (h > st.hmax) st.hmax = h;
+            st.hsum += h;
+            if (k > st.max_q) st.max_q = k;
+            if (k < MAXK) { C.k = kp1; for (int i = 0; i < N; ++i) UCUDA_BDF_PHI(ws, N, kp2)[i] = ev[i]; }
+            for (int i = 0; i < N; ++i) UCUDA_BDF_PHI(ws, N, kp1)[i] += ev[i];
+            for (int j = kp1 - 1; j >= 1; --j)
+                for (int i = 0; i < N; ++i) UCUDA_BDF_PHI(ws, N, j)[i] += UCUDA_BDF_PHI(ws, N, j + 1)[i];
+            if (!ucuda_bdf_finite(y, N)) { st.diverged = 1; return 0; }
+            if (!user_nw) ucuda_bdf_weights(C, ws, atol, P, y);   // веса нужны только тесту сходимости DASSL
+            C.h = P.hfix;
+            return 1;
         }
         numb enorm = (numb)1e300, erkm1 = 0, terkm1 = 0, est = 0, terk = 0;
         int knew = k;
@@ -338,7 +475,9 @@ UCUDA_BDF_HD inline int ucuda_bdf_step(UcudaBdfCore& C, Fn& fn, const int* kidx,
             for (int i = 0; i < N; ++i) UCUDA_BDF_PHI(ws, N, j)[i] += UCUDA_BDF_PHI(ws, N, j + 1)[i];
         if (!ucuda_bdf_finite(y, N)) { st.diverged = 1; return 0; }
         ucuda_bdf_weights(C, ws, atol, P, y);
+        if (fstart && hnew > P.hfix) hnew = P.hfix;
         C.h = hnew;
+        if (fstart) ucuda_bdf_fixed_collect(C, ws, P);
         return 1;
     }
 }
@@ -455,6 +594,18 @@ UCUDA_HD inline void ucuda_bdf_begin(UcudaAdaptState& S, const K& k, numb t0, co
     S.BP.hmax = (P.hmax > 0 && P.hmax <= UCUDA_AD_BIG) ? P.hmax : (numb)0;
     S.BP.maxk = UCUDA_BDF_MAXK;
     S.BP.hmin = 0;   // свипы: только защитный порог 10 ulp(t), как было
+#ifdef UCUDA_BDF_NSLOT   // Ньютон — из хвоста a[] вкладки: [tol, max_iters, full] с этого слота
+    S.BP.ntol = a[UCUDA_BDF_NSLOT];
+    S.BP.nmax = (int)a[UCUDA_BDF_NSLOT + 1];
+    S.BP.nfull = a[UCUDA_BDF_NSLOT + 2] != (numb)0 ? 1 : 0;
+#else
+    S.BP.ntol = 0; S.BP.nmax = 0; S.BP.nfull = 1;
+#endif
+#ifdef UCUDA_BDF_FIXED   // переключатель Fixed step: шаг h0 без регулятора
+    S.BP.hfix = P.h0;   // не h0: restart передаёт сюда прежний шаг клона
+#else
+    S.BP.hfix = 0;
+#endif
     for (int i = 0; i < AMOUNTOFX; ++i) S.atol[i] = P.atol[i];
 #ifdef UCUDA_BDF_KIDX
     const int kk[AMOUNTOFX] = UCUDA_BDF_KIDX;
