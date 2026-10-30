@@ -459,6 +459,71 @@ void bdf_tests() {
     ut::require(scheme_is_multistep("DAE BDF 1-5") && adaptive_scheme_name_ok("BDF 1-5"), "BDF names registered");
 }
 
+// h_min пользователя у BDF (шаг не меньше, отказ на нём — вынужденное принятие, код 2) и журнал без
+// переходного процесса (Analysis показывает h(t) только в окне записи); CPU = GPU.
+void bdf_hmin_and_skip() {
+    const System s = pend(kPend2, "lam=2");
+    const double t_skip = 0.3, t_rec = 0.7;
+    BdfSettings bs;
+    bs.rtol = 1e-8; bs.atol = { 1e-8 };
+    std::vector<std::vector<double>> tr;
+    std::vector<double> tm, clog;
+    BdfStats st0, st;
+    std::string err;
+    { const bool ok_ = bdf_integrate(s, kPendA.data(), (int)kPendA.size(), kPendX0.data(), bs, 0.0, 1.0, 0.1, 11, false, 0,
+                                     tr, tm, st0, &err);
+      ut::require(ok_, "BDF free run: " + err); }
+    bs.hmin = st0.hsum / (double)st0.nacc;   // средний свободный шаг: часть шагов упрётся в h_min
+    { const bool ok_ = bdf_integrate(s, kPendA.data(), (int)kPendA.size(), kPendX0.data(), bs, 0.0, 1.0, 0.1, 11, false, 0,
+                                     tr, tm, st, &err, nullptr, &clog, 100000);
+      ut::require(ok_, "BDF with h_min: " + err); }
+    long long nf = 0;
+    bool floor_ok = true;
+    for (size_t i = 0; i + 3 < clog.size(); i += 4) {
+        floor_ok = floor_ok && clog[i + 1] >= bs.hmin * (1 - 1e-12);
+        nf += clog[i + 3] == 2;
+    }
+    ut::require(floor_ok, "BDF: no attempt below the user h_min");
+    ut::require(st.nforced > 0 && nf == st.nforced, "BDF: forced steps at h_min are logged with code 2");
+    ut::require(st.hmin >= bs.hmin * (1 - 1e-12), "BDF: accepted steps >= h_min");
+    {   // с переходным процессом журнал начинается с шага, который заходит за t_skip
+        std::vector<double> lg2;
+        BdfStats st2;
+        { const bool ok_ = bdf_integrate(s, kPendA.data(), (int)kPendA.size(), kPendX0.data(), bs, t_skip, t_rec, 0.1, 8,
+                                         false, 0, tr, tm, st2, &err, nullptr, &lg2, 100000);
+          ut::require(ok_, "BDF with h_min and t_skip: " + err); }
+        bool window_ok = !lg2.empty() && lg2.size() < clog.size();
+        for (size_t i = 0; i + 3 < lg2.size(); i += 4) window_ok = window_ok && lg2[i] + lg2[i + 1] > t_skip;
+        ut::require(window_ok, "BDF step log starts at the transient end");
+    }
+
+    System sp;
+    { const bool ok_ = bdf_prepare_system(s, sp, &err); ut::require(ok_, err); }
+    BdfGpuRequest rq;
+    codegen_bdf_bodies(sp, rq.res, rq.jac);
+    const int ng = (int)sp.vars.size();
+    rq.amountOfX = ng;
+    rq.nx = sp.dae_nx < 0 ? ng : sp.dae_nx;
+    rq.kidx.assign((size_t)ng, 1);
+    for (int i = 0; i < ng && i < (int)sp.dae_index.size(); ++i) rq.kidx[(size_t)i] = std::max(1, sp.dae_index[(size_t)i]);
+    rq.atol.assign((size_t)ng, 1e-8);
+    rq.rtol = 1e-8;
+    rq.hmin = bs.hmin;
+    rq.N = 1;
+    rq.ic_flat = kPendX0;
+    rq.values = kPendA;
+    rq.t_skip = 0; rq.t_rec = 1.0; rq.dt = 0.1; rq.total = 11;
+    rq.log_cap = 100000;
+    NvrtcEngine eng;
+    PhaseAdaptiveResult out;
+    { const bool ok_ = eng.run_phase_portraits_bdf(rq, out); ut::require(ok_, "GPU BDF with h_min: " + eng.error()); }
+    bool same = out.log[0].size() == clog.size();
+    for (size_t i = 3; same && i < clog.size(); i += 4) same = out.log[0][i] == clog[i];
+    ut::require(same && out.stats[0].nforced == (double)st.nforced && !out.hmin_fail[0], "BDF h_min: GPU log = CPU log");
+    std::printf("  BDF 1-5 h_min = %.3g (free run: min %.3g): %lld accepted, %lld forced, GPU = CPU; step log after "
+                "t_skip = %.1f only\n", bs.hmin, st0.hmin, st.nacc, st.nforced, t_skip);
+}
+
 // BDF 1-5 на GPU (kernels/ucuda_bdf.cuh в модуле NVRTC) против той же формы DASSL на CPU.
 void bdf_gpu() {
     struct Case { const char* name; System s; std::vector<double> y0, a; double T, tol; };
@@ -847,6 +912,7 @@ int main() {
         gpu_tests();
         adaptive_gpu();
         bdf_gpu();
+        bdf_hmin_and_skip();
         dft_dae();
         bdf_index3_sweep();
         dae_no_root_point();

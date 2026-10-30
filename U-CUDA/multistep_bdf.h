@@ -26,11 +26,12 @@ struct BdfSettings {
     std::vector<double> atol = { 1e-8 };   // одно число или по переменной
     double h0 = 0;                         // 0 — автоматически
     double hmax = std::numeric_limits<double>::infinity();
+    double hmin = 0;                       // > 0 — h_min пользователя (UcudaBdfParams::hmin)
     int    max_order = 5;
 };
 
 struct BdfStats {
-    long long nacc = 0, nrej = 0, nrhs = 0, njac = 0, nnewton_fail = 0;
+    long long nacc = 0, nrej = 0, nforced = 0, nrhs = 0, njac = 0, nnewton_fail = 0;
     double hmin = 0, hmax = 0, hsum = 0;
     int    max_q = 0;
     bool   diverged = false, truncated = false;
@@ -96,18 +97,20 @@ inline bool bdf_integrate(const System& s0, const double* a, int na, const doubl
     P.h0 = st.h0;
     P.hmax = std::isfinite(st.hmax) ? st.hmax : 0.0;
     P.maxk = st.max_order;
+    P.hmin = st.hmin;
     UcudaBdfStats cs;
     std::vector<numb> lg(log != nullptr && log_cap > 0 ? (size_t)log_cap * 4 : 0);
     int nlog = 0;
     ucuda_bdf_run(fn, N, nx, kidx.data(), y.data(), atol.data(), P, t_skip, t_rec, dt, total, raw ? 1 : 0, max_pts,
                   ws.data(), cs, lg.empty() ? nullptr : lg.data(), lg.empty() ? 0 : log_cap, &nlog);
     if (log != nullptr) log->assign(lg.begin(), lg.begin() + (size_t)nlog * 4);
-    stats.nacc = cs.nacc; stats.nrej = cs.nrej; stats.nrhs = cs.nrhs; stats.njac = cs.njac;
+    stats.nacc = cs.nacc; stats.nrej = cs.nrej; stats.nforced = cs.nforced; stats.nrhs = cs.nrhs; stats.njac = cs.njac;
     stats.nnewton_fail = cs.nnewton_fail;
     stats.hmin = cs.hmin; stats.hmax = cs.hmax; stats.hsum = cs.hsum; stats.max_q = cs.max_q;
     stats.diverged = cs.diverged != 0; stats.truncated = cs.truncated != 0;
     if (cs.hmin_fail) {
-        if (err) *err = "BDF: step size below h_min";
+        if (err) *err = st.hmin > 0 ? "BDF: Newton does not converge at h_min - lower h_min"
+                                    : "BDF: step size below h_min";
         return false;
     }
     return true;

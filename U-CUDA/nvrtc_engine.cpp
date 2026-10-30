@@ -729,10 +729,10 @@ static const char* const kBdfPhaseKernel =
     "                                log_cap > 0 ? logs + (size_t)tid * log_cap * 4 : nullptr, log_cap, &nlog);\n"
     "    counts[tid] = c;\n"
     "    log_counts[tid] = nlog;\n"
-    "    numb* s = stats + (size_t)tid * 9;\n"
+    "    numb* s = stats + (size_t)tid * 10;\n"
     "    s[0] = (numb)st.nacc; s[1] = (numb)st.nrej; s[2] = (numb)st.hmin_fail; s[3] = (numb)st.nrhs;\n"
     "    s[4] = st.hmin; s[5] = st.hmax; s[6] = st.nacc > 0 ? st.hsum / (numb)st.nacc : (numb)0;\n"
-    "    s[7] = (numb)st.diverged; s[8] = (numb)st.truncated;\n"
+    "    s[7] = (numb)st.diverged; s[8] = (numb)st.truncated; s[9] = (numb)st.nforced;\n"
     "}\n";
 
 bool NvrtcEngine::run_phase_portraits_bdf(const BdfGpuRequest& rq, PhaseAdaptiveResult& out) {
@@ -812,7 +812,7 @@ bool NvrtcEngine::run_phase_portraits_bdf(const BdfGpuRequest& rq, PhaseAdaptive
         || !alloc(d_k, (size_t)nx * sizeof(int), "allocK(bdf)") || !alloc(d_at, (size_t)nx * sizeof(numb), "allocAtol(bdf)")
         || !alloc(d_data, (size_t)N * cap * nx * sizeof(numb), "allocData(bdf)")
         || !alloc(d_times, rq.raw ? (size_t)N * cap * sizeof(numb) : 0, "allocTimes(bdf)")
-        || !alloc(d_cnt, (size_t)N * sizeof(int), "allocCnt(bdf)") || !alloc(d_st, (size_t)N * 9 * sizeof(numb), "allocStats(bdf)")
+        || !alloc(d_cnt, (size_t)N * sizeof(int), "allocCnt(bdf)") || !alloc(d_st, (size_t)N * 10 * sizeof(numb), "allocStats(bdf)")
         || !alloc(d_log, (size_t)N * log_cap * 4 * sizeof(numb), "allocLog(bdf)")
         || !alloc(d_lcnt, (size_t)N * sizeof(int), "allocLogCnt(bdf)")) {
         free_all();
@@ -826,7 +826,8 @@ bool NvrtcEngine::run_phase_portraits_bdf(const BdfGpuRequest& rq, PhaseAdaptive
     bool cancelled = false;
     if (ok) ok = cancel_flag_reset();
     if (ok) {
-        struct { numb rtol, h0, hmax; int maxk; } par = { (numb)rq.rtol, (numb)rq.h0, (numb)rq.hmax, rq.maxk };
+        struct { numb rtol, h0, hmax; int maxk; numb hmin; } par = { (numb)rq.rtol, (numb)rq.h0, (numb)rq.hmax, rq.maxk,
+                                                                    (numb)rq.hmin };   // = UcudaBdfParams
         int nxd = rq.nx, total = rq.total, raw = rq.raw ? 1 : 0, max_pts = rq.max_pts, capv = cap, n = N, lcap = log_cap;
         numb t_skip = (numb)rq.t_skip, t_rec = (numb)rq.t_rec, dt = (numb)rq.dt;
         CUdeviceptr d_cancel = (CUdeviceptr)cancel_dev_;
@@ -837,7 +838,7 @@ bool NvrtcEngine::run_phase_portraits_bdf(const BdfGpuRequest& rq, PhaseAdaptive
           && wait_default_stream(rq.cancel, cancelled);
     }
     if (ok && cancelled) { free_all(); error_ = kNvrtcCancelled; return false; }
-    std::vector<numb> st((size_t)N * 9);
+    std::vector<numb> st((size_t)N * 10);
     std::vector<int> cnt(N), lcnt(N, 0);
     if (ok)
         ok = cu_ok(cuMemcpyDtoH(cnt.data(), d_cnt, (size_t)N * sizeof(int)), error_, "cpyCnt(bdf)")
@@ -848,6 +849,7 @@ bool NvrtcEngine::run_phase_portraits_bdf(const BdfGpuRequest& rq, PhaseAdaptive
     out.log.resize(N);
     out.stats.resize(N);
     out.final_h.assign(N, 0.0);
+    out.hmin_fail.assign(N, 0);
     std::vector<numb> buf;
     for (int tid = 0; ok && tid < N; ++tid) {
         const int c = cnt[tid] < 0 ? 0 : (cnt[tid] > cap ? cap : cnt[tid]);
@@ -874,8 +876,9 @@ bool NvrtcEngine::run_phase_portraits_bdf(const BdfGpuRequest& rq, PhaseAdaptive
             out.log[tid].assign(buf.begin(), buf.end());
         }
         AdaptiveStats& as = out.stats[tid];
-        const numb* s = &st[(size_t)tid * 9];
-        as.nacc = s[0]; as.nrej = s[1]; as.nforced = s[2]; as.nrhs = s[3];
+        const numb* s = &st[(size_t)tid * 10];
+        as.nacc = s[0]; as.nrej = s[1]; as.nforced = s[9]; as.nrhs = s[3];
+        out.hmin_fail[tid] = s[2] != 0;
         as.hmin = s[4]; as.hmax = s[5]; as.hmean = s[6];
         as.diverged = s[7] != 0; as.truncated = s[8] != 0;
     }

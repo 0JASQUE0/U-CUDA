@@ -69,6 +69,7 @@ struct BdfGpuRequest {
     std::vector<int>    kidx;             // индекс переменной (1 у x, 2 у z индекса 2)
     std::vector<double> atol;             // [amountOfX]
     double rtol = 1e-6, h0 = 0, hmax = 0; // hmax <= 0 — без ограничения
+    double hmin = 0;                      // > 0 — h_min пользователя (UcudaBdfParams::hmin)
     int    maxk = 5;
     std::vector<double> ic_flat;          // [N*amountOfX]
     int    N = 0;
@@ -86,6 +87,7 @@ struct PhaseAdaptiveResult {
     std::vector<std::vector<double>> log;                 // [N][4*k]: t, h, err, код
     std::vector<AdaptiveStats> stats;                     // [N]
     std::vector<double> final_h;                          // [N] — следующий предложенный шаг
+    std::vector<int> hmin_fail;                           // [N] — BDF: шаг сорвался на h_min (иначе пусто)
 };
 
 // Переиспользуемый движок рантайм-компиляции CUDA через NVRTC.

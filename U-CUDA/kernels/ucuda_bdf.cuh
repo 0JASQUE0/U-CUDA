@@ -35,10 +35,14 @@ struct UcudaBdfParams {
     numb h0;      // 0 — автоматически
     numb hmax;    // <= 0 — без ограничения
     int  maxk;    // 1..5
+    // h_min пользователя (> 0): шаг не меньше; попытка на нём, не прошедшая по ошибке, принимается
+    // вынужденно (код 2 в журнале), как у адаптивного драйвера; Ньютон, не сошедшийся на h_min, — отказ
+    // (hmin_fail). 0 — только защитный порог 10 ulp(t) (свипы).
+    numb hmin;
 };
 
 struct UcudaBdfStats {
-    long long nacc, nrej, nrhs, njac, nnewton_fail;
+    long long nacc, nrej, nforced, nrhs, njac, nnewton_fail;
     numb hmin, hmax, hsum;
     int max_q, diverged, truncated, hmin_fail;
 };
@@ -185,6 +189,8 @@ UCUDA_BDF_HD inline int ucuda_bdf_step(UcudaBdfCore& C, Fn& fn, const int* kidx,
     const numb eps = (numb)2.220446049250313e-16;
     for (;;) {
         const numb hmin = 10 * eps * (fabs(C.t) > 1 ? fabs(C.t) : (numb)1);
+        const numb hfloor = P.hmin > hmin ? P.hmin : (numb)0;   // h_min пользователя
+        if (C.h < hfloor) C.h = hfloor;
         if (C.t + C.h > tstop) C.h = tstop - C.t;   // ровно до tstop (DASSL: TSTOP)
         if (!(C.h >= hmin)) {
             if (C.t + hmin > tstop && tstop > C.t) C.h = tstop - C.t;   // хвост короче h_min — им и шагнуть
@@ -266,11 +272,15 @@ UCUDA_BDF_HD inline int ucuda_bdf_step(UcudaBdfCore& C, Fn& fn, const int* kidx,
             }
         } else ++st.nnewton_fail;
         const numb errv = conv ? ck * enorm : (numb)1e300;
+        const bool at_floor = hfloor > 0 && h <= hfloor;
+        const bool forced = at_floor && conv && !(errv <= (numb)1);   // на h_min ошибку не исправить — принять
         if (C.log != nullptr && C.log_n < C.log_cap) {
             numb* r = C.log + 4 * C.log_n++;
-            r[0] = C.t; r[1] = h; r[2] = errv; r[3] = errv <= (numb)1 ? (numb)1 : (numb)0;
+            r[0] = C.t; r[1] = h; r[2] = errv; r[3] = errv <= (numb)1 ? (numb)1 : (forced ? (numb)2 : (numb)0);
         }
-        if (!(errv <= (numb)1)) {
+        if (at_floor && !conv) { st.hmin_fail = 1; st.diverged = 1; return 0; }   // Ньютон не сошёлся и на h_min
+        if (forced) ++st.nforced;
+        if (!(errv <= (numb)1) && !forced) {
             // --- отказ: история назад (DDASTP, блок 690) ---
             if (kp1 >= nsp1)
                 for (int j = nsp1; j <= kp1; ++j) for (int i = 0; i < N; ++i) UCUDA_BDF_PHI(ws, N, j)[i] /= beta[j];
@@ -358,7 +368,7 @@ UCUDA_BDF_HD int ucuda_bdf_run(Fn& fn, int N, int nx, const int* kidx, const num
                                const UcudaBdfParams& P, numb t_skip, numb t_rec, numb dt, int total, int raw,
                                int max_pts, numb* ws, UcudaBdfStats& st,
                                numb* log = nullptr, int log_cap = 0, int* log_n = nullptr) {
-    st.nacc = st.nrej = st.nrhs = st.njac = st.nnewton_fail = 0;
+    st.nacc = st.nrej = st.nforced = st.nrhs = st.njac = st.nnewton_fail = 0;
     st.hmin = st.hmax = st.hsum = 0;
     st.max_q = st.diverged = st.truncated = st.hmin_fail = 0;
     const numb tend = t_skip + t_rec;
@@ -367,12 +377,15 @@ UCUDA_BDF_HD int ucuda_bdf_run(Fn& fn, int N, int nx, const int* kidx, const num
     numb* yo = UCUDA_BDF_V(ws, N, 8);
     for (int i = 0; i < N; ++i) yo[i] = y0[i];
     ucuda_bdf_start(C, fn, N, nx, kidx, yo, atol, P, (numb)0, tend, 0, ws, st);
-    C.log = log; C.log_cap = log_cap;   // журнал попыток (start его сбрасывает)
+    C.log_cap = log_cap;   // журнал попыток (start его сбрасывает)
     int nout = 0;
     if (t_skip <= 0) fn.emit(nout++, (numb)0, yo);
     long long iter = 0;
     while (C.t < tend && (raw ? nout < max_pts : nout < total)) {
         if ((++iter & 1023) == 0 && fn.cancelled()) break;
+        // Журнал — с шага, который заходит за t_skip: переходный процесс на графике h(t) не нужен
+        // (остальные проекции его тоже не показывают) и не съедает log_cap.
+        C.log = C.t + C.h > t_skip ? log : nullptr;
         if (!ucuda_bdf_step(C, fn, kidx, atol, P, (numb)1e300, ws, st)) break;
         if (raw) {
             if (C.t >= t_skip) fn.emit(nout++, C.t, y);
@@ -441,6 +454,7 @@ UCUDA_HD inline void ucuda_bdf_begin(UcudaAdaptState& S, const K& k, numb t0, co
     S.BP.h0 = h0;
     S.BP.hmax = (P.hmax > 0 && P.hmax <= UCUDA_AD_BIG) ? P.hmax : (numb)0;
     S.BP.maxk = UCUDA_BDF_MAXK;
+    S.BP.hmin = 0;   // свипы: только защитный порог 10 ulp(t), как было
     for (int i = 0; i < AMOUNTOFX; ++i) S.atol[i] = P.atol[i];
 #ifdef UCUDA_BDF_KIDX
     const int kk[AMOUNTOFX] = UCUDA_BDF_KIDX;
@@ -448,7 +462,7 @@ UCUDA_HD inline void ucuda_bdf_begin(UcudaAdaptState& S, const K& k, numb t0, co
 #else
     for (int i = 0; i < AMOUNTOFX; ++i) S.kidx[i] = 1;
 #endif
-    S.bst.nacc = S.bst.nrej = S.bst.nrhs = S.bst.njac = S.bst.nnewton_fail = 0;
+    S.bst.nacc = S.bst.nrej = S.bst.nforced = S.bst.nrhs = S.bst.njac = S.bst.nnewton_fail = 0;
     S.bst.hmin = S.bst.hmax = S.bst.hsum = 0;
     S.bst.max_q = S.bst.diverged = S.bst.truncated = S.bst.hmin_fail = 0;
     UcudaBdfKrs<K> fn{ k, a };
@@ -555,7 +569,7 @@ UCUDA_HD inline int ucuda_lyap_point(UcudaAdaptState& S, const K& Kf, const numb
         if (S.diverged || ucuda_lyap_out(S.X, maxValue)) return 0;
         for (int c = 0; c < NC; ++c) {
             numb* yc = cl.y + c * n;
-            cst.nacc = cst.nrej = cst.nrhs = cst.njac = cst.nnewton_fail = 0;
+            cst.nacc = cst.nrej = cst.nforced = cst.nrhs = cst.njac = cst.nnewton_fail = 0;
             cst.hmin = cst.hmax = cst.hsum = 0;
             cst.max_q = cst.diverged = cst.truncated = cst.hmin_fail = 0;
             ucuda_bdf_start(cl.C, fn, n, UCUDA_BDF_NX, S.kidx, yc, S.atol, S.BP, tStart, NT, 1, cl.ws, cst);

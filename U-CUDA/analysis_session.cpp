@@ -567,6 +567,19 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
 // ограничена (4 числа на запись, 6.4 МБ на НУ).
 static constexpr int kAdaptLogCap = 200000;
 
+// Журнал попыток — только окно записи (попытки, которые кончаются после t_skip), как и прочие
+// проекции. BDF не пишет переходный процесс сам (ucuda_bdf_run), адаптивные драйверы пишут с t = 0.
+static void trim_step_log_to_record(AnalysisResult& result, double t_skip) {
+    if (!(t_skip > 0)) return;
+    for (std::vector<double>& lg : result.step_log) {
+        size_t w = 0;
+        for (size_t r = 0; r + 4 <= lg.size(); r += 4)
+            if (lg[r] + lg[r + 1] > t_skip)
+                for (int c = 0; c < 4; ++c) lg[w++] = lg[r + c];
+        lg.resize(w);
+    }
+}
+
 // Ветка адаптивного шага для compute_phase_portrait: GPU (ядро phase_kernel_ad) или
 // CPU (computePhasePortraitCPU_adaptive) — один и тот же драйвер. raw[k] — траектория
 // НУ k, times[k] — моменты её точек на узлах шага (на равномерной сетке пусто).
@@ -602,6 +615,7 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
         }
         bs.h0 = parse_val(in.adaptive.h0, 0.0);
         if (!in.adaptive.hmax.empty()) bs.hmax = parse_val(in.adaptive.hmax, bs.hmax);
+        if (!in.adaptive.hmin.empty()) bs.hmin = parse_val(in.adaptive.hmin, 0.0);
         const double t_skip = in.skip_transient ? tskip : 0.0;
         const bool rawm = in.adaptive.raw_nodes;
         int max_pts = parse_num_int(in.adaptive.max_points, 1000000);
@@ -627,6 +641,7 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
             for (int i = 0; i < ng && i < (int)sp.dae_index.size(); ++i) rq.kidx[(size_t)i] = std::max(1, sp.dae_index[(size_t)i]);
             for (int i = 0; i < ng; ++i) rq.atol.push_back(bs.atol[(size_t)std::min(i, (int)bs.atol.size() - 1)]);
             rq.rtol = bs.rtol; rq.h0 = bs.h0; rq.hmax = std::isfinite(bs.hmax) ? bs.hmax : 0.0; rq.maxk = bs.max_order;
+            rq.hmin = bs.hmin;
             rq.N = N;
             rq.ic_flat.assign((size_t)N * ng, 0.0);   // mu системы GGL — с нуля
             for (int k = 0; k < N; ++k)
@@ -647,11 +662,11 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
                 if (rawm) times[(size_t)k] = std::move(out.times[(size_t)k]);
                 result.step_log[(size_t)k] = std::move(out.log[(size_t)k]);
                 result.step_stats[(size_t)k] = out.stats[(size_t)k];
-                if (out.stats[(size_t)k].nforced != 0) {   // h ниже h_min (поле занято под этот признак)
-                    result.error = "BDF: step size below h_min";
+                if (out.hmin_fail[(size_t)k]) {
+                    result.error = bs.hmin > 0 ? "BDF: Newton does not converge at h_min - lower h_min"
+                                               : "BDF: step size below h_min";
                     return false;
                 }
-                result.step_stats[(size_t)k].nforced = 0;
             }
         } else
         for (int k = 0; k < N; ++k) {
@@ -664,7 +679,8 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
                 return false;
             }
             AdaptiveStats& as = result.step_stats[(size_t)k];
-            as.nacc = (double)bst.nacc; as.nrej = (double)bst.nrej; as.nrhs = (double)bst.nrhs;
+            as.nacc = (double)bst.nacc; as.nrej = (double)bst.nrej; as.nforced = (double)bst.nforced;
+            as.nrhs = (double)bst.nrhs;
             as.hmin = bst.hmin; as.hmax = bst.hmax; as.hmean = bst.nacc ? bst.hsum / (double)bst.nacc : 0.0;
             as.diverged = bst.diverged; as.truncated = bst.truncated;
             if (in.cancel && in.cancel->load(std::memory_order_relaxed)) break;
@@ -831,6 +847,7 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
                      + "' reached max points before the end of the interval";
         }
     }
+    trim_step_log_to_record(result, t_skip);
     return true;
 }
 

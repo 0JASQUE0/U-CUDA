@@ -571,7 +571,13 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   log_n`, one record per attempt [t at the step start, h, err, code 1 accepted / 0 rejected], written in
   `ucuda_bdf_step`; only `ucuda_bdf_run` turns it on (optional arguments), sweeps and clones keep nullptr. CPU:
   `bdf_integrate(.., log, log_cap)`, GPU: `BdfGpuRequest::log_cap` -> `PhaseAdaptiveResult::log`. dae_test: log
-  length = 4 (accepted + rejected), codes = stats, GPU log = CPU log; trajectories unchanged.
+  length = 4 (accepted + rejected), codes = stats, GPU log = CPU log; trajectories unchanged. The log starts with the
+  step that crosses t_skip (`ucuda_bdf_run` switches `C.log` on there; the adaptive drivers log from t = 0 and
+  `trim_step_log_to_record` cuts their transient), so h(t) shares the time axis of the other projections.
+  User h_min (Analysis "h_min" -> `BdfSettings::hmin` / `BdfGpuRequest::hmin` -> `UcudaBdfParams::hmin`): the step
+  never goes below it; an attempt at h_min that fails the error test is accepted as forced (code 2, `nforced`), like
+  the adaptive driver; Newton not converging at h_min ends the run ("lower h_min"). Sweeps keep hmin = 0 (only the
+  10 ulp(t) guard). dae_test `bdf_hmin_and_skip`.
   Sweeps (Parametric: BD 1D/2D classic and continuation, Metrics, basins, LLE/LS): the adaptive sweep
   modules run on BDF without new kernels - `ucuda_adaptive.cuh` switches to the BDF section of
   `ucuda_bdf.cuh` under `UCUDA_BDF_DRIVER` (the same names `UcudaAdaptState`, `ucuda_ad_init / restart /
