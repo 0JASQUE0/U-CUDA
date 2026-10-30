@@ -72,6 +72,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     set_field_latex(model.field_latex);
     set_field_labels(&model.field_labels);
     set_field_library(&lib);
+    set_scheme_masks(&model);
     // полноэкранный dockspace-хост
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
