@@ -9,6 +9,7 @@
 #include "network_session.h"
 #include "prewarm_watch.h"
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include <memory>
@@ -349,12 +350,42 @@ public:
     // редактируемые UI-поля (UI читает/пишет напрямую)
     // Discrete map x_{n+1} = f(x_n): no integration scheme, h is pinned to 1.
     bool is_map = false;
-    // ДАУ: живёт на вкладке Library → DAE, в анализ пока не идёт (решателей нет).
-    // alg_text — алгебраические переменные (z), vars_text у ДАУ — дифференциальные (x).
+    // ДАУ: вкладка Library → DAE. alg_text — алгебраические переменные (z),
+    // vars_text у ДАУ — дифференциальные (x).
     bool is_dae = false;
     std::string alg_text;
     std::string dae_index_text;    // "x=1, lambda=3", см. SystemRecord
     bool dae_as_ode = false;       // ДАУ -> ОДУ подстановкой z (см. SystemRecord)
+    std::string dae_stab_alpha = "10";   // уровень C: (d/dt + alpha)^m g = 0 (см. SystemRecord)
+    std::string circuit_source;    // ДАУ из схемы: путь к .kicad_sch / .cir (см. SystemRecord)
+    std::string circuit_netlist;   // копия netlist'а на момент импорта
+    bool circuit_ideal_opamps = false;   // ОУ — идеальные (см. SystemRecord)
+    bool circuit_no_jcaps = false, circuit_ideal_diodes = false, circuit_ideal_bjts = false;   // см. SystemRecord
+    // Группы параметров (см. SystemRecord / param_groups.h) и состояние окна их правки.
+    ParamGroups param_groups;
+    ParamGroups ic_groups;        // то же для начальных условий
+    FieldLabels field_labels;     // свои подписи полей (LaTeX)
+    struct ParamGroupsUi {
+        bool open = false;
+        int kind = 0;             // вкладка окна: 0 — параметры, 1 — начальные условия
+        int kind_req = -1;        // кнопка "Groups..." просит открыть эту вкладку (один кадр)
+        std::string new_path, filter, target, rename_from, rename_to;
+        std::set<std::string> sel;
+    } pg_ui;
+    // Импорт схемы circuit_source: перезаписывает уравнения, x, z, параметры, НУ и шаг.
+    // false + err — файл не читается, kicad-cli не сработал или схема не поддержана.
+    bool import_circuit(std::string* report, std::string* err);
+    // Запись схемы без групп НУ (сохранена до них): группы и подписи берутся из повторного разбора
+    // circuit_netlist (уравнения и значения не трогаются); что не нашлось — x в "States", z в
+    // "Algebraic (computed)". Подписи импорта дописываются только там, где своей нет.
+    void circuit_layout_defaults();
+    // Имена для полей начальных условий: vars без алгебраических z (alg_text), если show_alg_ic
+    // выключен; *hidden — сколько убрано. Значения z всё равно пересчитываются (рабочая точка /
+    // проекция на g = 0), их НУ — лишь старт Ньютона. Редактор записи показывает все.
+    std::vector<std::string> ic_fields(const std::vector<std::string>& vars, int* hidden = nullptr) const;
+    // Рабочая точка ДАУ (x' = 0, g = 0; у схемы — расчёт по постоянному току) из текущих полей:
+    // старт — НУ записи, результат пишется в init_conditions всех переменных.
+    bool dae_operating_point(std::string* report, std::string* err);
     // ДАУ решается схемами ОДУ (сведение включено) — тогда всё как у ОДУ.
     bool dae_native() const { return is_dae && !dae_as_ode; }
     InputMode mode = InputMode::Image;
@@ -450,6 +481,11 @@ public:
     std::vector<std::string> wrapper_schemes;
     // Выключенные обёртки, канонические имена (см. SystemRecord::disabled_wrappers).
     std::vector<std::string> disabled_wrappers;
+    // Выключенные методы ДАУ (см. SystemRecord::dae_schemes_off).
+    std::vector<std::string> dae_schemes_off;
+    bool dae_scheme_on(const std::string& n) const {
+        return std::find(dae_schemes_off.begin(), dae_schemes_off.end(), n) == dae_schemes_off.end();
+    }
     bool wrapper_enabled(const std::string& name) const {
         const std::string c = wrapper_canonical_name(name);
         for (const auto& d : disabled_wrappers) if (d == c) return false;
@@ -586,6 +622,16 @@ public:
         std::vector<std::string> params;
         bool        reducible = false;      // сводится к ОДУ подстановкой z (dae_reduce_to_ode)
         std::string reduce_msg;             // z(x) или почему не сводится
+        bool        level_c = false;        // сводится только уровнем C (индекс 2-3, стабилизация alpha)
+        std::string latex;                  // уравнения для превью: \dot{x} = f, 0 = g (по строке)
+        int         latex_lines = 0;
+        // Импорт схемы: отчёт / ошибка последнего импорта, слежение за файлом.
+        std::string circuit_report, circuit_error;
+        std::string circuit_path;           // путь, для которого запомнен circuit_mtime
+        long long   circuit_mtime = -1;
+        double      circuit_poll_t = 0.0;   // ImGui::GetTime() последней проверки
+        bool        circuit_watch = true;   // перечитывать при сохранении файла
+        bool        circuit_import_now = false;
     };
     DaeEditorState dae_editor;
 
@@ -618,8 +664,11 @@ public:
     // того, у кого конфиг уже есть, список берётся из него и этот дефолт не
     // применяется вовсе. Тот же дефолт продублирован в AppConfig::hidden_tabs —
     // на случай конфига без ключа.
-    std::vector<std::string> hidden_tabs { "Network" };
+    std::vector<std::string> hidden_tabs { "Dft1D", "FastSync", "Order", "Network" };
     std::vector<std::string> hidden_schemes;
+    // Методы ДАУ, скрытые из списка редактора ДАУ (Settings -> DAE methods). Зеркалит
+    // AppConfig::hidden_dae_methods; дефолт свежей установки ставит app_main.
+    std::vector<std::string> hidden_dae_methods;
 
     // То же для систем библиотеки: имена, скрытые из глобального комбо
     // (галочки во вкладке Library). Зеркалит AppConfig::hidden_systems.
@@ -635,6 +684,7 @@ public:
     }
     bool tab_hidden(const std::string& id) const { return name_hidden(hidden_tabs, id); }
     bool scheme_hidden(const std::string& name) const { return name_hidden(hidden_schemes, name); }
+    bool dae_method_hidden(const std::string& name) const { return name_hidden(hidden_dae_methods, name); }
     bool system_hidden(const std::string& name) const { return name_hidden(hidden_systems, name); }
 
     // сессия анализа фазовых портретов ("песочница": изменения не сохраняются)
@@ -703,6 +753,10 @@ public:
     // apply_ui_scale в app_main.cpp, что и use_builtin_font — шрифты живут в
     // общем атласе и пересоздаются вместе с UI-шрифтом.
     bool plot_math_font = true;
+    // Имена параметров и переменных в полях — формулами (AppConfig::field_latex).
+    bool field_latex = true;
+    // Поля НУ алгебраических переменных ДАУ (AppConfig::show_alg_ic); выключено — ic_fields их убирает.
+    bool show_alg_ic = false;
 
     // Последний выбранный colormap для HeatmapView (LLE-2D и пр.). 1001..1200 — карта slanCM
     // (id = 1000 + её родной номер), легаси 0..8 мигрируют при чтении конфига; дефолт 0 = #1
@@ -1122,6 +1176,44 @@ public:
         try {
             System sys = build_system();
             std::string out;
+            // ДАУ: тела методов ДАУ над [x; z]. Метод, который к системе не применим (CD и явные
+            // при индексе >= 2), печатает причину, а не обрывает остальные.
+            if (dae_native()) {
+                bool any = false;
+                for (const auto& n : dae_scheme_names()) {
+                    if (!dae_scheme_on(n)) continue;
+                    any = true;
+                    DaeScheme ds;
+                    dae_scheme_from_name(n, &ds);
+                    out += "// ===== " + n + " =====\n";
+                    try { out += codegen_dae_scheme(sys, ds); }
+                    catch (const std::exception& e) { out += "// (not available: " + std::string(e.what()) + ")\n"; }
+                    out += "\n";
+                }
+                // BDF 1-5: тела постоянного шага нет — драйвер (kernels/ucuda_bdf.cuh) берёт невязку и якобиан
+                if (dae_scheme_on(kBdfSchemeDae)) {
+                    any = true;
+                    out += "// ===== " + std::string(kBdfSchemeDae) + " (multistep driver kernels/ucuda_bdf.cuh: "
+                           "residual F = [f; g] and Jacobian J; adaptive step only) =====\n";
+                    try {
+                        System sp = sys;   // как bdf_prepare_system (multistep_bdf.h): индекс 3 -> GGL
+                        std::string why;
+                        if (dae_structural_index(sys) > 2 && !dae_ggl_system(sys, sp, &why))
+                            throw std::runtime_error("index 3 via GGL: " + why);
+                        if (sp.vars.size() != sys.vars.size())
+                            out += "// index 3: GGL adds " + std::to_string(sp.vars.size() - sys.vars.size())
+                                 + " multiplier(s) to the state\n";
+                        std::string res, jac;
+                        codegen_bdf_bodies(sp, res, jac);
+                        out += "/* F */\n" + res + "/* J */\n" + jac;
+                    }
+                    catch (const std::exception& e) { out += "// (not available: " + std::string(e.what()) + ")\n"; }
+                    out += "\n";
+                }
+                if (!any) { error_message = "no DAE method selected"; return false; }
+                generated_code = out;
+                return true;
+            }
             // A map has exactly one step body and no scheme to pick from.
             if (is_map) {
                 generated_code = "// ===== Map =====\n"
@@ -1174,7 +1266,13 @@ public:
                 out += "// ===== ";
                 out += it.name;
                 out += " =====\n";
-                out += codegen_scheme(sys, it.s);
+                // ДАУ как ОДУ (уровень B) берёт не все схемы — у неё отказ печатается на месте.
+                if (is_dae) {
+                    try { out += codegen_scheme(sys, it.s); }
+                    catch (const std::exception& e) { out += "// (not available: " + std::string(e.what()) + ")\n"; }
+                } else {
+                    out += codegen_scheme(sys, it.s);
+                }
                 out += "\n";
             }
             // custom-схемы — добавляем их код как есть для preview

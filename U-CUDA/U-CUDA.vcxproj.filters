@@ -28,6 +28,15 @@
     <ClCompile Include="circuit_netlist.cpp">
       <Filter>Circuit</Filter>
     </ClCompile>
+    <ClCompile Include="dae_devices.cpp">
+      <Filter>Circuit</Filter>
+    </ClCompile>
+    <ClCompile Include="kicad_import.cpp">
+      <Filter>Circuit</Filter>
+    </ClCompile>
+    <ClCompile Include="spice_parse.cpp">
+      <Filter>Circuit</Filter>
+    </ClCompile>
     <ClCompile Include="circuit_nvrtc.cpp">
       <Filter>Circuit</Filter>
     </ClCompile>
@@ -47,6 +56,33 @@
       <Filter>OCR</Filter>
     </ClCompile>
     <ClCompile Include="gui.cpp">
+      <Filter>GUI</Filter>
+    </ClCompile>
+    <ClCompile Include="gui_analysis.cpp">
+      <Filter>GUI</Filter>
+    </ClCompile>
+    <ClCompile Include="gui_custom.cpp">
+      <Filter>GUI</Filter>
+    </ClCompile>
+    <ClCompile Include="gui_dft_basins.cpp">
+      <Filter>GUI</Filter>
+    </ClCompile>
+    <ClCompile Include="gui_fastsync.cpp">
+      <Filter>GUI</Filter>
+    </ClCompile>
+    <ClCompile Include="gui_network.cpp">
+      <Filter>GUI</Filter>
+    </ClCompile>
+    <ClCompile Include="gui_order.cpp">
+      <Filter>GUI</Filter>
+    </ClCompile>
+    <ClCompile Include="gui_parametric.cpp">
+      <Filter>GUI</Filter>
+    </ClCompile>
+    <ClCompile Include="gui_system.cpp">
+      <Filter>GUI</Filter>
+    </ClCompile>
+    <ClCompile Include="gui_widgets.cpp">
       <Filter>GUI</Filter>
     </ClCompile>
     <ClCompile Include="app_model.cpp">
@@ -132,6 +168,15 @@
     <ClInclude Include="circuit_netlist.h">
       <Filter>Circuit</Filter>
     </ClInclude>
+    <ClInclude Include="dae_devices.h">
+      <Filter>Circuit</Filter>
+    </ClInclude>
+    <ClInclude Include="kicad_import.h">
+      <Filter>Circuit</Filter>
+    </ClInclude>
+    <ClInclude Include="spice_parse.h">
+      <Filter>Circuit</Filter>
+    </ClInclude>
     <ClInclude Include="circuit_nvrtc.h">
       <Filter>Circuit</Filter>
     </ClInclude>
@@ -166,6 +211,9 @@
       <Filter>OCR</Filter>
     </ClInclude>
     <ClInclude Include="gui.h">
+      <Filter>GUI</Filter>
+    </ClInclude>
+    <ClInclude Include="gui_internal.h">
       <Filter>GUI</Filter>
     </ClInclude>
     <ClInclude Include="app_model.h">

@@ -60,7 +60,7 @@ __device__ __forceinline__ float curand_uniform(curandState_t* s) {
 #include "cudaLibrary.cuh"
 
 __device__ __host__ __forceinline__
-void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
+void calculateDiscreteModel(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h) {
 {{KRS_BODY}}
 }
 
@@ -73,7 +73,7 @@ void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
 
 #if ORDER_REF_ENABLED
 __device__ __host__ __forceinline__
-void calculateReferenceModel(numb* X, const numb* a, const numb h) {
+void calculateReferenceModel(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h) {
 {{KRS_REF_BODY}}
 }
 #endif
@@ -151,8 +151,8 @@ extern "C" __global__ void perfIntegrateKernel(
     const unsigned long long t0 = perfGlobalTimer();
     UcudaKrsPre krsPre;
     ucudaKrsPrep(krsPre, a, h);
-    for (long long n = 0; n < nSteps; ++n)
-        calculateDiscreteModelP(X, a, h, krsPre);
+    for (long long n = 0; n < nSteps; ++n)   // t = n*h (UCUDA_NONAUTONOMOUS)
+        calculateDiscreteModelP(X, UCUDA_TA((numb)n * h) a, h, krsPre);
     // Конец цикла фиксируется после того, как результат последнего шага готов: без
     // зависимости от X компилятор вправе прочитать таймер раньше, чем досчитана цепочка.
     numb acc = 0;
@@ -265,15 +265,19 @@ extern "C" __global__ void orderEstimateKernel(
 
     size_t sinceReport = 0;
     for (long long n = 0; n < N; ++n) {
-        calculateDiscreteModel(Xc, a, h1);
-        calculateDiscreteModel(Xm, a, h2);
-        calculateDiscreteModel(Xm, a, h2);
-        calculateDiscreteModel(Xf, a, h4);
-        calculateDiscreteModel(Xf, a, h4);
-        calculateDiscreteModel(Xf, a, h4);
-        calculateDiscreteModel(Xf, a, h4);
+        // Время подшагов: Xc в t_n = n*h1, Xm в t_n + k*h2, Xf в t_n + k*h4 (UCUDA_NONAUTONOMOUS).
+#ifdef UCUDA_NONAUTONOMOUS
+        const numb tn = (numb)n * h1;
+#endif
+        calculateDiscreteModel(Xc, UCUDA_TA(tn) a, h1);
+        calculateDiscreteModel(Xm, UCUDA_TA(tn) a, h2);
+        calculateDiscreteModel(Xm, UCUDA_TA(tn + h2) a, h2);
+        calculateDiscreteModel(Xf, UCUDA_TA(tn) a, h4);
+        calculateDiscreteModel(Xf, UCUDA_TA(tn + h4) a, h4);
+        calculateDiscreteModel(Xf, UCUDA_TA(tn + (numb)2 * h4) a, h4);
+        calculateDiscreteModel(Xf, UCUDA_TA(tn + (numb)3 * h4) a, h4);
 #if ORDER_REF_ENABLED
-        for (int q = 0; q < refM; ++q) calculateReferenceModel(Xr, a, hRef);
+        for (int q = 0; q < refM; ++q) calculateReferenceModel(Xr, UCUDA_TA(tn + (numb)q * hRef) a, hRef);
 #endif
 
         const bool last = (n == N - 1);
@@ -445,7 +449,7 @@ extern "C" __global__ void stabilityRegionKernel(
         numb X[AMOUNTOFX];
         for (int i = 0; i < AMOUNTOFX; ++i) X[i] = (numb)0;
         X[col] = (numb)1;
-        calculateDiscreteModel(X, a, h);
+        calculateDiscreteModel(X, UCUDA_TA((numb)0) a, h);   // тестовое уравнение: t не входит
         R[col]     = X[0];
         R[2 + col] = X[1];
     }

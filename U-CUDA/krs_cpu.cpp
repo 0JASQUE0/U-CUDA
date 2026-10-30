@@ -271,7 +271,30 @@ namespace {
 // пролога переиспользовалась бы DLL, собранная старым. Туда же уходит размер
 // numb — при смене float<->double в configCUDA.h кэш обязан протухнуть, иначе
 // подхватилась бы DLL, собранная в другой точности.
-constexpr int kPreludeVersion = 6;
+constexpr int kPreludeVersion = 7;
+
+// fmin / fmax CRT в DLL (cl /O2, статическая CRT) — вызовы функций, а тела схем зовут их сотнями
+// (dev_explim, ёмкости переходов, min / max уравнений). Встроенные — те же, что у хоста в
+// ucuda_adaptive.cuh (NaN отбрасывается). Мультивибратор BDF1 (1056 вызовов): 92 -> 88 мкс на шаг,
+// PUT burst neuron Radau IIA (2121): 914 -> 843 мкс; X после 2e4 / 5e3 шагов побитово тот же.
+// Заменяются вызовы без "::" перед именем (std::fmin в пользовательской КРС остаётся как есть);
+// число строк не меняется, #line ниже держит нумерацию ошибок.
+std::string inline_fmin_fmax(const std::string& body) {
+    std::string out;
+    out.reserve(body.size());
+    auto ident = [](char c) { return std::isalnum((unsigned char)c) || c == '_'; };
+    for (size_t i = 0; i < body.size();) {
+        const bool at = (body.compare(i, 5, "fmin(") == 0 || body.compare(i, 5, "fmax(") == 0)
+                     && (i == 0 || (!ident(body[i - 1]) && body[i - 1] != ':'));
+        if (at) {
+            out += body[i + 2] == 'i' ? "ucuda_fmin_i(" : "ucuda_fmax_i(";
+            i += 5;
+        } else {
+            out += body[i++];
+        }
+    }
+    return out;
+}
 
 // Пролог перед телом. Компилируется КАК C++ (/TP), поэтому bool / true /
 // false родные, а объявления допустимы в любом месте блока — как в CUDA.
@@ -323,16 +346,34 @@ std::string make_source(const std::string& body, int amountOfX, KrsCpuPrec prec)
     o << "#define AMOUNTOFX " << amountOfX << "\n"
          "#include \"configCUDA.h\"\n"
          "static inline numb min(numb x, numb y) { return x < y ? x : y; }\n"
-         "static inline numb max(numb x, numb y) { return x > y ? x : y; }\n"
-         "extern \"C\" __declspec(dllexport)\n";
+         "static inline numb max(numb x, numb y) { return x > y ? x : y; }\n";
+    if (!hp)
+        o << "static inline numb ucuda_fmin_i(numb a, numb b) { return (a < b || b != b) ? a : b; }\n"
+             "static inline numb ucuda_fmax_i(numb a, numb b) { return (a > b || b != b) ? a : b; }\n";
+    // Явное время: номер шага в DLL (KrsCpuStep::step_index), t = n*h, без накопления t += h.
+    const bool timed = step_body_uses_time(body);
+    // Шаг с h = 0 (проекция клона ДАУ на связь, ucudaDaeProject) берёт t = n*h последнего
+    // ненулевого шага и номер не двигает — это момент той траектории, к которой он относится.
+    if (timed)
+        o << "static thread_local long long ucuda_step_n = 0;\n"
+             "static thread_local numb ucuda_step_h = numb(0.0);\n"
+             "extern \"C\" __declspec(dllexport) long long krs_step_index(long long v) {\n"
+             "    const long long p = ucuda_step_n;\n"
+             "    if (v >= 0) ucuda_step_n = v;\n"
+             "    return p;\n"
+             "}\n";
+    o << "extern \"C\" __declspec(dllexport)\n";
     if (hp) o << "void krs_step(numb* X, const numb* a, const numb* h_ptr) {\n"
                  "    numb h = *h_ptr;\n";
     else    o << "void krs_step(numb* X, const numb* a, numb h) {\n";
+    if (timed) o << "    if (h != 0.0) ucuda_step_h = h;\n"
+                    "    const numb " << kStepTimeArg << " = numb((double)ucuda_step_n) * ucuda_step_h;\n"
+                    "    if (h != 0.0) ++ucuda_step_n;\n";
          // Дальше — код пользователя. #line переводит нумерацию компилятора
          // в координаты ТЕЛА, поэтому "krs(12): error" указывает ровно на
          // 12-ю строку в редакторе схемы.
     o << "#line 1 \"krs\"\n"
-      << body << "\n}\n";
+      << (hp ? body : inline_fmin_fmax(body)) << "\n}\n";
     return o.str();
 }
 
@@ -616,6 +657,18 @@ std::string make_ad_module_source(const std::string& rhs, const std::string& emb
          "#define __device__\n"
          "#define __host__\n"
          "#define __forceinline__ inline\n"
+         // Явное время: подписи ucuda_krs_* в adaptive_part.cu (на GPU макросы приходят из
+         // cudaLibrary.cuh шаблона, здесь его нет). Без UCUDA_NONAUTONOMOUS пусты.
+      << (step_body_uses_time(rhs) ? "#define UCUDA_NONAUTONOMOUS\n" : "")
+      << "#ifndef UCUDA_TA\n"
+         "#ifdef UCUDA_NONAUTONOMOUS\n"
+         "#define UCUDA_TA(t) (t),\n"
+         "#define UCUDA_TP(decl) decl,\n"
+         "#else\n"
+         "#define UCUDA_TA(t)\n"
+         "#define UCUDA_TP(decl)\n"
+         "#endif\n"
+         "#endif\n"
          "static inline int atomicAdd(int* p, int v) { const int o = *p; *p += v; return o; }\n"
          // getValueByIdx / getValueByIdx_log из cudaLibrary.cu (та же формула узла).
          "static inline numb getValueByIdx(const size_t idx, const int nPts, const numb lo, const numb hi,\n"
@@ -917,11 +970,6 @@ bool AdaptiveCpuModule::compile(const std::string& rhs, const std::string& emb, 
                                 const std::string& prelude, std::vector<KrsCpuDiag>& diags) {
     if (module_) { FreeLibrary((HMODULE)module_); module_ = nullptr; }
     endpoint_ = nullptr; lyap_ = nullptr; bif_ = nullptr; lyap_range_ = nullptr; metrics_ = nullptr; phase_ = nullptr;
-    // Явное время t на CPU ещё не проведено (этап 2): cl.exe ответил бы "ucuda_t: undeclared".
-    if (step_body_uses_time(rhs)) {
-        diags.push_back({ 0, "explicit time t: CPU paths do not support it yet; use the GPU" });
-        return false;
-    }
     std::string why;
     if (vcvars_path(why).empty()) {
         diags.push_back({ 0, "CPU compiler unavailable: " + why });
@@ -1041,15 +1089,15 @@ bool CtrlCpuFn::compile(const std::string& body, std::vector<KrsCpuDiag>& diags)
 KrsCpuStep::~KrsCpuStep() { release(); }
 
 KrsCpuStep::KrsCpuStep(KrsCpuStep&& o) noexcept
-    : module_(o.module_), fn_(o.fn_), fn_dd_(o.fn_dd_), fn_qd_(o.fn_qd_) {
-    o.module_ = nullptr; o.fn_ = nullptr; o.fn_dd_ = nullptr; o.fn_qd_ = nullptr;
+    : module_(o.module_), fn_(o.fn_), fn_dd_(o.fn_dd_), fn_qd_(o.fn_qd_), idx_(o.idx_) {
+    o.module_ = nullptr; o.fn_ = nullptr; o.fn_dd_ = nullptr; o.fn_qd_ = nullptr; o.idx_ = nullptr;
 }
 
 KrsCpuStep& KrsCpuStep::operator=(KrsCpuStep&& o) noexcept {
     if (this != &o) {
         release();
-        module_ = o.module_; fn_ = o.fn_; fn_dd_ = o.fn_dd_; fn_qd_ = o.fn_qd_;
-        o.module_ = nullptr; o.fn_ = nullptr; o.fn_dd_ = nullptr; o.fn_qd_ = nullptr;
+        module_ = o.module_; fn_ = o.fn_; fn_dd_ = o.fn_dd_; fn_qd_ = o.fn_qd_; idx_ = o.idx_;
+        o.module_ = nullptr; o.fn_ = nullptr; o.fn_dd_ = nullptr; o.fn_qd_ = nullptr; o.idx_ = nullptr;
     }
     return *this;
 }
@@ -1060,6 +1108,7 @@ void KrsCpuStep::release() {
     fn_     = nullptr;
     fn_dd_  = nullptr;
     fn_qd_  = nullptr;
+    idx_    = nullptr;
 }
 
 bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfValues,
@@ -1070,10 +1119,6 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
 bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfValues,
                          KrsCpuPrec prec, std::vector<KrsCpuDiag>& diags) {
     release();
-    if (step_body_uses_time(body)) {
-        diags.push_back({ 0, "explicit time t: CPU paths do not support it yet; use the GPU" });
-        return false;
-    }
 
     // Индексы проверяем ДО компиляции: в нативном коде выход за границу X[]
     // — это порча стека вызывающего, а не понятная ошибка.
@@ -1112,5 +1157,6 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
         case KrsCpuPrec::DD: fn_dd_ = (StepFnDD)p; break;
         default:             fn_    = (StepFn)p;   break;
     }
+    idx_ = (IndexFn)GetProcAddress(m, "krs_step_index");   // только у тела с явным t
     return true;
 }

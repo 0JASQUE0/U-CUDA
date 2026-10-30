@@ -50,7 +50,7 @@ __device__ __forceinline__ float curand_uniform(curandState_t* s) {
 #include "cudaLibrary.cuh"
 
 __device__ __host__ __forceinline__
-void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
+void calculateDiscreteModel(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h) {
 {{KRS_BODY}}
 }
 
@@ -99,6 +99,7 @@ extern "C" __global__ void bifurcation1dContinuationKernel(
 
     for (int i = 0; i < amountOfX; ++i)    x[i] = baseX[i];
     for (int i = 0; i < amountOfValues; ++i) a[i] = baseValues[i];
+    UCUDA_NVAR(ucudaStep, 0)   // время идёт по всей цепочке, как и состояние x
 
     numb denom = (numb)(nPts > 1 ? nPts - 1 : 1);
     for (int j = 0; j < nPts; ++j) {
@@ -134,18 +135,22 @@ extern "C" __global__ void bifurcation1dContinuationKernel(
         // Вырожденный шаг — траектории нет. Это REGIME_UNBOUND, а не fixed
         // point: -1 здесь помечал точку кодом «схлопнулась в точку».
         if (hLocal <= 0 || blockLen <= 0) { d_amountOfPeaks[j] = REGIME_UNBOUND; continue; }
+#ifdef UCUDA_LYAP_NX
+        // ДАУ (этап 7): z — на связь при новом параметре; старт — z прошлой точки (та же ветвь).
+        calculateDiscreteModel(x, UCUDA_TA((numb)ucudaStep * hLocal) a, (numb)0);
+#endif
 
         // Transient: x[] не сбрасываем — карри-овер с прошлой итерации.
         int flag = loopCalculateDiscreteModel_int(
             x, a, hLocal, transient_steps, amountOfX, 1, 0,
-            maxValue, nullptr, (size_t)j * sizeOfBlock, 1);
+            maxValue, nullptr, (size_t)j * sizeOfBlock, 1 UCUDA_NA_AFTER_WS(&ucudaStep));
         if (flag == REGIME_UNBOUND) { d_amountOfPeaks[j] = REGIME_UNBOUND; continue; }
 
         // Запись траектории: writableVar пишется в d_data на каждой
         // итерации loopCalculateDiscreteModel_int.
         flag = loopCalculateDiscreteModel_int(
             x, a, hLocal, blockLen, amountOfX, preScaller, writableVar,
-            maxValue, d_data, (size_t)j * sizeOfBlock, 1);
+            maxValue, d_data, (size_t)j * sizeOfBlock, 1 UCUDA_NA_AFTER_WS(&ucudaStep));
         // Сырой REGIME_* — как в классическом пути (calculateDiscreteModelCUDA
         // пишет flag без правок). Раньше unbound на основном участке давал 1, и
         // peakFinderCUDA искал пики в уже разошедшемся блоке.

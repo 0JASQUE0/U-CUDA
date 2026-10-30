@@ -60,12 +60,38 @@ struct AdaptiveEndpointResult {
 // без запуска. log — сообщения компилятора (строки "controller(N): ..." — в координатах тела).
 bool nvrtc_check_ctrl_body(const std::string& body, std::string& log);
 
+// BDF 1-5 (форма DASSL, kernels/ucuda_bdf.cuh) на GPU: нить на траекторию, вывод — как у адаптивного
+// шага (PhaseAdaptiveResult). Тела — codegen_bdf_bodies над системой, уже подготовленной
+// bdf_prepare_system (индекс 3 -> GGL); amountOfX — её размерность, ic_flat — уже с mu = 0.
+struct BdfGpuRequest {
+    std::string res, jac;                 // F = [f; g], J = d[f; g]/dX (codegen_bdf_bodies)
+    int    amountOfX = 0, nx = 0;         // размерность и число дифференциальных переменных
+    std::vector<int>    kidx;             // индекс переменной (1 у x, 2 у z индекса 2)
+    std::vector<double> atol;             // [amountOfX]
+    double rtol = 1e-6, h0 = 0, hmax = 0; // hmax <= 0 — без ограничения
+    double hmin = 0;                      // > 0 — h_min пользователя (UcudaBdfParams::hmin)
+    double hfix = 0;                      // > 0 — постоянный шаг без регулятора (UcudaBdfParams::hfix)
+    int    newton_max = 0;                // Ньютон (UcudaBdfParams::nmax / nfull / ntol), 0 — форма DASSL
+    bool   newton_full = true;
+    double newton_tol = 1e-10;
+    int    maxk = 5;
+    std::vector<double> ic_flat;          // [N*amountOfX]
+    int    N = 0;
+    std::vector<double> values;
+    bool   raw = false;
+    double t_skip = 0, t_rec = 0, dt = 0;
+    int    total = 0, max_pts = 0;
+    int    log_cap = 0;                   // журнал попыток на траекторию (0 — не вести), out.log
+    std::shared_ptr<std::atomic<bool>> cancel;
+};
+
 struct PhaseAdaptiveResult {
     std::vector<std::vector<std::vector<double>>> traj;   // [N][pts][dim]; короче, если разошлось
     std::vector<std::vector<double>> times;               // узлы шага: [N][pts]
     std::vector<std::vector<double>> log;                 // [N][4*k]: t, h, err, код
     std::vector<AdaptiveStats> stats;                     // [N]
     std::vector<double> final_h;                          // [N] — следующий предложенный шаг
+    std::vector<int> hmin_fail;                           // [N] — BDF: шаг сорвался на h_min (иначе пусто)
 };
 
 // Переиспользуемый движок рантайм-компиляции CUDA через NVRTC.
@@ -108,6 +134,10 @@ public:
     // Адаптивный шаг: компиляция (с кэшем по телам + размерности) и счёт.
     // Не трогает состояние compile()/run_phase_portraits. false + error() при сбое.
     bool run_phase_portraits_adaptive(const PhaseAdaptiveRequest& rq, PhaseAdaptiveResult& out);
+
+    // BDF 1-5 на GPU (BdfGpuRequest): компиляция с кэшем по телам и размерности, счёт. Статистика —
+    // nacc, nrej, nrhs, hmin, hmax, hmean, diverged, truncated; лога попыток нет.
+    bool run_phase_portraits_bdf(const BdfGpuRequest& rq, PhaseAdaptiveResult& out);
 
     // Только сборка адаптивного ядра Analysis в кэш (фоновый прогрев): rq.rhs/emb/dprep/deval,
     // ctrl_body и amountOfX — те же, что потом уйдут в run_phase_portraits_adaptive.

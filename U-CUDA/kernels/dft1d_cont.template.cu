@@ -49,7 +49,7 @@ __device__ __forceinline__ float curand_uniform(curandState_t* s) {
 #include "cudaLibrary.cuh"
 
 __device__ __host__ __forceinline__
-void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
+void calculateDiscreteModel(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h) {
 {{KRS_BODY}}
 }
 
@@ -127,6 +127,7 @@ extern "C" __global__ void dft1dContinuationKernel(
     numb a[64];
     for (int i = 0; i < amountOfX; ++i)      x[i] = baseX[i];
     for (int i = 0; i < amountOfValues; ++i) a[i] = baseValues[i];
+    UCUDA_NVAR(ucudaStep, 0)   // время идёт по всей цепочке, как и x
 
     const numb denom = (numb)(nPts > 1 ? nPts - 1 : 1);
     const int  RESET_INTERVAL = 1000;
@@ -156,16 +157,20 @@ extern "C" __global__ void dft1dContinuationKernel(
         if (hLocal <= 0 || blockLen <= 2) {
             regime = REGIME_UNBOUND;
         } else {
+#ifdef UCUDA_LYAP_NX
+            // ДАУ: z — на связь при новом параметре (старт — z прошлой точки, та же ветвь), как в bif1d_cont.
+            calculateDiscreteModel(x, UCUDA_TA((numb)ucudaStep * hLocal) a, (numb)0);
+#endif
             // Transient: x[] carried over from the previous point.
             int flag = loopCalculateDiscreteModel_int(
                 x, a, hLocal, transientSteps, amountOfX, 1, 0,
-                maxValue, nullptr, 0, 1);
+                maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaStep));
             if (flag == REGIME_UNBOUND) {
                 regime = REGIME_UNBOUND;
             } else {
                 flag = loopCalculateDiscreteModel_int(
                     x, a, hLocal, blockLen, amountOfX, preScaller, writableVar,
-                    maxValue, d_data, 0, 1);
+                    maxValue, d_data, 0, 1 UCUDA_NA_AFTER_WS(&ucudaStep));
                 if (flag != REGIME_OSCILLATION) regime = flag;
             }
         }
@@ -179,6 +184,7 @@ extern "C" __global__ void dft1dContinuationKernel(
             flags[j] = regime;
             // Break the chain: next point restarts from the initial conditions.
             for (int i = 0; i < amountOfX; ++i) x[i] = baseX[i];
+            UCUDA_NSET(ucudaStep, 0)
             continue;
         }
 

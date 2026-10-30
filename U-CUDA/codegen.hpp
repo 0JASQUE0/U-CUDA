@@ -27,6 +27,22 @@ struct System {
     // алгебраические (z), rhs = [f; g] со связями 0 = g. -1 — обычная ОДУ. Схемы ОДУ на
     // такой System не строятся (codegen_scheme откажет), только codegen_dae_scheme.
     int dae_nx = -1;
+    // Индекс каждой переменной ДАУ (как nind1/2/3 в RADAU5; пусто или 0/1 — индекс 1). Норма поправки
+    // Ньютона берёт переменную индекса k с множителем h^(k-1): без этого на индексе 3 поправка
+    // множителя Лагранжа (~1/h^2) решала, когда остановиться, а не позиции.
+    std::vector<int> dae_index;
+
+    // Выходы z («Solve as ODE», уровень A): vars = [x; z], rhs = f (только x), out_exprs[j] = phi_j(x)
+    // — z после шага пересчитываются по новому x и в f не входят. Так z видят все вкладки
+    // (выход БД, метрики, оси) как переменные состояния. codegen_scheme / codegen_adaptive и
+    // обёртки поддерживают это сами; точки входа, которые не умеют, отказывают явно.
+    std::vector<std::string> out_exprs;
+    // Уровень B («Solve as ODE» при связях, не разрешимых явно): vars = [x; z], rhs = f(x, z, t) (только
+    // x), zb_g[k] = g_k(x, z, t), z — из g = 0 Ньютоном в каждом вычислении f (лямбда ucuda_zb в
+    // начале тела, тёплый старт — z прошлого шага, кэш по x и t), после шага z пишутся в X[nx + k].
+    // zb_names — имена z (заполняет внутренний sys_core: у ядра схемы vars только x).
+    std::vector<std::string> zb_g;
+    std::vector<std::string> zb_names;
 
     // Ньютон неявных схем здесь не живёт: допуск, предел итераций и режим якобиана —
     // рантайм-слоты a[] каждой вкладки (NewtonSettings ниже).
@@ -340,6 +356,11 @@ double scheme_rhs_per_step(const System& s, const std::string& name);
 // Схема, у которой есть адаптивный шаг, — по одному имени: RK-пары, GBS 2-4 ..., Extr(база|n)
 // и ExtrZ(база|n) с K >= 2. База проверяется только при сборке кода.
 bool adaptive_scheme_name_supported(const std::string& name);
+// Многошаговые методы со своим драйвером (multistep_bdf.h): "BDF 1-5" (ОДУ), "DAE BDF 1-5" (ДАУ).
+// Тела шага у них нет — только адаптивный шаг в Analysis.
+bool scheme_is_multistep(const std::string& name);
+extern const char* const kBdfSchemeOde;
+extern const char* const kBdfSchemeDae;
 // Порядок оценщика по имени, для значений регулятора по умолчанию (dopri5 / dop853):
 // у Extr с кастомной базой неизвестен — 7.
 int adaptive_scheme_q_guess(const std::string& name);
@@ -373,11 +394,18 @@ std::vector<std::string> codegen_rhs(const System& s);
 // автономной системы тело прежнее до байта.
 inline constexpr const char* kStepTimeArg = "ucuda_t";
 inline constexpr const char* kTimeUnsupportedMsg =
-    "explicit time t is not supported by this scheme: complex CD, CD fast, SEMP/SIMP/D, "
-    "Complex Implicit Euler and adaptive GBS/Extr do not shift stage times yet "
-    "(supported: explicit RK, implicit Euler/Midpoint, CD, CD {1-0}, CD FP, GBS, Extr/Comp over them; "
-    "adaptive RK45/DOP853/DOPRI78)";
+    "explicit time t is not supported by this scheme: complex CD "
+    "and Complex Implicit Euler have complex stage times "
+    "(supported: explicit RK, implicit Euler/Midpoint, SEMP/SIMP/D, CD, CD {1-0}, CD FP, CD fast as CD, GBS, Extr/Comp over them; "
+    "adaptive RK45/DOP853/DOPRI78, GBS, Extr)";
 bool system_uses_time(const System& s);
+// Превью уравнений: выражение (синтаксис кодогена) в LaTeX для math_formula_draw — \frac, ^{},
+// \mathrm{sin}, модуль через \left|; имя с цифровым хвостом — с индексом (x1 -> x_{1}),
+// греческое — со слешем.
+// labels — свои подписи символов (имя -> TeX, подписи полей записи); нет в нём — name_to_latex.
+std::string expr_to_latex(const std::string& expr, bool latex_in, const std::vector<std::string>& user_funcs = {},
+                          const std::map<std::string, std::string>* labels = nullptr);
+std::string name_to_latex(const std::string& name);
 // Схема умеет печатать время стадий (неявные, CD, комплексные, ГБШ — ещё нет).
 bool scheme_supports_time(Scheme sch);
 // ДАУ: схемы этапа 4 плана DAE. Тело шага — как у схем ОДУ (calculateDiscreteModel над
@@ -391,7 +419,8 @@ bool scheme_supports_time(Scheme sch);
 //   ROS2 — Rosenbrock ROS2 (линейно-неявный, L-устойчив, порядок 2).
 //   CD / CDYoshida4 — CD с решением связи при каждом изменении x (уровень B, индекс 1; связь может
 //   быть нелинейной по z), и его композиция Йошиды 4-го порядка (при a[0] = 0.5).
-enum class DaeScheme { BDF1, Trapezoidal, TRBDF2, ExplicitEuler, ExplicitMidpoint, RK4, ROS2, CD, CDYoshida4 };
+enum class DaeScheme { BDF1, Trapezoidal, TRBDF2, ExplicitEuler, ExplicitMidpoint, RK4, ROS2, CD, CDYoshida4,
+                       ROS3P, Rodas4, SDIRK2, ImplicitMidpoint, Radau5, BDF1GGL, Radau5GGL, CDIndex2 };
 // Согласованные НУ (индекс 1): при фиксированных x решает g(x, z, t0) = 0 по z Ньютоном
 // (якобиан dg/dz символьный, тот же, что у шага). X — [x; z] на входе и выходе; a — раскладка
 // шага ([s, p_1..p_M, хвост]). Стартует с z из X. false — z не тронут, why — причина:
@@ -405,8 +434,40 @@ bool dae_consistent_z(const System& s, const double* a, int na, double t0, doubl
 // z_exprs — выражения z(x) (для наблюдаемых). false — причина в why (индекс >= 2 или z
 // входит нелинейно: тогда только методы ДАУ).
 bool dae_reduce_to_ode(const System& s, System& ode, std::vector<std::string>* z_exprs, std::string* why);
+// Структурный индекс 1: в каждой связи 0 = g есть хотя бы одна z (иначе dg/dz вырожден). Уровень B
+// «Solve as ODE» (z Ньютоном) и проверка галочки в редакторе.
+bool dae_index1_structural(const System& s);
+// Этап 5. Массив производных связей: связь дифференцируется вдоль x' = f, пока в ней не появится z;
+// индекс связи — число элементов (1 — z прямо в g). dae_structural_index — максимум по связям
+// (-1 — не ДАУ, 0 — не определяется: связь без z и после 3 производных).
+int dae_structural_index(const System& s);
+// Уровень C «Solve as ODE»: каждая связь индекса m+1 заменяется на (d/dt + alpha)^m g = 0 (её m-я
+// производная плюс младшие с биномиальными весами — стабилизация Баумгарте с кратным корнем), так что
+// получается ДАУ индекса 1 для уровней A/B; дрейф исходной связи гаснет как e^(-alpha t).
+bool dae_stabilized_index1(const System& s, double alpha, System& out, std::string* why);
+// GGL (Gear-Gupta-Leimkuhler): связям уровня позиций (индекс 3) добавляются множители mu
+// (vars "ucuda_ggl_mu<k>"): x' = f - (dg/dx)^T mu, 0 = g, 0 = d/dt g — система индекса 2 с mu = 0
+// на решении. Методы "... + GGL" держат mu внутри шага (состояние X прежнее).
+bool dae_ggl_system(const System& s, System& out, std::string* why);
 // Тело заканчивается меткой dae_nx_tag(s.dae_nx) — см. dae_nx_from_body.
 std::string codegen_dae_scheme(const System& s, DaeScheme sch);
+// Адаптивный шаг на ДАУ (этап 9b): Rodas4 как вложенная пара — Y по 6 стадиям (порядок 4),
+// E = u_6 (оценка порядка 3, rodas.f), плотный выход rodas.f порядка 3 по x и z. Только
+// индекс 1 (норма ошибки драйвера не масштабирует переменные индекса >= 2). Бросает на
+// другом методе / индексе.
+AdaptiveCode codegen_adaptive_dae(const System& s, DaeScheme sch);
+// Прочие одношаговые методы ДАУ — переменный шаг удвоением шага: Y = два шага h/2 тела постоянного
+// шага, E = (Y - шаг h)/(2^p - 1), E переменной индекса k — с множителем h^(k-1); плотный выход —
+// парабола через X, середину и Y. Индекс — какой поддерживает сам метод. name — для комментария.
+AdaptiveCode codegen_adaptive_dae_doubling(const System& s, DaeScheme sch, const std::string& name);
+// Порядок одношагового метода ДАУ (по x); 0 — нет.
+int dae_scheme_order(DaeScheme sch);
+// Тела для BDF 1-5 на GPU (kernels/ucuda_bdf.cuh): res — F[i] = [f; g](X, ucuda_t), jac — полный
+// символьный якобиан J[i*N + j] = d[f; g]_i / dX_j. Система — ОДУ или ДАУ индекса 1-2 (индекс 3
+// сначала сводится GGL, см. bdf_prepare_system).
+// jname — имя массива якобиана: "J" у ядра Analysis, "D" в свипах (тело встаёт в слот dprep
+// адаптивного модуля, где выход называется D).
+void codegen_bdf_bodies(const System& s, std::string& res, std::string& jac, const char* jname = "J");
 // Метка числа x в теле шага метода ДАУ: LLE/LS по ней возмущают клоны только по x
 // (UCUDA_LYAP_NX), z клона решает сам метод. Тело входит в ключ кэша модулей.
 constexpr const char* kDaeNxTag = "// @ucuda-dae-nx ";

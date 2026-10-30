@@ -15,6 +15,8 @@ struct GuiCallbacks {
     // коэффициентов композиции в конструкторе схем (System tab). Возвращает
     // абсолютный путь либо пустую строку при отмене.
     std::function<std::string()> pick_open_file_text;
+    // Диалог открытия схемы для вкладки DAE: SPICE-netlist или .kicad_sch.
+    std::function<std::string()> pick_open_file_circuit;
 };
 
 // Рисует один кадр интерфейса. lib — библиотека систем (вкладка Library).
@@ -23,6 +25,14 @@ struct GuiCallbacks {
 void gui_process_deferred(AppModel& model, const GuiCallbacks& cb);
 
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb);
+
+// Маски Settings на свежей установке (ключа в _app_config.json нет): показаны только Euler,
+// Explicit Midpoint, CD, RK4, DOPRI78, GBS (n=2) и из методов ДАУ — Trapezoidal и BDF 1-5.
+// Возвращают СКРЫТЫЕ имена, как AppModel::hidden_schemes / hidden_dae_methods.
+std::vector<std::string> default_hidden_schemes();
+std::vector<std::string> default_hidden_dae_methods();
+// Все методы ДАУ в порядке списка редактора: dae_scheme_names() + BDF 1-5.
+std::vector<std::string> dae_method_list();
 
 // Global system switch: loads the record from `lib` into `model` and re-inits
 // the CURRENT tab's session (mirroring the top-bar combo). Exposed so

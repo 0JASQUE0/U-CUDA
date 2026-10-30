@@ -4,6 +4,7 @@
 #include "phase_portrait_nvrtc.h"
 #include "integrator.h"
 #include "krs_cpu.h"
+#include "multistep_bdf.h"   // BDF 1-5: свой драйвер многошагового метода
 #include "num_parse.h"   // parse_num — единый разбор числовых полей
 #include <algorithm>
 #include <cstdlib>
@@ -250,7 +251,8 @@ std::string default_h_from_record(const SystemRecord& r) {
 std::string default_scheme_from_record(const SystemRecord& r, std::string current) {
     // ДАУ: схема ОДУ из прошлой системы не подходит — по умолчанию BDF1.
     if (r.is_dae && !r.dae_as_ode)
-        return dae_scheme_from_name(current, nullptr) ? current : std::string("DAE BDF1");
+        return dae_scheme_from_name(current, nullptr) || current == kBdfSchemeDae ? current : std::string("DAE BDF1");
+    if (current == kBdfSchemeDae) return r.is_dae ? std::string("RK4") : std::string(kBdfSchemeOde);
     // Сведено к ОДУ: схема ДАУ от прошлого запуска не подходит.
     if (r.is_dae && dae_scheme_from_name(current, nullptr)) return std::string("RK4");
     return r.is_map ? std::string("Map") : std::move(current);
@@ -264,7 +266,15 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
     std::vector<std::string> out;
     // A map has no scheme: its only step is the right-hand side itself.
     if (r.is_map) { out.emplace_back("Map"); return out; }
-    if (r.is_dae && !r.dae_as_ode) return dae_scheme_names();   // у ДАУ — только свои схемы
+    if (r.is_dae && !r.dae_as_ode) {   // у ДАУ — только свои схемы, без выключенных в редакторе
+        for (const auto& n : dae_scheme_names())
+            if (std::find(r.dae_schemes_off.begin(), r.dae_schemes_off.end(), n) == r.dae_schemes_off.end())
+                out.push_back(n);
+        // многошаговый, свой драйвер: только адаптивный шаг; галочка — в том же списке выключенных
+        if (std::find(r.dae_schemes_off.begin(), r.dae_schemes_off.end(), kBdfSchemeDae) == r.dae_schemes_off.end())
+            out.emplace_back(kBdfSchemeDae);
+        return out;
+    }
     // Порядок — как в комбо схем: по порядку точности.
     if (r.scheme_euler)    out.emplace_back("Euler");
     if (r.scheme_cromer)   out.emplace_back("Euler-Cromer");
@@ -301,6 +311,7 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
     if (r.scheme_gbs2468) out.emplace_back("GBS 2-4-6-8");
     if (r.scheme_gbs246810) out.emplace_back("GBS 2-4-6-8-10");
     if (r.scheme_gbs24681012) out.emplace_back("GBS 2-4-6-8-10-12");
+    out.emplace_back(kBdfSchemeOde);   // многошаговый, свой драйвер: только адаптивный шаг
     return out;
 }
 
@@ -556,6 +567,19 @@ static void append_circuit_trajectory(const PhaseRunInputs& in,
 // ограничена (4 числа на запись, 6.4 МБ на НУ).
 static constexpr int kAdaptLogCap = 200000;
 
+// Журнал попыток — только окно записи (попытки, которые кончаются после t_skip), как и прочие
+// проекции. BDF не пишет переходный процесс сам (ucuda_bdf_run), адаптивные драйверы пишут с t = 0.
+static void trim_step_log_to_record(AnalysisResult& result, double t_skip) {
+    if (!(t_skip > 0)) return;
+    for (std::vector<double>& lg : result.step_log) {
+        size_t w = 0;
+        for (size_t r = 0; r + 4 <= lg.size(); r += 4)
+            if (lg[r] + lg[r + 1] > t_skip)
+                for (int c = 0; c < 4; ++c) lg[w++] = lg[r + c];
+        lg.resize(w);
+    }
+}
+
 // Ветка адаптивного шага для compute_phase_portrait: GPU (ядро phase_kernel_ad) или
 // CPU (computePhasePortraitCPU_adaptive) — один и тот же драйвер. raw[k] — траектория
 // НУ k, times[k] — моменты её точек на узлах шага (на равномерной сетке пусто).
@@ -570,6 +594,120 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
     if (!adaptive_scheme_name_ok(in.scheme)) {
         result.error = adaptive_scheme_hint();
         return false;
+    }
+    // Многошаговый BDF 1-5 — свой драйвер (multistep_bdf.h), CPU, тот же вывод, что у адаптивных схем.
+    if (scheme_is_multistep(in.scheme)) {
+        const bool dae = in.sys.dae_nx >= 0;
+        if (dae != (in.scheme == kBdfSchemeDae)) {
+            result.error = dae ? "a DAE needs DAE BDF 1-5" : "DAE BDF 1-5 needs a DAE system";
+            return false;
+        }
+        BdfSettings bs;
+        bs.rtol = parse_val(in.adaptive.rtol, 1e-6);
+        bs.atol.clear();
+        {
+            std::string cur;
+            for (char c : in.adaptive.atol + ",") {
+                if (c == ',' || c == ';') { if (!cur.empty()) bs.atol.push_back(parse_val(cur, 1e-8)); cur.clear(); }
+                else if (c != ' ') cur += c;
+            }
+            if (bs.atol.empty()) bs.atol.push_back(1e-8);
+        }
+        bs.h0 = parse_val(in.adaptive.h0, 0.0);
+        if (!in.adaptive.hmax.empty()) bs.hmax = parse_val(in.adaptive.hmax, bs.hmax);
+        if (!in.adaptive.hmin.empty()) bs.hmin = parse_val(in.adaptive.hmin, 0.0);
+        if (!in.adaptive.enabled) bs.hfix = h;   // переключатель Fixed step: шаг h без регулятора
+        {   // Ньютон — хвост a[] вкладки (scheme_fill_tail): [n, tol, max_iters, full] после p_M
+            const size_t ns = (size_t)newton_slot(in.sys);
+            if (ns + 2 < a.size()) {
+                bs.newton_tol = a[ns]; bs.newton_max = (int)a[ns + 1]; bs.newton_full = a[ns + 2] != 0;
+            }
+        }
+        const double t_skip = in.skip_transient ? tskip : 0.0;
+        const bool rawm = in.adaptive.raw_nodes && in.adaptive.enabled;   // постоянный шаг — сетка через h
+        int max_pts = parse_num_int(in.adaptive.max_points, 1000000);
+        max_pts = std::max(2, std::min(max_pts, 50000000));
+        result.adaptive  = true;
+        result.raw_nodes = rawm;
+        result.step_log.assign((size_t)N, {});
+        result.step_stats.assign((size_t)N, AdaptiveStats());
+        raw.assign((size_t)N, {});
+        times.assign((size_t)N, {});
+        if (in.use_gpu) {
+            // GPU: тот же алгоритм (kernels/ucuda_bdf.cuh), тела F и J — кодоген над системой после GGL
+            System sp;
+            std::string e;
+            if (!bdf_prepare_system(in.sys, sp, &e)) { result.error = e; return false; }
+            BdfGpuRequest rq;
+            try { codegen_bdf_bodies(sp, rq.res, rq.jac); }
+            catch (const std::exception& ex) { result.error = std::string("BDF codegen: ") + ex.what(); return false; }
+            const int ng = (int)sp.vars.size();
+            rq.amountOfX = ng;
+            rq.nx = sp.dae_nx < 0 ? ng : sp.dae_nx;
+            rq.kidx.assign((size_t)ng, 1);
+            for (int i = 0; i < ng && i < (int)sp.dae_index.size(); ++i) rq.kidx[(size_t)i] = std::max(1, sp.dae_index[(size_t)i]);
+            for (int i = 0; i < ng; ++i) rq.atol.push_back(bs.atol[(size_t)std::min(i, (int)bs.atol.size() - 1)]);
+            rq.rtol = bs.rtol; rq.h0 = bs.h0; rq.hmax = std::isfinite(bs.hmax) ? bs.hmax : 0.0; rq.maxk = bs.max_order;
+            rq.hmin = bs.hmin; rq.hfix = bs.hfix;
+            rq.newton_max = bs.newton_max; rq.newton_full = bs.newton_full; rq.newton_tol = bs.newton_tol;
+            rq.N = N;
+            rq.ic_flat.assign((size_t)N * ng, 0.0);   // mu системы GGL — с нуля
+            for (int k = 0; k < N; ++k)
+                for (int i = 0; i < dim; ++i) rq.ic_flat[(size_t)k * ng + i] = ic_flat[(size_t)k * dim + i];
+            rq.values = a;
+            rq.raw = rawm; rq.t_skip = t_skip; rq.t_rec = tsim; rq.dt = h; rq.total = total; rq.max_pts = max_pts;
+            rq.log_cap = kAdaptLogCap;   // журнал попыток — проекция "Step size"
+            rq.cancel = in.cancel;
+            PhaseAdaptiveResult out;
+            if (!computePhasePortraitsBdfNVRTC(rq, out, &e)) {
+                if (e == kNvrtcCancelled) { result.cancelled = true; result.error = e; }
+                else result.error = "GPU: " + e;
+                return false;
+            }
+            for (int k = 0; k < N; ++k) {
+                raw[(size_t)k] = std::move(out.traj[(size_t)k]);
+                for (auto& row : raw[(size_t)k]) row.resize((size_t)dim);   // без mu
+                if (rawm) times[(size_t)k] = std::move(out.times[(size_t)k]);
+                result.step_log[(size_t)k] = std::move(out.log[(size_t)k]);
+                result.step_stats[(size_t)k] = out.stats[(size_t)k];
+                if (out.hmin_fail[(size_t)k]) {
+                    result.error = bs.hfix > 0 ? "BDF (fixed step): Newton does not converge - lower h or raise Newton max iters"
+                                 : bs.hmin > 0 ? "BDF: Newton does not converge at h_min - lower h_min"
+                                               : "BDF: step size below h_min";
+                    return false;
+                }
+            }
+        } else
+        for (int k = 0; k < N; ++k) {
+            BdfStats bst;
+            std::string e;
+            if (!bdf_integrate(in.sys, a.data(), (int)a.size(), &ic_flat[(size_t)k * dim], bs, t_skip, tsim, h, total,
+                               rawm, max_pts, raw[(size_t)k], times[(size_t)k], bst, &e, in.cancel.get(),
+                               &result.step_log[(size_t)k], kAdaptLogCap)) {
+                result.error = e;
+                return false;
+            }
+            AdaptiveStats& as = result.step_stats[(size_t)k];
+            as.nacc = (double)bst.nacc; as.nrej = (double)bst.nrej; as.nforced = (double)bst.nforced;
+            as.nrhs = (double)bst.nrhs;
+            as.hmin = bst.hmin; as.hmax = bst.hmax; as.hmean = bst.nacc ? bst.hsum / (double)bst.nacc : 0.0;
+            as.diverged = bst.diverged; as.truncated = bst.truncated;
+            if (in.cancel && in.cancel->load(std::memory_order_relaxed)) break;
+        }
+        if (in.cancel && in.cancel->load(std::memory_order_relaxed)) {
+            result.cancelled = true;
+            result.error = kNvrtcCancelled;
+            return false;
+        }
+        for (int k = 0; k < N; ++k) {
+            const AdaptiveStats& st = result.step_stats[(size_t)k];
+            if (st.diverged) { calc_ok = false; calc_err = "trajectory '" + in.ic_sets[(size_t)k].label + "' diverged (nan/inf)"; }
+            else if (st.truncated) {
+                calc_ok = false;
+                calc_err = "trajectory '" + in.ic_sets[(size_t)k].label + "' reached max points before the end of the interval";
+            }
+        }
+        return true;
     }
     AdaptiveCode code;
     try { code = adaptive_code_for_scheme(in.custom_schemes, in.sys, in.scheme); }
@@ -614,11 +752,13 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
         result.step_log   = std::move(out.log);
         result.step_stats = out.stats;
     }
-    else if (!scheme_supports_adaptive(scheme_from_name(in.scheme))) {
+    else if (in.sys.dae_nx >= 0 || !scheme_supports_adaptive(scheme_from_name(in.scheme)) || system_uses_time(in.sys)
+             || !in.sys.out_exprs.empty() || !in.sys.zb_g.empty()) {   // z (Solve as ODE) — тоже: вычислитель их не знает
         // Экстраполятор (Extr, GBS): CPU-драйвер exe считает по таблицам Бутчера и тело базы в
         // стадиях не выразит. Те же тела, что у GPU, собирает cl.exe в DLL адаптивного модуля
         // (AdaptiveCpuModule, кэш на диске), траектория — ucuda_cpu_ad_phase, копия phase_kernel_ad;
-        // регулятор (и пользовательский) вкомпилирован туда же.
+        // регулятор (и пользовательский) вкомпилирован туда же. Явное t — тоже сюда: exe-драйвер
+        // (вычислитель правых частей) времени не знает, а тела модуля его получают от драйвера.
         AdaptiveCpuModule mod;
         std::vector<KrsCpuDiag> diags;
         if (!mod.compile(code.rhs, code.emb, code.dprep, code.deval, ctrl_body, dim, "", diags) || !mod.phase()) {
@@ -716,6 +856,7 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
                      + "' reached max points before the end of the interval";
         }
     }
+    trim_step_log_to_record(result, t_skip);
     return true;
 }
 
@@ -772,14 +913,17 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     // уже согласованное шагом, — его не трогаем.
     if (in.sys.dae_nx >= 0 && in.sys.dae_nx < dim && !use_override) {
         int solved = 0;
-        std::string why;
+        std::string why, done;   // done — что сделано при индексе >= 2 (скрытые связи), пусто при индексе 1
         for (int k = 0; k < N; ++k) {
             std::string w;
-            if (dae_consistent_z(in.sys, a.data(), (int)a.size(), 0.0, &ic_flat[(size_t)k * dim], &w)) ++solved;
+            if (dae_consistent_z(in.sys, a.data(), (int)a.size(), 0.0, &ic_flat[(size_t)k * dim], &w)) {
+                ++solved;
+                if (done.empty()) done = w;
+            }
             else if (why.empty()) why = w;
         }
         result.dae_status = solved == N
-            ? std::string("initial z made consistent: g(x0, z) = 0")
+            ? (done.empty() ? std::string("initial z made consistent: g(x0, z) = 0") : "initial values: " + done)
             : "initial z: " + why;
     }
 
@@ -790,13 +934,10 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     // Адаптивный шаг — своя ветка расчёта; признаки, RQA и прореживание ниже общие.
     // У отображения шага нет, и переключатель для него игнорируется.
     std::vector<std::vector<double>> ad_times;
-    // Явное время t: пока только GPU (CPU-пути — в конце этапа 2). Адаптивный шаг —
-    // пары RK45 / DOP853 / DOPRI78, прочие отклонит кодоген.
-    if (system_uses_time(in.sys) && !in.use_gpu) {
-        result.error = "explicit time t: only the GPU path supports it so far (turn on GPU)";
-        return result;
-    }
-    if (in.adaptive.enabled && !in.sys.is_map) {
+    // Явное время t на CPU: фиксированный шаг — через krs_cpu (номер шага ведёт DLL, см.
+    // KrsCpuStep::step_index), адаптивный — через DLL адаптивного модуля (run_adaptive_phase).
+    const bool timed = system_uses_time(in.sys);
+    if ((in.adaptive.enabled || scheme_is_multistep(in.scheme)) && !in.sys.is_map) {
         if (!run_adaptive_phase(in, dim, N, ic_flat, a, h, tsim, tskip, total, raw, ad_times,
                                 result, calc_ok, calc_err))
             return result;
@@ -816,7 +957,8 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     }
     // ДАУ на CPU: тело DAE-метода — обычный шаг над [x; z], его собирает в нативную функцию
     // krs_cpu, как пользовательскую КРС (вычислитель правых частей ДАУ не считает).
-    else if (in.krs_is_custom || in.sys.dae_nx >= 0) {
+    // Явное время и z-выходы (Solve as ODE) — тоже здесь: вычислитель правых частей их не знает.
+    else if (in.krs_is_custom || in.sys.dae_nx >= 0 || timed || !in.sys.out_exprs.empty() || !in.sys.zb_g.empty()) {
         // Custom КРС: тело — сырой C с объявлениями, циклами и локальными
         // массивами. SystemEvaluator интерпретирует только ВЫРАЖЕНИЯ правых
         // частей, поэтому тело компилируется в нативную функцию шага
@@ -841,6 +983,7 @@ static AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         }
         raw.resize(N);
         for (int k = 0; k < N; ++k) {
+            step.step_index(0);   // явное t: каждая траектория с t = 0
             bool ok = computePhasePortraitCPU_custom(step.fn(),
                 &ic_flat[(size_t)k * dim], dim, a.data(), (int)a.size(),
                 h, total, skip, raw[k]);
@@ -1411,6 +1554,9 @@ static std::string krs_for_scheme_impl(const std::vector<CustomScheme>& custom_s
         if (err) *err = std::move(why);
         return {};
     };
+    if (scheme_is_multistep(scheme) && !sys.is_map)
+        return refuse("'" + scheme + "' is a multistep method with its own driver: Analysis and the Parametric "
+                      "sweeps (BD, LLE, LS, Metrics, basins) only");
     // Nothing to choose for a map: the step is always the same whatever the
     // scheme field says (a stale session JSON may hold a previous ODE's scheme).
     if (sys.is_map) {
@@ -1503,6 +1649,16 @@ AdaptiveCode adaptive_code_for_scheme(const std::vector<CustomScheme>& custom_sc
     // текст непрозрачен: оценки ошибки у неё нет.
     for (const auto& cs : custom_schemes)
         if (cs.name == scheme) throw std::runtime_error(adaptive_scheme_hint());
+    if (scheme_is_multistep(scheme))
+        throw std::runtime_error("'" + scheme + "' is a multistep method with its own driver (BDF), not an embedded pair");
+    if (sys.dae_nx >= 0) {   // нативная ДАУ: у Rodas4 вложенная пара, у прочих — удвоение шага
+        DaeScheme ds;
+        if (!dae_scheme_from_name(scheme, &ds))
+            throw std::runtime_error("a DAE needs a DAE method (or DAE BDF 1-5)");
+        if (ds == DaeScheme::Rodas4) return codegen_adaptive_dae(sys, ds);
+        return codegen_adaptive_dae_doubling(sys, ds, scheme);
+    }
+    if (scheme == "DAE Rodas4") throw std::runtime_error("DAE Rodas4 needs a DAE system");
     const Scheme sch = scheme_from_name(scheme);
     if (scheme_supports_adaptive(sch)) return codegen_adaptive(sys, sch);
     if (const int K = gbs_stage_count(sch); K >= 2) return codegen_adaptive_gbs(sys, K);
@@ -1633,17 +1789,83 @@ static int parse_i(const std::string& s, int def) {
 // вернёт её вместо расчёта, как любую другую ошибку запуска. span — длина всего
 // интервала интегрирования (транзиент + запись), нужна выбору h0. ax0 / ax1 —
 // коды адаптивных осей (AdaptiveAxisKind), 0 — обычная цель свипа.
+// Тело постоянного шага для запроса свипа. У BDF 1-5 тела нет, а шаблон модуля его требует: с
+// адаптивным шагом ядра постоянного шага модуля не зовутся, поэтому подставляется BDF1 (ДАУ) или
+// Euler (ОДУ). Без адаптивного шага — прежний отказ compute_krs_for_scheme.
+static std::string sweep_krs(const std::vector<CustomScheme>& cs, const System& sys, const std::string& scheme,
+                             const AdaptiveSettings& ad) {
+    (void)ad;   // BDF и с постоянным шагом идёт через драйвер BDF (fill_adaptive_request)
+    if (scheme_is_multistep(scheme) && !sys.is_map && !sys.rhs.empty()) {
+        try { return sys.dae_nx >= 0 ? codegen_dae_scheme(sys, DaeScheme::BDF1) : codegen_scheme(sys, Scheme::Euler); }
+        catch (const std::exception&) { return {}; }
+    }
+    return compute_krs_for_scheme(cs, sys, scheme);
+}
+
 static void fill_adaptive_request(const std::vector<CustomScheme>& custom_schemes,
                                   const System& sys, const std::string& scheme,
-                                  const AdaptiveSettings& st, int n, double span,
-                                  int ax0, int ax1, AdaptiveRequest& out) {
+                                  const AdaptiveSettings& st_in, int n, double span,
+                                  int ax0, int ax1, AdaptiveRequest& out, double h_fixed) {
     out = AdaptiveRequest();
+    // BDF 1-5 с постоянным шагом (Fixed step) — тот же драйвер BDF без регулятора (UCUDA_BDF_FIXED):
+    // шаг h, вывод на равномерную сетку.
+    AdaptiveSettings st = st_in;
+    const bool bdf_fixed = !st.enabled && scheme_is_multistep(scheme) && h_fixed > 0;
+    if (bdf_fixed) {
+        char hb[40];
+        std::snprintf(hb, sizeof(hb), "%.17g", h_fixed);
+        st.enabled = true; st.raw_nodes = false; st.h0 = st.hmax = hb; st.hmin.clear();
+    }
     if (!st.enabled || sys.is_map) return;
     out.enabled      = true;
     out.raw_nodes    = st.raw_nodes;
     out.peak_interp  = st.peak_interp;
     out.axis_kind[0] = ax0;
     out.axis_kind[1] = ax1;
+    // BDF 1-5: драйвер свипов — многошаговый (kernels/ucuda_bdf.cuh, UCUDA_BDF_DRIVER) с тем же
+    // интерфейсом, что у адаптивного; в слотах модуля rhs = [f; g], dprep — якобиан. z0 точки свипа
+    // и клонов LLE/LS он согласует сам (проекция на g = 0 при старте).
+    if (scheme_is_multistep(scheme)) {
+        const bool dae = sys.dae_nx >= 0;
+        if (dae != (scheme == kBdfSchemeDae)) {
+            out.setup_error = dae ? "a DAE needs DAE BDF 1-5" : "DAE BDF 1-5 needs a DAE system";
+            return;
+        }
+        // Индекс 3 — через GGL (bdf_prepare_system, как в Analysis): множители mu добавляются к состоянию
+        // (extra_x, старт 0; сборщик запроса расширяет amountOfX и НУ), результаты — по прежним индексам.
+        System sp;
+        { std::string e; if (!bdf_prepare_system(sys, sp, &e)) { out.setup_error = e; return; } }
+        out.extra_x = (int)sp.vars.size() - (int)sys.vars.size();
+        AdaptiveCode code;
+        try { codegen_bdf_bodies(sp, code.rhs, code.dprep, "D"); }
+        catch (const std::exception& e) { out.setup_error = std::string("BDF codegen: ") + e.what(); return; }
+        code.p = 5; code.q = 4; code.nlo = 1; code.emb_rhs = 1; code.dense_order = 3;
+        std::string err;
+        if (!adaptive_build_params(st, code, n + out.extra_x, span, out.params, err, &out.ctrl_body)) {
+            out.setup_error = err; return;
+        }
+        out.ctrl_body.clear();   // шаг и порядок выбирает сам BDF (DASSL), регулятор не нужен
+        out.rhs = code.rhs; out.dprep = code.dprep;
+        // Плотный выход у BDF свой (DDATRP); непустое тело — признак "плотный выход есть" для CPU-модуля.
+        out.deval = "    (void)D; (void)th; (void)Yo;\n";
+        const int N = (int)sp.vars.size();
+        std::string kidx;
+        for (int i = 0; i < N; ++i)
+            kidx += (i ? "," : "") + std::to_string(i < (int)sp.dae_index.size() && sp.dae_index[(size_t)i] > 1
+                                                    ? sp.dae_index[(size_t)i] : 1);
+        out.prefix = "#define UCUDA_BDF_DRIVER 1\n#define UCUDA_BDF_NX " + std::to_string(dae ? sp.dae_nx : N)
+                   + "\n#define UCUDA_BDF_KIDX {" + kidx + "}\n"
+                   + "#define UCUDA_BDF_NSLOT " + std::to_string(newton_slot(sp)) + "\n"   // Ньютон из a[]
+                   + (bdf_fixed ? "#define UCUDA_BDF_FIXED 1\n" : "");
+        if (dae && sp.dae_nx < N)   // клоны LLE/LS — по x (ucuda_lyap_init_clones / renorm)
+            out.prefix += "#define UCUDA_AD_DAE_NX " + std::to_string(sp.dae_nx) + "\n";
+        out.tol_ratio = out.params.rtol > 0 ? out.params.atol[0] / out.params.rtol : 1.0;
+        out.lyap_renorm = st.lyap_renorm;
+        if (bdf_fixed) { out.desc = scheme + " (multistep, DASSL form), fixed step " + st.h0; return; }
+        out.desc = scheme + " (multistep, DASSL form), rtol " + st.rtol + ", atol " + st.atol
+                 + (st.hmax.empty() ? std::string() : ", h_max " + st.hmax);
+        return;
+    }
     if (!adaptive_scheme_name_ok(scheme)) {
         out.setup_error = adaptive_scheme_hint();
         return;
@@ -1654,6 +1876,10 @@ static void fill_adaptive_request(const std::vector<CustomScheme>& custom_scheme
     std::string err;
     if (!adaptive_build_params(st, code, n, span, out.params, err, &out.ctrl_body)) { out.setup_error = err; return; }
     out.rhs = code.rhs; out.emb = code.emb; out.dprep = code.dprep; out.deval = code.deval;
+    // Нативная ДАУ (DAE Rodas4, индекс 1): драйвер согласует z0 каждой точки и клонов LLE/LS
+    // (ucuda_ad_dae_project в ucuda_adaptive.cuh), клоны возмущаются по x.
+    if (sys.dae_nx >= 0 && sys.dae_nx < (int)sys.vars.size())
+        out.prefix = "#define UCUDA_AD_DAE_NX " + std::to_string(sys.dae_nx) + "\n";
     // Ось tol держит отношение atol/rtol текущих настроек.
     out.tol_ratio = out.params.rtol > 0 ? out.params.atol[0] / out.params.rtol : 1.0;
     out.lyap_renorm = st.lyap_renorm;
@@ -1663,6 +1889,15 @@ static void fill_adaptive_request(const std::vector<CustomScheme>& custom_scheme
              + (st.max_rej.empty() ? std::string() : ", max rejects " + st.max_rej);
 }
 
+// Тела свипа добавили переменные (BDF индекса 3: множители GGL) — модуль считает amountOfX + extra_x,
+// хвост НУ — нули (mu = 0 на решении). Результаты читаются по прежним индексам x / z.
+template <class R>
+static void sweep_extend_state(R& req) {
+    if (req.adaptive.extra_x <= 0 || !req.adaptive.setup_error.empty()) return;
+    req.amountOfX += req.adaptive.extra_x;
+    req.initial_conditions.resize((size_t)req.amountOfX, 0.0);
+}
+
 // Снапшот текущих GUI-полей конкретной БД в Bifurcation1DRequest. Делается на
 // главном потоке перед стартом async-расчёта, чтобы worker работал со
 // стабильной копией и пользователь мог в это время менять поля без race.
@@ -1670,7 +1905,7 @@ static void fill_adaptive_request(const std::vector<CustomScheme>& custom_scheme
 static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession& s,
                                                 const BifurcationDiagramConfig& bd) {
     Bifurcation1DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, bd.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, bd.scheme, bd.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -1712,7 +1947,8 @@ static Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession
     req.emit_all_samples = bd.plot_all_iterates;
     req.csv_output_path = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, bd.scheme, bd.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, bd.ad_axis, 0, req.adaptive);
+                          req.transient_time + req.t_max, bd.ad_axis, 0, req.adaptive, req.h);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -1728,7 +1964,7 @@ static void apply_bif1d_result(BifurcationDiagramConfig& bd, Bifurcation1DResult
 static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession& s,
                                                 const BifurcationDiagramConfig& bd) {
     Bifurcation2DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, bd.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, bd.scheme, bd.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -1784,7 +2020,8 @@ static Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession
     req.mult_interval      = parse_d(bd.mult_interval_text, (double)::mult_interval);
     req.csv_output_path    = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, bd.scheme, bd.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, bd.ad_axis, bd.ad_axis_2, req.adaptive);
+                          req.transient_time + req.t_max, bd.ad_axis, bd.ad_axis_2, req.adaptive, req.h);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -2007,7 +2244,7 @@ static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     req.continuation         = c.continuation;
     req.continuation_reverse = c.continuation_reverse;
     req.use_cpu              = !c.use_gpu;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -2044,7 +2281,8 @@ static LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     req.vector_transient = parse_d(c.vtr_text, 0.0);
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive);
+                          req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive, req.h);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -2062,7 +2300,7 @@ static void apply_lle1d_result(LLECurveConfig& c, LLE1DResult&& r) {
 static LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
                                         const LLECurveConfig& c) {
     LLE2DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -2109,7 +2347,8 @@ static LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
     req.vector_transient   = parse_d(c.vtr_text, 0.0);
     req.csv_output_path    = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
+                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive, req.h);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -2560,7 +2799,7 @@ void BasinsAnalysisSession::remove_config(int i) {
 static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
                                           const BasinsConfig& c) {
     BasinsRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -2610,7 +2849,8 @@ static BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
     req.mult1    = (numb)parse_d(c.mult_feature1_text, 1.0);
     req.mult2    = (numb)parse_d(c.mult_feature2_text, 1.0);
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, 0, 0, req.adaptive);
+                          req.transient_time + req.t_max, 0, 0, req.adaptive, req.h);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -3499,7 +3739,7 @@ static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
     req.continuation         = c.continuation;
     req.continuation_reverse = c.continuation_reverse;
     req.use_cpu              = !c.use_gpu;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -3536,7 +3776,8 @@ static LS1DRequest build_ls1d_request(const LyapunovSpectrumAnalysisSession& s,
     req.vector_transient = parse_d(c.vtr_text, 0.0);
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive);
+                          req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive, req.h);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -3552,7 +3793,7 @@ static void apply_ls1d_result(LSCurveConfig& c, LS1DResult&& r) {
 static LS2DRequest build_ls2d_request(const LyapunovSpectrumAnalysisSession& s,
                                       const LSCurveConfig& c) {
     LS2DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -3599,7 +3840,8 @@ static LS2DRequest build_ls2d_request(const LyapunovSpectrumAnalysisSession& s,
     req.vector_transient   = parse_d(c.vtr_text, 0.0);
     req.csv_output_path    = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
+                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive, req.h);
+    sweep_extend_state(req);
     return req;
 }
 
@@ -3825,7 +4067,7 @@ void SignalMetricsAnalysisSession::remove_config(int i) {
 static SignalMetricsRequest build_metrics_request(const SignalMetricsAnalysisSession& s,
                                                   const SignalMetricsConfig& c) {
     SignalMetricsRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
     req.dimension = c.mode_2d ? 2 : 1;
 
@@ -3883,7 +4125,8 @@ static SignalMetricsRequest build_metrics_request(const SignalMetricsAnalysisSes
     // 1D: вторая ось не участвует, и её код от режима 2D не должен уводить расчёт из модуля
     // узлов (ad_nodes_module смотрит обе оси).
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, c.ad_axis, c.mode_2d ? c.ad_axis_2 : 0, req.adaptive);
+                          req.transient_time + req.t_max, c.ad_axis, c.mode_2d ? c.ad_axis_2 : 0, req.adaptive, req.h);
+    sweep_extend_state(req);
     return req;
 }
 

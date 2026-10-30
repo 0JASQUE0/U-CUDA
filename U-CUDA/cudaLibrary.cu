@@ -128,8 +128,8 @@ __device__ __host__ __forceinline__ void calculateDiscreteModel(numb* X, const n
 struct UcudaKrsPre {};
 __device__ __host__ __forceinline__ void ucudaKrsPrep(UcudaKrsPre&, const numb*, const numb) {}
 __device__ __host__ __forceinline__
-void calculateDiscreteModelP(numb* X, const numb* a, const numb h, const UcudaKrsPre&) {
-	calculateDiscreteModel(X, a, h);
+void calculateDiscreteModelP(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h, const UcudaKrsPre&) {
+	calculateDiscreteModel(X, UCUDA_TA(ucuda_t) a, h);
 }
 #endif
 
@@ -373,7 +373,9 @@ __device__ __host__ void calculateDiscreteModelforFastSynchro(numb* X, numb* S1,
 	for (int i = 0; i < AMOUNTOFX; ++i)
 		N[i] = K[i] * (S1[i] - X[i]);
 
-	calculateDiscreteModel(X, a, eff_h);
+	// FastSync с явным t не поддерживается (движок отказывает раньше); t = 0 — только чтобы
+	// модуль неавтономной системы собирался: cudaLibrary.cu входит в каждый модуль целиком.
+	calculateDiscreteModel(X, UCUDA_TA((numb)0) a, eff_h);
 
 	for (int i = 0; i < AMOUNTOFX; ++i)
 		X[i] += h * N[i];
@@ -482,6 +484,40 @@ __device__ __forceinline__ void ucudaProgressTopUp(int* progressCounter, int pro
 	if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
 }
 
+// Отсечённая монолитная сборка (UCUDA_PRUNE_KERNELS, см. nvrtc_prune_kernels в parametric_engine.cpp):
+// каждое ядро ниже обёрнуто в #if и остаётся, только если движок попросил его (UCUDA_KEEP_<имя>).
+// Обёртки цикла (loopCalculateDiscreteModel_int / ...Peaks_int) на большом теле шага не встраиваются, и NVVM
+// подстраивает их под ВСЕ вызовы: аргумент, константный во всех вызовах, сворачивается, у указателя
+// выводится адресное пространство. В полной сборке вызовы разнообразны; у одного-двух оставшихся ядер —
+// нет (у LLE preScaller всегда 1 и data = nullptr), и код обёртки, а с ним FMA в шаге, меняется. Поэтому,
+// если обёртку зовёт хоть что-то оставшееся (ядро библиотеки из списка или шаблон: UCUDA_KEEP_LOOP /
+// UCUDA_KEEP_PEAKS_LOOP ставит движок по тексту шаблона), остаются и два ядра полной сборки, которые
+// вместе дают все виды её аргументов (calculateDiscreteModelCUDA: data и флаги из параметров, локальный
+// &ticks; LLEKernelCUDA: константы, nullptr). Синтетический держатель с такими вызовами не годится:
+// NVVM встраивает их в него самого, и в модуле остаётся не тот набор вызовов. Новое ядро библиотеки,
+// зовущее обёртку, — добавить в список.
+#ifdef UCUDA_PRUNE_KERNELS
+#if defined(UCUDA_KEEP_PEAKS_LOOP) || defined(UCUDA_KEEP_calculateDiscreteModelAvgPeaksCUDA)
+#ifndef UCUDA_KEEP_calculateDiscreteModelPeaksCUDA
+#define UCUDA_KEEP_calculateDiscreteModelPeaksCUDA
+#endif
+#endif
+#if defined(UCUDA_KEEP_LOOP) || defined(UCUDA_KEEP_calculateDiscreteModelCUDA) \
+	|| defined(UCUDA_KEEP_calculateDiscreteModelPeaksCUDA) || defined(UCUDA_KEEP_calculateDiscreteModelAvgPeaksCUDA) \
+	|| defined(UCUDA_KEEP_calculateDiscreteModelICCUDA) || defined(UCUDA_KEEP_calculateDiscreteModelICCUDA_logAxes) \
+	|| defined(UCUDA_KEEP_LLEKernelCUDA) || defined(UCUDA_KEEP_LLEKernelICCUDA) \
+	|| defined(UCUDA_KEEP_LSKernelCUDA) || defined(UCUDA_KEEP_LSKernelICCUDA) \
+	|| defined(UCUDA_KEEP_calculateDiscreteModelICCforFastSynchro) || defined(UCUDA_KEEP_calculateDiscreteModelforFastSynchroCUDA)
+#ifndef UCUDA_KEEP_calculateDiscreteModelCUDA
+#define UCUDA_KEEP_calculateDiscreteModelCUDA
+#endif
+#ifndef UCUDA_KEEP_LLEKernelCUDA
+#define UCUDA_KEEP_LLEKernelCUDA
+#endif
+#endif
+#endif
+
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelICCforFastSynchro)
 __global__ void calculateDiscreteModelICCforFastSynchro(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -645,6 +681,7 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 
 	return;
 }
+#endif
 
 __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	numb* x,
@@ -1145,13 +1182,14 @@ struct PeakStream
 
 __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values, 
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
-	int writableVar, const numb maxValue, numb* data, 
-	const int startDataIndex, const int writeStep)
+	int writableVar, const numb maxValue, numb* data,
+	const int startDataIndex, const int writeStep UCUDA_NP)
 {
 
 	numb xPrev[AMOUNTOFX];
 	UcudaKrsPre krsPre;
 	ucudaKrsPrep(krsPre, values, h);
+	UCUDA_NBEGIN
 	// Глобальный цикл, который производит вычисления заданные amountOfIterations раз
 	// Счётчик size_t под стать amountOfIterations: при int-счётчике широкий
 	// параметр не давал бы ничего, цикл переполнялся бы на 2^31-м шаге.
@@ -1167,11 +1205,12 @@ __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values,
 
 		// Моделируем систему preScaller раз ( то есть если preScaller > 1, то мы пропустим ( preScaller - 1 ) в смоделированной траектории )
 		for ( int j = 0; j < preScaller; ++j )
-			calculateDiscreteModelP(x, values, h, krsPre);
+			UCUDA_STEP(x, values, h, krsPre);
 
 		// Если isnan или isinf - возвращаем false, ибо это нежелательное поведение системы
 		if ( isnan( x[writableVar] ) || isinf( x[writableVar] ) )
 		{
+			UCUDA_NEND
 			return false;
 		}
 
@@ -1179,10 +1218,12 @@ __device__  bool loopCalculateDiscreteModel(numb* x, const numb* values,
 		if ( maxValue != 0 )
 			if ( fabs( x[writableVar] ) > maxValue )
 			{
+				UCUDA_NEND
 				return false;
 			}
 	}
 
+	UCUDA_NEND
 	return true;
 }
 
@@ -1275,7 +1316,7 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModel_int_core(
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, numb* data,
 	const size_t startDataIndex, const int writeStep,
-	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NREF)
 {
 	//numb* xPrev = new numb[amountOfX];
 	numb xPrev[AMOUNTOFX];
@@ -1294,18 +1335,18 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModel_int_core(
 	if (data == nullptr) {
 		size_t i = 0;
 		while (i < amountOfIterations) {
-			calculateDiscreteModelP(x, values, h, krsPre);
+			UCUDA_STEP(x, values, h, krsPre);
 			++i;
 			const int r = ucudaLoopCheck(x, maxValue, cancelFlag, progressCounter, progressStride, ticksReported, sinceReport);
 			if (r != UCUDA_LOOP_GO) return r;
 			if (amountOfIterations - i >= (size_t)(UCUDA_LOOP_CHECK_BLOCK - 1)) {
 				#pragma unroll 4
 				for (int k = 0; k < UCUDA_LOOP_CHECK_BLOCK - 1; ++k)
-					calculateDiscreteModelP(x, values, h, krsPre);
+					UCUDA_STEP(x, values, h, krsPre);
 				i += UCUDA_LOOP_CHECK_BLOCK - 1;
 			} else {
 				for (; i < amountOfIterations; ++i)
-					calculateDiscreteModelP(x, values, h, krsPre);
+					UCUDA_STEP(x, values, h, krsPre);
 			}
 		}
 	}
@@ -1339,11 +1380,11 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModel_int_core(
 			//#pragma unroll
 			for (int j = 0; j < preScaller; ++j) {
 				//calculateDiscreteModel_rand(startDataIndex + i * writeStep, x, values, h);
-				calculateDiscreteModelP(x, values, h, krsPre);
+				UCUDA_STEP(x, values, h, krsPre);
 			}
 		}
 		else
-			calculateDiscreteModelP(x, values, h, krsPre);
+			UCUDA_STEP(x, values, h, krsPre);
 
 		if (--untilCheck < 0) {
 			untilCheck = CHECK_INTERVAL - 1;
@@ -1393,7 +1434,7 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModel_int_core(
 	//#pragma unroll
 	for (int j = 0; j < preScaller; ++j) {
 		//calculateDiscreteModel_rand(startDataIndex + i * writeStep, x, values, h);
-		calculateDiscreteModelP(x, values, h, krsPre);
+		UCUDA_STEP(x, values, h, krsPre);
 	}
 
 	// Возврат — REGIME_* из configCUDA.h:
@@ -1460,7 +1501,7 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModelPeaks_int_core
 	numb* __restrict__ x, const numb* __restrict__ values,
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, PeakStream& peaks,
-	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NREF)
 {
 	numb xPrev[AMOUNTOFX];
 	size_t sinceReport = 0;
@@ -1483,8 +1524,8 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModelPeaks_int_core
 			#pragma unroll
 			for (int k = 0; k < UCUDA_PEAK_CHUNK; ++k) {
 				samples[k] = ucudaSampleOf(x, writableVar, pick);
-				if (PS1) calculateDiscreteModelP(x, values, h, krsPre);
-				else for (int j = 0; j < preScaller; ++j) calculateDiscreteModelP(x, values, h, krsPre);
+				if (PS1) UCUDA_STEP(x, values, h, krsPre);
+				else for (int j = 0; j < preScaller; ++j) UCUDA_STEP(x, values, h, krsPre);
 				if (k == 0 && check) {
 					const int r = ucudaLoopCheck(x, maxValue, cancelFlag, progressCounter, progressStride, ticksReported, sinceReport);
 					if (r != UCUDA_LOOP_GO) return r;
@@ -1516,8 +1557,8 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModelPeaks_int_core
 		if (EA) peaks.pushRaw(sample);
 		else    peaks.pushAt(sample, i);
 
-		if (PS1) calculateDiscreteModelP(x, values, h, krsPre);
-		else for (int j = 0; j < preScaller; ++j) calculateDiscreteModelP(x, values, h, krsPre);
+		if (PS1) UCUDA_STEP(x, values, h, krsPre);
+		else for (int j = 0; j < preScaller; ++j) UCUDA_STEP(x, values, h, krsPre);
 
 		if (--untilCheck < 0) {
 			untilCheck = UCUDA_LOOP_CHECK_BLOCK - 1;
@@ -1530,7 +1571,7 @@ __device__ __host__ __forceinline__ int loopCalculateDiscreteModelPeaks_int_core
 		xPrev[j] = x[j];
 
 	for (int j = 0; j < preScaller; ++j)
-		calculateDiscreteModelP(x, values, h, krsPre);
+		UCUDA_STEP(x, values, h, krsPre);
 
 	numb tempResult = 0;
 	for (int j = 0; j < AMOUNTOFX; ++j)
@@ -1549,13 +1590,15 @@ __device__ __host__ int loopCalculateDiscreteModel_int(
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, numb* data,
 	const size_t startDataIndex, const int writeStep,
-	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NP)
 {
 	numb x[AMOUNTOFX];
+	UCUDA_NBEGIN
 	for (int j = 0; j < AMOUNTOFX; ++j) x[j] = xs[j];
 	const int r = loopCalculateDiscreteModel_int_core(x, values, h, amountOfIterations, amountOfX, preScaller,
-		writableVar, maxValue, data, startDataIndex, writeStep, cancelFlag, progressCounter, progressStride, ticksReported);
+		writableVar, maxValue, data, startDataIndex, writeStep, cancelFlag, progressCounter, progressStride, ticksReported UCUDA_NA(ucudaN));
 	for (int j = 0; j < AMOUNTOFX; ++j) xs[j] = x[j];
+	UCUDA_NEND
 	return r;
 }
 
@@ -1563,24 +1606,27 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 	numb* xs, const numb* values,
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, PeakStream& peaks,
-	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NP)
 {
 	numb x[AMOUNTOFX];
+	UCUDA_NBEGIN
 	for (int j = 0; j < AMOUNTOFX; ++j) x[j] = xs[j];
 	int r;
 	if (peaks.emitAll)
 		r = loopCalculateDiscreteModelPeaks_int_core<true, false>(x, values, h, amountOfIterations, amountOfX,
-			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported);
+			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported UCUDA_NA(ucudaN));
 	else if (preScaller == 1)
 		r = loopCalculateDiscreteModelPeaks_int_core<false, true>(x, values, h, amountOfIterations, amountOfX,
-			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported);
+			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported UCUDA_NA(ucudaN));
 	else
 		r = loopCalculateDiscreteModelPeaks_int_core<false, false>(x, values, h, amountOfIterations, amountOfX,
-			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported);
+			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported UCUDA_NA(ucudaN));
 	for (int j = 0; j < AMOUNTOFX; ++j) xs[j] = x[j];
+	UCUDA_NEND
 	return r;
 }
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_distributedCalculateDiscreteModelCUDA)
 __global__ void distributedCalculateDiscreteModelCUDA(
 	const size_t		amountOfPointsForSkip,
 	const int		amountOfThreads,
@@ -1620,6 +1666,7 @@ __global__ void distributedCalculateDiscreteModelCUDA(
 
 	return;
 }
+#endif
 
 // Глобальная функция, которая вычисляет траекторию нескольких систем
 
@@ -1700,9 +1747,16 @@ __device__ __forceinline__ bool ucudaSetupSweepPoint(
 		localValues[indicesOfMutVars[1]] = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
 		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 	}
+#ifdef UCUDA_LYAP_NX
+	// ДАУ (этап 7): связь g(x, z; p) = 0 зависит от параметров точки, поэтому z согласуется здесь, для
+	// каждой точки: шаг метода ДАУ при h = 0 — Ньютон по z при фиксированном x (индекс 1; на индексе >= 2
+	// пусто). Старт — z из настроек: это и есть правило выбора ветви при нескольких корнях.
+	calculateDiscreteModel(localX, UCUDA_TA((numb)0) localValues, (numb)0);
+#endif
 	return true;
 }
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelCUDA)
 __global__ void calculateDiscreteModelCUDA(
 	const int		nPts, 
 	const int		nPtsLimiter, 
@@ -1772,15 +1826,16 @@ __global__ void calculateDiscreteModelCUDA(
 	// flag — REGIME_* из configCUDA.h: 1 = OSCILLATION, -1 = FIXED_POINT,
 	// 0 = UNBOUND. (Раньше здесь был комментарий с перепутанными 0 и -1.)
 	int ticks = 0;
+	UCUDA_NVAR(ucudaStep, 0)   // номер шага траектории: t = n*h (UCUDA_NONAUTONOMOUS)
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
 		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, (size_t)idx * sizeOfBlock, 1,
-		cancelFlag, progressCounter, progressStride, &ticks);
+		cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	// Теперь уже по-взрослому моделируем систему
 	if (flag == 1 || flag == -1)
 		flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, iters_local,
 			amountOfInitialConditions, preScaller, writableVar, maxValue, data, (size_t)idx * sizeOfBlock, 1,
-			cancelFlag, progressCounter, progressStride, &ticks);
+			cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	// Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе
 
@@ -1792,6 +1847,7 @@ __global__ void calculateDiscreteModelCUDA(
 	//delete[] localValues;
 	return;
 }
+#endif
 
 // calculateDiscreteModelPeaksCUDA -- calculateDiscreteModelCUDA fused with
 // peakFinderCUDA. Same sweep point (shared ucudaSetupSweepPoint), same
@@ -1802,6 +1858,7 @@ __global__ void calculateDiscreteModelCUDA(
 //
 // Inter-peak intervals are scaled by h_local, not by the launch-wide h the
 // split path could only pass: under a dt-sweep every point has its own step.
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelPeaksCUDA)
 __global__ void calculateDiscreteModelPeaksCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -1859,9 +1916,10 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 		return;
 	}
 
+	UCUDA_NVAR(ucudaStep, 0)
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
 		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, 0, 1,
-		cancelFlag, progressCounter, progressStride, &ticks);
+		cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) {
 		PeakStream peaks;
@@ -1870,7 +1928,7 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 
 		flag = loopCalculateDiscreteModelPeaks_int(localX, localValues, h_local, iters_local,
 			amountOfInitialConditions, preScaller, writableVar, maxValue, peaks,
-			cancelFlag, progressCounter, progressStride, &ticks);
+			cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 		// peakFinderCUDA leaves FP and UNBOUND codes in the array untouched and
 		// only replaces OSCILLATION with the peak count -- same rule here.
@@ -1902,7 +1960,9 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 		if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
 	}
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelCUDA_H)
 __global__ void calculateDiscreteModelCUDA_H(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -1967,7 +2027,9 @@ __global__ void calculateDiscreteModelCUDA_H(
 
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelICCUDA)
 __global__ void calculateDiscreteModelICCUDA(
 	const int		nPts, 
 	const int		nPtsLimiter, 
@@ -2065,7 +2127,9 @@ __global__ void calculateDiscreteModelICCUDA(
 
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelICCUDA_logAxes)
 __global__ void calculateDiscreteModelICCUDA_logAxes(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -2132,6 +2196,7 @@ __global__ void calculateDiscreteModelICCUDA_logAxes(
 	}
 	return;
 }
+#endif
 
 // Функция, которая находит индекс в последовательности значений
 
@@ -2439,6 +2504,7 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 
 // Нахождение пиков в "data" массиве в многопоточном режиме
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_peakFinderCUDA)
 __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h, const int* actualIterations,
 	const size_t peakStride, const int peakCapacity, const bool emitAllSamples)
@@ -2484,7 +2550,9 @@ __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int a
 		peakBase, peakCapacity );
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_globalPeakFinderCUDA)
 __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* globalPeakValue)
 {
@@ -2504,7 +2572,9 @@ __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const
 	globalPeakValue[idx] = globalPeakFinder(data, (size_t)idx * sizeOfBlock, sizeOfBlock);
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_DFT_custom)
 __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq, numb h,
 	const int logFreqAxis)
@@ -2604,6 +2674,7 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 
 	return;
 }
+#endif
 
 // DFT_custom с потоком на пару (точка, частота) вместо потока на точку. Аргументы те же, сетка —
 // amountOfBlocks * nFreq потоков. Зачем: в DFT_custom поток последовательно проходит nFreq частот
@@ -2613,6 +2684,7 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 // cosf/sinf, деление в конце), сумма лишь копится в регистре, а не в AkCOS[]: результат бит-в-бит
 // как у DFT_custom. Соседние потоки — соседние частоты одной точки, поэтому data[n] и window[n]
 // варп читает одним запросом. DFT_custom оставлен для NonLinAnal (hostLibrary.cu).
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_DFT_custom_pf)
 __global__ void DFT_custom_pf(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq, numb h,
 	const int logFreqAxis)
@@ -2670,7 +2742,9 @@ __global__ void DFT_custom_pf(numb* data, const int sizeOfBlock, const int amoun
 	AkCOS[outIndex] = ak / (numb)sizeOfBlock;
 	BkSIN[outIndex] = bk / (numb)sizeOfBlock;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_MeanAndMedianFreqCUDA)
 __global__ void MeanAndMedianFreqCUDA(const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanFreq,  numb* medianFreq)
 {
@@ -2700,7 +2774,9 @@ __global__ void MeanAndMedianFreqCUDA(const int sizeOfBlock, const int amountOfB
 	MeanAndMedianFreq(idx, idx * sizeOfBlock, AoP, outPeaks, timeOfPeaks, meanFreq, medianFreq);
 	//return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_MeanAndVarianceCUDA)
 __global__ void MeanAndVarianceCUDA(const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanPeak, numb* variancePeak, numb* meanInterval, numb* varianceInterval, numb* maxPeak, numb* maxInterval)
 {
@@ -2754,7 +2830,9 @@ __global__ void MeanAndVarianceCUDA(const int sizeOfBlock, const int amountOfBlo
 	MeanAndVariance(idx, idx * sizeOfBlock, AoP, outPeaks, timeOfPeaks, meanPeak, variancePeak, meanInterval, varianceInterval, maxPeak, maxInterval);
 	//return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_peakFinderCUDA_H)
 __global__ void peakFinderCUDA_H(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h)
 {
@@ -2773,7 +2851,9 @@ __global__ void peakFinderCUDA_H(numb* data, const int sizeOfBlock, const int am
 	amountOfPeaks[idx] = peakFinder(data, idx * sizeOfBlock, amountOfPeaks[idx], outPeaks, timeOfPeaks, h);
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_peakFinderCUDAForCalculationOfPeriodicityByOstrovsky)
 __global__ void peakFinderCUDAForCalculationOfPeriodicityByOstrovsky(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, bool* flags, numb ostrovskyThreshold)
 {
@@ -2839,6 +2919,7 @@ __global__ void peakFinderCUDAForCalculationOfPeriodicityByOstrovsky(numb* data,
 		flags[idx * 5 + 4] = false;
 	return;
 }
+#endif
 
 __device__ __host__ int kde(numb* data, const int startDataIndex, const int amountOfPoints,
 	int maxAmountOfPeaks, int kdeSampling, numb kdeSamplesInterval1,
@@ -2908,6 +2989,7 @@ __device__ __host__ int kde(numb* data, const int startDataIndex, const int amou
 	return resultKde;
 }
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_kdeCUDA)
 __global__ void kdeCUDA(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, int* kdeResult, int maxAmountOfPeaks, int kdeSampling, numb kdeSamplesInterval1,
 	numb kdeSamplesInterval2, numb kdeSmoothH)
@@ -2924,6 +3006,7 @@ __global__ void kdeCUDA(numb* data, const int sizeOfBlock, const int amountOfBlo
 	kdeResult[idx] = kde(data, idx * sizeOfBlock, amountOfPeaks[idx], maxAmountOfPeaks,
 		kdeSampling, kdeSamplesInterval1, kdeSamplesInterval2, kdeSmoothH);
 }
+#endif
 
 // Вычисляет расстояние между двумя точками
 
@@ -3146,6 +3229,7 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 
 // Глобальная функция DBSCAN
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_dbscanCUDA)
 __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	const int* amountOfPeaks, numb* intervals, numb* helpfulArray,
 	const numb eps, int* outData,
@@ -3178,9 +3262,11 @@ __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amoun
 
 	outData[idx] = dbscan(data, intervals, helpfulArray, idx * pStride, amountOfPeaks[idx], (int)hStride, idx, eps, outData, multPeak, multInterval, idx * hStride);
 }
+#endif
 
 // Наибольшее число пиков в куске (REGIME_* < 0 не мешают: *out обнулён хостом). Хост
 // читает его перед dbscanWarpCUDA, чтобы выбрать ёмкость буфера в shared memory.
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_ucudaMaxPeaksCUDA)
 __global__ void ucudaMaxPeaksCUDA(const int* amountOfPeaks, const int n, int* out)
 {
 	int m = 0;
@@ -3189,6 +3275,7 @@ __global__ void ucudaMaxPeaksCUDA(const int* amountOfPeaks, const int n, int* ou
 	for (int o = 16; o > 0; o >>= 1) m = max(m, __shfl_down_sync(0xffffffffu, m, o));
 	if ((threadIdx.x & 31) == 0 && m > 0) atomicMax(out, m);
 }
+#endif
 
 // Одномерная ветка dbscan() (multPeak == 0 || multInterval == 0) — по ВАРПУ на ячейку.
 //
@@ -3211,6 +3298,7 @@ __device__ __forceinline__ numb ucudaPosInf()
 	                         : (numb)__int_as_float(0x7f800000);
 }
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_dbscanWarpCUDA)
 __global__ void dbscanWarpCUDA(const numb* data, const int amountOfBlocks,
 	const int* amountOfPeaks, const numb* intervals, numb* helpfulArray,
 	const numb eps, int* outData, const numb multPeak, const numb multInterval,
@@ -3264,6 +3352,7 @@ __global__ void dbscanWarpCUDA(const numb* data, const int amountOfBlocks,
 	for (int o = 16; o > 0; o >>= 1) gaps += __shfl_down_sync(0xffffffffu, gaps, o);
 	if (lane == 0) outData[cell] = gaps + 1;
 }
+#endif
 
 // Union-find для dbscanWarp2DCUDA: корень — элемент, который указывает сам на себя.
 // Дорожки варпа сливают компоненты одновременно; atomicCAS вешает БОЛЬШИЙ корень под
@@ -3318,6 +3407,7 @@ __device__ __forceinline__ void ucudaUfUnite(int* par, int a, int b)
 // x[cap], y[cap] (numb) и par[cap] (int). cap == 0 — shared не хватило: те же шаги идут
 // по глобальной памяти, сортировка на месте в буферах пиков (после DBSCAN их никто не
 // читает), par — в helpfulArray. Ячейка с пиками больше cap — тоже по глобальной памяти.
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_dbscanWarp2DCUDA)
 __global__ void dbscanWarp2DCUDA(numb* data, const int amountOfBlocks,
 	const int* amountOfPeaks, numb* intervals, numb* helpfulArray,
 	const numb eps, int* outData, const numb multPeak, const numb multInterval,
@@ -3401,6 +3491,7 @@ __global__ void dbscanWarp2DCUDA(numb* data, const int amountOfBlocks,
 	for (int o = 16; o > 0; o >>= 1) roots += __shfl_down_sync(0xffffffffu, roots, o);
 	if (lane == 0) outData[cell] = roots;
 }
+#endif
 
 // ПРИМЕЧАНИЕ: здесь были dbscan_optimized (Spatial Hashing + Stack DFS) и
 // ядро dbscanCUDA_optimized. Удалены как мёртвый код: единственная ссылка на
@@ -3411,10 +3502,19 @@ __global__ void dbscanWarp2DCUDA(numb* data, const int amountOfBlocks,
 // он ограничивает только число пиков в peakFinder и размеры device-буферов.
 
 // ДАУ (X = [x; z]): касательные векторы LLE/LS — только по первым UCUDA_LYAP_NX компонентам.
-// Норма и Грам-Шмидт — по x, а сдвиг клона умножается целиком, так что z клона остаётся
-// согласованной со связью в первом порядке. Без макроса (ОДУ) — все переменные, текст прежний.
+// Норма и Грам-Шмидт — по x; после каждой постановки клона x + eps*v его z проецируется на
+// связь (ucudaDaeProject). Без макроса (ОДУ) — все переменные, текст прежний.
 #ifdef UCUDA_LYAP_NX
 #define UCUDA_LYAP_K(n) (UCUDA_LYAP_NX)
+// Клон ДАУ: z берётся с траектории x (предиктор) и решается из g(y_x, z) = 0 — тело метода ДАУ
+// при h = 0 делает ровно это (codegen_dae_scheme). Без проекции методы, берущие f(x_n, z_n),
+// начинали бы блок с рассогласованной z, и показатели смещались на O(h/NT).
+__device__ __host__ inline void ucudaDaeProject(numb* y, const numb* x, UCUDA_TP(const numb ucuda_t) const numb* a, int n)
+{
+	for (int i = UCUDA_LYAP_NX; i < n; ++i)
+		y[i] = x[i];
+	calculateDiscreteModel(y, UCUDA_TA(ucuda_t) a, (numb)0);
+}
 #else
 #define UCUDA_LYAP_K(n) (n)
 #endif
@@ -3424,6 +3524,7 @@ __global__ void dbscanWarp2DCUDA(numb* data, const int amountOfBlocks,
 // доступен из cudaLibrary.cuh. Всё что после этого kernel'а (LLE_IC, LS,
 // dbscan, fastSynchro и пр.) остаётся под гардом, потому что не требуется
 // для текущих режимов engine'а и может нести host-only зависимости.
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_LLEKernelCUDA)
 __global__ void LLEKernelCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -3545,9 +3646,13 @@ __global__ void LLEKernelCUDA(
 	int ticks = 0;
 	const size_t totalSteps = amountOfPointsForSkip_local + (size_t)(sizeOfBlock + warmBlocks) * (size_t)amountOfNTPoints;
 
+#ifdef UCUDA_LYAP_NX
+	calculateDiscreteModel(x, UCUDA_TA((numb)0) localValues, (numb)0);   // ДАУ: z0 на связь при параметрах точки
+#endif
+	UCUDA_NVAR(ucudaStep, 0)   // номер шага основной траектории; клоны начинают блок с ним же
 	int flag = amountOfPointsForSkip_local == 0 ? 1
 		: loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local - 1, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
-		1, cancelFlag, progressCounter, progressStride, &ticks);
+		1, cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	if (flag == 0 || flag == REGIME_CANCELLED) {
 		resultArray[idx] = ucudaNoDataValue(flag);
@@ -3593,6 +3698,9 @@ __global__ void LLEKernelCUDA(
 	for (int i = 0; i < amountOfInitialConditions; ++i) {
 		y[i] = z[i] * eps + x[i];
 	}
+#ifdef UCUDA_LYAP_NX
+	ucudaDaeProject(y, x, UCUDA_TA((numb)ucudaStep * h_local) localValues, amountOfInitialConditions);
+#endif
 
 	numb result = 0;
 	size_t sinceTick = 0, sinceCancel = 0;   // прогресс и Stop по NT-блокам — см. ucudaBlockSignals
@@ -3605,8 +3713,9 @@ __global__ void LLEKernelCUDA(
 
 		//flag = loopCalculateDiscreteModel(y, localValues, h, amountOfNTPoints, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock);
 		//if (!flag) { resultArray[idx] = 0; result;/* goto Error; */ }
+		UCUDA_NVAR(ucudaClone, ucudaStep)
 		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
-			1, nullptr, nullptr, 0, nullptr);
+			1, nullptr, nullptr, 0, nullptr UCUDA_NA(&ucudaStep));
 		if (flag != 0 && ucudaBlockSignals(cancelFlag, progressCounter, progressStride, amountOfNTPoints, sinceTick, sinceCancel, ticks))
 			flag = REGIME_CANCELLED;
 
@@ -3617,7 +3726,7 @@ __global__ void LLEKernelCUDA(
 		}
 
 		flag = loopCalculateDiscreteModel_int(y, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
-			1, nullptr, nullptr, 0, nullptr);
+			1, nullptr, nullptr, 0, nullptr UCUDA_NA(&ucudaClone));
 
 		if (flag == 0 || flag == REGIME_CANCELLED) {
 			resultArray[idx] = ucudaNoDataValue(flag);
@@ -3654,11 +3763,15 @@ __global__ void LLEKernelCUDA(
 		for (int j = 0; j < amountOfInitialConditions; ++j) {
 			y[j] = (numb)(x[j] - ((x[j] - y[j]  + (numb)1e-14) * tempData));
 		}
+#ifdef UCUDA_LYAP_NX
+		ucudaDaeProject(y, x, UCUDA_TA((numb)ucudaStep * h_local) localValues, amountOfInitialConditions);
+#endif
 	}
 
 	resultArray[idx] = result / ((numb)sizeOfBlock * (numb)amountOfNTPoints * h_local);
 	ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 }
+#endif
 
 // Всё что ниже остаётся отрезано от NVRTC — engine эти kernel'ы не зовёт,
 // а часть из них содержит host-only зависимости или ещё не верифицирована
@@ -3666,6 +3779,7 @@ __global__ void LLEKernelCUDA(
 #ifndef __CUDACC_RTC__
 
 // Ядро для LLE (IC)
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_LLEKernelICCUDA)
 __global__ void LLEKernelICCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -3792,6 +3906,7 @@ __global__ void LLEKernelICCUDA(
 
 	resultArray[idx] = result / ((numb)sizeOfBlock * (numb)amountOfNTPoints * h);
 }
+#endif
 
 // projectionOperator + gramSchmidtProcess + LSKernelCUDA — выведены из
 // NVRTC-гарда (нужны для LS). curand_kernel.h теперь доступен под NVRTC.
@@ -3843,16 +3958,21 @@ __device__ __host__ void gramSchmidtProcess(numb* a, numb* b, int amountOfVector
 }
 
 #ifdef UCUDA_LYAP_NX
-// gramSchmidtProcess для ДАУ: K = UCUDA_LYAP_NX векторов длины n (шаг n), скалярные
-// произведения и нормы — по первым K компонентам (x), вычитание и деление — по всем n,
-// чтобы z-часть каждого вектора шла той же линейной комбинацией, что и x-часть.
+// gramSchmidtProcess для ДАУ: K = UCUDA_LYAP_NX векторов длины n (шаг n), всё — по первым
+// K компонентам (x); z-часть результата обнуляется, и клон x + eps*b стартует с z траектории
+// (это только предиктор Ньютона: метод ДАУ решает связь заново). Нести z-часть линейной
+// комбинацией нельзя: при близких показателях (λ1 ≈ λ2) x-часть вектора после вычитания
+// мала, нелинейный остаток z-части делится на неё, и предиктор уходит (Mikhailov DAU_n:
+// vd клона -4.6 при -0.44 у траектории, sinh(vd/NVT) ~ 1e42, точка помечалась ушедшей).
 __device__ __host__ void ucudaGramSchmidtDae(numb* a, numb* b, int n, numb* denominators = nullptr)
 {
 	constexpr int K = UCUDA_LYAP_NX;
 	for (int i = 0; i < K; ++i)
 	{
-		for (int j = 0; j < n; ++j)
+		for (int j = 0; j < K; ++j)
 			b[i * n + j] = a[i * n + j];
+		for (int j = K; j < n; ++j)
+			b[i * n + j] = 0;
 
 		for (int j = 0; j < i; ++j)
 		{
@@ -3863,7 +3983,7 @@ __device__ __host__ void ucudaGramSchmidtDae(numb* a, numb* b, int n, numb* deno
 				denominator += b[j * n + k] * b[j * n + k];
 			}
 			numb fraction = denominator == 0 ? 0 : numerator / denominator;
-			for (int k = 0; k < n; ++k)
+			for (int k = 0; k < K; ++k)
 				b[i * n + k] -= fraction * b[j * n + k];
 		}
 	}
@@ -3874,7 +3994,7 @@ __device__ __host__ void ucudaGramSchmidtDae(numb* a, numb* b, int n, numb* deno
 		for (int j = 0; j < K; ++j)
 			denominator += b[i * n + j] * b[i * n + j];
 		denominator = sqrt(denominator);
-		for (int j = 0; j < n; ++j)
+		for (int j = 0; j < K; ++j)
 			b[i * n + j] = denominator == 0 ? 0 : b[i * n + j] / denominator;
 
 		if (denominators != nullptr)
@@ -4036,6 +4156,7 @@ __device__ __forceinline__ void ucudaGramSchmidtN(const numb* __restrict__ a, nu
 	}
 }
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_LSKernelCUDA)
 __global__ void LSKernelCUDA(
 	const int nPts,
 	const int nPtsLimiter,
@@ -4158,6 +4279,9 @@ __global__ void LSKernelCUDA(
 			localValues[indicesOfMutVars[1]] = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
 			                                                              : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 	}
+#ifdef UCUDA_LYAP_NX
+	calculateDiscreteModel(x, UCUDA_TA((numb)0) localValues, (numb)0);   // ДАУ: z0 на связь при параметрах точки
+#endif
 
 	// Общий seed для всех потоков + номер подпоследовательности = idx (см.
 	// LLEKernelCUDA выше — тот же аргумент против idx-как-seed).
@@ -4192,9 +4316,10 @@ __global__ void LSKernelCUDA(
 	int ticks = 0;
 	const size_t totalSteps = amountOfPointsForSkip_local + (size_t)(sizeOfBlock + warmBlocks) * amountOfNTPoints;
 
+	UCUDA_NVAR(ucudaStep, 0)   // номер шага основной траектории; клоны начинают блок с ним же
 	int flag = amountOfPointsForSkip_local == 0 ? 1
 		: loopCalculateDiscreteModel_int(x, localValues, h_local, amountOfPointsForSkip_local - 1, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
-		1, cancelFlag, progressCounter, progressStride, &ticks);
+		1, cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	if (flag == 0 || flag == REGIME_CANCELLED) {
 		for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = ucudaNoDataValue(flag);
@@ -4215,6 +4340,9 @@ __global__ void LSKernelCUDA(
 		for (int i = 0; i < amountOfInitialConditions; ++i) {
 			y[j * amountOfInitialConditions + i] = y[j * amountOfInitialConditions + i] * eps + x[i];
 		}
+#ifdef UCUDA_LYAP_NX
+		ucudaDaeProject(y + j * amountOfInitialConditions, x, UCUDA_TA((numb)ucudaStep * h_local) localValues, amountOfInitialConditions);
+#endif
 	}
 
 	//numb result = 0;
@@ -4222,8 +4350,9 @@ __global__ void LSKernelCUDA(
 
 	for (int i = 0; i < warmBlocks + sizeOfBlock; ++i)
 	{
+		UCUDA_NVAR(ucudaBlock0, ucudaStep)   // клоны идут блок с того же момента, что и x
 		flag = loopCalculateDiscreteModel_int(x, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
-			1, nullptr, nullptr, 0, nullptr);
+			1, nullptr, nullptr, 0, nullptr UCUDA_NA(&ucudaStep));
 		if (flag != 0 && ucudaBlockSignals(cancelFlag, progressCounter, progressStride, amountOfNTPoints, sinceTick, sinceCancel, ticks))
 			flag = REGIME_CANCELLED;
 		if (flag == 0 || flag == REGIME_CANCELLED) {
@@ -4233,8 +4362,9 @@ __global__ void LSKernelCUDA(
 		}
 		for (int j = 0; j < UCUDA_LYAP_K(amountOfInitialConditions); ++j)
 		{
+			UCUDA_NVAR(ucudaClone, ucudaBlock0)
 			flag = loopCalculateDiscreteModel_int(y + j * amountOfInitialConditions, localValues, h_local, blockIters, amountOfInitialConditions, 1, 0, maxValue, nullptr, idx * sizeOfBlock,
-				1, nullptr, nullptr, 0, nullptr);
+				1, nullptr, nullptr, 0, nullptr UCUDA_NA(&ucudaClone));
 			if (flag == 0 || flag == REGIME_CANCELLED) {
 				for (int m = 0; m < amountOfInitialConditions; ++m) resultArray[idx * amountOfInitialConditions + m] = ucudaNoDataValue(flag);
 				ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
@@ -4268,6 +4398,9 @@ __global__ void LSKernelCUDA(
 			for (int j = 0; j < amountOfInitialConditions; ++j) {
 				y[k * amountOfInitialConditions + j] = (numb)(x[j] + z[k * amountOfInitialConditions + j] * eps);
 			}
+#ifdef UCUDA_LYAP_NX
+			ucudaDaeProject(y + k * amountOfInitialConditions, x, UCUDA_TA((numb)ucudaStep * h_local) localValues, amountOfInitialConditions);
+#endif
 		}
 	}
 
@@ -4280,10 +4413,12 @@ __global__ void LSKernelCUDA(
 #endif
 	ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 }
+#endif
 
 // Всё что ниже снова под гардом — engine не зовёт, потенциально хост-only.
 #ifndef __CUDACC_RTC__
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_LSKernelICCUDA)
 __global__ void LSKernelICCUDA(
 	const int nPts,
 	const int nPtsLimiter,
@@ -4433,9 +4568,11 @@ __global__ void LSKernelICCUDA(
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 		resultArray[idx * amountOfInitialConditions + i] = result[i] / tIntegrated;
 }
+#endif
 
 // Нахождение среднего значения пиков и межпиковых интервалов
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_avgPeakFinderCUDA_logMaximas)
 __global__ void avgPeakFinderCUDA_logMaximas(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* systemCheker, numb h)
 {
@@ -4491,6 +4628,7 @@ __global__ void avgPeakFinderCUDA_logMaximas(numb* data, const int sizeOfBlock, 
 
 	return;
 }
+#endif
 
 // Открываем доступ под NVRTC для basins-pipeline (U-CUDA)
 // Группа kernel'ов до CUDA_dbscan_search_unbound_points_kernel включительно
@@ -4564,6 +4702,7 @@ numb compute_basin_feature(int feat,
 // hSweepAxis is fixed at -1: BasinsRequest has no h axis. logAxisMask carries
 // only the ±log bits of the IC axes (UCUDA_SYMLOG_SHIFT + i); 0 is the linear
 // grid the kernel always had.
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelAvgPeaksCUDA)
 __global__ void calculateDiscreteModelAvgPeaksCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -4623,9 +4762,10 @@ __global__ void calculateDiscreteModelAvgPeaksCUDA(
 		return;
 	}
 
+	UCUDA_NVAR(ucudaStep, 0)
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
 		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, 0, 1,
-		cancelFlag, progressCounter, progressStride, &ticks);
+		cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	PeakStream peaks;
 	peaks.init(nullptr, nullptr, 0, h * (numb)preScaller, iters_local, 0);
@@ -4633,7 +4773,7 @@ __global__ void calculateDiscreteModelAvgPeaksCUDA(
 	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT)
 		flag = loopCalculateDiscreteModelPeaks_int(localX, localValues, h_local, iters_local,
 			amountOfInitialConditions, preScaller, writableVar, maxValue, peaks,
-			cancelFlag, progressCounter, progressStride, &ticks);
+			cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	if (systemCheker != nullptr) systemCheker[idx] = flag;
 
@@ -4678,7 +4818,9 @@ __global__ void calculateDiscreteModelAvgPeaksCUDA(
 		if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
 	}
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_avgPeakFinderCUDA)
 __global__ void avgPeakFinderCUDA(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* systemCheker, numb h,
 	int feature1, int feature2, numb mult1, numb mult2)
@@ -4753,7 +4895,9 @@ __global__ void avgPeakFinderCUDA(numb* data, const int sizeOfBlock, const int a
 	outAvgPeaks[idx]    = mult1 * compute_basin_feature(feature1, mean_p, mean_i, rms_p, rms_i, std_p, std_i);
 	AvgTimeOfPeaks[idx] = mult2 * compute_basin_feature(feature2, mean_p, mean_i, rms_p, rms_i, std_p, std_i);
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_avgPeakFinderCUDA_for2Dbif)
 __global__ void avgPeakFinderCUDA_for2Dbif(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* PeaksAmount, int* systemCheker, numb h)
 {
@@ -4803,6 +4947,7 @@ __global__ void avgPeakFinderCUDA_for2Dbif(numb* data, const int sizeOfBlock, co
 
 	return;
 }
+#endif
 
 // Seed-поиск (search_fixed / search_clear / search_unbound ниже) находит
 // ЛЮБУЮ ещё не размеченную точку нужного типа, чтобы начать от неё новый
@@ -4817,6 +4962,7 @@ __global__ void avgPeakFinderCUDA_for2Dbif(numb* data, const int sizeOfBlock, co
 // наименьший idx среди подходящих. Sentinel -1 (бит-паттерн 0xFFFFFFFF)
 // численно равен UINT_MAX, поэтому конвенция "res == -1 => не найдено"
 // переживает unsigned-перетолкование без изменений на host-стороне.
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_CUDA_dbscan_kernel)
 __global__ void CUDA_dbscan_kernel(numb* data, numb* intervals, int* labels,
 	const int amountOfData, const numb eps, int amountOfClusters,
 	int* amountOfNeighbors, int* neighbors, int idxCurPoint, int* helpfulArray)
@@ -4859,7 +5005,9 @@ __global__ void CUDA_dbscan_kernel(numb* data, numb* intervals, int* labels,
 		neighbors[atomicAdd(amountOfNeighbors, 1)] = idx;		// Фиксируем индекс найденного соседа - его ждет та же участь
 	}
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_CUDA_dbscan_search_clear_points_kernel)
 __global__ void CUDA_dbscan_search_clear_points_kernel(numb* data, numb* intervals, int* helpfulArray, int* labels,
 	const int amountOfData, int* res)
 {
@@ -4873,7 +5021,9 @@ __global__ void CUDA_dbscan_search_clear_points_kernel(numb* data, numb* interva
 		return;
 	}
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_CUDA_dbscan_search_fixed_points_kernel)
 __global__ void CUDA_dbscan_search_fixed_points_kernel(numb* data, numb* intervals, int* helpfulArray, int* labels,
 	const int amountOfData, int* res)
 {
@@ -4887,7 +5037,9 @@ __global__ void CUDA_dbscan_search_fixed_points_kernel(numb* data, numb* interva
 		return;
 	}
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_CUDA_dbscan_search_unbound_points_kernel)
 __global__ void CUDA_dbscan_search_unbound_points_kernel(numb* data, numb* intervals, int* helpfulArray, int* labels,
 	const int amountOfData, int* res)
 {
@@ -4901,6 +5053,7 @@ __global__ void CUDA_dbscan_search_unbound_points_kernel(numb* data, numb* inter
 		return;
 	}
 }
+#endif
 
 // FastSynchro kernels — теперь ВНУТРИ NVRTC-окна
 // Раньше эта группа была спрятана под `#ifndef __CUDACC_RTC__`, но U-CUDA
@@ -4908,6 +5061,7 @@ __global__ void CUDA_dbscan_search_unbound_points_kernel(numb* data, numb* inter
 // (cuModuleGetFunction → "named symbol not found" иначе). NonLinAnal
 // (Debug-build) тоже компилирует их через обычный nvcc-путь — пути совместимы.
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelforFastSynchroCUDA)
 __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -4966,6 +5120,7 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 		cancelFlag, progressCounter);
 	return;
 }
+#endif
 
 __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	const numb* initConditionsSlave,
@@ -5211,3 +5366,14 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 }
 // (Закрытие NVRTC-guard'а, который ранее окружал FS-kernels, удалено —
 // теперь они видимы как обычные символы и для NVRTC, и для nvcc.)
+
+#ifdef UCUDA_PRUNE_KERNELS
+// Держатель отсечённой монолитной сборки (см. nvrtc_prune_kernels в parametric_engine.cpp и блок перед
+// первым ядром). pow не встраивается, и NVVM подстраивает его под все вызовы: у продолжений их основание
+// всегда 10, и без других ядер __internal_accurate_pow специализировался на константе. Здесь pow зовётся
+// с аргументами из параметров, как в полной сборке. Ядро не запускается.
+__global__ void ucudaPruneKeeper(numb* out, const numb a, const numb b)
+{
+	out[0] = pow(a, b);
+}
+#endif

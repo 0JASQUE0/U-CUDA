@@ -259,6 +259,13 @@ static std::string pick_open_text_file_win() {
     return com_file_dialog(false, f, 2, nullptr);
 }
 
+// Диалог открытия схемы (вкладка DAE): SPICE-netlist или схема KiCad.
+static std::string pick_open_circuit_file_win() {
+    static const COMDLG_FILTERSPEC f[] = {
+        { L"Circuits", L"*.cir;*.net;*.sp;*.spice;*.kicad_sch" }, { L"All files", L"*.*" } };
+    return com_file_dialog(false, f, 2, nullptr);
+}
+
 // Диалог сохранения SPICE-netlist'а.
 static std::string pick_save_netlist_file_win() {
     static const COMDLG_FILTERSPEC f[] = {
@@ -336,6 +343,7 @@ int main() {
     cb.pick_save_file_csv = pick_save_csv_file_win;
     cb.pick_save_file_netlist = pick_save_netlist_file_win;
     cb.pick_open_file_text = pick_open_text_file_win;
+    cb.pick_open_file_circuit = pick_open_circuit_file_win;
 
     // Право-клик "Copy image to clipboard" на любой диаграмме стекается
     // сюда (см. plot_axis.h set_screenshot_request_sink).
@@ -404,11 +412,17 @@ int main() {
     model.slancm_enabled = (have_cfg && !app_cfg.slancm_enabled.empty())
                          ? app_cfg.slancm_enabled : default_enabled_slancm();
     set_enabled_slancm(model.slancm_enabled);
+    // Маски схем и методов ДАУ: без ключа в конфиге (или без конфига) — набор свежей установки.
+    model.hidden_schemes     = app_cfg.has_hidden_schemes ? app_cfg.hidden_schemes : default_hidden_schemes();
+    model.hidden_dae_methods = app_cfg.has_hidden_dae_methods ? app_cfg.hidden_dae_methods
+                                                              : default_hidden_dae_methods();
     if (have_cfg) {
         if (app_cfg.ui_scale_override > 0.0f)
             model.ui_scale_override = app_cfg.ui_scale_override;
         model.use_builtin_font = app_cfg.use_builtin_font;
         model.plot_math_font   = app_cfg.plot_math_font;
+        model.field_latex      = app_cfg.field_latex;
+        model.show_alg_ic      = app_cfg.show_alg_ic;
         model.plot_font_scale  = app_cfg.plot_font_scale;
         // colormap_id_or валидирует и мигрирует легаси 0..8; на невалидном
         // значении остаётся дефолт модели — как и раньше при непрошедшей проверке.
@@ -426,7 +440,6 @@ int main() {
         // Ставим ДО восстановления last_app_mode — draw_gui уведёт в Library,
         // если сохранённая вкладка теперь скрыта.
         model.hidden_tabs    = app_cfg.hidden_tabs;
-        model.hidden_schemes = app_cfg.hidden_schemes;
         model.hidden_systems = app_cfg.hidden_systems;
 
         // Restore last-used AppMode. Clamp to the valid enum range so a

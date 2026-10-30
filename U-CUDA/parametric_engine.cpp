@@ -115,6 +115,43 @@ static void add_profiling_nvrtc_opts(std::vector<const char*>& opts, std::string
     if (n > 0 && n < sizeof v) { storage = std::string("--maxrregcount=") + v; opts.push_back(storage.c_str()); }
 }
 
+// Отсечение ядер cudaLibrary.cu в монолитной сборке (этап 10). Модулю нужны только ядра из
+// name_exprs (плюс extern "C" ядра самого шаблона), а cudaLibrary.cu несёт 33 — почти все
+// встраивают шаг, и ptxas компилирует каждое (Mikhailov DAU_n, LLE 2D: 266 с против 11 с).
+// Ядра в cudaLibrary.cu обёрнуты в #if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_<имя>),
+// без UCUDA_PRUNE_KERNELS текст прежний (rdc-библиотека, CPU-DLL, Debug). Чтобы оставшийся код
+// совпал с полной сборкой бит-в-бит, cudaLibrary.cu при обёртках цикла оставляет ещё два своих ядра
+// и держит pow ядром-держателем (см. там). UCUDA_NVRTC_PRUNE=0 — полная сборка, для сравнения.
+static bool nvrtc_prune_kernels() {
+    char v[8];
+    const DWORD n = GetEnvironmentVariableA("UCUDA_NVRTC_PRUNE", v, sizeof v);
+    return !(n > 0 && n < sizeof v && v[0] == '0');
+}
+// src — текст шаблона после подстановок (cudaLibrary.cu в нём только #include): если его собственные
+// ядра зовут обёртки цикла, UCUDA_KEEP_LOOP / UCUDA_KEEP_PEAKS_LOOP — тогда cudaLibrary.cu оставляет и
+// ядра полной сборки, которые дают обёрткам все виды аргументов (блок перед первым ядром там).
+static std::string prune_kernel_defines(const std::vector<const char*>& name_exprs, const std::string& src) {
+    std::string d = "#define UCUDA_PRUNE_KERNELS\n";
+    for (const char* e : name_exprs) { d += "#define UCUDA_KEEP_"; d += e; d += '\n'; }
+    if (src.find("loopCalculateDiscreteModel_int(") != std::string::npos) d += "#define UCUDA_KEEP_LOOP\n";
+    if (src.find("loopCalculateDiscreteModelPeaks_int(") != std::string::npos) d += "#define UCUDA_KEEP_PEAKS_LOOP\n";
+    return d;
+}
+// UCUDA_NVRTC_PTX_DIR=<каталог> — исходник и PTX каждой монолитной сборки в <каталог>\<исходник>_<n>.cu / .ptx
+// (сравнение полной и отсечённой сборок по функциям: полную можно получить из того же .cu без строк
+// UCUDA_PRUNE_KERNELS / UCUDA_KEEP_ одним NVRTC, без ptxas).
+static void dump_module_ptx(const char* src_name, const std::string& src, const std::string& ptx) {
+    char dir[MAX_PATH];
+    const DWORD n = GetEnvironmentVariableA("UCUDA_NVRTC_PTX_DIR", dir, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    static std::atomic<int> seq{0};
+    const std::string base = std::string(dir, n) + "\\" + src_name + "_" + std::to_string(seq++);
+    for (const auto& [ext, text] : { std::pair<const char*, const std::string*>{ ".cu", &src }, { ".ptx", &ptx } }) {
+        FILE* f = nullptr;
+        if (fopen_s(&f, (base + ext).c_str(), "wb") == 0 && f) { std::fwrite(text->data(), 1, text->size(), f); std::fclose(f); }
+    }
+}
+
 // Строка опции для nvrtcCompileProgram. Литералы статические, поэтому указатель
 // живёт дольше вызова.
 const char* nvrtc_fmad_opt() {
@@ -256,6 +293,21 @@ static inline int steps_from_time_int(double t, double h)
 // Возврат — REGIME_* из configCUDA.h (1 = oscillation, -1 = fixed point, 0 = unbound). Проверка
 // расходимости — с тем же шагом, что у GPU-двойника: без записи траектории kLoopCheckBlock,
 // с записью kCheckInterval; БД 1D с записью передаёт kLoopCheckBlock явно (на GPU это цикл пиков).
+// ДАУ (этап 7): z0 точки свипа — на связь при её параметрах (шаг метода ДАУ при h = 0; у ОДУ — ничего).
+// Двойник согласования в ucudaSetupSweepPoint и ядрах продолжения (cudaLibrary.cu, kernels/*_cont).
+// Ось/свип по НУ алгебраической переменной z нативной ДАУ: z каждой точки решается из связи, так что 
+// заданное значение — лишь стартовое приближение Ньютона (выбор ветви), а не координата.
+static const char* const kDaeZAxisMsg = "DAE: an initial-condition axis must be a differential variable "
+    "(algebraic z is solved from the constraint at every point)";
+static bool dae_z_axis(const std::string& body, int var) {
+    const int nx = dae_nx_from_body(body);
+    return nx > 0 && var >= nx;
+}
+
+static void dae_point_start(const KrsCpuStep& step, const std::string& body, numb* x, const numb* a) {
+    if (dae_nx_from_body(body) > 0) step.fn()(x, a, (numb)0);
+}
+
 int cpu_loop_model(KrsCpuStep::StepFn step,
                    numb* x, const numb* a, numb h,
                    size_t iterations, int amountOfX, int preScaller,
@@ -516,6 +568,7 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
     res.peak_times.assign(nPts, {});
 
     std::vector<numb> x(req.initial_conditions.begin(), req.initial_conditions.end());
+    step.step_index(0);   // явное t: траектория с t = 0 (KrsCpuStep::step_index)
     std::vector<numb> a(req.base_values.begin(), req.base_values.end());
     std::vector<numb> block((size_t)maxPointsInBlock);
     std::vector<numb> peaks((size_t)maxPointsInBlock);
@@ -552,6 +605,7 @@ Bifurcation1DResult run_bif1d_continuation_cpu(const Bifurcation1DRequest& req) 
         }
 
         // Transient: x[] НЕ сбрасываем — это и есть перенос с прошлой точки.
+        dae_point_start(step, req.krs_body, x.data(), a.data());
         int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                                   pointsForSkip, req.amountOfX,
                                   /*preScaller*/ 1, /*writableVar*/ 0,
@@ -702,7 +756,7 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
                                           /*reverse*/ false, req.log_scale);
 
         // Каждая точка независима — состояние и параметры восстанавливаем.
-        x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+        { x.assign(req.initial_conditions.begin(), req.initial_conditions.end()); step.step_index(0); }
         a.assign(req.base_values.begin(), req.base_values.end());
 
         numb h_local = (numb)req.h;
@@ -729,6 +783,7 @@ Bifurcation1DResult run_bif1d_cpu(const Bifurcation1DRequest& req) {
         // Вырожденный шаг — траектории нет: unbound, а не fixed point.
         if (h_local <= (numb)0 || pointsInBlock <= 0) { finish_point(REGIME_UNBOUND); continue; }
 
+        dae_point_start(step, req.krs_body, x.data(), a.data());
         int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                                   pointsForSkip, req.amountOfX,
                                   /*preScaller*/ 1, /*writableVar*/ 0,
@@ -824,6 +879,20 @@ std::string hash_key(const std::string& krs_body, int amountOfX) {
 static std::string lyap_nx_prefix(const std::string& krs_body) {
     const int nx = dae_nx_from_body(krs_body);
     return nx > 0 ? "#define UCUDA_LYAP_NX " + std::to_string(nx) + "\n" : std::string();
+}
+
+// Запрос свипа на BDF 1-5 (fill_adaptive_request): в слоте dprep — якобиан, его берут и LLE/LS.
+static bool ad_is_bdf(const AdaptiveRequest& ad) {
+    return ad.prefix.find("UCUDA_BDF_DRIVER") != std::string::npos;
+}
+
+// Явное время t (этап 2): шаг calculateDiscreteModel(X, ucuda_t, a, h), циклы cudaLibrary.cu
+// ведут номер шага (UCUDA_STEP / UCUDA_NA в cudaLibrary.cuh); адаптивные — время драйвера S.t. Ставят только модули, чьи ядра
+// это проводят (БД, LLE/LS, Metrics, бассейны, DFT, Order; фиксированный и адаптивный шаг); build_module отказывает
+// модулю без макроса. У автономного тела пусто — исходник модуля прежний.
+static const char* const kNonautonomousDefine = "#define UCUDA_NONAUTONOMOUS\n";
+static std::string time_prefix(const std::string& krs_body) {
+    return step_body_uses_time(krs_body) ? kNonautonomousDefine : std::string();
 }
 
 // Число касательных векторов LLE/LS: x у метода ДАУ, иначе все N.
@@ -926,8 +995,22 @@ static void fill_curve1d_snapshot(Snap& sn, const Req& req, bool continuation, b
 static void write_curve1d_csv(const LLE1DResult& r, const std::string& path) {
     if (!path.empty()) data_export::export_lle1d(r, path);
 }
-static void write_curve1d_csv(const LS1DResult& r, const std::string& path) {
-    if (!path.empty()) data_export::export_ls1d(r, path);
+// ДАУ: K = lyap_dim показателей — хвост спектра до N у ядер и CPU NaN, в файл он не идёт.
+static void write_curve1d_csv(const LS1DResult& r, const std::string& path, int K) {
+    if (path.empty()) return;
+    if (K >= r.n_exponents) { data_export::export_ls1d(r, path); return; }
+    LS1DResult t = r;
+    t.n_exponents = K;
+    for (auto& v : t.spectrum) if ((int)v.size() > K) v.resize((size_t)K);
+    data_export::export_ls1d(t, path);
+}
+
+// Двойник ucudaDaeProject (cudaLibrary.cu): z клона v — с траектории x, затем шаг ДАУ при h = 0
+// решает связь. У ОДУ (k == n) ничего не делает.
+static void dae_project(const KrsCpuStep& step, const numb* x, numb* v, const numb* a, int k, int n) {
+    if (k >= n) return;
+    for (int i = k; i < n; ++i) v[i] = x[i];
+    step.fn()(v, a, (numb)0);
 }
 
 LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
@@ -979,6 +1062,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     res.flags.assign(nPts, 0);
 
     std::vector<numb> x(req.initial_conditions.begin(), req.initial_conditions.end());
+    step.step_index(0);   // явное t: траектория с t = 0 (KrsCpuStep::step_index)
     std::vector<numb> a(req.base_values.begin(), req.base_values.end());
     std::vector<numb> y((size_t)N, (numb)0);
     const int K = lyap_dim(req.krs_body, N);   // ДАУ: щуп и норма только по x, как в ядре
@@ -1006,10 +1090,14 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
     // cpu_loop_model делает ещё один шаг после цикла (см. ucuda_steps_per_block):
     // блок из ntSteps шагов — это ntSteps - 1 итераций. ntSteps >= 1 проверен до вызова.
     auto advance_block = [&](numb& out_log) -> bool {
+        const long long n0 = step.step_index();   // явное t: щуп идёт блок с того же момента, что x
         if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, (size_t)(ntSteps - 1), N,
                            1, 0, req.max_value, nullptr) == 0) return false;
-        if (cpu_loop_model(step.fn(), y.data(), a.data(), h_local, (size_t)(ntSteps - 1), N,
-                           1, 0, req.max_value, nullptr) == 0) return false;
+        const long long n1 = step.has_time() ? step.step_index(n0) : 0;
+        const bool ok = cpu_loop_model(step.fn(), y.data(), a.data(), h_local, (size_t)(ntSteps - 1), N,
+                                       1, 0, req.max_value, nullptr) != 0;
+        if (step.has_time()) step.step_index(n1);
+        if (!ok) return false;
 
         double d = 0.0;
         for (int l = 0; l < K; ++l) {
@@ -1023,6 +1111,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         const double inv = 1.0 / d;
         for (int l = 0; l < N; ++l)
             y[l] = x[l] - ((x[l] - y[l] + 1e-14) * inv);
+        dae_project(step, x.data(), y.data(), a.data(), K, N);
         return true;
     };
 
@@ -1052,7 +1141,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         // В классическом режиме состояние не переносится: сбрасываем всё, как
         // делает kernel в начале каждого потока.
         if (!continuation) {
-            x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+            { x.assign(req.initial_conditions.begin(), req.initial_conditions.end()); step.step_index(0); }
             seed_probe_direction((unsigned long long)j);
             probe_attached = false;
         }
@@ -1064,6 +1153,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
             continue;
         }
 
+        dae_point_start(step, req.krs_body, x.data(), a.data());
         bool alive = true;
         int  warm  = nWarm;   // неучётные блоки: транзиент касательных векторов / settle
         if (!probe_attached) {
@@ -1080,6 +1170,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
         } else {
             warm = settleBlocks > nWarm ? settleBlocks : nWarm;
         }
+        if (alive) dae_project(step, x.data(), y.data(), a.data(), K, N);   // как ядро: новый параметр
         {
             numb dummy;
             for (int b = 0; b < warm && alive; ++b)
@@ -1105,7 +1196,7 @@ LLE1DResult run_lle1d_cpu(const LLE1DRequest& req, bool continuation) {
             // чистого листа, а не с разошедшегося состояния.
             if (continuation) {
                 probe_attached = false;
-                x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+                { x.assign(req.initial_conditions.begin(), req.initial_conditions.end()); step.step_index(0); }
                 seed_probe_direction((unsigned long long)j + 1ULL);
             }
         }
@@ -1248,10 +1339,11 @@ void cpu_gram_schmidt(const numb* a, numb* b, int n, numb* denominators = nullpt
 }
 
 // Двойник ucudaGramSchmidtDae (cudaLibrary.cu): k векторов длины n, произведения и нормы по
-// первым k компонентам (x), вычитание и деление — по всем n.
+// первым k компонентам (x); z-часть результата обнуляется (клон стартует с z траектории).
 void cpu_gram_schmidt_dae(const numb* a, numb* b, int k, int n, numb* denominators = nullptr) {
     for (int i = 0; i < k; ++i) {
-        for (int j = 0; j < n; ++j) b[i * n + j] = a[i * n + j];
+        for (int j = 0; j < k; ++j) b[i * n + j] = a[i * n + j];
+        for (int j = k; j < n; ++j) b[i * n + j] = (numb)0;
         for (int j = 0; j < i; ++j) {
             numb numerator = (numb)0, denominator = (numb)0;
             for (int m = 0; m < k; ++m) {
@@ -1259,14 +1351,14 @@ void cpu_gram_schmidt_dae(const numb* a, numb* b, int k, int n, numb* denominato
                 denominator += b[j * n + m] * b[j * n + m];
             }
             const numb fraction = (denominator == (numb)0) ? (numb)0 : numerator / denominator;
-            for (int m = 0; m < n; ++m) b[i * n + m] -= fraction * b[j * n + m];
+            for (int m = 0; m < k; ++m) b[i * n + m] -= fraction * b[j * n + m];
         }
     }
     for (int i = 0; i < k; ++i) {
         numb denominator = (numb)0;
         for (int j = 0; j < k; ++j) denominator += b[i * n + j] * b[i * n + j];
         denominator = std::sqrt(denominator);
-        for (int j = 0; j < n; ++j)
+        for (int j = 0; j < k; ++j)
             b[i * n + j] = (denominator == (numb)0) ? (numb)0 : b[i * n + j] / denominator;
         if (denominators != nullptr) denominators[i] = denominator;
     }
@@ -1329,6 +1421,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     res.flags.assign(nPts, 0);
 
     std::vector<numb> x(req.initial_conditions.begin(), req.initial_conditions.end());
+    step.step_index(0);   // явное t: траектория с t = 0 (KrsCpuStep::step_index)
     std::vector<numb> a(req.base_values.begin(), req.base_values.end());
     std::vector<numb> y((size_t)N * N, (numb)0);   // N щупов, абсолютные координаты
     std::vector<numb> z((size_t)N * N, (numb)0);   // рабочий буфер Грама-Шмидта
@@ -1369,11 +1462,19 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     // cpu_loop_model делает ещё один шаг после цикла (см. ucuda_steps_per_block):
     // блок из ntSteps шагов — это ntSteps - 1 итераций. ntSteps >= 1 проверен до вызова.
     auto advance_block = [&](numb* out_logs) -> bool {
+        const long long n0 = step.step_index();   // явное t: клоны идут блок с того же момента, что x
         if (cpu_loop_model(step.fn(), x.data(), a.data(), h_local, (size_t)(ntSteps - 1), N,
                            1, 0, req.max_value, nullptr) == 0) return false;
-        for (int j = 0; j < K; ++j)
+        const long long n1 = step.step_index();
+        for (int j = 0; j < K; ++j) {
+            step.step_index(n0);
             if (cpu_loop_model(step.fn(), y.data() + (size_t)j * N, a.data(), h_local,
-                               (size_t)(ntSteps - 1), N, 1, 0, req.max_value, nullptr) == 0) return false;
+                               (size_t)(ntSteps - 1), N, 1, 0, req.max_value, nullptr) == 0) {
+                step.step_index(n1);
+                return false;
+            }
+        }
+        step.step_index(n1);
 
         for (int k = 0; k < K; ++k)
             for (int l = 0; l < N; ++l)
@@ -1385,6 +1486,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
             if (out_logs) out_logs[k] = std::log(denominators[k] / req.eps);
             for (int j = 0; j < N; ++j)
                 y[(size_t)k * N + j] = x[j] + z[(size_t)k * N + j] * req.eps;
+            dae_project(step, x.data(), y.data() + (size_t)k * N, a.data(), K, N);
         }
         return true;
     };
@@ -1412,7 +1514,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         }
 
         if (!continuation) {
-            x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+            { x.assign(req.initial_conditions.begin(), req.initial_conditions.end()); step.step_index(0); }
             seed_probe_basis((unsigned long long)j);
             probes_attached = false;
         }
@@ -1424,6 +1526,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
             continue;
         }
 
+        dae_point_start(step, req.krs_body, x.data(), a.data());
         bool alive = true;
         int  warm  = nWarm;   // неучётные блоки: транзиент касательных векторов / settle
         if (!probes_attached) {
@@ -1443,6 +1546,8 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
         } else {
             warm = settleBlocks > nWarm ? settleBlocks : nWarm;
         }
+        if (alive)   // как ядро: z клонов — на связь при новом параметре
+            for (int k = 0; k < K; ++k) dae_project(step, x.data(), y.data() + (size_t)k * N, a.data(), K, N);
         for (int b = 0; b < warm && alive; ++b)
             if (!advance_block(nullptr)) alive = false;
 
@@ -1461,7 +1566,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
             res.flags[j] = REGIME_UNBOUND;      // spectrum[j] остаётся NaN
             if (continuation) {
                 probes_attached = false;
-                x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+                { x.assign(req.initial_conditions.begin(), req.initial_conditions.end()); step.step_index(0); }
                 seed_probe_basis((unsigned long long)j + 1ULL);
             }
         }
@@ -1469,7 +1574,7 @@ LS1DResult run_ls1d_cpu(const LS1DRequest& req, bool continuation) {
     }
 
     fill_curve1d_snapshot(res.snapshot, req, continuation, /*on_cpu*/ true);
-    write_curve1d_csv(res, req.csv_output_path);
+    write_curve1d_csv(res, req.csv_output_path, lyap_dim(req.krs_body, req.amountOfX));
     res.ok = true;
     return res;
 }
@@ -1495,6 +1600,7 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
     if (req.sweep_over_var &&
         (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX))
                                                               return fail("var_sweep_index out of range");
+    if (req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
     if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
                                                               return fail("writable_var out of range");
     if (req.n_pts <= 0)         return fail("n_pts must be > 0");
@@ -1539,6 +1645,7 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
     res.flags.assign(nPts, 0);
 
     std::vector<numb> x(req.initial_conditions.begin(), req.initial_conditions.end());
+    step.step_index(0);   // явное t: траектория с t = 0 (KrsCpuStep::step_index)
     std::vector<numb> a(req.base_values.begin(), req.base_values.end());
     std::vector<numb> block((size_t)maxPointsInBlock);
     std::vector<numb> window;
@@ -1562,7 +1669,7 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
                                           req.log_scale);
 
         if (!continuation)
-            x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+            { x.assign(req.initial_conditions.begin(), req.initial_conditions.end()); step.step_index(0); }
 
         if (req.sweep_over_h)        h_local = p;
         else if (req.sweep_over_var) x[(size_t)req.var_sweep_index] = p;
@@ -1580,12 +1687,13 @@ Dft1DResult run_dft1d_cpu(const Dft1DRequest& req, bool continuation) {
                 res.ak_cos[(size_t)j * nFreq + k] = fill;
                 res.bk_sin[(size_t)j * nFreq + k] = fill;
             }
-            if (continuation) x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+            if (continuation) { x.assign(req.initial_conditions.begin(), req.initial_conditions.end()); step.step_index(0); }
             if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
         };
 
         // Вырожденный шаг — траектории нет: unbound, а не fixed point.
         if (h_local <= 0.0 || pointsInBlock <= 2) { mark_dead(REGIME_UNBOUND); continue; }
+        dae_point_start(step, req.krs_body, x.data(), a.data());
 
         int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                                   pointsForSkip, req.amountOfX,
@@ -1760,6 +1868,7 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
 
     const PeakConfig pc = get_peak_config();
     std::vector<numb> x(req.initial_conditions.begin(), req.initial_conditions.end());
+    step.step_index(0);   // явное t: траектория с t = 0 (KrsCpuStep::step_index)
     std::vector<numb> a(req.base_values.begin(), req.base_values.end());
     std::vector<numb> block((size_t)maxPointsInBlock);
     std::vector<numb> peaks((size_t)maxPointsInBlock);
@@ -1777,7 +1886,7 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
         }
         const double p = cont_sweep_value(j, nPts, req.param_lo, req.param_hi, rev, req.log_scale);
         if (!continuation) {
-            x.assign(req.initial_conditions.begin(), req.initial_conditions.end());
+            { x.assign(req.initial_conditions.begin(), req.initial_conditions.end()); step.step_index(0); }
             a.assign(req.base_values.begin(), req.base_values.end());
         }
         numb h_local = (numb)req.h;
@@ -1807,6 +1916,7 @@ SignalMetricsResult run_metrics_cpu(const SignalMetricsRequest& req, bool contin
             if (req.progress) req.progress->store((float)(j + 1) / (float)nPts, std::memory_order_relaxed);
         };
         if (h_local <= (numb)0 || pointsInBlock <= 0) { done(); continue; }
+        dae_point_start(step, req.krs_body, x.data(), a.data());
 
         int flag = cpu_loop_model(step.fn(), x.data(), a.data(), h_local,
                                   pointsForSkip, req.amountOfX,
@@ -2161,6 +2271,7 @@ struct ParametricEngine::Impl {
     std::string src_cudaLibrary_cuh;
     std::string src_cudaMacros_cuh;
     std::string src_ucuda_adaptive_cuh;   // драйвер адаптивного шага (kernels/ucuda_adaptive.cuh)
+    std::string src_ucuda_bdf_cuh;        // BDF 1-5 в форме DASSL (kernels/ucuda_bdf.cuh): свипы на BDF
     std::string src_adaptive_part;        // адаптивные ядра свипов (kernels/adaptive_part.cu)
     std::string src_metrics_adaptive_part; // адаптивное ядро метрик (kernels/metrics_adaptive_part.cu)
     std::string src_lyap_adaptive_part;    // адаптивные LLE/LS (kernels/lyapunov_adaptive_part.cu)
@@ -2546,6 +2657,7 @@ struct ParametricEngine::Impl {
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }
         src_cudaMacros_cuh    = read_text_file(root + "cudaMacros.cuh",            e); if (!e.empty()) { err = e; return false; }
         src_ucuda_adaptive_cuh = read_text_file(root + "ucuda_adaptive.cuh",       e); if (!e.empty()) { err = e; return false; }
+        src_ucuda_bdf_cuh     = read_text_file(root + "ucuda_bdf.cuh",            e); if (!e.empty()) { err = e; return false; }
         src_adaptive_part     = read_text_file(root + "adaptive_part.cu",          e); if (!e.empty()) { err = e; return false; }
         src_metrics_adaptive_part = read_text_file(root + "metrics_adaptive_part.cu", e); if (!e.empty()) { err = e; return false; }
         src_lyap_adaptive_part = read_text_file(root + "lyapunov_adaptive_part.cu", e); if (!e.empty()) { err = e; return false; }
@@ -2560,12 +2672,12 @@ struct ParametricEngine::Impl {
     // load_sources() rewrites configCUDA.h whenever the peak settings change, and reading a
     // std::string while another thread assigns it is a race no matter how rare.
     struct SrcSnapshot {
-        std::string tmpl, lib_cu, lib_cuh, macros_cuh, config_h, adaptive_cuh;
+        std::string tmpl, lib_cu, lib_cuh, macros_cuh, config_h, adaptive_cuh, bdf_cuh;
     };
 
     SrcSnapshot snapshot_sources(const std::string& tmpl) const {
         return { tmpl, src_cudaLibrary_cu, src_cudaLibrary_cuh, src_cudaMacros_cuh, src_configCUDA_h,
-                 src_ucuda_adaptive_cuh };
+                 src_ucuda_adaptive_cuh, src_ucuda_bdf_cuh };
     }
 
     // Функции модуля КРС при раздельной сборке. Шаблон держит тело каждой под своим
@@ -2590,6 +2702,26 @@ struct ParametricEngine::Impl {
     static const KrsFn* krs_fn(const std::string& ph) {
         for (const KrsFn& f : kKrsFns) if (ph == f.ph) return &f;
         return nullptr;
+    }
+    // Шаг неавтономной системы (модуль с UCUDA_NONAUTONOMOUS): время — вторым аргументом, как у
+    // calculateDiscreteModel в шаблоне (UCUDA_TP). Своё имя — PTX шага с временем и без не путаются.
+    // Так же функции адаптивного шага: время перед a, как у UcudaKrsFns с UCUDA_NONAUTONOMOUS.
+    static constexpr KrsFn kKrsFnsT[] = {
+        { "{{KRS_BODY}}", "krs_step_t", "numb* X, const numb ucuda_t, const numb* a, const numb h",
+          "    krs_step_t(X, ucuda_t, a, h);" },
+        { "{{KRS_RHS_BODY}}", "krs_rhs_t", "const numb* X, const numb ucuda_t, const numb* a, numb* F",
+          "    krs_rhs_t(X, ucuda_t, a, F);" },
+        { "{{KRS_EMB_BODY}}", "krs_emb_t",
+          "const numb* X, const numb* F0, const numb ucuda_t, const numb* a, const numb h, numb* Y, numb* E, numb* F1, numb* W",
+          "    krs_emb_t(X, F0, ucuda_t, a, h, Y, E, F1, W);" },
+        { "{{KRS_DPREP_BODY}}", "krs_dprep_t",
+          "const numb* X, const numb* Y, const numb* F0, const numb* F1, const numb ucuda_t, const numb* a, const numb h, numb* W, numb* D",
+          "    krs_dprep_t(X, Y, F0, F1, ucuda_t, a, h, W, D);" },
+    };
+    static const KrsFn* krs_fn(const std::string& ph, bool nonauto) {
+        if (nonauto)
+            for (const KrsFn& f : kKrsFnsT) if (ph == f.ph) return &f;
+        return krs_fn(ph);
     }
 
     // Кэш PTX библиотечной половины: ключ — всё, кроме КРС. Именно это и есть смысл затеи:
@@ -2645,7 +2777,9 @@ struct ParametricEngine::Impl {
             src = replace_all(src, sub.first, sub.second);
         }
         std::string decls;
-        for (const KrsFn& f : kKrsFns) {
+        const bool nonauto = snap.tmpl.find(kNonautonomousDefine) != std::string::npos;
+        for (const KrsFn& f0 : kKrsFns) {
+            const KrsFn& f = *krs_fn(f0.ph, nonauto);
             if (src.find(f.ph) == std::string::npos) continue;
             src = replace_all(src, f.ph, f.call);
             decls += std::string("\nextern \"C\" __device__ void ") + f.name + "(" + f.params + ");";
@@ -2654,9 +2788,9 @@ struct ParametricEngine::Impl {
 
         const std::vector<const char*> hs = { snap.lib_cu.c_str(), snap.lib_cuh.c_str(),
                                               snap.macros_cuh.c_str(), snap.config_h.c_str(),
-                                              snap.adaptive_cuh.c_str() };
+                                              snap.adaptive_cuh.c_str(), snap.bdf_cuh.c_str() };
         const std::vector<const char*> hn = { "cudaLibrary.cu", "cudaLibrary.cuh",
-                                              "cudaMacros.cuh", "configCUDA.h", "ucuda_adaptive.cuh" };
+                                              "cudaMacros.cuh", "configCUDA.h", "ucuda_adaptive.cuh", "ucuda_bdf.cuh" };
         CachedLibPtx fresh;
         fresh.key = lib_key;
         const bool ok = compile_ptx(src, src_name, hs, hn, name_exprs, true,
@@ -2761,13 +2895,15 @@ struct ParametricEngine::Impl {
                       CUmodule& out_module,
                       std::vector<std::string>& lowered,
                       std::string& err) {
-        // Явное время t (этап 2) в свипах ещё не проведено: шаблоны объявляют шаг без
-        // ucuda_t, и NVRTC ответил бы непонятным "identifier ucuda_t is undefined".
+        // Явное время t (этап 2): номер шага проведён через ядра БД, LLE/LS, Metrics, бассейнов и
+        // DFT на фиксированном шаге — их модули приходят с UCUDA_NONAUTONOMOUS (time_prefix).
+        // Остальным (адаптивные свипы, FastSync, Order, Network) — понятный отказ, а не
+        // "identifier ucuda_t is undefined" от NVRTC.
+        const bool nonauto = snap_in.tmpl.find(kNonautonomousDefine) != std::string::npos;
         for (const auto& sub : subs)
             if ((sub.first == "{{KRS_BODY}}" || sub.first == "{{KRS_RHS_BODY}}")
-                && step_body_uses_time(sub.second)) {
-                err = "explicit time t: parameter sweeps (bifurcation, LLE/LS, metrics, basins, "
-                      "FastSync, Order, Network) do not support it yet; use Analysis";
+                && step_body_uses_time(sub.second) && !nonauto) {
+                err = "explicit time t: FastSync and Network do not support it yet";
                 return false;
             }
         // Стадия предрасчёта (krs_prep.h): у шага с блоком констант ("CD fast") горячие
@@ -2805,7 +2941,7 @@ struct ParametricEngine::Impl {
                 }
             }
             for (const auto& sub : subs) {
-                if (const KrsFn* f = krs_fn(sub.first)) {
+                if (const KrsFn* f = krs_fn(sub.first, nonauto)) {
                     krs_fns.emplace_back(f, sub.second);
                     krs_all += f->name; krs_all += '\x1f'; krs_all += sub.second; krs_all += '\x1f';
                     continue;
@@ -2855,6 +2991,8 @@ struct ParametricEngine::Impl {
         for (const auto& sub : subs) src = replace_all(src, sub.first, sub.second);
         if (has_prep)
             krs_insert_before_line(src, "#include \"cudaLibrary.cu\"", krs_prep_inline_defs(prep_sp));
+        if (nvrtc_prune_kernels())
+            krs_insert_before_line(src, "#include \"cudaLibrary.cu\"", prune_kernel_defines(name_exprs, src));
 
         // Виртуальные заголовки для NVRTC. curand_kernel.h-stub НЕ нужен:
         // inline-stub в шаблонах + `#define CURAND_KERNEL_H_` блокируют как
@@ -2865,6 +3003,7 @@ struct ParametricEngine::Impl {
             snap.macros_cuh.c_str(),
             snap.config_h.c_str(),
             snap.adaptive_cuh.c_str(),
+            snap.bdf_cuh.c_str(),
         };
         const char* header_names[] = {
             "cudaLibrary.cu",
@@ -2872,8 +3011,9 @@ struct ParametricEngine::Impl {
             "cudaMacros.cuh",
             "configCUDA.h",
             "ucuda_adaptive.cuh",
+            "ucuda_bdf.cuh",
         };
-        constexpr int n_headers = 5;
+        constexpr int n_headers = 6;
 
         nvrtcProgram prog = nullptr;
         nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), src_name,
@@ -2926,6 +3066,7 @@ struct ParametricEngine::Impl {
         size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
         std::string ptx(ptxsz, '\0');
         nvrtcGetPTX(prog, &ptx[0]);
+        dump_module_ptx(src_name, src, ptx);
 
         // Mangled-имена копируем в свои строки ДО nvrtcDestroyProgram — после
         // destroy указатели становятся невалидны.
@@ -2986,7 +3127,7 @@ struct ParametricEngine::Impl {
             // мог переиспользовать этот кэш без отдельной компиляции.
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template), "bifurcation1d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template), "bifurcation1d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -3011,7 +3152,7 @@ struct ParametricEngine::Impl {
                               int par_or_var, std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         // Узлы шага — свой модуль без плотного выхода (UCUDA_AD_NO_DENSE): состояние нити
         // легче на D, Xp, Fp, а стадии живут только внутри попытки. Своё имя исходника — от
         // него зависит ключ PTX библиотеки при раздельной сборке.
@@ -3023,7 +3164,7 @@ struct ParametricEngine::Impl {
             std::vector<std::string> mg;
             const std::string tmpl = (nodes ? std::string(kAdNodesModulePrefix) : std::string())
                                    + src_template_bif2d + "\n" + src_adaptive_part;
-            if (!build_module(snapshot_sources(tmpl), nodes ? "adaptive_sweep_nodes.cu" : "adaptive_sweep.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), nodes ? "adaptive_sweep_nodes.cu" : "adaptive_sweep.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
@@ -3053,14 +3194,14 @@ struct ParametricEngine::Impl {
                                    std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         const std::string key = hash_key(bodies, amountOfX) + ":ad_cont";
         return compile_into(pool_ad_cont, key, cached_ad_cont, activate, [&](CachedSimpleContModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
             const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_CONT_KERNEL 1\n"
                                    + src_template_bif2d + "\n" + src_adaptive_part;
-            if (!build_module(snapshot_sources(tmpl), "adaptive_cont.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), "adaptive_cont.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      "1" },
@@ -3084,7 +3225,7 @@ struct ParametricEngine::Impl {
                                    int par_or_var, std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         const std::string key = hash_key(bodies, amountOfX) + ":lyap_ad:pov" + std::to_string(par_or_var);
         return compile_into(pool_lyap_ad, key, cached_lyap_ad, activate, [&](CachedLyapAdModule& fresh) {
             CUmodule mod = nullptr;
@@ -3092,13 +3233,13 @@ struct ParametricEngine::Impl {
             const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_NO_DENSE 1\n"
                                      "#define UCUDA_AD_LYAPUNOV 1\n"
                                    + src_template_bif2d + "\n" + src_adaptive_part + "\n" + src_lyap_adaptive_part;
-            if (!build_module(snapshot_sources(tmpl), "lyapunov_adaptive.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), "lyapunov_adaptive.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
                                 { "{{KRS_RHS_BODY}}",    ad.rhs },
                                 { "{{KRS_EMB_BODY}}",    ad.emb },
-                                { "{{KRS_DPREP_BODY}}",  "" },
+                                { "{{KRS_DPREP_BODY}}",  ad_is_bdf(ad) ? ad.dprep : std::string() },
                                 { "{{KRS_DEVAL_BODY}}",  "" },
                                 { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
                               { "lyapunovLLEAdCUDA", "lyapunovLSAdCUDA" },
@@ -3120,7 +3261,7 @@ struct ParametricEngine::Impl {
                                         std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         const std::string key = hash_key(bodies, amountOfX) + ":lyap_ad_cont";
         return compile_into(pool_lyap_ad_cont, key, cached_lyap_ad_cont, activate, [&](CachedLyapAdModule& fresh) {
             CUmodule mod = nullptr;
@@ -3128,13 +3269,13 @@ struct ParametricEngine::Impl {
             const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_NO_DENSE 1\n"
                                      "#define UCUDA_AD_LYAPUNOV 1\n#define UCUDA_LYAP_AD_CONT_ONLY 1\n"
                                    + src_template_bif2d + "\n" + src_adaptive_part + "\n" + src_lyap_adaptive_part;
-            if (!build_module(snapshot_sources(tmpl), "lyapunov_adaptive_cont.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), "lyapunov_adaptive_cont.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      "1" },
                                 { "{{KRS_RHS_BODY}}",    ad.rhs },
                                 { "{{KRS_EMB_BODY}}",    ad.emb },
-                                { "{{KRS_DPREP_BODY}}",  "" },
+                                { "{{KRS_DPREP_BODY}}",  ad_is_bdf(ad) ? ad.dprep : std::string() },
                                 { "{{KRS_DEVAL_BODY}}",  "" },
                                 { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
                               { "lyapunovLLEAdContCUDA", "lyapunovLSAdContCUDA" },
@@ -3180,7 +3321,7 @@ struct ParametricEngine::Impl {
             AdaptiveCpuModule mod;
             std::vector<KrsCpuDiag> diags;
             // Те же аргументы, что у БД 1D (run_bif1d_cpu_ad), — одна DLL на все адаптивные CPU-ветки.
-            if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, n, peak_config_defines(), diags)) {
+            if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, n, ad.prefix + peak_config_defines(), diags)) {
                 err = "CPU adaptive module:";
                 for (const KrsCpuDiag& d : diags)
                     err += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
@@ -3337,6 +3478,7 @@ struct ParametricEngine::Impl {
             if (cont) return fail("continuation requires a param sweep, not an IC sweep");
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
             return fail("param_index out of range");
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
@@ -3351,7 +3493,7 @@ struct ParametricEngine::Impl {
         {
             std::vector<KrsCpuDiag> diags;
             if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, req.amountOfX,
-                             peak_config_defines(), diags) || !mod.bif()) {
+                             ad.prefix + peak_config_defines(), diags) || !mod.bif()) {
                 std::string e = "CPU adaptive module:";
                 for (const KrsCpuDiag& d : diags)
                     e += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
@@ -3539,7 +3681,7 @@ struct ParametricEngine::Impl {
         res.ad_stats = st;
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         fill_curve1d_snapshot(res.snapshot, req, req.continuation, req.use_cpu);
-        write_curve1d_csv(res, req.csv_output_path);
+        write_curve1d_csv(res, req.csv_output_path, lyap_dim(req.krs_body, req.amountOfX));
         res.ok = true;
         res.cancelled = cancelled;
         return res;
@@ -3713,6 +3855,7 @@ struct ParametricEngine::Impl {
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else if (!ad_axis) {
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index out of range");
@@ -4136,7 +4279,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool_lle, key, cached_lle, activate, [&](CachedLleModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(lyap_nx_prefix(krs_body) + src_template_lle), "lle1d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_lle), "lle1d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -4171,6 +4314,7 @@ struct ParametricEngine::Impl {
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else if (!(req.adaptive.enabled && req.adaptive.axis_kind[0] != kAdAxisSystem)) {
             // Ось настройки шага (rtol, atol, ...) параметр системы не трогает — как в run_bif1d.
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
@@ -4517,7 +4661,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool_lle_2d, key, cached_lle_2d, activate, [&](CachedLleModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(lyap_nx_prefix(krs_body) + src_template_lle_2d), "lle2d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_lle_2d), "lle2d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -4562,6 +4706,8 @@ struct ParametricEngine::Impl {
         auto check_var = [&](int v0based) -> bool {
             return v0based >= 0 && v0based < req.amountOfX;
         };
+        if ((req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) ||
+            (req.sweep_over_var_2 && dae_z_axis(req.krs_body, req.var_sweep_index_2))) return fail(kDaeZAxisMsg);
 
         int par_or_var;
         int  idx_axis_x, idx_axis_y;   // что передаём в indicesOfMutVars[0/1]
@@ -5012,7 +5158,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool_ls, key, cached_ls, activate, [&](CachedLsModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(lyap_nx_prefix(krs_body) + src_template_ls), "ls1d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_ls), "ls1d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -5045,6 +5191,7 @@ struct ParametricEngine::Impl {
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else if (!(req.adaptive.enabled && req.adaptive.axis_kind[0] != kAdAxisSystem)) {
             // Ось настройки шага (rtol, atol, ...) параметр системы не трогает — как в run_bif1d.
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
@@ -5353,9 +5500,9 @@ struct ParametricEngine::Impl {
                     row[j] = h_lsResult[k * (size_t)amountOfInitialConditions + j];
                 }
 
-                if (out.is_open())
+                if (out.is_open())   // ДАУ: только nx показателей, как в результате (trim_ls_spectrum)
                     data_export::write_ls1d_row(out, param_val, row.data(),
-                                                amountOfInitialConditions);
+                                                lyap_dim(req.krs_body, amountOfInitialConditions));
             }
             if (out.is_open()) out.close();
         }
@@ -5377,7 +5524,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool_ls_2d, key, cached_ls_2d, activate, [&](CachedLsModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(lyap_nx_prefix(krs_body) + src_template_ls_2d), "ls2d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_ls_2d), "ls2d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -5418,6 +5565,8 @@ struct ParametricEngine::Impl {
         auto check_var = [&](int v0based) -> bool {
             return v0based >= 0 && v0based < req.amountOfX;
         };
+        if ((req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) ||
+            (req.sweep_over_var_2 && dae_z_axis(req.krs_body, req.var_sweep_index_2))) return fail(kDaeZAxisMsg);
 
         int par_or_var;
         int  idx_axis_x, idx_axis_y;
@@ -5804,7 +5953,8 @@ struct ParametricEngine::Impl {
             std::ofstream out(OUT_FILE_PATH);
             if (out.is_open()) {
                 out << std::setprecision(set_precision);
-                data_export::write_ls2d_cells(out, nPts, N, res.values.data());
+                // ДАУ: первые nx плоскостей (trim_ls_spectrum) — хвост ядра NaN.
+                data_export::write_ls2d_cells(out, nPts, lyap_dim(req.krs_body, N), res.values.data());
             }
         }
 
@@ -5851,7 +6001,7 @@ struct ParametricEngine::Impl {
             // cudaLibrary.cu целиком) и нужен continuation-ветке run_dft_1d.
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_cont), "bifurcation1d_cont.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_cont), "bifurcation1d_cont.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body } },
                               { "peakFinderCUDA", "DFT_custom_pf" },
@@ -5885,7 +6035,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool, key, slot, true, [&](CachedSimpleContModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;   // пуст: единственный символ — extern "C"
-            if (!build_module(snapshot_sources(lyap_nx_prefix(krs_body) + tmpl), src_name,
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + tmpl), src_name,
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body } },
                               {},
@@ -6103,7 +6253,7 @@ struct ParametricEngine::Impl {
         }
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         fill_curve1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
-        write_curve1d_csv(res, req.csv_output_path);
+        write_curve1d_csv(res, req.csv_output_path, lyap_dim(req.krs_body, req.amountOfX));
         res.ok = true;
         res.cancelled = cancel_requested(req.cancel);
         return res;
@@ -6959,6 +7109,7 @@ struct ParametricEngine::Impl {
         if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else {
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index out of range");
@@ -7564,7 +7715,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool_bif2d, key, cached_bif2d, activate, [&](CachedBif2dModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_bif2d), "bifurcation2d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_bif2d), "bifurcation2d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -7613,6 +7764,8 @@ struct ParametricEngine::Impl {
         auto check_var = [&](int v0based) -> bool {
             return v0based >= 0 && v0based < req.amountOfX;
         };
+        if ((req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) ||
+            (req.sweep_over_var_2 && dae_z_axis(req.krs_body, req.var_sweep_index_2))) return fail(kDaeZAxisMsg);
 
         int par_or_var;
         int    idx_axis_x, idx_axis_y;
@@ -8252,7 +8405,7 @@ struct ParametricEngine::Impl {
             std::vector<std::string> mg;
             const std::string tmpl = minmax ? "#define SIGM_MINMAX_INTERP 1\n" + src_template_metrics
                                             : src_template_metrics;
-            if (!build_module(snapshot_sources(tmpl), minmax ? "signal_metrics_mm.cu" : "signal_metrics.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + tmpl), minmax ? "signal_metrics_mm.cu" : "signal_metrics.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -8273,7 +8426,7 @@ struct ParametricEngine::Impl {
                                       int par_or_var, std::string& err, bool activate = true) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         // Узлы шага — модуль без плотного выхода, как у БД (см. compile_ad_if_needed).
         const bool nodes = ad_nodes_module(ad);
         const std::string key = hash_key(bodies, amountOfX) + ":metrics_ad:pov" + std::to_string(par_or_var)
@@ -8286,7 +8439,7 @@ struct ParametricEngine::Impl {
                                    + "#define SIGM_MINMAX_INTERP 1\n#define UCUDA_AD_NO_SWEEP_KERNELS 1\n"
                                    + src_template_metrics + "\n"
                                    + src_adaptive_part + "\n" + src_metrics_adaptive_part;
-            if (!build_module(snapshot_sources(tmpl), nodes ? "signal_metrics_ad_nodes.cu" : "signal_metrics_ad.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), nodes ? "signal_metrics_ad_nodes.cu" : "signal_metrics_ad.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
@@ -8322,6 +8475,8 @@ struct ParametricEngine::Impl {
         auto check_param = [&](int p) { return p >= 0 && p < (int)req.base_values.size(); };
         auto check_var   = [&](int v) { return v >= 0 && v < req.amountOfX; };
 
+        if (req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) return kDaeZAxisMsg;
+        if (req.dimension == 2 && req.sweep_over_var_2 && dae_z_axis(req.krs_body, req.var_sweep_index_2)) return kDaeZAxisMsg;
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
             return "log scale requires param lo/hi > 0 (X axis)";
 
@@ -8880,7 +9035,7 @@ struct ParametricEngine::Impl {
         {
             std::vector<KrsCpuDiag> diags;
             if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, req.amountOfX,
-                             peak_config_defines(), diags) || !mod.metrics()) {
+                             ad.prefix + peak_config_defines(), diags) || !mod.metrics()) {
                 std::string e = "CPU adaptive module:";
                 for (const KrsCpuDiag& d : diags)
                     e += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
@@ -9150,7 +9305,7 @@ struct ParametricEngine::Impl {
         return compile_into(pool_basins, key, cached_basins, activate, [&](CachedBasinsModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_basins), "basins.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_basins), "basins.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body } },
                               { "calculateDiscreteModelAvgPeaksCUDA" },
@@ -9349,6 +9504,7 @@ struct ParametricEngine::Impl {
         if (req.axis_x_var < 0 || req.axis_x_var >= req.amountOfX) return fail("axis_x_var out of range");
         if (req.axis_y_var < 0 || req.axis_y_var >= req.amountOfX) return fail("axis_y_var out of range");
         if (req.axis_x_var == req.axis_y_var)                      return fail("axis_x_var == axis_y_var (pick different variables)");
+        if (dae_z_axis(req.krs_body, req.axis_x_var) || dae_z_axis(req.krs_body, req.axis_y_var)) return fail(kDaeZAxisMsg);
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX) return fail("writable_var out of range");
         if (req.n_pts <= 0)         return fail("n_pts must be > 0");
         if (req.h <= 0.0)           return fail("h must be > 0");
@@ -9867,7 +10023,7 @@ struct ParametricEngine::Impl {
             CUmodule mod = nullptr;
             std::vector<std::string> lowered;
             // orderEstimateKernel объявлено extern "C" — в name_exprs не нужно.
-            if (!build_module(snapshot_sources(src_template_order), "order.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body + ref_body) + src_template_order), "order.cu",
                               { { "{{AMOUNT_OF_X}}",      std::to_string(amountOfX) },
                                 { "{{AMOUNT_OF_VALUES}}", std::to_string(amountOfValues) },
                                 { "{{KRS_BODY}}",         krs_body },
@@ -9900,7 +10056,7 @@ struct ParametricEngine::Impl {
         if (!ad.setup_error.empty()) return;
         AdaptiveCpuModule mod;
         std::vector<KrsCpuDiag> diags;
-        (void)mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, amountOfX, peak_config_defines(), diags);
+        (void)mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, amountOfX, ad.prefix + peak_config_defines(), diags);
     }
 
     void prewarm_bif1d(const Bifurcation1DRequest& req) {

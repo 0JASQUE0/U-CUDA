@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include "param_groups.h"
 
 // Именованная пользовательская КРС. Это "ещё один scheme" — встаёт в scheme
 // combo рядом с Euler/Cromer/Midpoint/RK4. Имя не должно совпадать с built-in.
@@ -52,7 +53,20 @@ struct SystemRecord {
     // Решать как ОДУ (этап 3, уровень A): z выражается из связей и подставляется в f —
     // система идёт во все вкладки со схемами ОДУ. Только если сведение удаётся.
     bool        dae_as_ode = false;
-    std::string mode;         // "Image" | "LaTeX" | "Plain"
+    // Уровень C (индекс 2-3 при dae_as_ode): связи дифференцируются и стабилизируются
+    // (d/dt + alpha)^m g = 0 — alpha здесь (см. dae_stabilized_index1).
+    std::string dae_stab_alpha = "10";
+    // ДАУ из схемы (этап 8): путь к .kicad_sch / .cir и копия netlist'а на момент
+    // импорта — запись воспроизводится и без исходного файла. Пусто — уравнения введены руками.
+    std::string circuit_source;
+    std::string circuit_netlist;
+    bool        circuit_ideal_opamps = false;   // ОУ — идеальные нуллоры, а не их .subckt (копия на идеальных)
+    // Упрощения приборов при импорте (SpiceImportOptions): без ёмкостей переходов, идеальные диоды / LED,
+    // идеальные биполярные транзисторы.
+    bool        circuit_no_jcaps = false;
+    bool        circuit_ideal_diodes = false;
+    bool        circuit_ideal_bjts = false;
+    std::string mode;        // "Image" | "LaTeX" | "Plain"
     std::string latex_text;
     std::string plain_text;
     std::string alphabet_text;       // legacy: один список (vars + params вперемешку)
@@ -137,6 +151,9 @@ struct SystemRecord {
     // не сбрасывает. Хранится список выключенных, а не включённых, чтобы у
     // старых system.json все обёртки остались включены.
     std::vector<std::string> disabled_wrappers;
+    // ДАУ: выключенные методы ДАУ (имена dae_scheme_names). Тоже список выключенных — у старых
+    // записей ДАУ включены все. При dae_as_ode действуют обычные scheme_* (схемы ОДУ).
+    std::vector<std::string> dae_schemes_off;
 
     // значения по умолчанию (всё опционально, пустое = не задано)
     std::string step_h;          // шаг дискретизации (строка, пустая = не задано)
@@ -146,4 +163,11 @@ struct SystemRecord {
 
     // значения параметров по имени: "sigma" -> "10" (пустое = не задано)
     std::map<std::string, std::string> param_values;
+
+    // Группы параметров в полях вкладок (только интерфейс, см. param_groups.h).
+    ParamGroups param_groups;
+    // То же для начальных условий (импорт схемы: конденсаторы, приборы, алгебраические z).
+    ParamGroups ic_groups;
+    // Свои подписи полей параметров и НУ: имя -> LaTeX (пусто — автоматическая, см. param_groups.h).
+    FieldLabels field_labels;
 };

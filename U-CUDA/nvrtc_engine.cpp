@@ -701,6 +701,193 @@ bool NvrtcEngine::run_adaptive_endpoint(const AdaptiveEndpointRequest& rq, Adapt
     return true;
 }
 
+// BDF 1-5 на GPU: тела F и J — функции модуля, алгоритм — kernels/ucuda_bdf.cuh (тот же, что у CPU).
+// Рабочая память DASSL — массив в локальной памяти нити (AMOUNTOFX известен при сборке).
+static const char* const kBdfPhaseKernel =
+    "struct UcudaBdfGpu {\n"
+    "    const numb* a; numb* out; numb* tm; int raw; const volatile int* cancel;\n"
+    "    __device__ void res(const numb* y, numb t, numb* F) { ucuda_bdf_res(y, t, a, F); }\n"
+    "    __device__ void jac(const numb* y, numb t, numb* J) { ucuda_bdf_jac(y, t, a, J); }\n"
+    "    __device__ void emit(int i, numb t, const numb* y) {\n"
+    "        for (int k = 0; k < AMOUNTOFX; ++k) out[(size_t)i * AMOUNTOFX + k] = y[k];\n"
+    "        if (raw) tm[i] = t;\n"
+    "    }\n"
+    "    __device__ bool cancelled() const { return *cancel != 0; }\n"
+    "};\n"
+    "extern \"C\" __global__ void bdf_phase_kernel(const numb* ic, const numb* values, const int* kidx,\n"
+    "    const numb* atol, UcudaBdfParams P, int nx, numb t_skip, numb t_rec, numb dt, int total, int raw,\n"
+    "    int max_pts, int cap, int N, numb* data, numb* times, int* counts, numb* stats, const volatile int* cancel,\n"
+    "    int log_cap, numb* logs, int* log_counts) {\n"
+    "    const int tid = blockIdx.x * blockDim.x + threadIdx.x;\n"
+    "    if (tid >= N) return;\n"
+    "    numb ws[UCUDA_BDF_WS(AMOUNTOFX)];\n"
+    "    UcudaBdfGpu fn{ values, data + (size_t)tid * cap * AMOUNTOFX, times + (size_t)tid * cap, raw, cancel };\n"
+    "    UcudaBdfStats st;\n"
+    "    int nlog = 0;\n"
+    "    const int c = ucuda_bdf_run(fn, AMOUNTOFX, nx, kidx, ic + (size_t)tid * AMOUNTOFX, atol, P, t_skip, t_rec,\n"
+    "                                dt, total, raw, max_pts, ws, st,\n"
+    "                                log_cap > 0 ? logs + (size_t)tid * log_cap * 4 : nullptr, log_cap, &nlog);\n"
+    "    counts[tid] = c;\n"
+    "    log_counts[tid] = nlog;\n"
+    "    numb* s = stats + (size_t)tid * 10;\n"
+    "    s[0] = (numb)st.nacc; s[1] = (numb)st.nrej; s[2] = (numb)st.hmin_fail; s[3] = (numb)st.nrhs;\n"
+    "    s[4] = st.hmin; s[5] = st.hmax; s[6] = st.nacc > 0 ? st.hsum / (numb)st.nacc : (numb)0;\n"
+    "    s[7] = (numb)st.diverged; s[8] = (numb)st.truncated; s[9] = (numb)st.nforced;\n"
+    "}\n";
+
+bool NvrtcEngine::run_phase_portraits_bdf(const BdfGpuRequest& rq, PhaseAdaptiveResult& out) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    out = PhaseAdaptiveResult();
+    if (!inited_ && !init()) return false;
+    cuCtxSetCurrent((CUcontext)context_);
+    const int nx = rq.amountOfX, N = rq.N;
+    if (N <= 0) NV_FAIL("N<=0");
+    if (nx < 1 || nx > 512) NV_FAIL("BDF: dimension out of range");
+    if ((int)rq.ic_flat.size() != N * nx || (int)rq.kidx.size() != nx || (int)rq.atol.size() != nx)
+        NV_FAIL("BDF: ic / kidx / atol size");
+    if (rq.raw ? rq.max_pts <= 0 : rq.total <= 0) NV_FAIL("BDF: no output points");
+
+    // модуль (кэш — по телам, размерности и fmad)
+    const bool fmad = get_nvrtc_fmad();
+    std::string key = "bdf\x1f" + rq.res + '\x1f' + rq.jac + '\x1f' + std::to_string(nx) + '\x1f' + (fmad ? '1' : '0');
+    CUfunction fn = nullptr;
+    for (size_t i = 0; i < cache_.size() && !fn; ++i)
+        if (cache_[i].key == key) fn = (CUfunction)cache_[i].kernel;
+    if (!fn) {
+        std::string hdr;
+        if (!read_kernel_text("ucuda_bdf.cuh", hdr, error_)) return false;
+        std::ostringstream src;
+        src << kNumbTypedef
+            << "#define AMOUNTOFX " << nx << "\n"
+            << "__device__ __forceinline__ void ucuda_bdf_res(const numb* X, const numb ucuda_t, const numb* a, numb* F) {\n"
+            << "    (void)ucuda_t;\n" << rq.res << "\n}\n"
+            << "__device__ __forceinline__ void ucuda_bdf_jac(const numb* X, const numb ucuda_t, const numb* a, numb* J) {\n"
+            << "    (void)ucuda_t;\n" << rq.jac << "\n}\n"
+            << "#include \"ucuda_bdf.cuh\"\n"
+            << kBdfPhaseKernel;
+        const std::string code = src.str();
+        nvrtcProgram prog;
+        const char* hdr_src[]  = { hdr.c_str() };
+        const char* hdr_name[] = { "ucuda_bdf.cuh" };
+        NVOK(nvrtcCreateProgram(&prog, code.c_str(), "model_bdf.cu", 1, hdr_src, hdr_name), "createProgram(bdf)");
+        char arch[32];
+        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major_, cc_minor_);
+        const char* opts[] = { arch, fmad ? "--fmad=true" : "--fmad=false", "--std=c++17" };
+        const nvrtcResult comp = nvrtcCompileProgram(prog, 3, opts);
+        size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+        std::string log;
+        if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+        if (comp != NVRTC_SUCCESS) {
+            error_ = "NVRTC compile failed (BDF):\n" + log;
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+        size_t ptxsz = 0; NVOK(nvrtcGetPTXSize(prog, &ptxsz), "ptxSize(bdf)");
+        std::string ptx(ptxsz, '\0'); NVOK(nvrtcGetPTX(prog, &ptx[0]), "getPtx(bdf)");
+        nvrtcDestroyProgram(&prog);
+        CUmodule mod;
+        CUOK(cuModuleLoadDataEx(&mod, ptx.c_str(), 0, nullptr, nullptr), "moduleLoad(bdf)");
+        CUOK(cuModuleGetFunction(&fn, mod, "bdf_phase_kernel"), "getFunction(bdf)");
+        if (cache_.size() >= kCacheCapacity) {
+            if (cache_.front().kernel == kernel_) { kernel_ = nullptr; compiled_ = false; }
+            cuModuleUnload((CUmodule)cache_.front().module);
+            cache_.erase(cache_.begin());
+        }
+        cache_.push_back({ key, mod, fn });
+    }
+
+    const int cap = rq.raw ? rq.max_pts : rq.total;
+    const int nv = (int)rq.values.size();
+    CUdeviceptr d_ic = 0, d_val = 0, d_k = 0, d_at = 0, d_data = 0, d_times = 0, d_cnt = 0, d_st = 0, d_log = 0, d_lcnt = 0;
+    auto free_all = [&]() {
+        for (CUdeviceptr p : { d_ic, d_val, d_k, d_at, d_data, d_times, d_cnt, d_st, d_log, d_lcnt }) if (p) cuMemFree(p);
+    };
+    const int log_cap = rq.log_cap > 0 ? rq.log_cap : 0;   // журнал попыток на траекторию
+    auto alloc = [&](CUdeviceptr& p, size_t bytes, const char* what) {
+        const CUresult r = cuMemAlloc(&p, bytes > 0 ? bytes : 8);
+        if (r != CUDA_SUCCESS) { cu_ok(r, error_, what); return false; }
+        return true;
+    };
+    if (!alloc(d_ic, (size_t)N * nx * sizeof(numb), "allocIc(bdf)") || !alloc(d_val, (size_t)(nv > 0 ? nv : 1) * sizeof(numb), "allocVal(bdf)")
+        || !alloc(d_k, (size_t)nx * sizeof(int), "allocK(bdf)") || !alloc(d_at, (size_t)nx * sizeof(numb), "allocAtol(bdf)")
+        || !alloc(d_data, (size_t)N * cap * nx * sizeof(numb), "allocData(bdf)")
+        || !alloc(d_times, rq.raw ? (size_t)N * cap * sizeof(numb) : 0, "allocTimes(bdf)")
+        || !alloc(d_cnt, (size_t)N * sizeof(int), "allocCnt(bdf)") || !alloc(d_st, (size_t)N * 10 * sizeof(numb), "allocStats(bdf)")
+        || !alloc(d_log, (size_t)N * log_cap * 4 * sizeof(numb), "allocLog(bdf)")
+        || !alloc(d_lcnt, (size_t)N * sizeof(int), "allocLogCnt(bdf)")) {
+        free_all();
+        return false;
+    }
+    const std::vector<numb> ic_n = to_numb(rq.ic_flat), val_n = to_numb(rq.values), at_n = to_numb(rq.atol);
+    bool ok = cu_ok(cuMemcpyHtoD(d_ic, ic_n.data(), ic_n.size() * sizeof(numb)), error_, "cpyIc(bdf)")
+           && (nv == 0 || cu_ok(cuMemcpyHtoD(d_val, val_n.data(), (size_t)nv * sizeof(numb)), error_, "cpyVal(bdf)"))
+           && cu_ok(cuMemcpyHtoD(d_k, rq.kidx.data(), (size_t)nx * sizeof(int)), error_, "cpyK(bdf)")
+           && cu_ok(cuMemcpyHtoD(d_at, at_n.data(), (size_t)nx * sizeof(numb)), error_, "cpyAtol(bdf)");
+    bool cancelled = false;
+    if (ok) ok = cancel_flag_reset();
+    if (ok) {
+        // = UcudaBdfParams (тот же порядок и типы полей)
+        struct { numb rtol, h0, hmax; int maxk; numb hmin; int nmax, nfull; numb ntol, hfix; } par = {
+            (numb)rq.rtol, (numb)rq.h0, (numb)rq.hmax, rq.maxk, (numb)rq.hmin,
+            rq.newton_max, rq.newton_full ? 1 : 0, (numb)rq.newton_tol, (numb)rq.hfix };
+        int nxd = rq.nx, total = rq.total, raw = rq.raw ? 1 : 0, max_pts = rq.max_pts, capv = cap, n = N, lcap = log_cap;
+        numb t_skip = (numb)rq.t_skip, t_rec = (numb)rq.t_rec, dt = (numb)rq.dt;
+        CUdeviceptr d_cancel = (CUdeviceptr)cancel_dev_;
+        void* args[] = { &d_ic, &d_val, &d_k, &d_at, &par, &nxd, &t_skip, &t_rec, &dt, &total, &raw, &max_pts, &capv,
+                         &n, &d_data, &d_times, &d_cnt, &d_st, &d_cancel, &lcap, &d_log, &d_lcnt };
+        const int threads = 32, blocks = (N + threads - 1) / threads;
+        ok = cu_ok(cuLaunchKernel(fn, blocks, 1, 1, threads, 1, 1, 0, nullptr, args, nullptr), error_, "launch(bdf)")
+          && wait_default_stream(rq.cancel, cancelled);
+    }
+    if (ok && cancelled) { free_all(); error_ = kNvrtcCancelled; return false; }
+    std::vector<numb> st((size_t)N * 10);
+    std::vector<int> cnt(N), lcnt(N, 0);
+    if (ok)
+        ok = cu_ok(cuMemcpyDtoH(cnt.data(), d_cnt, (size_t)N * sizeof(int)), error_, "cpyCnt(bdf)")
+          && cu_ok(cuMemcpyDtoH(st.data(), d_st, st.size() * sizeof(numb)), error_, "cpyStats(bdf)")
+          && cu_ok(cuMemcpyDtoH(lcnt.data(), d_lcnt, (size_t)N * sizeof(int)), error_, "cpyLogCnt(bdf)");
+    out.traj.resize(N);
+    if (rq.raw) out.times.resize(N);
+    out.log.resize(N);
+    out.stats.resize(N);
+    out.final_h.assign(N, 0.0);
+    out.hmin_fail.assign(N, 0);
+    std::vector<numb> buf;
+    for (int tid = 0; ok && tid < N; ++tid) {
+        const int c = cnt[tid] < 0 ? 0 : (cnt[tid] > cap ? cap : cnt[tid]);
+        buf.resize((size_t)c * nx);
+        if (c > 0)
+            ok = cu_ok(cuMemcpyDtoH(buf.data(), d_data + (size_t)tid * cap * nx * sizeof(numb), buf.size() * sizeof(numb)),
+                       error_, "cpyData(bdf)");
+        if (!ok) break;
+        auto& tr = out.traj[tid];
+        tr.resize(c);
+        for (int i = 0; i < c; ++i) tr[i].assign(buf.data() + (size_t)i * nx, buf.data() + (size_t)(i + 1) * nx);
+        if (rq.raw) {
+            buf.resize((size_t)c);
+            if (c > 0)
+                ok = cu_ok(cuMemcpyDtoH(buf.data(), d_times + (size_t)tid * cap * sizeof(numb), (size_t)c * sizeof(numb)),
+                           error_, "cpyTimes(bdf)");
+            out.times[tid].assign(buf.begin(), buf.end());
+        }
+        const int nl = lcnt[tid] < 0 ? 0 : (lcnt[tid] > log_cap ? log_cap : lcnt[tid]);
+        if (ok && nl > 0) {
+            buf.resize((size_t)nl * 4);
+            ok = cu_ok(cuMemcpyDtoH(buf.data(), d_log + (size_t)tid * log_cap * 4 * sizeof(numb), buf.size() * sizeof(numb)),
+                       error_, "cpyLog(bdf)");
+            out.log[tid].assign(buf.begin(), buf.end());
+        }
+        AdaptiveStats& as = out.stats[tid];
+        const numb* s = &st[(size_t)tid * 10];
+        as.nacc = s[0]; as.nrej = s[1]; as.nforced = s[9]; as.nrhs = s[3];
+        out.hmin_fail[tid] = s[2] != 0;
+        as.hmin = s[4]; as.hmax = s[5]; as.hmean = s[6];
+        as.diverged = s[7] != 0; as.truncated = s[8] != 0;
+    }
+    free_all();
+    return ok;
+}
+
 bool NvrtcEngine::run_phase_portraits_adaptive(const PhaseAdaptiveRequest& rq, PhaseAdaptiveResult& out) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     out = PhaseAdaptiveResult();
