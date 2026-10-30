@@ -1564,6 +1564,28 @@ struct Builder {
         }
         for (const std::string& g : gs) eq << "0 = " << resolve(g) << "\n";
         r.plain_text = eq.str();
+        // .ic без UIC (SPICE): рабочая точка считается с узлами .ic, удержанными на заданных напряжениях, потом
+        // узлы отпускаются. Для неё — те же уравнения, где KCL удержанного узла заменён на v - V = 0 (ток
+        // удерживающего источника свободен).
+        if (!deck.uic && !deck.ic_nodes.empty()) {
+            std::map<size_t, double> pin;
+            for (const auto& kv : deck.ic_nodes) {
+                auto it = node_idx.find(node_key(kv.first, Ctx{}));
+                if (it != node_idx.end()) pin[(size_t)it->second] = kv.second;
+            }
+            std::ostringstream op;
+            for (size_t i = 0; i < xs.size(); ++i) op << xs[i] << "' = " << resolve(x_rhs[i]) << "\n";
+            for (size_t n = 0; n < node_keys.size(); ++n) {
+                auto p = pin.find(n);
+                if (p != pin.end()) { op << "0 = " << node_var[n] << " - (" << fmt(p->second) << ")\n"; continue; }
+                std::string s;
+                for (const std::string& term : kcl[n]) s += (s.empty() ? (term[0] == '+' ? term.substr(2) : "-" + term.substr(2))
+                                                                       : " " + term);
+                op << "0 = " << resolve(s) << "\n";
+            }
+            for (const std::string& g : gs) op << "0 = " << resolve(g) << "\n";
+            if (!pin.empty()) r.op_plain_text = op.str();
+        }
 
         auto join = [](const std::vector<std::string>& v) {
             std::string s;

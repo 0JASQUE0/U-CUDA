@@ -59,6 +59,9 @@ struct SpiceImportResult {
     std::string t_stop;
     bool uic = false;          // .tran ... UIC
     bool has_ic = false;       // в netlist'е есть IC= или .ic
+    // .ic без UIC: уравнения рабочей точки с удержанными узлами .ic (KCL узла заменён на v - V = 0); пусто —
+    // таких узлов нет. Рабочая точка по ним — начальные значения, дальше схема идёт по plain_text.
+    std::string op_plain_text;
     // Без UIC и без НУ SPICE начинает переходный процесс с рабочей точки — так и импорт
     // (AppModel::import_circuit через dae_dc_operating_point).
     // Диагностика: замены моделей, пропущенные директивы, контуры C-V.

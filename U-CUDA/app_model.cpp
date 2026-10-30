@@ -251,6 +251,33 @@ bool AppModel::import_circuit(std::string* report, std::string* err) {
     // Без UIC и без НУ SPICE стартует переходный процесс из рабочей точки — так же и здесь.
     std::string op;
     if (r.uic) op = "initial values: as given (UIC)";
+    else if (!r.op_plain_text.empty()) {
+        // .ic без UIC, как в SPICE: рабочая точка с удержанными узлами .ic, затем узлы отпускаются (z при
+        // старте расчёта согласуются с x уже по исходным уравнениям).
+        try {
+            const DaeSystem d = parse_dae(r.op_plain_text, vars_text, alg_text, params_text, dae_index_text, FuncDefs{});
+            const System s = d.as_codegen_system();
+            std::vector<double> a = { 0.5 };
+            for (const std::string& p : d.params) {
+                auto it = param_values.find(p);
+                a.push_back(it == param_values.end() || it->second.empty() ? 0.0 : std::stod(it->second));
+            }
+            std::vector<double> X;
+            for (const std::string& v : s.vars) {
+                auto it = init_conditions.find(v);
+                X.push_back(it == init_conditions.end() || it->second.empty() ? 0.0 : std::stod(it->second));
+            }
+            int it = 0;
+            std::string why;
+            if (dae_dc_operating_point(s, a.data(), (int)a.size(), 0.0, X.data(), &it, &why)) {
+                for (size_t i = 0; i < s.vars.size(); ++i) init_conditions[s.vars[i]] = fmt_num_shortest(X[i]);
+                op = "initial values: DC operating point with the .ic nodes held (" + std::to_string(it)
+                   + " Newton iterations), then released";
+            } else op = "initial values: .ic as given; DC operating point with the .ic nodes held failed: " + why;
+        } catch (const std::exception& e) {
+            op = std::string("initial values: .ic as given; DC operating point: ") + e.what();
+        }
+    }
     else if (r.has_ic) op = "initial values: IC= / .ic (no DC operating point)";
     else {
         std::string orep, oerr;

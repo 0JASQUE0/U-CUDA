@@ -599,6 +599,37 @@ void param_groups() {
                 " kept on re-import, system.json round trip (%zu groups)\n", G.size());
 }
 
+// .ic без UIC (SPICE): рабочая точка с удержанным узлом — op_plain_text, KCL узла заменён на v - V = 0.
+void ic_without_uic() {
+    SpiceImportResult r;
+    std::string err;
+    { const bool ok_ = spice_import("* ic\nV1 in 0 DC 5\nR1 in a 1k\nC1 a 0 1u\nR2 a 0 1k\n.ic v(a)=1\n.tran 1u 1m\n", {}, r, &err);
+      ut::require(ok_, "import: " + err); }
+    ut::require(!r.uic && r.has_ic && !r.op_plain_text.empty(), ".ic without UIC gives the held-node DC OP equations");
+    const System s = parse_dae(r.op_plain_text, r.vars_text, r.alg_text, r.params_text, "").as_codegen_system();
+    std::vector<double> a = { 0.5 };
+    const DaeSystem d = parse_dae(r.op_plain_text, r.vars_text, r.alg_text, r.params_text, "");
+    for (const auto& p : d.params) a.push_back(std::stod(r.param_values.at(p)));
+    a.insert(a.end(), { 4, 1e-10, 25, 1 });
+    std::vector<double> X(s.vars.size(), 0.0);
+    int it = 0;
+    std::string why;
+    { const bool ok_ = dae_dc_operating_point(s, a.data(), (int)a.size(), 0.0, X.data(), &it, &why);
+      ut::require(ok_, "held DC OP: " + why); }
+    double va = 0, vc = 0;
+    for (size_t i = 0; i < s.vars.size(); ++i) {
+        if (s.vars[i] == "v_a") va = X[i];
+        if (s.vars[i] == "vc_c1") vc = X[i];
+    }
+    ut::approx(va, 1.0, 1e-12, ".ic node held at 1 V in the DC OP");
+    ut::approx(vc, 1.0, 1e-12, "capacitor starts from the held node voltage (free OP would give 2.5 V)");
+    SpiceImportResult u;
+    { const bool ok_ = spice_import("* ic uic\nV1 in 0 DC 5\nR1 in a 1k\nC1 a 0 1u\n.ic v(a)=1\n.tran 1u 1m uic\n", {}, u, &err);
+      ut::require(ok_, "import UIC: " + err); }
+    ut::require(u.uic && u.op_plain_text.empty(), "UIC: no DC OP, .ic as given");
+    std::printf("  .ic without UIC: DC OP with the node held (v(a) = %.3f V, vc = %.3f V); with UIC no DC OP\n", va, vc);
+}
+
 int main() {
     return ut::run_main("spice", []() -> int {
         sources();
@@ -611,6 +642,7 @@ int main() {
         b_conditionals();
         li_cutsets();
         param_groups();
+        ic_without_uic();
         return 0;
     });
 }
