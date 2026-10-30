@@ -76,6 +76,7 @@ struct BdfGpuRequest {
     bool   raw = false;
     double t_skip = 0, t_rec = 0, dt = 0;
     int    total = 0, max_pts = 0;
+    int    log_cap = 0;                   // журнал попыток на траекторию (0 — не вести), out.log
     std::shared_ptr<std::atomic<bool>> cancel;
 };
 

@@ -182,7 +182,15 @@ D:\U-CUDA\
 - **system_record.h** — Struct for one ODE system (name, latex, param_order, initial conditions, values, selected numerical schemes)
 
 ### UI (ImGui/ImPlot)
-- **gui.cpp / .h** — Top-level UI, ImGui widgets, menus
+- **gui.cpp / .h** — Top-level UI: `draw_gui` (frame, menus, tab dispatch) and `gui_process_deferred`. Split
+  2026-10-30 (mechanically, no code changes) into one file per tab: `gui_widgets.cpp` (shared widgets: input
+  fields, scheme combo, Integration/Newton blocks, toolbars, export menus), `gui_system.cpp` (System tab,
+  Extr/Comp builders, Generate, parameters, library list/editor incl. DAE), `gui_analysis.cpp`,
+  `gui_parametric.cpp` (BD / LLE / LS / Metrics + Parametric windows), `gui_dft_basins.cpp`, `gui_fastsync.cpp`,
+  `gui_order.cpp`, `gui_network.cpp`, `gui_custom.cpp`. **gui_internal.h** — what several of them share:
+  includes, types, constants, templates, prototypes (default arguments live only there). A helper used by one
+  tab stays `static` in that tab's file; when another tab needs it, move its prototype into gui_internal.h and
+  drop `static` (and the default arguments from the definition).
 - **plot_renderer.cpp / .h** — General plot renderer
 - **plot_view_2d.cpp / .h** — 2D phase portraits, time series
 - **plot_view_3d.cpp / .h** — 3D phase portraits
@@ -554,6 +562,11 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   thread per trajectory, DASSL workspace in thread-local memory; `computePhasePortraitsBdfNVRTC`). Index 3 is
   turned into GGL on the host (`bdf_prepare_system`), mu start at 0 and are cut from the output; h_min failure
   comes back in stats slot 2. GPU = CPU on the stands: the same step counts (164 / 196 / 326), max diff ~2e-12.
+  Step log for Analysis ("Step size" projection, `AnalysisResult::step_log`): `UcudaBdfCore::log / log_cap /
+  log_n`, one record per attempt [t at the step start, h, err, code 1 accepted / 0 rejected], written in
+  `ucuda_bdf_step`; only `ucuda_bdf_run` turns it on (optional arguments), sweeps and clones keep nullptr. CPU:
+  `bdf_integrate(.., log, log_cap)`, GPU: `BdfGpuRequest::log_cap` -> `PhaseAdaptiveResult::log`. dae_test: log
+  length = 4 (accepted + rejected), codes = stats, GPU log = CPU log; trajectories unchanged.
   Sweeps (Parametric: BD 1D/2D classic and continuation, Metrics, basins, LLE/LS): the adaptive sweep
   modules run on BDF without new kernels - `ucuda_adaptive.cuh` switches to the BDF section of
   `ucuda_bdf.cuh` under `UCUDA_BDF_DRIVER` (the same names `UcudaAdaptState`, `ucuda_ad_init / restart /

@@ -633,6 +633,7 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
                 for (int i = 0; i < dim; ++i) rq.ic_flat[(size_t)k * ng + i] = ic_flat[(size_t)k * dim + i];
             rq.values = a;
             rq.raw = rawm; rq.t_skip = t_skip; rq.t_rec = tsim; rq.dt = h; rq.total = total; rq.max_pts = max_pts;
+            rq.log_cap = kAdaptLogCap;   // журнал попыток — проекция "Step size"
             rq.cancel = in.cancel;
             PhaseAdaptiveResult out;
             if (!computePhasePortraitsBdfNVRTC(rq, out, &e)) {
@@ -644,6 +645,7 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
                 raw[(size_t)k] = std::move(out.traj[(size_t)k]);
                 for (auto& row : raw[(size_t)k]) row.resize((size_t)dim);   // без mu
                 if (rawm) times[(size_t)k] = std::move(out.times[(size_t)k]);
+                result.step_log[(size_t)k] = std::move(out.log[(size_t)k]);
                 result.step_stats[(size_t)k] = out.stats[(size_t)k];
                 if (out.stats[(size_t)k].nforced != 0) {   // h ниже h_min (поле занято под этот признак)
                     result.error = "BDF: step size below h_min";
@@ -656,7 +658,8 @@ static bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
             BdfStats bst;
             std::string e;
             if (!bdf_integrate(in.sys, a.data(), (int)a.size(), &ic_flat[(size_t)k * dim], bs, t_skip, tsim, h, total,
-                               rawm, max_pts, raw[(size_t)k], times[(size_t)k], bst, &e, in.cancel.get())) {
+                               rawm, max_pts, raw[(size_t)k], times[(size_t)k], bst, &e, in.cancel.get(),
+                               &result.step_log[(size_t)k], kAdaptLogCap)) {
                 result.error = e;
                 return false;
             }

@@ -53,10 +53,13 @@ inline bool bdf_prepare_system(const System& s, System& out, std::string* err) {
 // Траектория от y0 (t = 0) до t_skip + t_rec. raw = false — равномерная сетка total точек через
 // dt от t_skip; raw = true — узлы шага после t_skip (не больше max_pts). traj[k][i], times[k].
 // false + err — система не поддержана (нет якобиана, индекс выше 3) или шаг сорвался ниже h_min.
+// log (не nullptr) — журнал попыток, не больше log_cap записей по 4 числа: t начала, h, err, код
+// (1 принят, 0 отвергнут) — как AnalysisResult::step_log у адаптивного шага.
 inline bool bdf_integrate(const System& s0, const double* a, int na, const double* y0, const BdfSettings& st,
                           double t_skip, double t_rec, double dt, int total, bool raw, int max_pts,
                           std::vector<std::vector<double>>& traj, std::vector<double>& times, BdfStats& stats,
-                          std::string* err, const std::atomic<bool>* cancel = nullptr) {
+                          std::string* err, const std::atomic<bool>* cancel = nullptr,
+                          std::vector<double>* log = nullptr, int log_cap = 0) {
     const int N0 = (int)s0.vars.size();
     System s;
     if (!bdf_prepare_system(s0, s, err)) return false;
@@ -94,8 +97,11 @@ inline bool bdf_integrate(const System& s0, const double* a, int na, const doubl
     P.hmax = std::isfinite(st.hmax) ? st.hmax : 0.0;
     P.maxk = st.max_order;
     UcudaBdfStats cs;
+    std::vector<numb> lg(log != nullptr && log_cap > 0 ? (size_t)log_cap * 4 : 0);
+    int nlog = 0;
     ucuda_bdf_run(fn, N, nx, kidx.data(), y.data(), atol.data(), P, t_skip, t_rec, dt, total, raw ? 1 : 0, max_pts,
-                  ws.data(), cs);
+                  ws.data(), cs, lg.empty() ? nullptr : lg.data(), lg.empty() ? 0 : log_cap, &nlog);
+    if (log != nullptr) log->assign(lg.begin(), lg.begin() + (size_t)nlog * 4);
     stats.nacc = cs.nacc; stats.nrej = cs.nrej; stats.nrhs = cs.nrhs; stats.njac = cs.njac;
     stats.nnewton_fail = cs.nnewton_fail;
     stats.hmin = cs.hmin; stats.hmax = cs.hmax; stats.hsum = cs.hsum; stats.max_q = cs.max_q;

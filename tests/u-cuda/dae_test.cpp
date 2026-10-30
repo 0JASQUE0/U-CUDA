@@ -478,8 +478,20 @@ void bdf_gpu() {
         std::vector<double> tm;
         BdfStats st;
         std::string err;
+        std::vector<double> clog;   // журнал попыток (проекция "Step size" в Analysis)
         { const bool ok_ = bdf_integrate(c.s, c.a.data(), (int)c.a.size(), c.y0.data(), bs, 0.0, c.T, dt, total, false, 0,
-                                         tr, tm, st, &err); ut::require(ok_, std::string("CPU BDF ") + c.name + ": " + err); }
+                                         tr, tm, st, &err, nullptr, &clog, 100000);
+          ut::require(ok_, std::string("CPU BDF ") + c.name + ": " + err); }
+        {
+            long long na = 0, nr = 0;
+            double tprev = -1;
+            bool mono = true;
+            for (size_t i = 0; i + 3 < clog.size(); i += 4) {
+                if (clog[i + 3] == 1) { ++na; mono = mono && clog[i] > tprev; tprev = clog[i]; } else ++nr;
+            }
+            ut::require(clog.size() == 4 * (size_t)(st.nacc + st.nrej) && na == st.nacc && nr == st.nrej && mono,
+                        std::string("BDF step log matches the stats, ") + c.name);
+        }
         System sp;
         { const bool ok_ = bdf_prepare_system(c.s, sp, &err); ut::require(ok_, err); }
         BdfGpuRequest rq;
@@ -496,9 +508,16 @@ void bdf_gpu() {
         for (int k = 0; k < 2; ++k) for (int i = 0; i < dim; ++i) rq.ic_flat[(size_t)k * ng + i] = c.y0[(size_t)i];
         rq.values = c.a;
         rq.t_rec = c.T; rq.dt = dt; rq.total = total;
+        rq.log_cap = 100000;
         PhaseAdaptiveResult out;
         const bool ok = eng.run_phase_portraits_bdf(rq, out);
         ut::require(ok, std::string("GPU BDF ") + c.name + ": " + eng.error());
+        {   // журнал GPU = журнал CPU: те же попытки, те же коды
+            bool same = out.log[0].size() == clog.size();
+            for (size_t i = 3; same && i < clog.size(); i += 4) same = out.log[0][i] == clog[i];
+            ut::require(same, std::string("BDF step log GPU = CPU, ") + c.name);
+            std::printf("  BDF 1-5 step log, %s: %zu attempts on CPU and GPU, same codes\n", c.name, clog.size() / 4);
+        }
         ut::require((int)out.traj[0].size() == total && (int)tr.size() == total, "GPU BDF: every grid point");
         double d = 0, d01 = 0;
         for (int k = 0; k < total; ++k)

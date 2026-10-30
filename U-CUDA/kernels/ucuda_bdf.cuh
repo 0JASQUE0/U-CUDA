@@ -49,6 +49,10 @@ struct UcudaBdfCore {
          sigma[UCUDA_BDF_MAXK + 3], psi[UCUDA_BDF_MAXK + 3];
     numb t, h, hold, hs;
     int  N, nx, maxk, k, kold, ns, iphase, nef;
+    // Журнал попыток (только Analysis, ucuda_bdf_run): по 4 числа — t начала шага, h, err, код (1 принят,
+    // 0 отвергнут), как у адаптивного драйвера. nullptr — не вести (свипы, клоны).
+    numb* log;
+    int   log_cap, log_n;
 };
 
 UCUDA_BDF_HD inline int ucuda_bdf_ws_size(int N) { return UCUDA_BDF_WS(N); }
@@ -115,6 +119,7 @@ UCUDA_BDF_HD inline void ucuda_bdf_start(UcudaBdfCore& C, Fn& fn, int N, int nx,
                                          const numb* atol, const UcudaBdfParams& P, numb t0, numb span, int project,
                                          numb* ws, UcudaBdfStats& st) {
     C.N = N; C.nx = nx;
+    C.log = nullptr; C.log_cap = 0; C.log_n = 0;
     C.maxk = P.maxk < 1 ? 1 : (P.maxk > UCUDA_BDF_MAXK ? UCUDA_BDF_MAXK : P.maxk);
     for (int j = 0; j < UCUDA_BDF_MAXK + 3; ++j) C.alpha[j] = C.beta[j] = C.gamma[j] = C.sigma[j] = C.psi[j] = 0;
     numb* F = UCUDA_BDF_V(ws, N, 0);
@@ -261,6 +266,10 @@ UCUDA_BDF_HD inline int ucuda_bdf_step(UcudaBdfCore& C, Fn& fn, const int* kidx,
             }
         } else ++st.nnewton_fail;
         const numb errv = conv ? ck * enorm : (numb)1e300;
+        if (C.log != nullptr && C.log_n < C.log_cap) {
+            numb* r = C.log + 4 * C.log_n++;
+            r[0] = C.t; r[1] = h; r[2] = errv; r[3] = errv <= (numb)1 ? (numb)1 : (numb)0;
+        }
         if (!(errv <= (numb)1)) {
             // --- отказ: история назад (DDASTP, блок 690) ---
             if (kp1 >= nsp1)
@@ -347,7 +356,8 @@ UCUDA_BDF_HD inline void ucuda_bdf_interp(const UcudaBdfCore& C, const numb* ws,
 template <class Fn>
 UCUDA_BDF_HD int ucuda_bdf_run(Fn& fn, int N, int nx, const int* kidx, const numb* y0, const numb* atol,
                                const UcudaBdfParams& P, numb t_skip, numb t_rec, numb dt, int total, int raw,
-                               int max_pts, numb* ws, UcudaBdfStats& st) {
+                               int max_pts, numb* ws, UcudaBdfStats& st,
+                               numb* log = nullptr, int log_cap = 0, int* log_n = nullptr) {
     st.nacc = st.nrej = st.nrhs = st.njac = st.nnewton_fail = 0;
     st.hmin = st.hmax = st.hsum = 0;
     st.max_q = st.diverged = st.truncated = st.hmin_fail = 0;
@@ -357,6 +367,7 @@ UCUDA_BDF_HD int ucuda_bdf_run(Fn& fn, int N, int nx, const int* kidx, const num
     numb* yo = UCUDA_BDF_V(ws, N, 8);
     for (int i = 0; i < N; ++i) yo[i] = y0[i];
     ucuda_bdf_start(C, fn, N, nx, kidx, yo, atol, P, (numb)0, tend, 0, ws, st);
+    C.log = log; C.log_cap = log_cap;   // журнал попыток (start его сбрасывает)
     int nout = 0;
     if (t_skip <= 0) fn.emit(nout++, (numb)0, yo);
     long long iter = 0;
@@ -375,6 +386,7 @@ UCUDA_BDF_HD int ucuda_bdf_run(Fn& fn, int N, int nx, const int* kidx, const num
         }
     }
     if (raw && nout >= max_pts && C.t < tend) st.truncated = 1;
+    if (log_n != nullptr) *log_n = C.log_n;
     return nout;
 }
 
