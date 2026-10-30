@@ -736,6 +736,11 @@ void field_apply_all_menu(AppModel* model, BroadcastField f,
     return out;
 }
 
+// Маски Settings (hidden_schemes / hidden_dae_methods) для комбо схемы: draw_gui ставит модель каждый
+// кадр — у части вызовов draw_scheme_combo модели нет (bc = nullptr).
+static const AppModel* g_scheme_masks = nullptr;
+void set_scheme_masks(const AppModel* m) { g_scheme_masks = m; }
+
 // Комбо выбора схемы: встроенные + (через разделитель) пользовательские.
 // on_pick вызывается ПОСЛЕ записи имени в scheme — им пользуются Phase
 // (regenerate_krs) и Custom Shared config (проброс в phase_session).
@@ -762,7 +767,7 @@ bool draw_scheme_combo(const char* label, std::string& scheme,
         picked = true;
     };
     // ДАУ: сессия получила только схемы ДАУ (enabled_builtins_from_record) — их и показываем,
-    // схемы ОДУ на такой системе не строятся.
+    // схемы ОДУ на такой системе не строятся. Скрытые в Settings не предлагаются (выбранная остаётся).
     if (enabled_builtins && !enabled_builtins->empty()
         && (dae_scheme_from_name((*enabled_builtins)[0], nullptr) || (*enabled_builtins)[0] == kBdfSchemeDae)) {
         ImGui::SetNextItemWidth(kComboW);
@@ -770,6 +775,7 @@ bool draw_scheme_combo(const char* label, std::string& scheme,
             ImGui::SeparatorText("DAE");
             bool ms_header = false;
             for (const auto& nm : *enabled_builtins) {
+                if (g_scheme_masks && g_scheme_masks->dae_method_hidden(nm) && scheme != nm) continue;
                 if (scheme_is_multistep(nm) && !ms_header) {
                     ImGui::SeparatorText("multistep");
                     ms_header = true;
@@ -803,7 +809,9 @@ bool draw_scheme_combo(const char* label, std::string& scheme,
         // группы, иначе отфильтрованная группа оставила бы пустую шапку.
         std::string shown_group;
         for (const auto& b : kBuiltinSchemes) {
-            if (!is_enabled(b.name) && scheme != b.name) continue;
+            // Выключенная у системы или скрытая в Settings схема не предлагается, выбранная остаётся.
+            if ((!is_enabled(b.name) || (g_scheme_masks && g_scheme_masks->scheme_hidden(b.name)))
+                && scheme != b.name) continue;
             if (scheme_group_title(b) != shown_group) {
                 ImGui::SeparatorText(scheme_group_title(b).c_str());
                 shown_group = scheme_group_title(b);

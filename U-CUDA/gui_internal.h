@@ -133,6 +133,8 @@ void field_apply_all_menu(AppModel* model, BroadcastField f,
 // (model.loaded_name; draw_gui ставит библиотеку каждый кадр). Пункты для поля name и для всего
 // блока names; запись перечитывается при каждом открытии меню. true — что-то поменялось.
 void set_field_library(SystemLibrary* lib);
+// Маски Settings для комбо схемы (draw_scheme_combo): скрытые там схемы ОДУ и методы ДАУ не предлагаются.
+void set_scheme_masks(const AppModel* m);
 bool field_restore_menu_items(const AppModel* model, BroadcastField f, const std::string& name,
                               std::map<std::string, std::string>& values, const std::vector<std::string>& names);
 // То же своим попапом (поля без рассылки по вкладкам: Analysis, System). Звать сразу после поля.
