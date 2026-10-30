@@ -625,6 +625,20 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   AM, SFFM, PSpice "VALUE {..}" without '=', K with |k| = 1 (ideal transformer, index-2 note), clear refusals
   for A elements, VDMOS and noise sources.
   Still open: GUI check.
+- Stage 11, global testing (2026-10-30): `tests/u-cuda` has 11 suites (`run_tests.bat` with no arguments runs all,
+  ~20 min): gpu_smoke, krs_cpu, adaptive, architecture, sessions, tabs, dae, spice, kicad, library. New ones:
+  `sessions` (every system.json and all 242 session JSON files round-trip unchanged), `tabs` (Order: Euler ~1 /
+  RK4 ~4 GPU and CPU, Performance, stability region on Dahlquist 2D; Network ring of 16 Lorenz nodes),
+  `library` (every library system - ODE, map, DAE - through BD 1D / LLE on GPU and CPU, LS, Metrics, basins, DFT
+  on GPU, plus the records' custom KRS; 884 runs). Byte-level regression probes (scratchpad, not in the repo):
+  codegen dump of all 56 ODE library systems (1906 bodies incl. CPU, adaptive, complex core, GBS) identical to
+  b95ed43; DAE dump of 20 systems identical after removing exactly the intended blocks (root check of the
+  projection, RADAU5); Lorenz sweep dump (24 runs) and Duffing with t identical to the stage-2 baseline.
+  Found by them: `InputTextMultilineStr` (gui.cpp) gave ImGui a "length + 4096" scratch buffer, so pasting more
+  than 4096 characters into an empty multiline field silently cut the text at 4095 - the custom KRS CRK7s8_L of
+  Lorenz-CxSearch in library/ (gitignored user data) is cut mid-expression and does not compile. Fixed with
+  `ImGuiInputTextFlags_CallbackResize` (the string grows, imgui_stdlib style); the record itself is left as is.
+  Not covered: numb = float build, Debug build (not built by agreement), GUI by hand.
 - Newton for DAE: the predictor of `scheme_implicit_common` (BDF1, Trapezoidal, TR-BDF2, SDIRK2,
   Implicit Midpoint) is X_n for x and z alike, like Radau. The explicit-Euler x predictor the ODE
   schemes keep threw Newton far from the root on stiff circuits: "DAE-1 PUT burst neuron" at h = 5e-4

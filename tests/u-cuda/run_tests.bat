@@ -2,7 +2,7 @@
 rem Tests of U-CUDA (MSBuild project, no CMake). Each test is compiled by cl.exe and linked against
 rem the Release objects (build U-CUDA.sln Release|x64 first), then run from tests\u-cuda\build with a
 rem fresh copy of x64\Release\kernels next to it (the engines load templates from the exe dir).
-rem   run_tests.bat [test ...]     tests: gpu_smoke krs_cpu adaptive architecture dae spice kicad (none = all)
+rem   run_tests.bat [test ...]     tests: gpu_smoke krs_cpu adaptive architecture sessions tabs dae spice kicad library (none = all)
 rem Exit code of a test: 0 pass, 77 skip (no CUDA device), anything else fail.
 setlocal enabledelayedexpansion
 call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" >nul 2>nul
@@ -27,7 +27,7 @@ set APPLIBS=/LIBPATH:"%VCPKG%\lib" imgui.lib implot.lib implot3d.lib glfw3dll.li
 set CF=/nologo /EHsc /std:c++17 /O2 /MD /utf-8 /DWIN32 /DWIN64 /DNDEBUG /I"%HERE%." /I"%SRC%" /I"%SRC%\include" /I"%CUDA_PATH%\include"
 
 set TESTS=%*
-if "%TESTS%"=="" set TESTS=gpu_smoke krs_cpu adaptive architecture dae spice kicad
+if "%TESTS%"=="" set TESTS=gpu_smoke krs_cpu adaptive architecture sessions tabs dae spice kicad library
 set FAILED=0
 for %%t in (%TESTS%) do (
   set FILE=%%t_test.cpp
@@ -35,7 +35,11 @@ for %%t in (%TESTS%) do (
   set OBJS=!ENG!
   set EXTRA=%LIBS%
   set DEF=
-  if "%%t"=="architecture" (
+  set FULL=0
+  if "%%t"=="architecture" set FULL=1
+  if "%%t"=="sessions" set FULL=1
+  if "%%t"=="tabs" set FULL=1
+  if "!FULL!"=="1" (
     set OBJS=!APP!
     set EXTRA=%LIBS% %APPLIBS%
     set DEF=/DUT_FULL_APP /I"%VCPKG%\include"

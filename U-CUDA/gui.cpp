@@ -139,11 +139,20 @@ static std::vector<char>& input_scratch(const std::string& str, size_t extra) {
     return buf;
 }
 
+// Многострочное поле прямо над std::string с ростом буфера (CallbackResize, как imgui_stdlib). Раньше —
+// скретч "длина + 4096": вставка длиннее 4096 символов в пустое поле молча резалась на 4095 (так
+// обрезалось тело КРС CRK7s8_L в Lorenz-CxSearch: 5245 символов -> 4095, посреди выражения).
+static int input_str_resize(ImGuiInputTextCallbackData* d) {
+    if (d->EventFlag == ImGuiInputTextFlags_CallbackResize) {
+        std::string* s = static_cast<std::string*>(d->UserData);
+        s->resize((size_t)d->BufTextLen);
+        d->Buf = s->data();
+    }
+    return 0;
+}
 static bool InputTextMultilineStr(const char* label, std::string& str, const ImVec2& size) {
-    std::vector<char>& buf = input_scratch(str, 4096);
-    bool changed = ImGui::InputTextMultiline(label, buf.data(), buf.size(), size);
-    if (changed) str = buf.data();
-    return changed;
+    return ImGui::InputTextMultiline(label, str.data(), str.capacity() + 1, size,
+                                     ImGuiInputTextFlags_CallbackResize, input_str_resize, &str);
 }
 
 // Drag handle below a multiline input; drags along Y and clamps `height`.
