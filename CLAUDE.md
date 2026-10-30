@@ -77,6 +77,11 @@ The project builds **ONE .exe** with different `main()` depending on configurati
 
 ## 📁 Directory Structure & Key Files
 
+**Code map — `ARCHITECTURE.md` (root):** layers, one frame of the UI loop, a table tab → GUI file → session /
+request builder → engine entry → template / kernel → CPU twin, how a scheme name becomes a step body,
+persistence, a "where to look" index and recipes (new scheme, setting, kernel). Read it first when looking
+for code; update it when a tab, engine entry, template or persistence path is added or moved.
+
 ```
 D:\U-CUDA\
 ├── CLAUDE.md              ← You are reading this (rules for AI)
