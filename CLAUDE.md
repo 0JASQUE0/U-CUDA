@@ -182,7 +182,10 @@ D:\U-CUDA\
   каждой вкладки), встроенные регуляторы, библиотека пользовательских
   регуляторов, `adaptive_build_params` (настройки → `UcudaAdaptParams`)
 - **krs_cpu.cpp / .h** — cl.exe-сборка тела КРС в DLL для CPU-путей
-  (`KrsCpuStep`, double/dd/qd) и тела пользовательского регулятора (`CtrlCpuFn`)
+  (`KrsCpuStep`, double/dd/qd) и тела пользовательского регулятора (`CtrlCpuFn`). В double/float-теле
+  вызовы `fmin(` / `fmax(` (без `::` перед именем) заменяются встроенными `ucuda_fmin_i` / `ucuda_fmax_i`
+  (`inline_fmin_fmax`; CRT-вызов в DLL дороже): мультивибратор BDF1 92 -> 88 мкс на шаг, PUT burst neuron
+  Radau IIA 914 -> 843 мкс, X побитово тот же
 - **system_library.cpp / .h** — Working with `library/*/system.json`
 - **system_record.h** — Struct for one ODE system (name, latex, param_order, initial conditions, values, selected numerical schemes)
 
@@ -227,26 +230,41 @@ D:\U-CUDA\
 `build_module` (`parametric_engine.cpp`) has two paths; `set_nvrtc_rdc` picks one. The code default is
 **off** (`g_nvrtc_rdc{false}`, `AppConfig::nvrtc_rdc = false`); only a saved `_app_config.json` turns it on.
 - **Monolith (rdc off):** the template defines `calculateDiscreteModel` (`__forceinline__`) and then
-  `#include "cudaLibrary.cu"` — one translation unit. `name_exprs` only fetches mangled names, it prunes
-  nothing: every non-template `__global__` of `cudaLibrary.cu` (30 of them) lands in the PTX and goes through
-  the driver's ptxas, and ~12 of them inline the step. `loopCalculateDiscreteModel_int` itself is NOT inlined
-  (one shared `.func`, 4-5 step copies inside), so the cost is the other kernels, not the requested one.
-  Measured (Mikhailov DAU_n, DAE CD, 45 KB body, RTX 2060, `CUDA_CACHE_DISABLE=1`): LLE 2D module with all
-  kernels 266 s (NVRTC 62 s + ptxas 204 s, 30 entries, 15 MB PTX); with only `LLEKernelCUDA` left
-  10.7 s (1 entry, 1.4 MB) — the same as rdc.
+  `#include "cudaLibrary.cu"` — one translation unit. **Kernel pruning (stage 10):** every `__global__` of
+  `cudaLibrary.cu` (33) sits in `#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_<name>)`, and
+  `build_module` puts `#define UCUDA_PRUNE_KERNELS` + `#define UCUDA_KEEP_<e>` for each `name_exprs` entry before
+  that include (`prune_kernel_defines`; the template's own `extern "C"` kernels are always there). Without the
+  macro the text is the old one (rdc library, CPU DLL, Debug). Bit equality with the full build: NVVM tunes a
+  non-inlined shared function to ALL its call sites (an argument constant in every call is folded, a pointer's
+  address space is inferred), so a pruned module must keep the full build's variety of calls. (1) `pow`: the
+  continuation templates call it only as pow(10, x) -> keeper kernel `ucudaPruneKeeper` (end of `cudaLibrary.cu`,
+  never launched) calls `pow(a, b)` with runtime arguments. (2) Loop wrappers (`loopCalculateDiscreteModel_int` /
+  `...Peaks_int`, not inlined on a big step body): a block before the first kernel keeps `calculateDiscreteModelCUDA`
+  + `LLEKernelCUDA` (+ `calculateDiscreteModelPeaksCUDA` for Peaks_int) whenever anything left calls a wrapper (a
+  listed library kernel, or the template itself: `UCUDA_KEEP_LOOP` / `UCUDA_KEEP_PEAKS_LOOP`, set by the engine from
+  the template text). Together they give every argument kind of the full build (data / flags from parameters or
+  nullptr, local `&ticks` or nullptr, preScaller 1 or runtime). A synthetic keeper with such calls failed: NVVM
+  inlined them into the keeper itself, and the remaining call was the constant one (Radau LLE: the wrapper lost 8 of
+  13 parameters). Checked by PTX per function (labels, `callseq`, `__local_depot` numbering normalised; a full PTX =
+  the dumped pruned source minus the prune lines, one NVRTC run): identical on Radau IIA DAE (11 modules: BD 1D/2D,
+  continuation, LLE/LS 1D + cont, Metrics, basins, DFT cont / h-sweep), Lorenz RK4, adaptive DOP853 / BDF 1-5 sweeps;
+  Rodas4 adaptive: 1 function of 35 differs by one 16-byte local load split in two (same addresses, no arithmetic),
+  results bit-identical. Results bit-identical also on Lorenz CD fast (prep block), Duffing with t, FastSync
+  attr/grid, Order, Network. Test `tests/u-cuda/prune_test.cpp` (results, pruned vs `UCUDA_NVRTC_PRUNE=0`). Knobs:
+  `UCUDA_NVRTC_PRUNE=0` = full build; `UCUDA_NVRTC_PTX_DIR=<dir>` dumps the source (`.cu`) and PTX of every
+  monolithic build. Cost (RTX 2060, `CUDA_CACHE_DISABLE=1`, build + run of all modules of the probe): Lorenz RK4
+  14-26 s vs 95 s, Duffing 24 s vs 172 s, Rodas4 adaptive sweeps 61 s vs 325 s; Radau IIA PTX per module
+  15-17 MB -> 3.3-9.9 MB (NVRTC alone ~210 s -> 42-145 s). Before pruning (Mikhailov DAU_n, DAE CD, 45 KB body): LLE
+  2D 266 s (NVRTC 62 s + ptxas 204 s, 30 entries, 15 MB PTX). A new kernel in `cudaLibrary.cu` needs the same
+  `#if` wrapper (and a place in the wrapper list if it calls a loop wrapper); a new non-inlined shared function
+  called with constants may need a keeper call (check with the PTX dump).
 - **rdc:** the library half (template with `extern "C" krs_step(...)` calls instead of the body) is compiled
   once per (template, N, par_or_var, fmad, peak settings, kernels) and cached as PTX (`lib_ptx_for`); the step
   is its own small TU (`krs_ptx_for`); `cuLinkAddData` x2 + `cuLinkComplete` join them (PTX link, no LTO, so
   the step is a real call). The lost FMA contraction across that call changes last bits on some schemes.
-- **Pruning kernels is not bit-identical by itself.** Cutting the unused kernels (tried on a scratch copy of
-  `cudaLibrary.cu`) gave LS 1D on Mikhailov ~1e-12 differences in 8 of 16 rows. Cause: when every remaining
-  caller passes `data = nullptr`, NVVM specialises `loopCalculateDiscreteModel_int` (the trajectory-writing
-  branch is dead, one step copy goes), the CFG changes and FMA contraction in the step copies lands
-  differently. Proof: a dummy caller kernel with `data` from a parameter restores bit equality with the full
-  library (`preScaller == 1` alone does not matter), and with `--fmad=false` both agree exactly. So a pruned
-  build needs a "keeper" kernel per loop wrapper (`loopCalculateDiscreteModel_int`, `…Peaks_int`,
-  `loopCalculateDiscreteModel`) whose arguments are all runtime values, and a CSV comparison against the full
-  build for every template.
+- **Why it matters.** An earlier scratch try (no keepers) gave LS 1D on Mikhailov ~1e-12 differences in 8 of 16
+  rows: with every remaining caller passing `data = nullptr`, NVVM specialised `loopCalculateDiscreteModel_int`, the
+  CFG changed and FMA contraction in the step copies landed differently (with `--fmad=false` both agree exactly).
 
 ### Where linearization actually comes from
 **LLE/LS do not use a Jacobian.** They linearize with perturbed clone trajectories plus Gram-Schmidt (`LLEKernelCUDA` / `LSKernelCUDA` in `cudaLibrary.cu`) — the Benettin/Wolf method. No variational equations, no monodromy matrix anywhere.
@@ -402,7 +420,12 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   complex one ((alpha + i beta)/h M - J) as a real 2N x 2N; if it diverges / is singular / does not converge in
   nmax, the same step goes through the old Newton from the predictor (`rd_done`). newton_full = 1 (DAE default)
   runs the old text. Orders unchanged (index 1: 5/5, 2: 5/3, 3 + GGL: 5/3), = full Newton to 6e-13 on the
-  index-2 pendulum, converges without the fallback (dae_test). Speed not measured (stage 10).
+  index-2 pendulum, converges without the fallback (dae_test). Speed (stage 10, Metrics sweep, GPU 2048 points /
+  CPU 16): the simplified Newton does NOT pay off here - double pendulum GPU 0.48 s (full, sparse LU) vs 1.84 s
+  (simplified), Andrews 6.0 vs 9.1 s, Mikhailov DAU_n 2.94 vs 2.84 s, pendulum index 2 0.11 vs 0.14 s; CPU the
+  same picture (double pendulum 3.9 vs 5.6 ms per point, Mikhailov 29 vs 23). The full Newton gets the hybrid
+  sparse LU of the 3N system, the simplified one factors dense N x N and 2N x 2N; keep newton_full = 1 (DAE
+  default). GPU vs CPU per sweep point (CPU DLL, all cores): BDF1 9-24x, Radau IIA 14-20x.
   `System::dae_index` (from `dae_index_text`, `DaeSystem::as_codegen_system`) weights the Newton
   correction of an index-k variable by h^(k-1) (`dae_norm_w`), in `scheme_implicit_common` and Radau;
   index <= 1 systems print the old text. Orders (headless probe, self-convergence): Radau IIA index 1:
@@ -457,7 +480,11 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   and ran 1.4x slower — the straight-line code size, not arithmetic). `UCUDA_DAE_DENSE_LU=1` forces the
   dense LU (comparison knob). CPU probe, same results to the last digit: Andrews BDF1 114 -> 69 ms,
   Radau IIA 915 -> 250 ms (both match the Test Set q(0.03): Radau 1.4e-9), double pendulum BDF1
-  27 -> 16 ms, Radau 590 -> 465 ms. Not measured on the GPU (bodies are plain C; NVRTC not checked).
+  27 -> 16 ms, Radau 590 -> 465 ms. GPU (stage 10, Metrics sweep 2048 points, RTX 2060, rdc on; same results,
+  sums equal to 1e-12, Andrews Radau 1e-8): double pendulum BDF1 0.25 -> 0.095 s, Radau IIA 11.3 -> 0.48 s;
+  Andrews (t = 0.003, h = 1e-5) BDF1 2.67 -> 0.21 s, Radau IIA 47.9 -> 6.0 s - the sparse LU gains more on
+  the GPU (8-23x) than on the CPU: the dense 3N x 3N loop LU lives in local memory. Module build with rdc:
+  Andrews Radau 53 s sparse vs 32 s dense (straight-line code), double pendulum 10 s vs 2 s.
 - Stage 7, sweeps on a native DAE: `lyap_nx_prefix` (`#define UCUDA_LYAP_NX nx` from the body tag) now goes
   to the BD 1D / continuation / BD 2D / Metrics / basins modules too, not only LLE/LS. With it every sweep
   point makes z0 consistent with ITS parameters (the constraint depends on them): the DAE step with h = 0
@@ -769,7 +796,15 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   than 4096 characters into an empty multiline field silently cut the text at 4095 - the custom KRS CRK7s8_L of
   Lorenz-CxSearch in library/ (gitignored user data) is cut mid-expression and does not compile. Fixed with
   `ImGuiInputTextFlags_CallbackResize` (the string grows, imgui_stdlib style); the record itself is left as is.
-  Not covered: numb = float build, Debug build (not built by agreement), GUI by hand.
+  Closing (2026-10-30): suite 12 `prune` (monolith with kernel pruning = full build, bit for bit; the only suite
+  that runs the app default rdc off - the others set rdc on; a test must not be named after a library it links:
+  `nvrtc.exe` left `nvrtc.lib` in build\ and the linker took it for CUDA's). numb = float build: compiles again
+  (`multistep_bdf.h`: the BDF CPU provider calls `SystemEvaluator` through double buffers, `bdf_eval`); checked
+  by building into separate dirs (`-p:OutDir=x64\ReleaseFloat\ -p:IntDir=U-CUDA\x64\ReleaseFloat\`, configCUDA.h
+  switched only for the build) and running the suite against those objects with `/DUCUDA_NUMB_TYPE=float`:
+  gpu_smoke, krs_cpu pass; adaptive (dense output to 1e-8) and dae (orders by self-convergence) fail on their
+  double-precision tolerances - float limits, not breakage. GUI by hand: `tests/u-cuda/GUI_CHECKLIST.md`.
+  Debug is not built (by agreement).
 - Newton for DAE: the predictor of `scheme_implicit_common` (BDF1, Trapezoidal, TR-BDF2, SDIRK2,
   Implicit Midpoint) is X_n for x and z alike, like Radau. The explicit-Euler x predictor the ODE
   schemes keep threw Newton far from the root on stiff circuits: "DAE-1 PUT burst neuron" at h = 5e-4

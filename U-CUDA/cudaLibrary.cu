@@ -484,6 +484,40 @@ __device__ __forceinline__ void ucudaProgressTopUp(int* progressCounter, int pro
 	if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
 }
 
+// Отсечённая монолитная сборка (UCUDA_PRUNE_KERNELS, см. nvrtc_prune_kernels в parametric_engine.cpp):
+// каждое ядро ниже обёрнуто в #if и остаётся, только если движок попросил его (UCUDA_KEEP_<имя>).
+// Обёртки цикла (loopCalculateDiscreteModel_int / ...Peaks_int) на большом теле шага не встраиваются, и NVVM
+// подстраивает их под ВСЕ вызовы: аргумент, константный во всех вызовах, сворачивается, у указателя
+// выводится адресное пространство. В полной сборке вызовы разнообразны; у одного-двух оставшихся ядер —
+// нет (у LLE preScaller всегда 1 и data = nullptr), и код обёртки, а с ним FMA в шаге, меняется. Поэтому,
+// если обёртку зовёт хоть что-то оставшееся (ядро библиотеки из списка или шаблон: UCUDA_KEEP_LOOP /
+// UCUDA_KEEP_PEAKS_LOOP ставит движок по тексту шаблона), остаются и два ядра полной сборки, которые
+// вместе дают все виды её аргументов (calculateDiscreteModelCUDA: data и флаги из параметров, локальный
+// &ticks; LLEKernelCUDA: константы, nullptr). Синтетический держатель с такими вызовами не годится:
+// NVVM встраивает их в него самого, и в модуле остаётся не тот набор вызовов. Новое ядро библиотеки,
+// зовущее обёртку, — добавить в список.
+#ifdef UCUDA_PRUNE_KERNELS
+#if defined(UCUDA_KEEP_PEAKS_LOOP) || defined(UCUDA_KEEP_calculateDiscreteModelAvgPeaksCUDA)
+#ifndef UCUDA_KEEP_calculateDiscreteModelPeaksCUDA
+#define UCUDA_KEEP_calculateDiscreteModelPeaksCUDA
+#endif
+#endif
+#if defined(UCUDA_KEEP_LOOP) || defined(UCUDA_KEEP_calculateDiscreteModelCUDA) \
+	|| defined(UCUDA_KEEP_calculateDiscreteModelPeaksCUDA) || defined(UCUDA_KEEP_calculateDiscreteModelAvgPeaksCUDA) \
+	|| defined(UCUDA_KEEP_calculateDiscreteModelICCUDA) || defined(UCUDA_KEEP_calculateDiscreteModelICCUDA_logAxes) \
+	|| defined(UCUDA_KEEP_LLEKernelCUDA) || defined(UCUDA_KEEP_LLEKernelICCUDA) \
+	|| defined(UCUDA_KEEP_LSKernelCUDA) || defined(UCUDA_KEEP_LSKernelICCUDA) \
+	|| defined(UCUDA_KEEP_calculateDiscreteModelICCforFastSynchro) || defined(UCUDA_KEEP_calculateDiscreteModelforFastSynchroCUDA)
+#ifndef UCUDA_KEEP_calculateDiscreteModelCUDA
+#define UCUDA_KEEP_calculateDiscreteModelCUDA
+#endif
+#ifndef UCUDA_KEEP_LLEKernelCUDA
+#define UCUDA_KEEP_LLEKernelCUDA
+#endif
+#endif
+#endif
+
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelICCforFastSynchro)
 __global__ void calculateDiscreteModelICCforFastSynchro(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -647,6 +681,7 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 
 	return;
 }
+#endif
 
 __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	numb* x,
@@ -1591,6 +1626,7 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 	return r;
 }
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_distributedCalculateDiscreteModelCUDA)
 __global__ void distributedCalculateDiscreteModelCUDA(
 	const size_t		amountOfPointsForSkip,
 	const int		amountOfThreads,
@@ -1630,6 +1666,7 @@ __global__ void distributedCalculateDiscreteModelCUDA(
 
 	return;
 }
+#endif
 
 // Глобальная функция, которая вычисляет траекторию нескольких систем
 
@@ -1719,6 +1756,7 @@ __device__ __forceinline__ bool ucudaSetupSweepPoint(
 	return true;
 }
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelCUDA)
 __global__ void calculateDiscreteModelCUDA(
 	const int		nPts, 
 	const int		nPtsLimiter, 
@@ -1809,6 +1847,7 @@ __global__ void calculateDiscreteModelCUDA(
 	//delete[] localValues;
 	return;
 }
+#endif
 
 // calculateDiscreteModelPeaksCUDA -- calculateDiscreteModelCUDA fused with
 // peakFinderCUDA. Same sweep point (shared ucudaSetupSweepPoint), same
@@ -1819,6 +1858,7 @@ __global__ void calculateDiscreteModelCUDA(
 //
 // Inter-peak intervals are scaled by h_local, not by the launch-wide h the
 // split path could only pass: under a dt-sweep every point has its own step.
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelPeaksCUDA)
 __global__ void calculateDiscreteModelPeaksCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -1920,7 +1960,9 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 		if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
 	}
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelCUDA_H)
 __global__ void calculateDiscreteModelCUDA_H(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -1985,7 +2027,9 @@ __global__ void calculateDiscreteModelCUDA_H(
 
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelICCUDA)
 __global__ void calculateDiscreteModelICCUDA(
 	const int		nPts, 
 	const int		nPtsLimiter, 
@@ -2083,7 +2127,9 @@ __global__ void calculateDiscreteModelICCUDA(
 
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelICCUDA_logAxes)
 __global__ void calculateDiscreteModelICCUDA_logAxes(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -2150,6 +2196,7 @@ __global__ void calculateDiscreteModelICCUDA_logAxes(
 	}
 	return;
 }
+#endif
 
 // Функция, которая находит индекс в последовательности значений
 
@@ -2457,6 +2504,7 @@ __device__ __host__ int peakFinder(numb* data, const size_t startDataIndex,
 
 // Нахождение пиков в "data" массиве в многопоточном режиме
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_peakFinderCUDA)
 __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h, const int* actualIterations,
 	const size_t peakStride, const int peakCapacity, const bool emitAllSamples)
@@ -2502,7 +2550,9 @@ __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int a
 		peakBase, peakCapacity );
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_globalPeakFinderCUDA)
 __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* globalPeakValue)
 {
@@ -2522,7 +2572,9 @@ __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const
 	globalPeakValue[idx] = globalPeakFinder(data, (size_t)idx * sizeOfBlock, sizeOfBlock);
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_DFT_custom)
 __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq, numb h,
 	const int logFreqAxis)
@@ -2622,6 +2674,7 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 
 	return;
 }
+#endif
 
 // DFT_custom с потоком на пару (точка, частота) вместо потока на точку. Аргументы те же, сетка —
 // amountOfBlocks * nFreq потоков. Зачем: в DFT_custom поток последовательно проходит nFreq частот
@@ -2631,6 +2684,7 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 // cosf/sinf, деление в конце), сумма лишь копится в регистре, а не в AkCOS[]: результат бит-в-бит
 // как у DFT_custom. Соседние потоки — соседние частоты одной точки, поэтому data[n] и window[n]
 // варп читает одним запросом. DFT_custom оставлен для NonLinAnal (hostLibrary.cu).
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_DFT_custom_pf)
 __global__ void DFT_custom_pf(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq, numb h,
 	const int logFreqAxis)
@@ -2688,7 +2742,9 @@ __global__ void DFT_custom_pf(numb* data, const int sizeOfBlock, const int amoun
 	AkCOS[outIndex] = ak / (numb)sizeOfBlock;
 	BkSIN[outIndex] = bk / (numb)sizeOfBlock;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_MeanAndMedianFreqCUDA)
 __global__ void MeanAndMedianFreqCUDA(const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanFreq,  numb* medianFreq)
 {
@@ -2718,7 +2774,9 @@ __global__ void MeanAndMedianFreqCUDA(const int sizeOfBlock, const int amountOfB
 	MeanAndMedianFreq(idx, idx * sizeOfBlock, AoP, outPeaks, timeOfPeaks, meanFreq, medianFreq);
 	//return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_MeanAndVarianceCUDA)
 __global__ void MeanAndVarianceCUDA(const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanPeak, numb* variancePeak, numb* meanInterval, numb* varianceInterval, numb* maxPeak, numb* maxInterval)
 {
@@ -2772,7 +2830,9 @@ __global__ void MeanAndVarianceCUDA(const int sizeOfBlock, const int amountOfBlo
 	MeanAndVariance(idx, idx * sizeOfBlock, AoP, outPeaks, timeOfPeaks, meanPeak, variancePeak, meanInterval, varianceInterval, maxPeak, maxInterval);
 	//return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_peakFinderCUDA_H)
 __global__ void peakFinderCUDA_H(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h)
 {
@@ -2791,7 +2851,9 @@ __global__ void peakFinderCUDA_H(numb* data, const int sizeOfBlock, const int am
 	amountOfPeaks[idx] = peakFinder(data, idx * sizeOfBlock, amountOfPeaks[idx], outPeaks, timeOfPeaks, h);
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_peakFinderCUDAForCalculationOfPeriodicityByOstrovsky)
 __global__ void peakFinderCUDAForCalculationOfPeriodicityByOstrovsky(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, bool* flags, numb ostrovskyThreshold)
 {
@@ -2857,6 +2919,7 @@ __global__ void peakFinderCUDAForCalculationOfPeriodicityByOstrovsky(numb* data,
 		flags[idx * 5 + 4] = false;
 	return;
 }
+#endif
 
 __device__ __host__ int kde(numb* data, const int startDataIndex, const int amountOfPoints,
 	int maxAmountOfPeaks, int kdeSampling, numb kdeSamplesInterval1,
@@ -2926,6 +2989,7 @@ __device__ __host__ int kde(numb* data, const int startDataIndex, const int amou
 	return resultKde;
 }
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_kdeCUDA)
 __global__ void kdeCUDA(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, int* kdeResult, int maxAmountOfPeaks, int kdeSampling, numb kdeSamplesInterval1,
 	numb kdeSamplesInterval2, numb kdeSmoothH)
@@ -2942,6 +3006,7 @@ __global__ void kdeCUDA(numb* data, const int sizeOfBlock, const int amountOfBlo
 	kdeResult[idx] = kde(data, idx * sizeOfBlock, amountOfPeaks[idx], maxAmountOfPeaks,
 		kdeSampling, kdeSamplesInterval1, kdeSamplesInterval2, kdeSmoothH);
 }
+#endif
 
 // Вычисляет расстояние между двумя точками
 
@@ -3164,6 +3229,7 @@ __device__ __host__ int dbscan(numb* data, numb* intervals, numb* helpfulArray,
 
 // Глобальная функция DBSCAN
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_dbscanCUDA)
 __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	const int* amountOfPeaks, numb* intervals, numb* helpfulArray,
 	const numb eps, int* outData,
@@ -3196,9 +3262,11 @@ __global__ void dbscanCUDA(numb* data, const size_t sizeOfBlock, const int amoun
 
 	outData[idx] = dbscan(data, intervals, helpfulArray, idx * pStride, amountOfPeaks[idx], (int)hStride, idx, eps, outData, multPeak, multInterval, idx * hStride);
 }
+#endif
 
 // Наибольшее число пиков в куске (REGIME_* < 0 не мешают: *out обнулён хостом). Хост
 // читает его перед dbscanWarpCUDA, чтобы выбрать ёмкость буфера в shared memory.
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_ucudaMaxPeaksCUDA)
 __global__ void ucudaMaxPeaksCUDA(const int* amountOfPeaks, const int n, int* out)
 {
 	int m = 0;
@@ -3207,6 +3275,7 @@ __global__ void ucudaMaxPeaksCUDA(const int* amountOfPeaks, const int n, int* ou
 	for (int o = 16; o > 0; o >>= 1) m = max(m, __shfl_down_sync(0xffffffffu, m, o));
 	if ((threadIdx.x & 31) == 0 && m > 0) atomicMax(out, m);
 }
+#endif
 
 // Одномерная ветка dbscan() (multPeak == 0 || multInterval == 0) — по ВАРПУ на ячейку.
 //
@@ -3229,6 +3298,7 @@ __device__ __forceinline__ numb ucudaPosInf()
 	                         : (numb)__int_as_float(0x7f800000);
 }
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_dbscanWarpCUDA)
 __global__ void dbscanWarpCUDA(const numb* data, const int amountOfBlocks,
 	const int* amountOfPeaks, const numb* intervals, numb* helpfulArray,
 	const numb eps, int* outData, const numb multPeak, const numb multInterval,
@@ -3282,6 +3352,7 @@ __global__ void dbscanWarpCUDA(const numb* data, const int amountOfBlocks,
 	for (int o = 16; o > 0; o >>= 1) gaps += __shfl_down_sync(0xffffffffu, gaps, o);
 	if (lane == 0) outData[cell] = gaps + 1;
 }
+#endif
 
 // Union-find для dbscanWarp2DCUDA: корень — элемент, который указывает сам на себя.
 // Дорожки варпа сливают компоненты одновременно; atomicCAS вешает БОЛЬШИЙ корень под
@@ -3336,6 +3407,7 @@ __device__ __forceinline__ void ucudaUfUnite(int* par, int a, int b)
 // x[cap], y[cap] (numb) и par[cap] (int). cap == 0 — shared не хватило: те же шаги идут
 // по глобальной памяти, сортировка на месте в буферах пиков (после DBSCAN их никто не
 // читает), par — в helpfulArray. Ячейка с пиками больше cap — тоже по глобальной памяти.
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_dbscanWarp2DCUDA)
 __global__ void dbscanWarp2DCUDA(numb* data, const int amountOfBlocks,
 	const int* amountOfPeaks, numb* intervals, numb* helpfulArray,
 	const numb eps, int* outData, const numb multPeak, const numb multInterval,
@@ -3419,6 +3491,7 @@ __global__ void dbscanWarp2DCUDA(numb* data, const int amountOfBlocks,
 	for (int o = 16; o > 0; o >>= 1) roots += __shfl_down_sync(0xffffffffu, roots, o);
 	if (lane == 0) outData[cell] = roots;
 }
+#endif
 
 // ПРИМЕЧАНИЕ: здесь были dbscan_optimized (Spatial Hashing + Stack DFS) и
 // ядро dbscanCUDA_optimized. Удалены как мёртвый код: единственная ссылка на
@@ -3451,6 +3524,7 @@ __device__ __host__ inline void ucudaDaeProject(numb* y, const numb* x, UCUDA_TP
 // доступен из cudaLibrary.cuh. Всё что после этого kernel'а (LLE_IC, LS,
 // dbscan, fastSynchro и пр.) остаётся под гардом, потому что не требуется
 // для текущих режимов engine'а и может нести host-only зависимости.
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_LLEKernelCUDA)
 __global__ void LLEKernelCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -3697,6 +3771,7 @@ __global__ void LLEKernelCUDA(
 	resultArray[idx] = result / ((numb)sizeOfBlock * (numb)amountOfNTPoints * h_local);
 	ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 }
+#endif
 
 // Всё что ниже остаётся отрезано от NVRTC — engine эти kernel'ы не зовёт,
 // а часть из них содержит host-only зависимости или ещё не верифицирована
@@ -3704,6 +3779,7 @@ __global__ void LLEKernelCUDA(
 #ifndef __CUDACC_RTC__
 
 // Ядро для LLE (IC)
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_LLEKernelICCUDA)
 __global__ void LLEKernelICCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -3830,6 +3906,7 @@ __global__ void LLEKernelICCUDA(
 
 	resultArray[idx] = result / ((numb)sizeOfBlock * (numb)amountOfNTPoints * h);
 }
+#endif
 
 // projectionOperator + gramSchmidtProcess + LSKernelCUDA — выведены из
 // NVRTC-гарда (нужны для LS). curand_kernel.h теперь доступен под NVRTC.
@@ -4079,6 +4156,7 @@ __device__ __forceinline__ void ucudaGramSchmidtN(const numb* __restrict__ a, nu
 	}
 }
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_LSKernelCUDA)
 __global__ void LSKernelCUDA(
 	const int nPts,
 	const int nPtsLimiter,
@@ -4335,10 +4413,12 @@ __global__ void LSKernelCUDA(
 #endif
 	ucudaProgressTopUp(progressCounter, progressStride, totalSteps, ticks);
 }
+#endif
 
 // Всё что ниже снова под гардом — engine не зовёт, потенциально хост-only.
 #ifndef __CUDACC_RTC__
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_LSKernelICCUDA)
 __global__ void LSKernelICCUDA(
 	const int nPts,
 	const int nPtsLimiter,
@@ -4488,9 +4568,11 @@ __global__ void LSKernelICCUDA(
 	for (int i = 0; i < amountOfInitialConditions; ++i)
 		resultArray[idx * amountOfInitialConditions + i] = result[i] / tIntegrated;
 }
+#endif
 
 // Нахождение среднего значения пиков и межпиковых интервалов
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_avgPeakFinderCUDA_logMaximas)
 __global__ void avgPeakFinderCUDA_logMaximas(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* systemCheker, numb h)
 {
@@ -4546,6 +4628,7 @@ __global__ void avgPeakFinderCUDA_logMaximas(numb* data, const int sizeOfBlock, 
 
 	return;
 }
+#endif
 
 // Открываем доступ под NVRTC для basins-pipeline (U-CUDA)
 // Группа kernel'ов до CUDA_dbscan_search_unbound_points_kernel включительно
@@ -4619,6 +4702,7 @@ numb compute_basin_feature(int feat,
 // hSweepAxis is fixed at -1: BasinsRequest has no h axis. logAxisMask carries
 // only the ±log bits of the IC axes (UCUDA_SYMLOG_SHIFT + i); 0 is the linear
 // grid the kernel always had.
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelAvgPeaksCUDA)
 __global__ void calculateDiscreteModelAvgPeaksCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -4734,7 +4818,9 @@ __global__ void calculateDiscreteModelAvgPeaksCUDA(
 		if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
 	}
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_avgPeakFinderCUDA)
 __global__ void avgPeakFinderCUDA(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* systemCheker, numb h,
 	int feature1, int feature2, numb mult1, numb mult2)
@@ -4809,7 +4895,9 @@ __global__ void avgPeakFinderCUDA(numb* data, const int sizeOfBlock, const int a
 	outAvgPeaks[idx]    = mult1 * compute_basin_feature(feature1, mean_p, mean_i, rms_p, rms_i, std_p, std_i);
 	AvgTimeOfPeaks[idx] = mult2 * compute_basin_feature(feature2, mean_p, mean_i, rms_p, rms_i, std_p, std_i);
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_avgPeakFinderCUDA_for2Dbif)
 __global__ void avgPeakFinderCUDA_for2Dbif(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	numb* outAvgPeaks, numb* AvgTimeOfPeaks, numb* outPeaks, numb* timeOfPeaks, int* PeaksAmount, int* systemCheker, numb h)
 {
@@ -4859,6 +4947,7 @@ __global__ void avgPeakFinderCUDA_for2Dbif(numb* data, const int sizeOfBlock, co
 
 	return;
 }
+#endif
 
 // Seed-поиск (search_fixed / search_clear / search_unbound ниже) находит
 // ЛЮБУЮ ещё не размеченную точку нужного типа, чтобы начать от неё новый
@@ -4873,6 +4962,7 @@ __global__ void avgPeakFinderCUDA_for2Dbif(numb* data, const int sizeOfBlock, co
 // наименьший idx среди подходящих. Sentinel -1 (бит-паттерн 0xFFFFFFFF)
 // численно равен UINT_MAX, поэтому конвенция "res == -1 => не найдено"
 // переживает unsigned-перетолкование без изменений на host-стороне.
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_CUDA_dbscan_kernel)
 __global__ void CUDA_dbscan_kernel(numb* data, numb* intervals, int* labels,
 	const int amountOfData, const numb eps, int amountOfClusters,
 	int* amountOfNeighbors, int* neighbors, int idxCurPoint, int* helpfulArray)
@@ -4915,7 +5005,9 @@ __global__ void CUDA_dbscan_kernel(numb* data, numb* intervals, int* labels,
 		neighbors[atomicAdd(amountOfNeighbors, 1)] = idx;		// Фиксируем индекс найденного соседа - его ждет та же участь
 	}
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_CUDA_dbscan_search_clear_points_kernel)
 __global__ void CUDA_dbscan_search_clear_points_kernel(numb* data, numb* intervals, int* helpfulArray, int* labels,
 	const int amountOfData, int* res)
 {
@@ -4929,7 +5021,9 @@ __global__ void CUDA_dbscan_search_clear_points_kernel(numb* data, numb* interva
 		return;
 	}
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_CUDA_dbscan_search_fixed_points_kernel)
 __global__ void CUDA_dbscan_search_fixed_points_kernel(numb* data, numb* intervals, int* helpfulArray, int* labels,
 	const int amountOfData, int* res)
 {
@@ -4943,7 +5037,9 @@ __global__ void CUDA_dbscan_search_fixed_points_kernel(numb* data, numb* interva
 		return;
 	}
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_CUDA_dbscan_search_unbound_points_kernel)
 __global__ void CUDA_dbscan_search_unbound_points_kernel(numb* data, numb* intervals, int* helpfulArray, int* labels,
 	const int amountOfData, int* res)
 {
@@ -4957,6 +5053,7 @@ __global__ void CUDA_dbscan_search_unbound_points_kernel(numb* data, numb* inter
 		return;
 	}
 }
+#endif
 
 // FastSynchro kernels — теперь ВНУТРИ NVRTC-окна
 // Раньше эта группа была спрятана под `#ifndef __CUDACC_RTC__`, но U-CUDA
@@ -4964,6 +5061,7 @@ __global__ void CUDA_dbscan_search_unbound_points_kernel(numb* data, numb* inter
 // (cuModuleGetFunction → "named symbol not found" иначе). NonLinAnal
 // (Debug-build) тоже компилирует их через обычный nvcc-путь — пути совместимы.
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelforFastSynchroCUDA)
 __global__ void calculateDiscreteModelforFastSynchroCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -5022,6 +5120,7 @@ __global__ void calculateDiscreteModelforFastSynchroCUDA(
 		cancelFlag, progressCounter);
 	return;
 }
+#endif
 
 __device__ numb loopCalculateDiscreteModelForFastSynchro(
 	const numb* initConditionsSlave,
@@ -5267,3 +5366,14 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro(
 }
 // (Закрытие NVRTC-guard'а, который ранее окружал FS-kernels, удалено —
 // теперь они видимы как обычные символы и для NVRTC, и для nvcc.)
+
+#ifdef UCUDA_PRUNE_KERNELS
+// Держатель отсечённой монолитной сборки (см. nvrtc_prune_kernels в parametric_engine.cpp и блок перед
+// первым ядром). pow не встраивается, и NVVM подстраивает его под все вызовы: у продолжений их основание
+// всегда 10, и без других ядер __internal_accurate_pow специализировался на константе. Здесь pow зовётся
+// с аргументами из параметров, как в полной сборке. Ядро не запускается.
+__global__ void ucudaPruneKeeper(numb* out, const numb a, const numb b)
+{
+	out[0] = pow(a, b);
+}
+#endif

@@ -115,6 +115,43 @@ static void add_profiling_nvrtc_opts(std::vector<const char*>& opts, std::string
     if (n > 0 && n < sizeof v) { storage = std::string("--maxrregcount=") + v; opts.push_back(storage.c_str()); }
 }
 
+// Отсечение ядер cudaLibrary.cu в монолитной сборке (этап 10). Модулю нужны только ядра из
+// name_exprs (плюс extern "C" ядра самого шаблона), а cudaLibrary.cu несёт 33 — почти все
+// встраивают шаг, и ptxas компилирует каждое (Mikhailov DAU_n, LLE 2D: 266 с против 11 с).
+// Ядра в cudaLibrary.cu обёрнуты в #if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_<имя>),
+// без UCUDA_PRUNE_KERNELS текст прежний (rdc-библиотека, CPU-DLL, Debug). Чтобы оставшийся код
+// совпал с полной сборкой бит-в-бит, cudaLibrary.cu при обёртках цикла оставляет ещё два своих ядра
+// и держит pow ядром-держателем (см. там). UCUDA_NVRTC_PRUNE=0 — полная сборка, для сравнения.
+static bool nvrtc_prune_kernels() {
+    char v[8];
+    const DWORD n = GetEnvironmentVariableA("UCUDA_NVRTC_PRUNE", v, sizeof v);
+    return !(n > 0 && n < sizeof v && v[0] == '0');
+}
+// src — текст шаблона после подстановок (cudaLibrary.cu в нём только #include): если его собственные
+// ядра зовут обёртки цикла, UCUDA_KEEP_LOOP / UCUDA_KEEP_PEAKS_LOOP — тогда cudaLibrary.cu оставляет и
+// ядра полной сборки, которые дают обёрткам все виды аргументов (блок перед первым ядром там).
+static std::string prune_kernel_defines(const std::vector<const char*>& name_exprs, const std::string& src) {
+    std::string d = "#define UCUDA_PRUNE_KERNELS\n";
+    for (const char* e : name_exprs) { d += "#define UCUDA_KEEP_"; d += e; d += '\n'; }
+    if (src.find("loopCalculateDiscreteModel_int(") != std::string::npos) d += "#define UCUDA_KEEP_LOOP\n";
+    if (src.find("loopCalculateDiscreteModelPeaks_int(") != std::string::npos) d += "#define UCUDA_KEEP_PEAKS_LOOP\n";
+    return d;
+}
+// UCUDA_NVRTC_PTX_DIR=<каталог> — исходник и PTX каждой монолитной сборки в <каталог>\<исходник>_<n>.cu / .ptx
+// (сравнение полной и отсечённой сборок по функциям: полную можно получить из того же .cu без строк
+// UCUDA_PRUNE_KERNELS / UCUDA_KEEP_ одним NVRTC, без ptxas).
+static void dump_module_ptx(const char* src_name, const std::string& src, const std::string& ptx) {
+    char dir[MAX_PATH];
+    const DWORD n = GetEnvironmentVariableA("UCUDA_NVRTC_PTX_DIR", dir, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    static std::atomic<int> seq{0};
+    const std::string base = std::string(dir, n) + "\\" + src_name + "_" + std::to_string(seq++);
+    for (const auto& [ext, text] : { std::pair<const char*, const std::string*>{ ".cu", &src }, { ".ptx", &ptx } }) {
+        FILE* f = nullptr;
+        if (fopen_s(&f, (base + ext).c_str(), "wb") == 0 && f) { std::fwrite(text->data(), 1, text->size(), f); std::fclose(f); }
+    }
+}
+
 // Строка опции для nvrtcCompileProgram. Литералы статические, поэтому указатель
 // живёт дольше вызова.
 const char* nvrtc_fmad_opt() {
@@ -2954,6 +2991,8 @@ struct ParametricEngine::Impl {
         for (const auto& sub : subs) src = replace_all(src, sub.first, sub.second);
         if (has_prep)
             krs_insert_before_line(src, "#include \"cudaLibrary.cu\"", krs_prep_inline_defs(prep_sp));
+        if (nvrtc_prune_kernels())
+            krs_insert_before_line(src, "#include \"cudaLibrary.cu\"", prune_kernel_defines(name_exprs, src));
 
         // Виртуальные заголовки для NVRTC. curand_kernel.h-stub НЕ нужен:
         // inline-stub в шаблонах + `#define CURAND_KERNEL_H_` блокируют как
@@ -3027,6 +3066,7 @@ struct ParametricEngine::Impl {
         size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
         std::string ptx(ptxsz, '\0');
         nvrtcGetPTX(prog, &ptx[0]);
+        dump_module_ptx(src_name, src, ptx);
 
         // Mangled-имена копируем в свои строки ДО nvrtcDestroyProgram — после
         // destroy указатели становятся невалидны.

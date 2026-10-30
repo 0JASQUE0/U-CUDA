@@ -56,6 +56,21 @@ inline bool bdf_prepare_system(const System& s, System& out, std::string* err) {
     return true;
 }
 
+// SystemEvaluator считает в double, драйвер — в numb. При numb = double — прямой вызов; иначе (сборка
+// numb = float) состояние и результат идут через double-буферы, как у CPU-драйвера адаптивного шага.
+inline void bdf_eval(const SystemEvaluator& ev, bool jac, const double* y, const double* a, double* o, int,
+                     std::vector<double>&, std::vector<double>&) {
+    if (jac) ev.eval_jacobian(y, a, o); else ev.eval(y, a, o);
+}
+template <class T>
+inline void bdf_eval(const SystemEvaluator& ev, bool jac, const T* y, const double* a, T* o, int n,
+                     std::vector<double>& ys, std::vector<double>& os) {
+    ys.assign(y, y + n);
+    os.resize(jac ? (size_t)n * (size_t)n : (size_t)n);
+    if (jac) ev.eval_jacobian(ys.data(), a, os.data()); else ev.eval(ys.data(), a, os.data());
+    for (size_t i = 0; i < os.size(); ++i) o[i] = (T)os[i];
+}
+
 // Траектория от y0 (t = 0) до t_skip + t_rec. raw = false — равномерная сетка total точек через
 // dt от t_skip; raw = true — узлы шага после t_skip (не больше max_pts). traj[k][i], times[k].
 // false + err — система не поддержана (нет якобиана, индекс выше 3) или шаг сорвался ниже h_min.
@@ -92,11 +107,12 @@ inline bool bdf_integrate(const System& s0, const double* a, int na, const doubl
     struct Provider {
         SystemEvaluator& ev; std::vector<double>& ae; bool ht; int N0; bool raw;
         std::vector<std::vector<double>>& traj; std::vector<double>& times; const std::atomic<bool>* cancel;
-        void res(const numb* yy, numb t, numb* F) { if (ht) ae.back() = t; ev.eval(yy, ae.data(), F); }
-        void jac(const numb* yy, numb t, numb* J) { if (ht) ae.back() = t; ev.eval_jacobian(yy, ae.data(), J); }
+        int N; std::vector<double> ys, os;
+        void res(const numb* yy, numb t, numb* F) { if (ht) ae.back() = t; bdf_eval(ev, false, yy, ae.data(), F, N, ys, os); }
+        void jac(const numb* yy, numb t, numb* J) { if (ht) ae.back() = t; bdf_eval(ev, true, yy, ae.data(), J, N, ys, os); }
         void emit(int, numb t, const numb* yy) { traj.emplace_back(yy, yy + N0); if (raw) times.push_back(t); }
         bool cancelled() const { return cancel && cancel->load(std::memory_order_relaxed); }
-    } fn{ ev, ae, ht, N0, raw, traj, times, cancel };
+    } fn{ ev, ae, ht, N0, raw, traj, times, cancel, N, {}, {} };
     UcudaBdfParams P;
     P.rtol = st.rtol;
     P.h0 = st.h0;

@@ -99,7 +99,10 @@ bytecode interpreter of the same AST.
 - `build_module(snap, ...)` — one place that turns (template, body, defines) into a CUmodule:
   monolith or rdc (`lib_ptx_for` + `krs_ptx_for` + cuLink). Prefix macros added here or by callers:
   `time_prefix` (`UCUDA_NONAUTONOMOUS`), `lyap_nx_prefix` (`UCUDA_LYAP_NX`), `AdaptiveRequest::prefix`
-  (`UCUDA_AD_DAE_NX`, `UCUDA_BDF_DRIVER`), `peak_config_defines`.
+  (`UCUDA_AD_DAE_NX`, `UCUDA_BDF_DRIVER`), `peak_config_defines`. Monolith only: `prune_kernel_defines`
+  (`UCUDA_PRUNE_KERNELS` + `UCUDA_KEEP_<kernel>` per `name_exprs`) before `#include "cudaLibrary.cu"` — the other
+  kernels of the library are cut; `ucudaPruneKeeper` (pow) and two kept loop-calling kernels keep the code
+  identical to the full build (CLAUDE.md, "How a sweep module is compiled"); `UCUDA_NVRTC_PRUNE=0` / `UCUDA_NVRTC_PTX_DIR` are the comparison knobs.
 - `compile_*_if_needed` per task + `ModuleLru` (`module_lru.h`) caches; `prewarm_*` compile without activating.
 - CPU twins live at the top of the file (`run_*_cpu`, `cpu_loop_model`, `cpu_gram_schmidt[_dae]`,
   `dae_point_start`) and use `KrsCpuStep` (krs_cpu) for the step.

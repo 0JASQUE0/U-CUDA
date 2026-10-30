@@ -271,7 +271,30 @@ namespace {
 // пролога переиспользовалась бы DLL, собранная старым. Туда же уходит размер
 // numb — при смене float<->double в configCUDA.h кэш обязан протухнуть, иначе
 // подхватилась бы DLL, собранная в другой точности.
-constexpr int kPreludeVersion = 6;
+constexpr int kPreludeVersion = 7;
+
+// fmin / fmax CRT в DLL (cl /O2, статическая CRT) — вызовы функций, а тела схем зовут их сотнями
+// (dev_explim, ёмкости переходов, min / max уравнений). Встроенные — те же, что у хоста в
+// ucuda_adaptive.cuh (NaN отбрасывается). Мультивибратор BDF1 (1056 вызовов): 92 -> 88 мкс на шаг,
+// PUT burst neuron Radau IIA (2121): 914 -> 843 мкс; X после 2e4 / 5e3 шагов побитово тот же.
+// Заменяются вызовы без "::" перед именем (std::fmin в пользовательской КРС остаётся как есть);
+// число строк не меняется, #line ниже держит нумерацию ошибок.
+std::string inline_fmin_fmax(const std::string& body) {
+    std::string out;
+    out.reserve(body.size());
+    auto ident = [](char c) { return std::isalnum((unsigned char)c) || c == '_'; };
+    for (size_t i = 0; i < body.size();) {
+        const bool at = (body.compare(i, 5, "fmin(") == 0 || body.compare(i, 5, "fmax(") == 0)
+                     && (i == 0 || (!ident(body[i - 1]) && body[i - 1] != ':'));
+        if (at) {
+            out += body[i + 2] == 'i' ? "ucuda_fmin_i(" : "ucuda_fmax_i(";
+            i += 5;
+        } else {
+            out += body[i++];
+        }
+    }
+    return out;
+}
 
 // Пролог перед телом. Компилируется КАК C++ (/TP), поэтому bool / true /
 // false родные, а объявления допустимы в любом месте блока — как в CUDA.
@@ -324,6 +347,9 @@ std::string make_source(const std::string& body, int amountOfX, KrsCpuPrec prec)
          "#include \"configCUDA.h\"\n"
          "static inline numb min(numb x, numb y) { return x < y ? x : y; }\n"
          "static inline numb max(numb x, numb y) { return x > y ? x : y; }\n";
+    if (!hp)
+        o << "static inline numb ucuda_fmin_i(numb a, numb b) { return (a < b || b != b) ? a : b; }\n"
+             "static inline numb ucuda_fmax_i(numb a, numb b) { return (a > b || b != b) ? a : b; }\n";
     // Явное время: номер шага в DLL (KrsCpuStep::step_index), t = n*h, без накопления t += h.
     const bool timed = step_body_uses_time(body);
     // Шаг с h = 0 (проекция клона ДАУ на связь, ucudaDaeProject) берёт t = n*h последнего
@@ -347,7 +373,7 @@ std::string make_source(const std::string& body, int amountOfX, KrsCpuPrec prec)
          // в координаты ТЕЛА, поэтому "krs(12): error" указывает ровно на
          // 12-ю строку в редакторе схемы.
     o << "#line 1 \"krs\"\n"
-      << body << "\n}\n";
+      << (hp ? body : inline_fmin_fmax(body)) << "\n}\n";
     return o.str();
 }
 

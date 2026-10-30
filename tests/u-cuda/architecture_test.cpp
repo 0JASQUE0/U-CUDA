@@ -9,6 +9,7 @@
 #include "test_util.h"
 #include "app_model.h"
 #include "dae_ir.h"
+#include "num_parse.h"
 #include "session_io.h"
 #include "system_library.h"
 #include <atomic>
@@ -124,7 +125,8 @@ void records() {
     m.circuit_source = cir.u8string();
     std::string rep, err;
     ut::require(m.import_circuit(&rep, &err), "import_circuit: " + err);
-    ut::require(m.is_dae && m.vars_text == "vc_c1" && m.param_values.at("r1") == "1000" &&
+    // значения R / C / L импорт пишет с приставками СИ (fmt_num_si): 1k
+    ut::require(m.is_dae && m.vars_text == "vc_c1" && parse_num(m.param_values.at("r1"), 0) == 1000.0 &&
                 m.init_conditions.at("vc_c1") == "1" && m.step_h == "0.001" &&
                 m.circuit_netlist.find("R1 in out 1k") != std::string::npos && m.note == "rc from a file",
                 "import_circuit fills the DAE fields: " + rep);
