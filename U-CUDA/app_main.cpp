@@ -412,6 +412,10 @@ int main() {
     model.slancm_enabled = (have_cfg && !app_cfg.slancm_enabled.empty())
                          ? app_cfg.slancm_enabled : default_enabled_slancm();
     set_enabled_slancm(model.slancm_enabled);
+    // Маски схем и методов ДАУ: без ключа в конфиге (или без конфига) — набор свежей установки.
+    model.hidden_schemes     = app_cfg.has_hidden_schemes ? app_cfg.hidden_schemes : default_hidden_schemes();
+    model.hidden_dae_methods = app_cfg.has_hidden_dae_methods ? app_cfg.hidden_dae_methods
+                                                              : default_hidden_dae_methods();
     if (have_cfg) {
         if (app_cfg.ui_scale_override > 0.0f)
             model.ui_scale_override = app_cfg.ui_scale_override;
@@ -436,7 +440,6 @@ int main() {
         // Ставим ДО восстановления last_app_mode — draw_gui уведёт в Library,
         // если сохранённая вкладка теперь скрыта.
         model.hidden_tabs    = app_cfg.hidden_tabs;
-        model.hidden_schemes = app_cfg.hidden_schemes;
         model.hidden_systems = app_cfg.hidden_systems;
 
         // Restore last-used AppMode. Clamp to the valid enum range so a

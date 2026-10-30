@@ -664,8 +664,11 @@ public:
     // того, у кого конфиг уже есть, список берётся из него и этот дефолт не
     // применяется вовсе. Тот же дефолт продублирован в AppConfig::hidden_tabs —
     // на случай конфига без ключа.
-    std::vector<std::string> hidden_tabs { "Network" };
+    std::vector<std::string> hidden_tabs { "Dft1D", "FastSync", "Order", "Network" };
     std::vector<std::string> hidden_schemes;
+    // Методы ДАУ, скрытые из списка редактора ДАУ (Settings -> DAE methods). Зеркалит
+    // AppConfig::hidden_dae_methods; дефолт свежей установки ставит app_main.
+    std::vector<std::string> hidden_dae_methods;
 
     // То же для систем библиотеки: имена, скрытые из глобального комбо
     // (галочки во вкладке Library). Зеркалит AppConfig::hidden_systems.
@@ -681,6 +684,7 @@ public:
     }
     bool tab_hidden(const std::string& id) const { return name_hidden(hidden_tabs, id); }
     bool scheme_hidden(const std::string& name) const { return name_hidden(hidden_schemes, name); }
+    bool dae_method_hidden(const std::string& name) const { return name_hidden(hidden_dae_methods, name); }
     bool system_hidden(const std::string& name) const { return name_hidden(hidden_systems, name); }
 
     // сессия анализа фазовых портретов ("песочница": изменения не сохраняются)

@@ -256,8 +256,15 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
     if (parse_string_field(body, "hidden_tabs", csv))
         out.hidden_tabs = split_csv(csv);
     csv.clear();
-    if (parse_string_field(body, "hidden_schemes", csv))
+    if (parse_string_field(body, "hidden_schemes", csv)) {
         out.hidden_schemes = split_csv(csv);
+        out.has_hidden_schemes = true;
+    }
+    csv.clear();
+    if (parse_string_field(body, "hidden_dae_methods", csv)) {
+        out.hidden_dae_methods = split_csv(csv);
+        out.has_hidden_dae_methods = true;
+    }
     std::string lines;
     if (parse_string_field(body, "hidden_systems", lines))
         out.hidden_systems = split_lines(lines);
@@ -312,6 +319,7 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         f << "  \"peak_max_amount\": "      << cfg.peak.max_amount_of_peaks << ",\n";
         f << "  \"hidden_tabs\": \""         << json_escape(join_csv(cfg.hidden_tabs))    << "\",\n";
         f << "  \"hidden_schemes\": \""      << json_escape(join_csv(cfg.hidden_schemes)) << "\",\n";
+        f << "  \"hidden_dae_methods\": \""  << json_escape(join_csv(cfg.hidden_dae_methods)) << "\",\n";
         f << "  \"hidden_systems\": \""      << json_escape(join_lines(cfg.hidden_systems)) << "\",\n";
         f << "  \"nvrtc_fmad\": "           << (cfg.nvrtc_fmad ? "true" : "false") << ",\n";
         f << "  \"nvrtc_rdc\": "            << (cfg.nvrtc_rdc ? "true" : "false") << ",\n";

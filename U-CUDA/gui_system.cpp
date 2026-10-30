@@ -898,12 +898,18 @@ static void draw_builtin_scheme_checkboxes(AppModel& model) {
 // Галочки методов ДАУ (список выключенных — AppModel::dae_schemes_off). Порядок — dae_scheme_names.
 static void draw_dae_method_checkboxes(AppModel& model) {
     ImGui::Text("DAE methods to generate:");
-    if (ImGui::Button("Select all##dae")) model.dae_schemes_off.clear();
+    // Как у схем ОДУ: методы, скрытые в Settings, не показываются и не включаются скопом.
+    const std::vector<std::string> all = dae_method_list();
+    auto set_on = [&](const std::string& n, bool on) {
+        auto& off = model.dae_schemes_off;
+        off.erase(std::remove(off.begin(), off.end(), n), off.end());
+        if (!on) off.push_back(n);
+    };
+    if (ImGui::Button("Select all##dae"))
+        for (const auto& n : all) if (!model.dae_method_hidden(n)) set_on(n, true);
     ImGui::SameLine();
-    if (ImGui::Button("Clear all##dae")) {
-        model.dae_schemes_off = dae_scheme_names();
-        model.dae_schemes_off.push_back(kBdfSchemeDae);
-    }
+    if (ImGui::Button("Clear all##dae"))
+        for (const auto& n : all) if (!model.dae_method_hidden(n)) set_on(n, false);
     // Группы: неявные (любой индекс), с решением связи при каждом x (только индекс 1), многошаговый.
     // Подсказки — по имени (список методов рос, по номеру они съезжали).
     static const std::map<std::string, const char*> kTips = {
@@ -932,24 +938,28 @@ static void draw_dae_method_checkboxes(AppModel& model) {
                          "ramped up 1..5, no step controller. Index 1-2 directly, index 3 through GGL.\n"
                          "Generate prints its residual [f; g] and Jacobian." },
     };
-    std::vector<std::string> names = dae_scheme_names();
-    names.push_back(kBdfSchemeDae);
+    static const char* const kGroupTitle[] = { "implicit, any index", "constraint solved whenever x changes, index 1",
+                                               "multistep" };
+    int group = 0, shown_group = -1;
     bool first_in_line = true;
-    for (size_t i = 0; i < names.size(); ++i) {
-        if (i == 0) ImGui::SeparatorText("implicit, any index");
-        if (names[i] == "DAE CD") { ImGui::SeparatorText("constraint solved whenever x changes, index 1"); first_in_line = true; }
-        if (names[i] == kBdfSchemeDae) { ImGui::SeparatorText("multistep"); first_in_line = true; }
+    std::string hidden_on;
+    for (const std::string& n : all) {
+        if (n == "DAE CD") group = 1;
+        if (n == kBdfSchemeDae) group = 2;
+        if (model.dae_method_hidden(n)) {
+            if (model.dae_scheme_on(n)) hidden_on += (hidden_on.empty() ? "" : ", ") + n;
+            continue;
+        }
+        if (group != shown_group) { ImGui::SeparatorText(kGroupTitle[group]); shown_group = group; first_in_line = true; }
         if (!first_in_line) ImGui::SameLine();
         first_in_line = false;
-        bool on = model.dae_scheme_on(names[i]);
-        if (ImGui::Checkbox(names[i].c_str(), &on)) {
-            auto& off = model.dae_schemes_off;
-            off.erase(std::remove(off.begin(), off.end(), names[i]), off.end());
-            if (!on) off.push_back(names[i]);
-        }
-        auto tip = kTips.find(names[i]);
+        bool on = model.dae_scheme_on(n);
+        if (ImGui::Checkbox(n.c_str(), &on)) set_on(n, on);
+        auto tip = kTips.find(n);
         if (tip != kTips.end() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip->second);
     }
+    if (!hidden_on.empty())
+        ImGui::TextDisabled("Hidden in Settings, still enabled for this system: %s", hidden_on.c_str());
 }
 
 static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
@@ -2035,6 +2045,7 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
     // Редактор рисует System tab по буферу-черновику, а маска схем глобальная
     // и живёт в основной модели — иначе в редакторе показались бы скрытые схемы.
     buf.hidden_schemes = model.hidden_schemes;
+    buf.hidden_dae_methods = model.hidden_dae_methods;
     if (buf.is_dae) {
         ImGui::TextWrapped("x' = f(x, z, t),  0 = g(x, z, t). One equation per line: "
                            "x' = ... for each differential variable, 0 = ... for each "

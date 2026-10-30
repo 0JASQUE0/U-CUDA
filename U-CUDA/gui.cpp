@@ -1144,6 +1144,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.gpu_block_size         = m.gpu_block_size;
             cfg.hidden_tabs            = m.hidden_tabs;
             cfg.hidden_schemes         = m.hidden_schemes;
+            cfg.hidden_dae_methods     = m.hidden_dae_methods;
             cfg.hidden_systems         = m.hidden_systems;
             save_app_config(get_exe_dir_with_sep(), cfg);
         };
@@ -1316,6 +1317,37 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     }
                     ImGui::PopID();
                     if (b.tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", b.tooltip);
+                }
+            }
+
+            // То же для методов ДАУ: список "DAE methods to generate" редактора ДАУ.
+            ImGui::Separator();
+            ImGui::Text("DAE methods");
+            ImGui::TextDisabled("Which DAE methods are offered in the DAE editor. Unticking one");
+            ImGui::TextDisabled("only hides the checkbox, as for the integration schemes.");
+            {
+                const std::vector<std::string> dae = dae_method_list();
+                auto set_all_dae = [&](bool shown) {
+                    for (const auto& n : dae) AppModel::set_name_hidden(model.hidden_dae_methods, n, !shown);
+                    persist_settings(model);
+                };
+                if (ImGui::Button("Show all##dae_methods")) set_all_dae(true);
+                ImGui::SameLine();
+                if (ImGui::Button("Hide all##dae_methods")) set_all_dae(false);
+                ImGui::SameLine();
+                int n_on = 0;
+                for (const auto& n : dae)
+                    if (!model.dae_method_hidden(n)) ++n_on;
+                ImGui::Text("%d / %d shown", n_on, (int)dae.size());
+                for (size_t i = 0; i < dae.size(); ++i) {
+                    if (i % 4 != 0) ImGui::SameLine();
+                    bool on = !model.dae_method_hidden(dae[i]);
+                    ImGui::PushID(("dae_m_" + dae[i]).c_str());
+                    if (ImGui::Checkbox(dae[i].c_str(), &on)) {
+                        AppModel::set_name_hidden(model.hidden_dae_methods, dae[i], !on);
+                        persist_settings(model);
+                    }
+                    ImGui::PopID();
                 }
             }
 

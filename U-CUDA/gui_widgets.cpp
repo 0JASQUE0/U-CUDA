@@ -1614,6 +1614,29 @@ static const FieldLabels* g_field_labels = nullptr;
 void set_field_latex(bool on) { g_field_latex = on; }
 void set_field_labels(const FieldLabels* labels) { g_field_labels = labels; }
 
+std::vector<std::string> default_hidden_schemes() {
+    static const char* const kShown[] = { "Euler", "Explicit Midpoint", "CD", "RK4", "DOPRI78", "GBS (n=2)" };
+    std::vector<std::string> out;
+    for (const auto& b : kBuiltinSchemes)
+        if (std::find_if(std::begin(kShown), std::end(kShown),
+                         [&](const char* s) { return std::strcmp(s, b.name) == 0; }) == std::end(kShown))
+            out.push_back(b.name);
+    return out;
+}
+
+std::vector<std::string> dae_method_list() {
+    std::vector<std::string> v = dae_scheme_names();
+    v.push_back(kBdfSchemeDae);
+    return v;
+}
+
+std::vector<std::string> default_hidden_dae_methods() {
+    std::vector<std::string> out;
+    for (const std::string& n : dae_method_list())
+        if (n != "DAE Trapezoidal" && n != kBdfSchemeDae) out.push_back(n);
+    return out;
+}
+
 static SystemLibrary* g_field_lib = nullptr;
 void set_field_library(SystemLibrary* lib) { g_field_lib = lib; }
 
