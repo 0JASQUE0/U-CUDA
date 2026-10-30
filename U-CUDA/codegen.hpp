@@ -402,7 +402,9 @@ bool system_uses_time(const System& s);
 // Превью уравнений: выражение (синтаксис кодогена) в LaTeX для math_formula_draw — \frac, ^{},
 // \mathrm{sin}, модуль через \left|; имя с цифровым хвостом — с индексом (x1 -> x_{1}),
 // греческое — со слешем.
-std::string expr_to_latex(const std::string& expr, bool latex_in, const std::vector<std::string>& user_funcs = {});
+// labels — свои подписи символов (имя -> TeX, подписи полей записи); нет в нём — name_to_latex.
+std::string expr_to_latex(const std::string& expr, bool latex_in, const std::vector<std::string>& user_funcs = {},
+                          const std::map<std::string, std::string>* labels = nullptr);
 std::string name_to_latex(const std::string& name);
 // Схема умеет печатать время стадий (неявные, CD, комплексные, ГБШ — ещё нет).
 bool scheme_supports_time(Scheme sch);

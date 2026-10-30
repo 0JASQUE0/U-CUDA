@@ -719,8 +719,9 @@ void si_prefixes() {
                 "fmt_num_si: " + fmt_num_si(15000.0) + " " + fmt_num_si(1e-8) + " " + fmt_num_si(4.7e-6));
     SpiceImportResult r;
     std::string err;
-    const bool ok_ = spice_import("* si\nV1 in 0 DC 1\nR1 in a 15k\nC1 a 0 10n\nL1 a 0 4.7m\n", {}, r, &err);
+    const bool ok_ = spice_import("* si\nV1 in 0 DC 1\nR1 in a 15k\nC1 a 0 10n\nL1 a 0 4.7m\nC2 a 0 10u\n", {}, r, &err);
     ut::require(ok_, "import: " + err);
+    ut::require(r.param_values.at("c2") == "10u", "netlist 10u -> " + r.param_values.at("c2") + " (exact 1e-5)");
     ut::require(r.param_values.at("r1") == "15k" && r.param_values.at("c1") == "10n" && r.param_values.at("l1") == "4.7m",
                 "import values: " + r.param_values.at("r1") + " " + r.param_values.at("c1") + " " + r.param_values.at("l1"));
     std::printf("  SI prefixes: f p n u/\xC2\xB5 m k M/meg G T, exact (10n == 1e-8), import values 15k / 10n / 4.7m\n");

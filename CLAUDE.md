@@ -721,7 +721,12 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   invalid). Exact: a negative prefix divides by an exact 10^k, so "10n" is the very double 1e-8. The ↑/↓ digit step
   keeps the prefix (`DigitInput::ComputeStep`). The import writes R / C / L values with prefixes (`fmt_num_si`:
   shortest text that parses back to the same double: 15k, 10n, 4.7m). Every reader of field strings must go through
-  `parse_num` (`std::stod("10k")` = 10): AppModel DC OP / consistent start and the tests were switched.
+  `parse_num` (`std::stod("10k")` = 10): AppModel DC OP / consistent start and the tests were switched. The SPICE
+  value parser (`spice_parse.cpp`) scales the same way (10u = exactly 1e-5; it multiplied by an inexact 1e-6).
+  DAE equation preview: symbols use the record's `field_labels` (`expr_to_latex(.., labels)`, part of the preview
+  cache key), the derivative dot sits on the base only (`dot_latex`: \dot{vc}_{C1}), (m*10^(k)) prints as 10^{k} /
+  m \cdot 10^{k} (10*10^(-13) folds to 10^{-12}), and `\frac` places numerator / denominator by their real extent
+  (`layout_extent`), so a fraction inside a denominator no longer runs into the numerator.
   Device simplifications (`SpiceImportOptions::no_junction_caps / ideal_diodes / ideal_bjts`, record fields
   `circuit_no_jcaps / circuit_ideal_diodes / circuit_ideal_bjts`, JSON "1", DAE editor checkboxes that re-import,
   "Save simplified copy" = all three as "<name> (simplified)"): no barrier capacitances of D / Q / J / M; ideal diode

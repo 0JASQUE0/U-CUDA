@@ -275,6 +275,7 @@ void take_arg(const char*& p, const char* e, const char*& ab, const char*& ae) {
 }
 
 float typeset(MathLayout& L, const char* b, const char* e, float size, Style st);
+MathExtent layout_extent(const MathLayout& L, float width, float size);   // ниже; нужен \frac
 
 // Габарит «чернил» набранного фрагмента относительно его начала и базовой
 // линии: по метрикам самих глифов, а не по advance и ascent шрифта.
@@ -547,8 +548,12 @@ float typeset(MathLayout& L, const char* b, const char* e, float size, Style st)
                 const float wd = typeset(den, db, de, fs, st);
                 const float w  = std::max(wn, wd) + size * 0.20f;
                 const float axis = -size * 0.28f;   // высота дробной черты над базовой линией
-                append_layout(L, num, x + (w - wn) * 0.5f, axis - fs * 0.45f);
-                append_layout(L, den, x + (w - wd) * 0.5f, axis + fs * 0.78f);
+                // Числитель и знаменатель — от их фактического габарита: вложенная дробь или индекс
+                // иначе налезают на черту и на соседний этаж (дробь в знаменателе дроби).
+                const MathExtent en = layout_extent(num, wn, fs), ed = layout_extent(den, wd, fs);
+                const float gap = size * 0.10f;
+                append_layout(L, num, x + (w - wn) * 0.5f, std::min(axis - fs * 0.45f, axis - gap - en.descent));
+                append_layout(L, den, x + (w - wd) * 0.5f, std::max(axis + fs * 0.78f, axis + gap + ed.ascent));
                 L.marks.push_back({ x + size * 0.05f, x + w - size * 0.05f, axis, 0.0f });
                 x += w;
                 continue;

@@ -65,24 +65,26 @@ bool read_number(const std::string& s, size_t& i, double& v) {
     size_t k = i + (size_t)(e - b);
     std::string suf;
     while (k < s.size() && std::isalpha((unsigned char)s[k])) suf += (char)std::tolower((unsigned char)s[k++]);
-    double m = 1.0;
-    if (suf.rfind("meg", 0) == 0) m = 1e6;
-    else if (suf.rfind("mil", 0) == 0) m = 25.4e-6;
+    // Показатель степени 10 множителя: дробные — делением на точное 10^k (scale_pow10), так что 10u —
+    // ровно то же double, что 1e-5 (умножение на неточное 1e-6 давало 9.999999999999999e-06).
+    int e10 = 0;
+    if (suf.rfind("meg", 0) == 0) e10 = 6;
+    else if (suf.rfind("mil", 0) == 0) v *= 25.4e-6;
     else if (!suf.empty()) {
         switch (suf[0]) {
-        case 'f': m = 1e-15; break;
-        case 'p': m = 1e-12; break;
-        case 'n': m = 1e-9;  break;
-        case 'u': m = 1e-6;  break;
-        case 'm': m = 1e-3;  break;
-        case 'k': m = 1e3;   break;
-        case 'g': m = 1e9;   break;
-        case 't': m = 1e12;  break;
-        case 'a': m = 1e-18; break;
+        case 'f': e10 = -15; break;
+        case 'p': e10 = -12; break;
+        case 'n': e10 = -9;  break;
+        case 'u': e10 = -6;  break;
+        case 'm': e10 = -3;  break;
+        case 'k': e10 = 3;   break;
+        case 'g': e10 = 9;   break;
+        case 't': e10 = 12;  break;
+        case 'a': e10 = -18; break;
         default: break;
         }
     }
-    v *= m;
+    v = num_parse_detail::scale_pow10(v, e10);
     i = k;
     return true;
 }

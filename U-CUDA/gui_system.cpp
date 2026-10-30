@@ -1743,6 +1743,18 @@ static void library_editor_save(AppModel& model, SystemLibrary& lib) {
 // model.library_edit_buffer — never the live model — so it never changes
 // the system currently active in Parametric/Phase/Basins/FastSync.
 // tab — какая вкладка рисуется: в ней только записи своего вида (kind в system.json).
+// Производная по имени в превью: точка над основой, индекс после неё (\dot{vc}_{C1}), а не над
+// всем именем с индексом. labels — подписи полей записи (vc_c1 -> vc_{C1}).
+static std::string dot_latex(const std::string& name, const FieldLabels* labels = nullptr) {
+    std::string tex = name_to_latex(name);
+    if (labels) {
+        auto it = labels->find(name);
+        if (it != labels->end() && !it->second.empty()) tex = it->second;
+    }
+    const size_t us = tex.find("_{");
+    return us == std::string::npos || us == 0 ? "\\dot{" + tex + "}" : "\\dot{" + tex.substr(0, us) + "}" + tex.substr(us);
+}
+
 void draw_library_list(AppModel& model, SystemLibrary& lib, LibTab tab) {
     // Черновик один на все вкладки: пока он открыт в соседней, Add/Edit отсюда
     // молча затёрли бы несохранённую правку.
@@ -2180,7 +2192,8 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
         AppModel::DaeEditorState& st = model.dae_editor;
         const std::string key = buf.plain_text + '\x1e' + buf.vars_text + '\x1e' + buf.alg_text
                               + '\x1e' + buf.params_text + '\x1e' + buf.dae_index_text
-                              + '\x1e' + (buf.use_aux_funcs ? buf.func_defs_text : std::string());
+                              + '\x1e' + (buf.use_aux_funcs ? buf.func_defs_text : std::string())
+                              + '\x1e' + fl_to_text(buf.field_labels);   // подписи — в превью уравнений
         if (st.key != key) {
             st.key = key;
             try {
@@ -2240,7 +2253,7 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
                     for (size_t i = 0; i < ps.rhs.size(); ++i) {
                         const bool diff = (int)i < ps.dae_nx;
                         std::string ln;
-                        std::string lhs = diff ? "\\dot{" + name_to_latex(ps.vars[i]) + "} = " : std::string("0 = ");
+                        std::string lhs = diff ? dot_latex(ps.vars[i], &buf.field_labels) + " = " : std::string("0 = ");
                         bool done = false;
                         if (use_raw) {
                             const size_t eq = raw_rows[i].find('=');
@@ -2248,17 +2261,17 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
                                 std::string l = raw_rows[i].substr(0, eq);
                                 l.erase(std::remove_if(l.begin(), l.end(), [](char c) { return c == ' ' || c == '\t'; }), l.end());
                                 try {
-                                    ln = expr_to_latex(raw_rows[i].substr(eq + 1), false, fnames);
+                                    ln = expr_to_latex(raw_rows[i].substr(eq + 1), false, fnames, &buf.field_labels);
                                     if (l != "0") {
                                         const size_t q = l.find_first_of("'(");
-                                        lhs = "\\dot{" + name_to_latex(l.substr(0, q)) + "} = ";
+                                        lhs = dot_latex(l.substr(0, q), &buf.field_labels) + " = ";
                                     }
                                     done = true;
                                 } catch (const std::exception&) {}
                             }
                         }
                         if (!done) {
-                            try { ln = expr_to_latex(ps.rhs[i], ps.latex); }
+                            try { ln = expr_to_latex(ps.rhs[i], ps.latex, {}, &buf.field_labels); }
                             catch (const std::exception&) { ln = "?"; }
                         }
                         st.latex += lhs + ln + "\n";

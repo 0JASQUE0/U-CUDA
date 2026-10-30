@@ -7332,7 +7332,8 @@ std::string name_to_latex(const std::string& n) {
     return idx.empty() ? base : base + "_{" + idx + "}";
 }
 
-std::string expr_to_latex(const std::string& expr, bool latex_in, const std::vector<std::string>& user_funcs) {
+std::string expr_to_latex(const std::string& expr, bool latex_in, const std::vector<std::string>& user_funcs,
+                          const std::map<std::string, std::string>* labels) {
     Parser p(expr, latex_in);
     if (!user_funcs.empty()) p.extra_funcs = &user_funcs;
     const PN root = p.parse();
@@ -7359,7 +7360,14 @@ std::string expr_to_latex(const std::string& expr, bool latex_in, const std::vec
             std::snprintf(buf, sizeof(buf), "%.10g", n->num);
             return buf;
         }
-        case Node::Sym: return n->name == "t" ? "t" : name_to_latex(n->name);
+        case Node::Sym: {
+            if (n->name == "t") return "t";
+            if (labels) {
+                auto it = labels->find(n->name);
+                if (it != labels->end() && !it->second.empty()) return "{" + it->second + "}";
+            }
+            return name_to_latex(n->name);
+        }
         case Node::Neg: return "-" + paren(n->a, 3);
         case Node::Add: {
             if (n->b->kind == Node::Neg) return L(n->a) + " - " + paren(n->b->a, 2);
@@ -7367,10 +7375,26 @@ std::string expr_to_latex(const std::string& expr, bool latex_in, const std::vec
         }
         case Node::Sub: return L(n->a) + " - " + paren(n->b, 2);
         case Node::Mul: {
+            // Число в записи импорта схем (m*10^(k)): 10^{k} при m = 1, иначе m \cdot 10^{k}.
+            if (n->a->kind == Node::Num && n->b->kind == Node::Pow && n->b->a->kind == Node::Num
+                && n->b->a->num == 10.0) {
+                // m = 10^j и целый показатель (10*10^(-13) — Gmin) — одна степень: 10^{-12}
+                const PN& ex = n->b->b;
+                const bool ex_num = ex->kind == Node::Num || (ex->kind == Node::Neg && ex->a->kind == Node::Num);
+                const double ev = ex->kind == Node::Num ? ex->num : ex_num ? -ex->a->num : 0.0;
+                const double lj = std::log10(n->a->num);
+                if (ex_num && n->a->num > 0 && lj == std::floor(lj) && ev == std::floor(ev)) {
+                    char buf[24];
+                    std::snprintf(buf, sizeof(buf), "%d", (int)(ev + lj));
+                    return std::string("10^{") + buf + "}";
+                }
+                const std::string p10 = "10^{" + L(ex) + "}";
+                return n->a->num == 1.0 ? p10 : L(n->a) + " \\cdot " + p10;
+            }
             const std::string a = paren(n->a, 2), b = paren(n->b, 3);
-            // число на символ — без точки: 2x; иначе \cdot
+            // число на символ — без точки: 2x; иначе \cdot (и перед степенью числа: 2 \cdot 3^{k}, не "23^{k}")
             const bool juxt = n->a->kind == Node::Num && (n->b->kind == Node::Sym || n->b->kind == Node::Call
-                                                           || n->b->kind == Node::Pow);
+                                                           || (n->b->kind == Node::Pow && n->b->a->kind != Node::Num));
             return juxt ? a + " " + b : a + " \\cdot " + b;
         }
         case Node::Div: return "\\frac{" + L(n->a) + "}{" + L(n->b) + "}";
