@@ -643,6 +643,20 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   AM, SFFM, PSpice "VALUE {..}" without '=', K with |k| = 1 (ideal transformer, index-2 note), clear refusals
   for A elements, VDMOS and noise sources.
   Still open: GUI check.
+- Stage 12 (planned, not started), NI Multisim import - the same role as KiCad. Found on this machine: Multisim 14.2
+  (`%ProgramFiles(x86)%\National Instruments\Circuit Design Suite 14.2`, 133 samples `.ms14` in
+  `%PUBLIC%\Documents\National Instruments\Circuit Design Suite 14.2\samples`). Differences from KiCad: `.ms14` is a
+  closed binary format and there is no CLI exporter; there is a COM automation API (`MultisimInterface.MultisimApp` /
+  `MultisimCircuit`, 32-bit in-proc `MSInterface.dll` - not loadable into the x64 exe, so a 32-bit helper process,
+  like `kicad-cli`). Methods (from the type library, not tried yet): `Connect`, `OpenFile`, `ReportNetlist(probes,
+  Text|CSV, file)` (looks like a component/pin/net table, not SPICE), `DoCommandLine(cmdfile, logfile)` (XSPICE
+  commands - maybe the way to the simulated SPICE netlist), `EnumComponents`, `RLCValue`, `SaveAs`. Plan:
+  (1) probe: open 2-3 samples through COM from a 32-bit script (Multisim starts on screen; may stop on a license
+  dialog), see what `ReportNetlist` / `DoCommandLine` give; (2) the manual path regardless: Multisim's own SPICE
+  netlist export (`.cir`) -> `spice_import`, adapt to its dialect on the samples; (3) if COM gives a netlist:
+  `circuit_source_load` accepts `.ms14` (Open / Re-read / Watch) through the helper; (4) test like kicad_test
+  (skip without Multisim), compare with ngspice where the netlist allows. Expected limits: XSPICE code models
+  (A elements: switches, logic, part of the virtual parts) are refused, as for the KiCad demos.
 - Stage 11, global testing (2026-10-30): `tests/u-cuda` has 11 suites (`run_tests.bat` with no arguments runs all,
   ~20 min): gpu_smoke, krs_cpu, adaptive, architecture, sessions, tabs, dae, spice, kicad, library. New ones:
   `sessions` (every system.json and all 242 session JSON files round-trip unchanged), `tabs` (Order: Euler ~1 /
