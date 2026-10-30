@@ -192,6 +192,7 @@ std::string record_to_json(const SystemRecord& r) {
     kv(o, "step_h", r.step_h);
     kvmap(o, "init_conditions", r.init_conditions);
     kvmap(o, "param_values", r.param_values);
+    if (!r.param_groups.empty()) kv(o, "param_groups", pg_to_text(r.param_groups));   // строкой — см. "kind"
     // custom_schemes: [ {"name": "...", "body": "...", "order": "2", "symmetric": "0"}, ... ]
     // order/symmetric пишутся СТРОКАМИ: читатель ниже для любого значения
     // зовёт parse_string(), и голое число его сломало бы.
@@ -374,6 +375,7 @@ SystemRecord record_from_json(const std::string& json) {
             else if (key == "circuit_source") r.circuit_source = val;
             else if (key == "circuit_netlist") r.circuit_netlist = val;
             else if (key == "circuit_ideal_opamps") r.circuit_ideal_opamps = (val == "1" || val == "true");
+            else if (key == "param_groups") r.param_groups = pg_from_text(val);
             else if (key == "mode") r.mode = val;
             else if (key == "latex_text") r.latex_text = val;
             else if (key == "plain_text") r.plain_text = val;

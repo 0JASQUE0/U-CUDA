@@ -1616,7 +1616,9 @@ void draw_named_num_fields(const char* header,
                                   const std::function<bool(const std::string&)>& overwritten) {
     if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) return;
     if (note) ImGui::TextDisabled("%s", note);
-    for (const auto& n : names) {
+    // Группы параметров — у системы, загруженной в модель (bc); у НУ и без модели — плоский список.
+    const ParamGroups* groups = field == BroadcastField::Param && bc ? &bc->param_groups : nullptr;
+    draw_param_tree(groups, names, [&](const std::string& n) {
         ImGui::PushID(n.c_str());
         const bool off = overwritten && overwritten(n);
         if (off) ImGui::BeginDisabled();
@@ -1624,6 +1626,88 @@ void draw_named_num_fields(const char* header,
                     [&] { field_apply_all_menu(bc, field, n, n, values[n]); });
         if (off) ImGui::EndDisabled();
         ImGui::PopID();
+    });
+}
+
+// Дерево групп параметров (param_groups.h). Узлы строятся каждый кадр — групп десятки, это
+// дешевле, чем следить за кэшем. Открыт ли узел, помнит ImGui (по id окна и пути группы).
+namespace {
+struct PgNode {
+    std::string seg, path;
+    const ParamGroup* g = nullptr;
+    std::vector<PgNode> kids;
+    int count = 0;   // параметров из names в узле и под ним
+};
+
+int pg_count(PgNode& n, const std::set<std::string>& present) {
+    n.count = 0;
+    if (n.g) for (const std::string& p : n.g->params) n.count += present.count(p) ? 1 : 0;
+    for (PgNode& k : n.kids) n.count += pg_count(k, present);
+    return n.count;
+}
+
+bool pg_header(const std::string& label, const std::string& id, bool in_table) {
+    if (in_table) { ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); }
+    const ImGuiTreeNodeFlags fl = in_table ? ImGuiTreeNodeFlags_SpanAllColumns | ImGuiTreeNodeFlags_LabelSpanAllColumns
+                                           : ImGuiTreeNodeFlags_SpanAvailWidth;
+    return ImGui::TreeNodeEx((label + "##pg_" + id).c_str(), fl);
+}
+
+void pg_draw(const PgNode& n, const std::set<std::string>& present,
+             const std::function<void(const std::string&)>& item, bool in_table) {
+    if (n.g)
+        for (const std::string& p : n.g->params)
+            if (present.count(p)) item(p);
+    for (const PgNode& k : n.kids) {
+        if (k.count == 0) continue;
+        if (pg_header(k.seg + "  (" + std::to_string(k.count) + ")", k.path, in_table)) {
+            pg_draw(k, present, item, in_table);
+            ImGui::TreePop();
+        }
+    }
+}
+}  // namespace
+
+void draw_param_tree(const ParamGroups* groups, const std::vector<std::string>& names,
+                     const std::function<void(const std::string&)>& item, bool in_table) {
+    if (groups == nullptr || groups->empty()) {
+        for (const std::string& n : names) item(n);
+        return;
+    }
+    const std::set<std::string> present(names.begin(), names.end());
+    PgNode root;
+    std::set<std::string> grouped;
+    for (const ParamGroup& g : *groups) {
+        PgNode* cur = &root;
+        size_t pos = 0;
+        while (pos <= g.path.size()) {
+            size_t e = g.path.find('/', pos);
+            if (e == std::string::npos) e = g.path.size();
+            const std::string seg = g.path.substr(pos, e - pos);
+            pos = e + 1;
+            auto it = std::find_if(cur->kids.begin(), cur->kids.end(), [&](const PgNode& k) { return k.seg == seg; });
+            if (it == cur->kids.end()) {
+                PgNode k;
+                k.seg = seg;
+                k.path = g.path.substr(0, e);
+                cur->kids.push_back(std::move(k));
+                it = cur->kids.end() - 1;
+            }
+            cur = &*it;
+        }
+        cur->g = &g;
+        grouped.insert(g.params.begin(), g.params.end());
+    }
+    if (pg_count(root, present) == 0) {   // ни одна группа к этим именам не относится
+        for (const std::string& n : names) item(n);
+        return;
+    }
+    pg_draw(root, present, item, in_table);
+    std::vector<std::string> other;
+    for (const std::string& n : names) if (!grouped.count(n)) other.push_back(n);
+    if (!other.empty() && pg_header("Other  (" + std::to_string(other.size()) + ")", "\x01other", in_table)) {
+        for (const std::string& n : other) item(n);
+        ImGui::TreePop();
     }
 }
 

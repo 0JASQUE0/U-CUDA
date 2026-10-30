@@ -154,6 +154,7 @@ files). `tests/u-cuda/sessions_test.cpp` checks that every library file round-tr
 | OCR | `ocr_client_win.*` ↔ `ocr_server.py`; `AppModel::start_ocr` |
 | Undo/redo, broadcast of settings between tabs | `push_undo` / `undo_last` / `slots_for` (app_model.cpp) |
 | GUI helper used by several tabs | `gui_internal.h` (prototypes with default args) |
+| Parameter groups (UI only) | `param_groups.h` (model, `pg_*`), `SystemRecord::param_groups` / `AppModel::param_groups`, import `Builder::cur_group` → `SpiceImportResult::param_groups` → `pg_merge_auto` in `import_circuit`; drawn by `draw_param_tree` (`gui_widgets.cpp`, used by `draw_named_num_fields` and the Analysis / System / DAE / Custom fields), edited in `draw_param_groups_window` (`gui_system.cpp`) |
 
 ## 8. Recipes
 

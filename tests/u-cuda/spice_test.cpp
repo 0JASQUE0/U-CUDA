@@ -15,6 +15,8 @@
 #include "dae_devices.h"
 #include "dae_ir.h"
 #include "krs_cpu.h"
+#include "system_library.h"
+#include <algorithm>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -545,6 +547,58 @@ void li_cutsets() {
     std::printf("  L-I cutsets: series inductors through a bare node reported (index 2), RL circuits not\n");
 }
 
+// Группы параметров (только интерфейс): раскладка при импорте, слияние с правками пользователя при
+// повторном импорте, правка групп, хранение в system.json.
+void param_groups() {
+    const std::string net =
+        "* groups\nV1 in 0 SIN(0 1 1k)\nR1 in a 1k\nR2 a b 10k\nC1 b 0 10n\nL1 b c 1m\nD1 c 0 dmod\n"
+        ".model dmod D(IS=1e-14 RS=1)\n"
+        ".subckt amp1 p n o\nR1 p n 1meg\nE1 o 0 p n 1000\n.ends\n"
+        "XU1 a b o1 amp1\nXU2 b 0 o2 amp1\nR3 o1 0 1k\nR4 o2 0 1k\n.tran 1u 1m\n";
+    SpiceImportResult r;
+    std::string err;
+    { const bool ok_ = spice_import(net, {}, r, &err); ut::require(ok_, "import: " + err); }
+    std::map<std::string, std::string> g(r.param_groups.begin(), r.param_groups.end());
+    std::vector<std::string> names;
+    for (const auto& pg : r.param_groups) names.push_back(pg.first);
+    ut::require(names.size() == r.param_values.size(), "every parameter has a group entry");
+    auto in = [&](const std::string& p, const std::string& path) {
+        ut::require(g.count(p) && g[p] == path, p + " -> " + (g.count(p) ? g[p] : "?") + ", expected " + path);
+    };
+    in("r1", "Resistors"); in("r3", "Resistors"); in("c1", "Capacitors"); in("l1", "Inductors");
+    in("v1_va", "Sources"); in("dmod_rs", "Models/dmod");
+    int u1 = 0, u2 = 0;
+    for (const auto& kv : g) { u1 += kv.second == "amp1/XU1"; u2 += kv.second == "amp1/XU2"; }
+    ut::require(u1 == 2 && u2 == 2, "each amp1 instance has its own group of 2 (R1, E1)");
+
+    // Пользователь переносит r1 и переименовывает группу; повторный импорт не трогает его правки.
+    ParamGroups G;
+    pg_merge_auto(G, names, r.param_groups);
+    pg_move(G, "r1", "Input");
+    pg_rename(G, "amp1", "Amplifiers");
+    ut::require(pg_find(G, "Amplifiers/XU1") && !pg_find(G, "amp1/XU1"), "rename moves the subtree");
+    std::vector<std::string> names2 = names;
+    names2.erase(std::remove(names2.begin(), names2.end(), "r4"), names2.end());
+    pg_merge_auto(G, names2, r.param_groups);
+    ut::require(pg_group_of(G, "r1") == "Input", "re-import keeps the user's group");
+    ut::require(pg_group_of(G, "r4").empty(), "re-import drops a removed parameter");
+    ut::require(pg_group_of(G, "amp1.xu1_r1").empty() || pg_group_of(G, "amp1.xu1_r1") == "Amplifiers/XU1",
+                "renamed instance group keeps its parameters");
+    pg_remove(G, "Amplifiers");
+    ut::require(!pg_find(G, "Amplifiers/XU2"), "remove takes the subtree");
+
+    // system.json: строка "param_groups", туда и обратно без потерь.
+    SystemRecord rec;
+    rec.name = "groups";
+    rec.param_groups = G;
+    const SystemRecord back = record_from_json(record_to_json(rec));
+    ut::require(pg_to_text(back.param_groups) == pg_to_text(G), "param_groups survive system.json");
+    SystemRecord none;
+    ut::require(record_to_json(none).find("param_groups") == std::string::npos, "no groups - no key (old files unchanged)");
+    std::printf("  parameter groups: R / C / L / sources / Models/<model> / <subckt>/<instance> at import, user edits"
+                " kept on re-import, system.json round trip (%zu groups)\n", G.size());
+}
+
 int main() {
     return ut::run_main("spice", []() -> int {
         sources();
@@ -556,6 +610,7 @@ int main() {
         devices_tails();
         b_conditionals();
         li_cutsets();
+        param_groups();
         return 0;
     });
 }

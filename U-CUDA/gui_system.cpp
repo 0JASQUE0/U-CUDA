@@ -1295,6 +1295,145 @@ static void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 }
 
 // Вкладка Parameters: НУ, значения/диапазоны параметров, шаг
+// Окно "Parameter groups": создать / переименовать / удалить группу, разложить параметры. Строки
+// групп — все пути и их префиксы ("OPA2134" у "OPA2134/XU1"), так что переименовать можно и
+// родителя; удаление убирает узел с поддеревом, параметры остаются без группы.
+void draw_param_groups_window(AppModel& m, const std::vector<std::string>& names, const char* id) {
+    AppModel::ParamGroupsUi& u = m.pg_ui;
+    if (!u.open) return;
+    ImGui::SetNextWindowSize(ImVec2(640.0f, 600.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin((std::string("Parameter groups##") + id).c_str(), &u.open)) { ImGui::End(); return; }
+    ParamGroups& G = m.param_groups;
+    ImGui::TextDisabled("Only how parameter fields are laid out in the tabs; the computation does not change.\n"
+                        "Nested groups: '/' in the name, e.g. OPA2134/XU1.");
+
+    InputTextStrHint("##pg_new", u.new_path, "new group, e.g. OPA2134/XU1", 300.0f);
+    ImGui::SameLine();
+    if (ImGui::Button("Create group")) {
+        const std::string p = pg_normalize_path(u.new_path);
+        if (!p.empty()) { pg_get(G, p); u.target = p; }
+        u.new_path.clear();
+    }
+
+    // Строки групп: пути записей и их префиксы.
+    std::set<std::string> rows;
+    for (const ParamGroup& g : G)
+        for (size_t e = g.path.find('/'); ; e = g.path.find('/', e + 1)) {
+            rows.insert(g.path.substr(0, e));
+            if (e == std::string::npos) break;
+        }
+    const std::set<std::string> present(names.begin(), names.end());
+    auto count_in = [&](const std::string& path) {
+        int n = 0;
+        for (const ParamGroup& g : G)
+            if (pg_in_subtree(g.path, path))
+                for (const std::string& p : g.params) n += present.count(p) ? 1 : 0;
+        return n;
+    };
+
+    ImGui::SeparatorText("Groups");
+    if (rows.empty()) ImGui::TextDisabled("No groups: the tabs show a flat list.");
+    std::string del, ren_from, ren_to;
+    if (!rows.empty() && ImGui::BeginChild("##pg_rows", ImVec2(0, std::min(220.0f, 26.0f * (float)rows.size() + 8.0f)),
+                                           ImGuiChildFlags_Borders)) {
+        for (const std::string& r : rows) {
+            ImGui::PushID(r.c_str());
+            const int depth = (int)std::count(r.begin(), r.end(), '/');
+            const size_t sl = r.rfind('/');
+            const std::string seg = sl == std::string::npos ? r : r.substr(sl + 1);
+            ImGui::Indent(16.0f * (float)depth + 1.0f);
+            if (u.rename_from == r) {
+                InputTextStr("##rn", u.rename_to, 260.0f);
+                ImGui::SameLine();
+                if (ImGui::SmallButton("OK")) { ren_from = r; ren_to = u.rename_to; }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Cancel")) u.rename_from.clear();
+            } else {
+                ImGui::Text("%s  (%d)", seg.c_str(), count_in(r));
+                ImGui::SameLine(360.0f);
+                if (ImGui::SmallButton("Rename")) { u.rename_from = r; u.rename_to = r; }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Delete")) del = r;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Removes the group and its subgroups; their parameters stay ungrouped.");
+            }
+            ImGui::Unindent(16.0f * (float)depth + 1.0f);
+            ImGui::PopID();
+        }
+    }
+    if (!rows.empty()) ImGui::EndChild();
+    if (!del.empty()) { pg_remove(G, del); if (pg_in_subtree(u.target, del)) u.target.clear(); }
+    if (!ren_from.empty()) {
+        pg_rename(G, ren_from, ren_to);
+        u.rename_from.clear();
+        u.target.clear();
+    }
+
+    ImGui::SeparatorText("Parameters");
+    InputTextStr("filter##pg", u.filter, 200.0f);
+    std::vector<std::string> shown;
+    for (const std::string& p : names)
+        if (u.filter.empty() || p.find(u.filter) != std::string::npos
+            || pg_group_of(G, p).find(u.filter) != std::string::npos) shown.push_back(p);
+    ImGui::SameLine();
+    if (ImGui::Button("Select shown")) u.sel.insert(shown.begin(), shown.end());
+    ImGui::SameLine();
+    if (ImGui::Button("Clear selection")) u.sel.clear();
+
+    // Список целей: все строки групп + "без группы".
+    auto group_combo = [&](const char* label, std::string& cur) {
+        bool changed = false;
+        if (ImGui::BeginCombo(label, cur.empty() ? "(no group)" : cur.c_str())) {
+            if (ImGui::Selectable("(no group)", cur.empty())) { cur.clear(); changed = true; }
+            for (const std::string& r : rows)
+                if (ImGui::Selectable(r.c_str(), cur == r)) { cur = r; changed = true; }
+            ImGui::EndCombo();
+        }
+        return changed;
+    };
+    ImGui::SetNextItemWidth(260.0f);
+    group_combo("##pg_target", u.target);
+    ImGui::SameLine();
+    int nsel = 0;
+    for (const std::string& p : names) nsel += u.sel.count(p) ? 1 : 0;
+    ImGui::BeginDisabled(nsel == 0);
+    if (ImGui::Button(("Move selected (" + std::to_string(nsel) + ")").c_str())) {
+        for (const std::string& p : names)
+            if (u.sel.count(p)) pg_move(G, p, u.target);
+        u.sel.clear();
+    }
+    ImGui::EndDisabled();
+
+    if (ImGui::BeginTable("##pg_params", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV,
+                          ImVec2(0, ImGui::GetContentRegionAvail().y))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+        ImGui::TableSetupColumn("parameter", ImGuiTableColumnFlags_WidthFixed, 200.0f);
+        ImGui::TableSetupColumn("group");
+        ImGui::TableHeadersRow();
+        ImGuiListClipper clip;
+        clip.Begin((int)shown.size());
+        while (clip.Step())
+            for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
+                const std::string& p = shown[(size_t)i];
+                ImGui::PushID(p.c_str());
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                bool s = u.sel.count(p) > 0;
+                if (ImGui::Checkbox("##s", &s)) { if (s) u.sel.insert(p); else u.sel.erase(p); }
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextUnformatted(p.c_str());
+                ImGui::TableSetColumnIndex(2);
+                std::string g = pg_group_of(G, p);
+                ImGui::SetNextItemWidth(-1.0f);
+                if (group_combo("##g", g)) pg_move(G, p, g);
+                ImGui::PopID();
+            }
+        ImGui::EndTable();
+    }
+    ImGui::End();
+}
+
 static void draw_parameters_tab(AppModel& model) {
     ImGui::TextDisabled("Parameter fields appear after parsing the system.");
     if (ImGui::Button("Refresh from system")) {
@@ -1332,18 +1471,21 @@ static void draw_parameters_tab(AppModel& model) {
     // параметры: значение
     if (!model.known_params.empty()) {
         ImGui::SeparatorText("Parameters (value)");
+        if (ImGui::Button("Groups...##sys_pg")) model.pg_ui.open = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Group the parameter fields (layout only)");
         if (ImGui::BeginTable("params", 2, ImGuiTableFlags_SizingFixedFit)) {
             ImGui::TableSetupColumn("name");
             ImGui::TableSetupColumn("value");
             ImGui::TableHeadersRow();
-            for (const auto& p : model.known_params) {
+            draw_param_tree(&model.param_groups, model.known_params, [&](const std::string& p) {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0); ImGui::Text("%s", p.c_str());
                 ImGui::TableSetColumnIndex(1);
                 { std::string id = "##val_" + p; InputNumStr(id.c_str(), model.param_values[p], 100); }
-            }
+            }, true);
             ImGui::EndTable();
         }
+        draw_param_groups_window(model, model.known_params, "sys");
         ImGui::TextDisabled("Empty fields are left unset.");
     }
 
@@ -2099,8 +2241,12 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
                 InputNumStr((v + "##daeic").c_str(), buf.init_conditions[v], 140.0f, {}, true);
             ImGui::TableNextColumn();
             ImGui::TextDisabled("Parameter values");
-            for (const auto& p : st.params)
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Groups...##dae_pg")) buf.pg_ui.open = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Group the parameter fields (layout only)");
+            draw_param_tree(&buf.param_groups, st.params, [&](const std::string& p) {
                 InputNumStr((p + "##daepv").c_str(), buf.param_values[p], 140.0f, {}, true);
+            });
             InputNumStr("h##daeh", buf.step_h, 140.0f, {}, true);
             // Ньютон схем ДАУ — значения по умолчанию для вкладок (как у неявных схем ОДУ).
             ImGui::TextDisabled("Newton (defaults for the tabs)");
@@ -2112,6 +2258,7 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
                                   "iterations is accepted unconverged and the constraint drifts.");
             ImGui::EndTable();
         }
+        if (st.ok) draw_param_groups_window(buf, st.params, "lib");
         // Методы: при «Solve as ODE» система — ОДУ (схемы ОДУ, флаги scheme_*), иначе — методы ДАУ.
         ImGui::Separator();
         if (buf.dae_as_ode) draw_builtin_scheme_checkboxes(buf);

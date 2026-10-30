@@ -239,6 +239,12 @@ bool AppModel::import_circuit(std::string* report, std::string* err) {
     use_aux_funcs = false;
     init_conditions = r.init_conditions;
     param_values = r.param_values;
+    {
+        // Разложенное пользователем остаётся; новые параметры — в группы импорта.
+        std::vector<std::string> names;
+        for (const auto& pg : r.param_groups) names.push_back(pg.first);
+        pg_merge_auto(param_groups, names, r.param_groups);
+    }
     if (!r.step_h.empty()) step_h = r.step_h;
     circuit_netlist = net;
     if (note.empty() && !r.title.empty()) note = r.title;
@@ -307,6 +313,7 @@ SystemRecord AppModel::to_record() const {
     r.circuit_source = circuit_source;
     r.circuit_netlist = circuit_netlist;
     r.circuit_ideal_opamps = circuit_ideal_opamps;
+    r.param_groups = param_groups;
     switch (mode) {
     case InputMode::Image: r.mode = "Image"; break;
     case InputMode::Latex: r.mode = "LaTeX"; break;
@@ -382,6 +389,8 @@ void AppModel::from_record(const SystemRecord& r) {
     circuit_source = r.circuit_source;
     circuit_netlist = r.circuit_netlist;
     circuit_ideal_opamps = r.circuit_ideal_opamps;
+    param_groups = r.param_groups;
+    pg_ui = ParamGroupsUi{};
     if (r.mode == "Image") mode = InputMode::Image;
     else if (r.mode == "Plain") mode = InputMode::Plain;
     else mode = InputMode::Latex;
@@ -488,6 +497,8 @@ void AppModel::clear() {
     circuit_source.clear();
     circuit_netlist.clear();
     circuit_ideal_opamps = false;
+    param_groups.clear();
+    pg_ui = ParamGroupsUi{};
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_dopri78_legacy
         = scheme_rk45 = scheme_dop853
         = scheme_cd = scheme_cdfast

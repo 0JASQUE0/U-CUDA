@@ -53,7 +53,9 @@ struct SpiceImportResult {
     std::string params_text;
     std::map<std::string, std::string> init_conditions;
     std::map<std::string, std::string> param_values;
-    std::string step_h;        // из .tran (пусто — директивы нет)
+    // Параметр -> путь группы в интерфейсе ("Resistors", "Models/1N4148", "OPA2134/XU1"), см. param_groups.h.
+    std::vector<std::pair<std::string, std::string>> param_groups;
+    std::string step_h;       // из .tran (пусто — директивы нет)
     std::string t_stop;
     bool uic = false;          // .tran ... UIC
     bool has_ic = false;       // в netlist'е есть IC= или .ic

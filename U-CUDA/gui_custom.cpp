@@ -214,8 +214,10 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
         // of a sweep-axis param manually.
         EffectiveSweep esx = effective_sweep_x(c);
         EffectiveSweep esy = effective_sweep_y(c);
-        for (int i = 0; i < (int)params.size(); ++i) {
-            const auto& p = params[i];
+        std::map<std::string, int> par_idx;
+        for (int i = 0; i < (int)params.size(); ++i) par_idx.emplace(params[i], i);
+        draw_param_tree(&model.param_groups, params, [&](const std::string& p) {
+            const int i = par_idx.at(p);
             ImGui::PushID(p.c_str());
             if (InputNumStr(p.c_str(), c.param_values[p], kFieldW)) {
                 phase.param_values[p] = c.param_values[p];
@@ -238,7 +240,7 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
                 ImGui::TextDisabled("(swept)");
             }
             ImGui::PopID();
-        }
+        });
     }
 }
 

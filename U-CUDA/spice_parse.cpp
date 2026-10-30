@@ -658,7 +658,25 @@ struct Builder {
         std::map<std::string, std::string> pins;      // вывод подсхемы -> ключ внешнего узла
         const Scope* scope = nullptr;
         int depth = 0;
+        std::string group;                            // группа параметров подсхемы "OPA2134/XU1"
     };
+
+    // Группа, в которую param() кладёт параметр (только интерфейс, SpiceImportResult::param_groups).
+    std::string cur_group;
+    std::vector<std::pair<std::string, std::string>> pgroups;
+    // Верхний уровень — по виду элемента; внутри подсхемы — группа экземпляра.
+    static std::string element_group(char type, const Ctx& c) {
+        if (!c.group.empty()) return c.group;
+        switch (type) {
+        case 'r': return "Resistors";
+        case 'c': return "Capacitors";
+        case 'l': return "Inductors";
+        case 'k': return "Coupling (K)";
+        case 'v': case 'i': return "Sources";
+        case 'e': case 'f': case 'g': case 'h': case 'b': return "Controlled sources";
+        default:  return "Devices";
+        }
+    }
 
     // Ключ узла: "" — земля.
     std::string node_key(const std::string& tok, const Ctx& c) {
@@ -707,6 +725,7 @@ struct Builder {
         const std::string p = uniq(sanitize(name));
         params.push_back(p);
         pvals[p] = fmt_short(v);
+        pgroups.push_back({ p, cur_group });
         return p;
     }
     std::string branch_ref(const std::string& key) { return "\x01" + key + "\x02"; }
@@ -1014,6 +1033,9 @@ struct Builder {
         auto it = model_cache.find(lower(m.name));
         if (it != model_cache.end()) return it->second;
         std::map<std::string, std::string>& out = model_cache[lower(m.name)];
+        // Модель из подсхемы — своя у экземпляра (его группа); общая .model — своя группа.
+        const std::string saved_group = cur_group;
+        if (!m.in_subckt) cur_group = "Models/" + m.name;
         for (size_t i = 0; i < keys.size(); ++i) {
             if (m.bad.count(keys[i]))
                 fail("model " + m.name + ": cannot evaluate " + keys[i] + " = " + m.raw.at(keys[i]));
@@ -1022,6 +1044,7 @@ struct Builder {
             if (defs[i] == 0.0 && val == 0.0) continue;
             out[keys[i]] = param(m.name + "_" + keys[i], val);
         }
+        cur_group = saved_group;
         std::string skip;
         for (const auto& kv : m.raw)
             if (kv.first == "mfg" || kv.first == "type" || kv.first == "icrating" || kv.first == "vceo"
@@ -1084,6 +1107,7 @@ struct Builder {
         const char type = (char)std::tolower((unsigned char)t[0][0]);
         const std::string name = c.prefix + t[0];
         const std::string key = c.prefix + lower(t[0]);
+        cur_group = element_group(type, c);
         auto need = [&](size_t n) { if (t.size() < n) fail(at + "too few fields"); };
         auto value_at = [&](size_t i, const char* kw) {
             need(i + 1);
@@ -1442,6 +1466,7 @@ struct Builder {
         Ctx in;
         in.prefix = key + ".";
         in.depth = c.depth + 1;
+        in.group = c.group.empty() ? sub + "/" + t[0] : c.group + "/" + t[0];
         for (size_t k = 0; k < nodes.size(); ++k) in.pins[s.pins[k]] = node_key(nodes[k], c);
         // узлы-выводы должны существовать снаружи
         for (size_t k = 0; k < nodes.size(); ++k) node_of(nodes[k], c);
@@ -1551,6 +1576,7 @@ struct Builder {
         r.alg_text = join(alg);
         r.params_text = join(params);
         r.param_values = pvals;
+        r.param_groups = pgroups;
         r.init_conditions = ic;
         for (const auto& kv : deck.ic_nodes) {
             auto it = node_idx.find(node_key(kv.first, Ctx{}));

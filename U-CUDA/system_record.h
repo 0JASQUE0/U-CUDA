@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include "param_groups.h"
 
 // Именованная пользовательская КРС. Это "ещё один scheme" — встаёт в scheme
 // combo рядом с Euler/Cromer/Midpoint/RK4. Имя не должно совпадать с built-in.
@@ -157,4 +158,7 @@ struct SystemRecord {
 
     // значения параметров по имени: "sigma" -> "10" (пустое = не задано)
     std::map<std::string, std::string> param_values;
+
+    // Группы параметров в полях вкладок (только интерфейс, см. param_groups.h).
+    ParamGroups param_groups;
 };

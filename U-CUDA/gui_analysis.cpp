@@ -218,13 +218,13 @@ void draw_phase_controls(PhaseAnalysisSession& s,
     if (!s.params.empty()) {
         ImGui::SeparatorText("Parameters");
         if (ImGui::BeginTable("aparams", 2, ImGuiTableFlags_SizingFixedFit)) {
-            for (const auto& p : s.params) {
+            draw_param_tree(bc ? &bc->param_groups : nullptr, s.params, [&](const std::string& p) {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0); ImGui::Text("%s", p.c_str());
                 ImGui::TableSetColumnIndex(1);
                 std::string id = "##ap_" + p;
                 changed |= InputNumStr(id.c_str(), s.param_values[p], 110);
-            }
+            }, true);
             ImGui::EndTable();
         }
     }

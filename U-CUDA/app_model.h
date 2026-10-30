@@ -9,6 +9,7 @@
 #include "network_session.h"
 #include "prewarm_watch.h"
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include <memory>
@@ -359,6 +360,13 @@ public:
     std::string circuit_source;    // ДАУ из схемы: путь к .kicad_sch / .cir (см. SystemRecord)
     std::string circuit_netlist;   // копия netlist'а на момент импорта
     bool circuit_ideal_opamps = false;   // ОУ — идеальные (см. SystemRecord)
+    // Группы параметров (см. SystemRecord / param_groups.h) и состояние окна их правки.
+    ParamGroups param_groups;
+    struct ParamGroupsUi {
+        bool open = false;
+        std::string new_path, filter, target, rename_from, rename_to;
+        std::set<std::string> sel;
+    } pg_ui;
     // Импорт схемы circuit_source: перезаписывает уравнения, x, z, параметры, НУ и шаг.
     // false + err — файл не читается, kicad-cli не сработал или схема не поддержана.
     bool import_circuit(std::string* report, std::string* err);

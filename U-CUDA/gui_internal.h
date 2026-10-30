@@ -495,6 +495,14 @@ bool draw_integration_block(const char* header,
                                    const IntegrationFields& f,
                                    AppModel* bc = nullptr,
                                    bool is_map = false);
+// Поля параметров по группам (param_groups.h): item рисует одно поле. groups == nullptr / пусто или ни
+// одна группа не относится к names — плоский список, как раньше. in_table — заголовки групп строками
+// таблицы (item сам открывает свою строку).
+void draw_param_tree(const ParamGroups* groups, const std::vector<std::string>& names,
+                     const std::function<void(const std::string&)>& item, bool in_table = false);
+// Окно правки групп параметров модели m (кнопка "Groups..." ставит m.pg_ui.open). names — параметры
+// системы; id отличает окно редактора библиотеки от окна вкладки System.
+void draw_param_groups_window(AppModel& m, const std::vector<std::string>& names, const char* id);
 void draw_named_num_fields(const char* header,
                                   const std::vector<std::string>& names,
                                   std::map<std::string, std::string>& values,
