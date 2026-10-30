@@ -686,6 +686,56 @@ A right-hand side may use `t` (not a variable or parameter). Autonomous systems 
   / 3.820 / 3.520 V, ngspice 3.818 / 3.448 / 3.700 / 3.822 / 3.514). Its switching front needs steps down to
   ~1e-14 s (pF junction capacitances): fixed-step BDF stops there at the same t for any h (2e-6 .. 5e-5; damping
   the Newton did not help) - use the adaptive step on such circuits. spice_test `ic_without_uic`.
+  Field layout (UI only, `param_groups.h`): initial conditions are grouped like parameters (`SystemRecord::ic_groups`,
+  JSON "ic_groups"): the import puts capacitor / inductor states in "Capacitors" / "Inductors" (or the subcircuit
+  group), junction capacitances of a device in "Devices/<name>", every z in "Algebraic (computed)/Node potentials" /
+  "/Branch currents" (their IC is only Newton's start - recomputed by the DC OP / projection). Import groups are
+  ordered by kind (`Builder::group_rank`: R, C, L, K, sources, controlled, devices, subcircuits, models, algebraic);
+  after that the vector order is the screen order and group headers are dragged among siblings in every field tree and
+  in the Groups window (`pg_reorder`; `pg_get` appends a new group after its siblings, `pg_rename` works in place).
+  Field names are drawn as formulas (`draw_field_name`, `math_formula_draw`): a user label (`field_labels`, JSON
+  "field_labels", edited in the Groups window) or `name_to_latex` - the part after the first '_' is the subscript
+  (vc_c1 -> vc_{c1}, vc_q1_cje -> vc_{q1,cje}; also in the DAE equation preview); inside a subscript the renderer no
+  longer drops trailing digits a level lower. KiCad unnamed nets lose the "net-" prefix (`net_short`:
+  net-_led1-k_ -> v_led1_k); re-importing an old circuit record renames those variables.
+  The import also gives labels with the netlist's case (`SpiceImportResult::field_labels`): R / C / L values
+  R_{1}, C_{1}, L_{1} (`elem_tex`), element variables vc_{C1}, ic_{C1}, il_{L1}, i_{V1}, vc_{Q1,cje} (`var_tex`);
+  `import_circuit` adds them to `field_labels` where the user has none. A circuit record saved before IC groups gets
+  them on load (`AppModel::circuit_layout_defaults`: re-parse of `circuit_netlist`, names it does not give go to
+  "States" / "Algebraic (computed)"); nothing else in the record changes. Projection variable checkboxes (Analysis)
+  use the same labels. Settings -> "Use LaTeX for parameters and variables" (`AppConfig::field_latex`,
+  `set_field_latex`): off = plain names. Variable combos of the projections (Phase 2D / 3D axes, feature /
+  continuation / recurrence variable) go through `var_combo_begin` / `var_selectable` / `var_combo_preview`
+  (formula preview via `ImGuiComboFlags_CustomPreview`); plot axis and series names through `plot_var_name` (TeX label
+  only when the plot LaTeX labels are on too). `set_field_labels(&model.field_labels)` each frame makes
+  `field_label(nullptr, ..)` use the loaded system's labels. The Time domain variable checkboxes follow `ic_groups`
+  (a "variables" tree). Settings -> "Initial conditions of algebraic variables (DAE)" (`AppConfig::show_alg_ic`,
+  default off): `AppModel::ic_fields` drops the z (alg_text) from the IC fields of the tabs (Analysis, System,
+  `draw_named_num_fields`) with a "N algebraic variables hidden" note; their values stay in the session and are
+  recomputed anyway; the library editor shows all. Right click on a group header of the Time domain variable tree
+  (or on "variables"): Select all / Deselect all / Only these (`draw_param_tree(.., group_menu)`). Combo previews
+  draw the formula at the size of the field labels on the UI text baseline (`field_tex_draw(.., fit)`), clipped to
+  the frame.
+  SI prefixes in every numeric field (`num_parse.h`: `si_prefix`, `scale_pow10`): f p n u/µ m k M G T and meg/Meg
+  (SPICE mega), case-sensitive as in SI (m milli, M mega), only right after a number ("2pi", "5asdf", "1kk" stay
+  invalid). Exact: a negative prefix divides by an exact 10^k, so "10n" is the very double 1e-8. The ↑/↓ digit step
+  keeps the prefix (`DigitInput::ComputeStep`). The import writes R / C / L values with prefixes (`fmt_num_si`:
+  shortest text that parses back to the same double: 15k, 10n, 4.7m). Every reader of field strings must go through
+  `parse_num` (`std::stod("10k")` = 10): AppModel DC OP / consistent start and the tests were switched.
+  Device simplifications (`SpiceImportOptions::no_junction_caps / ideal_diodes / ideal_bjts`, record fields
+  `circuit_no_jcaps / circuit_ideal_diodes / circuit_ideal_bjts`, JSON "1", DAE editor checkboxes that re-import,
+  "Save simplified copy" = all three as "<name> (simplified)"): no barrier capacitances of D / Q / J / M; ideal diode
+  = threshold Vf + Ron (`ideal_diode_current`: softplus over kIdealVs = 10 mV; `ideal_junction_fit`: the tangent of
+  the Shockley exponential with RS at kIdealIref = 10 mA), parameters `<model>_vf / _ron`, no internal RS node; ideal
+  BJT = Ebers-Moll on two such junctions (Ic = Dbe - Dbc (1 + 1/BR), Ib = Dbe/BF + Dbc/BR), `<model>_vfbe / _ronbe /
+  _vfbc / _ronbc / _bf / _br`, no Early effect, no RB / RC / RE. spice_test `device_simplifications`: rectifier loses
+  the C(v) state, the ideal diode is exact at 10 mA, ideal-BJT CE stage Vc 4.06 V vs 3.81 V full (Early dropped).
+  On the astable multivibrator they do NOT help: without junction capacitances the regenerative switching has no fast
+  state left - the algebraic equations lose their root at the switching instant (an impasse point; the DAE must
+  jump), so even the adaptive step stops there; ideal BJTs without RB / RE put the junction capacitances into loops with
+  C1 / C2 (index 2) and shift the period by a few %; scaling the junction capacitances from pF to 0.1 - 10 nF changes
+  the step count only from 11.2k to 10.0k (2 s, BDF rtol 1e-6, ~0.8 s CPU) - the cost is the exponential switching
+  itself, as in SPICE. Useful for circuits without regeneration (amplifiers, rectifiers, filters with diodes).
   Still open: GUI check.
 - Stage 12 (planned, not started), NI Multisim import - the same role as KiCad. Found on this machine: Multisim 14.2
   (`%ProgramFiles(x86)%\National Instruments\Circuit Design Suite 14.2`, 133 samples `.ms14` in

@@ -4,14 +4,20 @@
 //
 // Группа — путь "OPA2134/XU1" ('/' — вложенность) и список параметров. Промежуточные узлы
 // пути отдельной записи не требуют. Параметр — не больше чем в одной группе; не попавшие ни в
-// одну показываются в конце узлом "Other". Записи держатся отсортированными по пути.
+// одну показываются в конце узлом "Other". Порядок записей — порядок узлов на экране (дети узла
+// идут в порядке первого появления); его меняет перетаскивание (pg_reorder).
 //
 // Импорт схемы раскладывает параметры сам (SpiceImportResult::param_groups): R / C / L /
 // источники по видам, параметры моделей приборов — "Models/<модель>", всё из подсхемы —
 // "<подсхема>/<экземпляр>". Пользователь правит группы в окне "Parameter groups".
+// Так же раскладываются начальные условия (SystemRecord::ic_groups): конденсаторы, индуктивности,
+// внутренние состояния приборов "Devices/<прибор>", алгебраические z — "Algebraic (computed)".
 //
-// В system.json — одна строка "param_groups": строки "<путь>: p1, p2" (строкой, а не объектом:
-// старые сборки пропускают неизвестный ключ через parse_string).
+// В system.json — одна строка "param_groups" / "ic_groups": строки "<путь>: p1, p2" (строкой, а
+// не объектом: старые сборки пропускают неизвестный ключ через parse_string).
+//
+// Подписи полей (FieldLabels, "field_labels"): имя -> LaTeX, строки "<имя>: <подпись>"; без своей
+// подписи поле подписано автоматически (field_label_auto в gui_widgets.cpp).
 
 #include <algorithm>
 #include <map>
@@ -57,12 +63,62 @@ inline ParamGroup* pg_find(ParamGroups& g, const std::string& path) {
     return nullptr;
 }
 
-// Группа по пути; нет — создаётся на своём месте по сортировке.
+// Группа по пути; нет — создаётся последней среди детей ближайшего существующего предка
+// (без предка — в конце).
 inline ParamGroup& pg_get(ParamGroups& g, const std::string& path) {
-    auto it = std::lower_bound(g.begin(), g.end(), path,
-                               [](const ParamGroup& a, const std::string& p) { return a.path < p; });
-    if (it != g.end() && it->path == path) return *it;
-    return *g.insert(it, ParamGroup{ path, {} });
+    if (ParamGroup* x = pg_find(g, path)) return *x;
+    size_t at = g.size();
+    for (std::string anc = path; ;) {
+        const size_t sl = anc.rfind('/');
+        if (sl == std::string::npos) break;
+        anc.resize(sl);
+        size_t last = g.size();
+        for (size_t i = 0; i < g.size(); ++i) if (pg_in_subtree(g[i].path, anc)) last = i;
+        if (last < g.size()) { at = last + 1; break; }
+    }
+    return *g.insert(g.begin() + (std::ptrdiff_t)at, ParamGroup{ path, {} });
+}
+
+inline std::string pg_parent(const std::string& path) {
+    const size_t sl = path.rfind('/');
+    return sl == std::string::npos ? std::string() : path.substr(0, sl);
+}
+
+// Все узлы дерева (пути записей и их префиксы) в порядке обхода на экране: ребёнок сразу под
+// родителем, дети — в порядке первого появления.
+inline std::vector<std::string> pg_rows(const ParamGroups& g) {
+    std::vector<std::string> nodes;   // в порядке первого появления
+    for (const ParamGroup& x : g)
+        for (size_t e = x.path.find('/'); ; e = x.path.find('/', e + 1)) {
+            const std::string p = x.path.substr(0, e);
+            if (std::find(nodes.begin(), nodes.end(), p) == nodes.end()) nodes.push_back(p);
+            if (e == std::string::npos) break;
+        }
+    std::vector<std::string> out;
+    auto visit = [&](auto&& self, const std::string& parent) -> void {   // в глубину, дети в порядке nodes
+        for (const std::string& p : nodes)
+            if (pg_parent(p) == parent) {
+                out.push_back(p);
+                self(self, p);
+            }
+    };
+    visit(visit, std::string());
+    return out;
+}
+
+// Перетаскивание: узел from (с поддеревом) ставится перед соседом to (after — после него).
+// Только среди детей одного родителя; иначе ничего.
+inline void pg_reorder(ParamGroups& g, const std::string& from, const std::string& to, bool after) {
+    if (from == to || pg_parent(from) != pg_parent(to)) return;
+    ParamGroups block, rest;
+    for (ParamGroup& x : g) (pg_in_subtree(x.path, from) ? block : rest).push_back(std::move(x));
+    size_t at = rest.size(), first = rest.size(), last = rest.size();
+    for (size_t i = 0; i < rest.size(); ++i)
+        if (pg_in_subtree(rest[i].path, to)) { if (first == rest.size()) first = i; last = i; }
+    if (first < rest.size()) at = after ? last + 1 : first;
+    rest.insert(rest.begin() + (std::ptrdiff_t)at, std::make_move_iterator(block.begin()),
+                std::make_move_iterator(block.end()));
+    g = std::move(rest);
 }
 
 // Путь группы параметра, "" — без группы.
@@ -79,17 +135,19 @@ inline void pg_move(ParamGroups& g, const std::string& param, const std::string&
     if (!p.empty()) pg_get(g, p).params.push_back(param);
 }
 
-// Переименование узла вместе с поддеревом; совпавшие пути сливаются.
+// Переименование узла вместе с поддеревом на месте; совпавшие пути сливаются в первый.
 inline void pg_rename(ParamGroups& g, const std::string& from, const std::string& to_raw) {
     const std::string to = pg_normalize_path(to_raw);
     if (to.empty() || to == from || pg_in_subtree(to, from)) return;
-    ParamGroups moved, kept;
-    for (ParamGroup& x : g) (pg_in_subtree(x.path, from) ? moved : kept).push_back(std::move(x));
-    g = std::move(kept);
-    for (ParamGroup& x : moved) {
-        ParamGroup& d = pg_get(g, to + x.path.substr(from.size()));
-        d.params.insert(d.params.end(), x.params.begin(), x.params.end());
+    for (ParamGroup& x : g)
+        if (pg_in_subtree(x.path, from)) x.path = to + x.path.substr(from.size());
+    ParamGroups out;
+    for (ParamGroup& x : g) {
+        ParamGroup* d = pg_find(out, x.path);
+        if (d) d->params.insert(d->params.end(), x.params.begin(), x.params.end());
+        else out.push_back(std::move(x));
     }
+    g = std::move(out);
 }
 
 // Удаление узла с поддеревом; его параметры остаются без группы.
@@ -148,6 +206,7 @@ inline ParamGroups pg_from_text(const std::string& text) {
         if (c == std::string::npos) continue;
         const std::string path = pg_normalize_path(line.substr(0, c));
         if (path.empty()) continue;
+        // порядок файла — порядок узлов (pg_get ставит новую группу за последней своего предка)
         ParamGroup& x = pg_get(g, path);
         std::string cur;
         for (size_t i = c + 1; i <= line.size(); ++i) {
@@ -157,4 +216,37 @@ inline ParamGroups pg_from_text(const std::string& text) {
         }
     }
     return g;
+}
+
+// Подписи полей: имя -> LaTeX. Пустая подпись — автоматическая.
+using FieldLabels = std::map<std::string, std::string>;
+
+inline std::string fl_to_text(const FieldLabels& m) {
+    std::string s;
+    for (const auto& kv : m) {
+        if (kv.second.empty()) continue;
+        if (!s.empty()) s += '\n';
+        s += kv.first + ": " + kv.second;
+    }
+    return s;
+}
+
+inline FieldLabels fl_from_text(const std::string& text) {
+    FieldLabels m;
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        size_t e = text.find('\n', pos);
+        if (e == std::string::npos) e = text.size();
+        const std::string line = text.substr(pos, e - pos);
+        pos = e + 1;
+        const size_t c = line.find(':');
+        if (c == std::string::npos) continue;
+        auto trim = [](const std::string& s) {
+            const size_t a = s.find_first_not_of(" \t\r"), b = s.find_last_not_of(" \t\r");
+            return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+        };
+        const std::string k = trim(line.substr(0, c)), v = trim(line.substr(c + 1));
+        if (!k.empty() && !v.empty()) m[k] = v;
+    }
+    return m;
 }

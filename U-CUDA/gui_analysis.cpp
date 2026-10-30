@@ -220,7 +220,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         if (ImGui::BeginTable("aparams", 2, ImGuiTableFlags_SizingFixedFit)) {
             draw_param_tree(bc ? &bc->param_groups : nullptr, s.params, [&](const std::string& p) {
                 ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0); ImGui::Text("%s", p.c_str());
+                ImGui::TableSetColumnIndex(0); draw_field_name(p, bc ? &bc->field_labels : nullptr);
                 ImGui::TableSetColumnIndex(1);
                 std::string id = "##ap_" + p;
                 changed |= InputNumStr(id.c_str(), s.param_values[p], 110);
@@ -231,6 +231,11 @@ void draw_phase_controls(PhaseAnalysisSession& s,
 
     // начальные условия (несколько, мультистабильность)
     ImGui::SeparatorText("Initial conditions");
+    if (bc) {
+        int hidden = 0;
+        (void)bc->ic_fields(s.vars, &hidden);
+        if (hidden > 0) ImGui::TextDisabled("%d algebraic variables hidden (Settings)", hidden);
+    }
     int ic_to_remove = -1;
     for (int i = 0; i < (int)s.ic_sets.size(); ++i) {
         InitialConditionSet& ic = s.ic_sets[i];
@@ -238,12 +243,31 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         ImGui::Checkbox("##vis", &ic.visible); ImGui::SameLine();
         ImGui::SetNextItemWidth(70);
         InputTextStr("##label", ic.label); ImGui::SameLine();
-        for (const auto& v : s.vars) {
-            ImGui::Text("%s:", v.c_str()); ImGui::SameLine();
-            std::string id = "##icv_" + v;
-            changed |= InputNumStr(id.c_str(), ic.values[v], 60); ImGui::SameLine();
+        const FieldLabels* labels = bc ? &bc->field_labels : nullptr;
+        if (bc && !bc->ic_groups.empty()) {
+            // С группами НУ (схемы: десятки переменных) — набор раскрывается деревом групп, а не строкой.
+            if (ImGui::SmallButton("X")) ic_to_remove = i;
+            if (ImGui::TreeNode("##icvals", "values")) {
+                if (ImGui::BeginTable("icv", 2, ImGuiTableFlags_SizingFixedFit)) {
+                    draw_param_tree(&bc->ic_groups, bc->ic_fields(s.vars), [&](const std::string& v) {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0); draw_field_name(v, labels);
+                        ImGui::TableSetColumnIndex(1);
+                        std::string id = "##icv_" + v;
+                        changed |= InputNumStr(id.c_str(), ic.values[v], 110);
+                    }, true);
+                    ImGui::EndTable();
+                }
+                ImGui::TreePop();
+            }
+        } else {
+            for (const auto& v : bc ? bc->ic_fields(s.vars) : s.vars) {
+                draw_field_name(v, labels); ImGui::SameLine();
+                std::string id = "##icv_" + v;
+                changed |= InputNumStr(id.c_str(), ic.values[v], 60); ImGui::SameLine();
+            }
+            if (ImGui::SmallButton("X")) ic_to_remove = i;
         }
-        if (ImGui::SmallButton("X")) ic_to_remove = i;
         ImGui::PopID();
     }
     if (ic_to_remove >= 0) { s.remove_ic(ic_to_remove); changed = true; }
@@ -255,6 +279,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
     for (int i = 0; i < (int)s.projections.size(); ++i) {
         Projection& pr = s.projections[i];
         ImGui::PushID(1000 + i);
+        bool x_drawn = false;   // кнопку удаления дерево переменных рисует в своей строке
         ImGui::SetNextItemWidth(90);
         InputTextStr("##plabel", pr.label); ImGui::SameLine();
         // тип проекции
@@ -270,10 +295,10 @@ void draw_phase_controls(PhaseAnalysisSession& s,
 
         if (pr.type == ProjType::Phase2D) {
             ImGui::Text("X:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(55);
+            ImGui::SetNextItemWidth(95);
             phase_axis_combo("##px", s, pr.axis_x);
             ImGui::SameLine(); ImGui::Text("Y:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(55);
+            ImGui::SetNextItemWidth(95);
             phase_axis_combo("##py", s, pr.axis_y);
         }
         else if (pr.type == ProjType::FeatureDiagram) {
@@ -291,10 +316,11 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                                  : s.vars[pr.axis_x < nv ? pr.axis_x : 0]);
 
             ImGui::Text("var:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(feat_is_combo ? 170.0f : 55.0f);
-            if (ImGui::BeginCombo("##pfv", preview.c_str())) {
+            ImGui::SetNextItemWidth(feat_is_combo ? 170.0f : 95.0f);
+            const bool open_pfv = var_combo_begin("##pfv", preview, !feat_is_combo && !s.vars.empty());
+            if (open_pfv) {
                 for (int k = 0; k < nv; ++k)
-                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_x == k)) { pr.axis_x = k; s.fit_request = true; }
+                    if (var_selectable(s.vars[k], pr.axis_x == k)) { pr.axis_x = k; s.fit_request = true; }
                 if (nv >= 2) {
                     ImGui::Separator();
                     const std::string lbl = combo_var_label(s.vars);
@@ -302,6 +328,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                 }
                 ImGui::EndCombo();
             }
+            var_combo_preview();
             ImGui::SameLine();
             ImGui::TextDisabled("(peak vs interval)");
         }
@@ -331,24 +358,25 @@ void draw_phase_controls(PhaseAnalysisSession& s,
             }
             if (pr.rqa_source == rqa::Source::Embedding) {
                 ImGui::SameLine(); ImGui::Text("var:"); ImGui::SameLine();
-                ImGui::SetNextItemWidth(55);
+                ImGui::SetNextItemWidth(95);
                 const int nv = (int)s.vars.size();
-                if (ImGui::BeginCombo("##rqvar", s.vars.empty() ? "-" : s.vars[pr.rqa_var < nv ? pr.rqa_var : 0].c_str())) {
+                if (var_combo_begin("##rqvar", s.vars.empty() ? "-" : s.vars[pr.rqa_var < nv ? pr.rqa_var : 0], !s.vars.empty())) {
                     for (int k = 0; k < nv; ++k)
-                        if (ImGui::Selectable(s.vars[k].c_str(), pr.rqa_var == k)) { pr.rqa_var = k; changed = true; }
+                        if (var_selectable(s.vars[k], pr.rqa_var == k)) { pr.rqa_var = k; changed = true; }
                     ImGui::EndCombo();
                 }
+                var_combo_preview();
             }
         }
         else if (pr.type == ProjType::Phase3D) {
             ImGui::Text("X:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(50);
+            ImGui::SetNextItemWidth(95);
             phase_axis_combo("##p3x", s, pr.axis_x);
             ImGui::SameLine(); ImGui::Text("Y:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(50);
+            ImGui::SetNextItemWidth(95);
             phase_axis_combo("##p3y", s, pr.axis_y);
             ImGui::SameLine(); ImGui::Text("Z:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(50);
+            ImGui::SetNextItemWidth(95);
             phase_axis_combo("##p3z", s, pr.axis_z);
         }
         else if (pr.type == ProjType::ContinuationDiagram) {
@@ -360,10 +388,11 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                                  : s.vars[pr.axis_x < nv ? pr.axis_x : 0]);
 
             ImGui::Text("var:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(cont_is_combo ? 170.0f : 55.0f);
-            if (ImGui::BeginCombo("##pcv", preview.c_str())) {
+            ImGui::SetNextItemWidth(cont_is_combo ? 170.0f : 95.0f);
+            const bool open_pcv = var_combo_begin("##pcv", preview, !cont_is_combo && !s.vars.empty());
+            if (open_pcv) {
                 for (int k = 0; k < nv; ++k)
-                    if (ImGui::Selectable(s.vars[k].c_str(), pr.axis_x == k)) { pr.axis_x = k; s.fit_request = true; }
+                    if (var_selectable(s.vars[k], pr.axis_x == k)) { pr.axis_x = k; s.fit_request = true; }
                 if (nv >= 2) {
                     ImGui::Separator();
                     const std::string lbl = combo_var_label(s.vars);
@@ -371,6 +400,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                 }
                 ImGui::EndCombo();
             }
+            var_combo_preview();
             ImGui::SameLine();
             ImGui::TextDisabled("(peak vs time)");
         }
@@ -393,22 +423,61 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                     pr.show_var[j] = prev[j];
                 pr.show_var[(size_t)nv_td] = false;
             }
-            ImGui::Text("vars:"); ImGui::SameLine();
-            for (int k = 0; k < nv_td; ++k) {
+            const FieldLabels* labels = bc ? &bc->field_labels : nullptr;
+            auto var_box = [&](int k) {
                 bool v = pr.show_var[k];
-                if (ImGui::Checkbox(s.vars[k].c_str(), &v)) { pr.show_var[k] = v; }
-                ImGui::SameLine();
-            }
-            if (nv_td >= 2) {
+                ImGui::PushID(k);
+                if (ImGui::Checkbox("##sv", &v)) { pr.show_var[k] = v; }
+                ImGui::PopID();
+                ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+                draw_field_name(s.vars[k], labels);
+            };
+            auto combo_box = [&] {
+                if (nv_td < 2) return;
                 bool v = pr.show_var[(size_t)nv_td];
                 if (ImGui::Checkbox(combo_var_label(s.vars).c_str(), &v))
                     pr.show_var[(size_t)nv_td] = v;
+            };
+            if (bc && !bc->ic_groups.empty()) {
+                // С группами НУ (схемы) — переменные тем же деревом групп, что и начальные условия.
+                combo_box();
                 ImGui::SameLine();
+                if (ImGui::SmallButton("X")) pr_to_remove = i;
+                x_drawn = true;
+                std::map<std::string, int> idx;
+                for (int k = 0; k < nv_td; ++k) idx.emplace(s.vars[(size_t)k], k);
+                // ПКМ по группе (и по самому узлу "variables" — все переменные): включить / выключить разом.
+                auto group_menu = [&](const std::vector<std::string>& names) {
+                    auto set_all = [&](bool on) { for (const std::string& n : names) pr.show_var[(size_t)idx.at(n)] = on; };
+                    if (ImGui::MenuItem("Select all"))   set_all(true);
+                    if (ImGui::MenuItem("Deselect all")) set_all(false);
+                    if (ImGui::MenuItem("Only these")) {
+                        for (int k = 0; k < nv_td; ++k) pr.show_var[(size_t)k] = false;
+                        set_all(true);
+                    }
+                };
+                const bool vars_open = ImGui::TreeNode("##prvars", "variables");
+                if (ImGui::BeginPopupContextItem("##prvars_menu")) {
+                    group_menu(s.vars);
+                    ImGui::EndPopup();
+                }
+                if (vars_open) {
+                    draw_param_tree(&bc->ic_groups, s.vars, [&](const std::string& n) { var_box(idx.at(n)); },
+                                    false, group_menu);
+                    ImGui::TreePop();
+                }
+            } else {
+                ImGui::Text("vars:"); ImGui::SameLine();
+                for (int k = 0; k < nv_td; ++k) { var_box(k); ImGui::SameLine(); }
+                combo_box();
+                if (nv_td >= 2) ImGui::SameLine();
+                ImGui::NewLine();
             }
-            ImGui::NewLine();
         }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("X")) pr_to_remove = i;
+        if (!x_drawn) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) pr_to_remove = i;
+        }
         ImGui::PopID();
     }
     if (pr_to_remove >= 0) s.remove_projection(pr_to_remove);
@@ -773,8 +842,8 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     if (!pr.view2d) pr.view2d = std::make_unique<Plot2DView>();
 
                     // обновить имена осей
-                    pr.view2d->x_axis.name = s.vars.empty() ? "x" : phase_axis_name(s, ax);
-                    pr.view2d->y_axis.name = s.vars.empty() ? "y" : phase_axis_name(s, ay);
+                    pr.view2d->x_axis.name = s.vars.empty() ? "x" : plot_var_name(phase_axis_name(s, ax));
+                    pr.view2d->y_axis.name = s.vars.empty() ? "y" : plot_var_name(phase_axis_name(s, ay));
                     // No zero-axis on phase 2D — x=0 / y=0 have no meaning
                     // for a state-space trajectory.
                     pr.view2d->show_zero_x = false;
@@ -888,7 +957,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     std::string ax_name;
                     if (s.vars.empty())                     ax_name = "x";
                     else if (nv_ax >= 2 && av == nv_ax)     ax_name = combo_var_label(s.vars);
-                    else                                    ax_name = s.vars[av < nv_ax ? av : 0];
+                    else                                    ax_name = plot_var_name(s.vars[av < nv_ax ? av : 0]);
 
                     pr.view2d->x_axis.name = "peak " + ax_name + mult_suffix(mp);
                     pr.view2d->y_axis.name = "IPI" + mult_suffix(mi);   // interpeak interval
@@ -1074,7 +1143,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
 
                             std::string base = (k < res.labels.size()) ? res.labels[k] : ("IC" + std::to_string(k + 1));
                             std::string who = s.legend_show_ic ? ic_legend_text(res, k) : base;
-                            std::string lab = (is_combo ? combo_var_label(s.vars) : s.vars[vi])
+                            std::string lab = (is_combo ? combo_var_label(s.vars) : plot_var_name(s.vars[vi]))
                                             + " [" + who + "]";
 
                             // Оттенок комбинации берём из расширенной палитры
@@ -1173,11 +1242,12 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     if (pr.rqa_source == rqa::Source::Embedding) {
                         const int nv = (int)s.vars.size();
                         ImGui::SetNextItemWidth(180);
-                        if (ImGui::BeginCombo("variable", s.vars.empty() ? "-" : s.vars[pr.rqa_var < nv ? pr.rqa_var : 0].c_str())) {
+                        if (var_combo_begin("variable", s.vars.empty() ? "-" : s.vars[pr.rqa_var < nv ? pr.rqa_var : 0], !s.vars.empty())) {
                             for (int k = 0; k < nv; ++k)
-                                if (ImGui::Selectable(s.vars[k].c_str(), pr.rqa_var == k)) { pr.rqa_var = k; ch = true; }
+                                if (var_selectable(s.vars[k], pr.rqa_var == k)) { pr.rqa_var = k; ch = true; }
                             ImGui::EndCombo();
                         }
+                        var_combo_preview();
                         ch |= InputNumStr("m (dimension)", pr.rqa_m_text, 100.0f);
                         ch |= InputNumStr("tau (samples)", pr.rqa_tau_text, 100.0f);
                     }
@@ -1418,9 +1488,9 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     pr.view3d->points_with_lines = pr.draw_points && pr.custom_line_style;
                     pr.view3d->point_size_px     = pr.point_size;
 
-                    pr.view3d->x_name = s.vars.empty() ? "x" : phase_axis_name(s, ax);
-                    pr.view3d->y_name = s.vars.empty() ? "y" : phase_axis_name(s, ay);
-                    pr.view3d->z_name = s.vars.empty() ? "z" : phase_axis_name(s, az);
+                    pr.view3d->x_name = s.vars.empty() ? "x" : plot_var_name(phase_axis_name(s, ax));
+                    pr.view3d->y_name = s.vars.empty() ? "y" : plot_var_name(phase_axis_name(s, ay));
+                    pr.view3d->z_name = s.vars.empty() ? "z" : plot_var_name(phase_axis_name(s, az));
 
                     // Локальный буфер — см. ветку Phase2D выше.
                     std::vector<std::vector<float>> series_data(res.trajectories.size());
@@ -1480,7 +1550,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     std::string ax_name;
                     if (s.vars.empty())                     ax_name = "x";
                     else if (nv_ax >= 2 && av == nv_ax)     ax_name = combo_var_label(s.vars);
-                    else                                    ax_name = s.vars[av < nv_ax ? av : 0];
+                    else                                    ax_name = plot_var_name(s.vars[av < nv_ax ? av : 0]);
 
                     pr.view2d->x_axis.name = s.sys.is_map ? "n" : "t, s";
                     pr.view2d->y_axis.name = "peak " + ax_name;

@@ -61,6 +61,11 @@ struct SystemRecord {
     std::string circuit_source;
     std::string circuit_netlist;
     bool        circuit_ideal_opamps = false;   // ОУ — идеальные нуллоры, а не их .subckt (копия на идеальных)
+    // Упрощения приборов при импорте (SpiceImportOptions): без ёмкостей переходов, идеальные диоды / LED,
+    // идеальные биполярные транзисторы.
+    bool        circuit_no_jcaps = false;
+    bool        circuit_ideal_diodes = false;
+    bool        circuit_ideal_bjts = false;
     std::string mode;        // "Image" | "LaTeX" | "Plain"
     std::string latex_text;
     std::string plain_text;
@@ -161,4 +166,8 @@ struct SystemRecord {
 
     // Группы параметров в полях вкладок (только интерфейс, см. param_groups.h).
     ParamGroups param_groups;
+    // То же для начальных условий (импорт схемы: конденсаторы, приборы, алгебраические z).
+    ParamGroups ic_groups;
+    // Свои подписи полей параметров и НУ: имя -> LaTeX (пусто — автоматическая, см. param_groups.h).
+    FieldLabels field_labels;
 };

@@ -1599,6 +1599,105 @@ bool draw_integration_block(const char* header,
     return changed;
 }
 
+// Подпись поля: своя (labels) или автоматическая. Автоматическая — TeX от имени: часть после
+// первого '_' — индекс (vc_c1 -> vc_{c1}, vc_q1_cje -> vc_{q1,cje}); без '_' — как в превью
+// уравнений (sigma -> \sigma, x1 -> x_{1}).
+std::string field_label_auto(const std::string& name) { return name_to_latex(name); }
+
+static bool g_field_latex = true;
+static const FieldLabels* g_field_labels = nullptr;
+void set_field_latex(bool on) { g_field_latex = on; }
+void set_field_labels(const FieldLabels* labels) { g_field_labels = labels; }
+
+std::string field_label(const FieldLabels* labels, const std::string& name) {
+    if (!labels) labels = g_field_labels;   // подписи системы, загруженной в модель
+    if (labels) {
+        auto it = labels->find(name);
+        if (it != labels->end() && !it->second.empty()) return it->second;
+    }
+    return field_label_auto(name);
+}
+
+// Подпись формулой как отдельный элемент высотой с поле ввода (по центру строки); наведение
+// показывает имя, под которым поле живёт в уравнениях и сессиях.
+namespace {
+// Вёрстка формулы дорогая, подписей — сотни: габарит кэшируется по (TeX, кегль).
+MathExtent field_tex_extent(const std::string& tex, float fs) {
+    static std::unordered_map<std::string, MathExtent> cache;
+    const std::string key = tex + '\x01' + std::to_string((int)(fs * 8.0f));
+    auto it = cache.find(key);
+    if (it == cache.end()) it = cache.emplace(key, math_formula_extent(tex.c_str(), fs)).first;
+    return it->second;
+}
+float field_tex_size() { return std::floor(ImGui::GetFontSize() * 1.2f + 0.5f); }   // засечный курсив мельче UI-шрифта
+// Формула с верхним левым углом строки высотой box_h в p, по центру строки.
+// fit — уменьшить кегль, чтобы формула с индексами целиком влезла в box_h (превью списка: рамка поля
+// фиксированной высоты, индексы иначе вылезают за неё).
+void field_tex_draw(ImDrawList* dl, ImVec2 p, const std::string& tex, float box_h, bool fit = false) {
+    float fs = field_tex_size();
+    MathExtent ext = field_tex_extent(tex, fs);
+    float y = p.y + std::max(0.0f, (box_h - (ext.ascent + ext.descent)) * 0.5f);
+    if (fit) {
+        // Кегль UI-текста и его базовая линия: индекс уходит ниже строки, но в пределах отступа рамки.
+        const float ui = ImGui::GetFontSize();
+        const float base = p.y + (box_h - ui) * 0.5f + 0.8f * ui;   // ~ascent строки UI-шрифта
+        y = std::max(p.y + 1.0f, base - ext.ascent);
+    }
+    math_formula_draw(dl, ImVec2(p.x, y), ImGui::GetColorU32(ImGuiCol_Text), tex.c_str(), fs);
+}
+std::string g_combo_preview;   // TeX превью открытого var_combo_begin ("" — превью текстом)
+}  // namespace
+
+void draw_field_name(const std::string& name, const FieldLabels* labels) {
+    if (!g_field_latex) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(name.c_str());
+        return;
+    }
+    const std::string tex = field_label(labels, name);
+    const MathExtent ext = field_tex_extent(tex, field_tex_size());
+    const float fh = ImGui::GetFrameHeight();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(std::max(ext.width, 1.0f), std::max(fh, ext.ascent + ext.descent)));
+    if (ImGui::IsItemVisible()) field_tex_draw(ImGui::GetWindowDrawList(), p, tex, fh);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", name.c_str());
+}
+
+bool var_combo_begin(const char* id, const std::string& cur, bool cur_is_name) {
+    g_combo_preview.clear();
+    if (!g_field_latex || !cur_is_name) return ImGui::BeginCombo(id, cur.c_str());
+    g_combo_preview = field_label(nullptr, cur);
+    return ImGui::BeginCombo(id, "", ImGuiComboFlags_CustomPreview);
+}
+
+void var_combo_preview() {
+    if (g_combo_preview.empty()) return;
+    const std::string tex = std::move(g_combo_preview);
+    g_combo_preview.clear();
+    if (ImGui::BeginComboPreview()) {
+        // Курсор превью стоит на отступе рамки; формулу вписываем во всю высоту рамки.
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        field_tex_draw(ImGui::GetWindowDrawList(), ImVec2(c.x, c.y - ImGui::GetStyle().FramePadding.y), tex,
+                       ImGui::GetFrameHeight(), true);
+        ImGui::EndComboPreview();
+    }
+}
+
+bool var_selectable(const std::string& name, bool selected) {
+    if (!g_field_latex) return ImGui::Selectable(name.c_str(), selected);
+    const std::string tex = field_label(nullptr, name);
+    const MathExtent ext = field_tex_extent(tex, field_tex_size());
+    const float h = std::max(ImGui::GetTextLineHeight(), ext.ascent + ext.descent);
+    const bool clicked = ImGui::Selectable(("##vs_" + name).c_str(), selected, 0, ImVec2(std::max(ext.width, 1.0f), h));
+    if (ImGui::IsItemVisible()) field_tex_draw(ImGui::GetWindowDrawList(), ImGui::GetItemRectMin(), tex, h);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", name.c_str());
+    return clicked;
+}
+
+std::string plot_var_name(const std::string& name) {
+    return g_field_latex && plot_math_enabled() ? field_label(nullptr, name) : name;
+}
+
 // Секции "Initial conditions" и "Parameters" — это один и тот же блок:
 // по числовому полю на каждое имя из списка. Раньше — около дюжины копий.
 // bc / field — см. draw_integration_block: ПКМ по полю предлагает разослать
@@ -1618,14 +1717,22 @@ void draw_named_num_fields(const char* header,
                                   const std::function<bool(const std::string&)>& overwritten) {
     if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) return;
     if (note) ImGui::TextDisabled("%s", note);
-    // Группы параметров — у системы, загруженной в модель (bc); у НУ и без модели — плоский список.
-    const ParamGroups* groups = field == BroadcastField::Param && bc ? &bc->param_groups : nullptr;
-    draw_param_tree(groups, names, [&](const std::string& n) {
+    // Группы и подписи — у системы, загруженной в модель (bc); без модели — плоский список имён.
+    ParamGroups* groups = !bc ? nullptr
+                        : field == BroadcastField::Param ? &bc->param_groups
+                        : field == BroadcastField::InitCondition ? &bc->ic_groups : nullptr;
+    const FieldLabels* labels = bc ? &bc->field_labels : nullptr;
+    int hidden = 0;
+    const std::vector<std::string> shown = bc && field == BroadcastField::InitCondition ? bc->ic_fields(names, &hidden) : names;
+    if (hidden > 0) ImGui::TextDisabled("%d algebraic variables hidden (Settings)", hidden);
+    draw_param_tree(groups, shown, [&](const std::string& n) {
         ImGui::PushID(n.c_str());
         const bool off = overwritten && overwritten(n);
         if (off) ImGui::BeginDisabled();
-        InputNumStr(n.c_str(), values[n], kFieldW,
+        InputNumStr("##v", values[n], kFieldW,
                     [&] { field_apply_all_menu(bc, field, n, n, values[n]); });
+        ImGui::SameLine();
+        draw_field_name(n, labels);
         if (off) ImGui::EndDisabled();
         ImGui::PopID();
     });
@@ -1633,6 +1740,7 @@ void draw_named_num_fields(const char* header,
 
 // Дерево групп параметров (param_groups.h). Узлы строятся каждый кадр — групп десятки, это
 // дешевле, чем следить за кэшем. Открыт ли узел, помнит ImGui (по id окна и пути группы).
+// Заголовки групп перетаскиваются мышью среди соседей (pg_reorder) — так задаётся их порядок.
 namespace {
 struct PgNode {
     std::string seg, path;
@@ -1648,30 +1756,92 @@ int pg_count(PgNode& n, const std::set<std::string>& present) {
     return n.count;
 }
 
-bool pg_header(const std::string& label, const std::string& id, bool in_table) {
+// Перетаскивание заголовка группы: груз — список (адрес ParamGroups, чтобы не путать параметры
+// с НУ и разные модели) и путь узла.
+constexpr const char* kPgDragType = "UCUDA_PG_NODE";
+struct PgDrop { std::string from, to; bool after = false; };
+
+std::string pg_payload(const ParamGroups* list, const std::string& path) {
+    std::string s(sizeof(list), '\0');
+    std::memcpy(&s[0], &list, sizeof(list));
+    return s + path;
+}
+
+// Источник и приёмник перетаскивания для только что нарисованного элемента-узла path.
+void pg_drag_node(ParamGroups* list, const std::string& path, const std::string& shown, PgDrop& drop) {
+    if (!list) return;
+    if (ImGui::BeginDragDropSource()) {
+        const std::string pl = pg_payload(list, path);
+        ImGui::SetDragDropPayload(kPgDragType, pl.data(), pl.size());
+        ImGui::TextUnformatted(shown.c_str());
+        ImGui::EndDragDropSource();
+    }
+    if (ImGui::BeginDragDropTarget()) {
+        const ImGuiPayload* pk = ImGui::GetDragDropPayload();
+        if (pk && pk->IsDataType(kPgDragType) && pk->DataSize > (int)sizeof(list)) {
+            const ParamGroups* src = nullptr;
+            std::memcpy(&src, pk->Data, sizeof(src));
+            const std::string from((const char*)pk->Data + sizeof(src), (size_t)pk->DataSize - sizeof(src));
+            if (src == list && from != path && pg_parent(from) == pg_parent(path)) {
+                const ImRect r(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+                const bool after = ImGui::GetMousePos().y > (r.Min.y + r.Max.y) * 0.5f;
+                // Линия вставки вместо подсветки всего узла.
+                const float y = after ? r.Max.y : r.Min.y;
+                ImGui::GetWindowDrawList()->AddLine(ImVec2(r.Min.x, y), ImVec2(r.Max.x, y),
+                                                    ImGui::GetColorU32(ImGuiCol_DragDropTarget), 2.0f);
+                if (ImGui::AcceptDragDropPayload(kPgDragType, ImGuiDragDropFlags_AcceptNoDrawDefaultRect))
+                    drop = PgDrop{ from, path, after };
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+}
+
+using PgMenu = std::function<void(const std::vector<std::string>&)>;
+
+// Имена из names в узле и под ним, в порядке экрана.
+void pg_collect(const PgNode& n, const std::set<std::string>& present, std::vector<std::string>& out) {
+    if (n.g) for (const std::string& p : n.g->params) if (present.count(p)) out.push_back(p);
+    for (const PgNode& k : n.kids) pg_collect(k, present, out);
+}
+
+// names_of — имена узла для меню по ПКМ (зовётся только при открытом меню).
+bool pg_header(const std::string& label, const std::string& id, bool in_table, ParamGroups* list,
+               const std::string& seg, PgDrop& drop, const PgMenu& menu,
+               const std::function<std::vector<std::string>()>& names_of) {
     if (in_table) { ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); }
     const ImGuiTreeNodeFlags fl = in_table ? ImGuiTreeNodeFlags_SpanAllColumns | ImGuiTreeNodeFlags_LabelSpanAllColumns
                                            : ImGuiTreeNodeFlags_SpanAvailWidth;
-    return ImGui::TreeNodeEx((label + "##pg_" + id).c_str(), fl);
+    const bool open = ImGui::TreeNodeEx((label + "##pg_" + id).c_str(), fl);
+    pg_drag_node(list, id, seg, drop);
+    if (menu && ImGui::BeginPopupContextItem(("##pgm_" + id).c_str())) {
+        menu(names_of());
+        ImGui::EndPopup();
+    }
+    return open;
 }
 
 void pg_draw(const PgNode& n, const std::set<std::string>& present,
-             const std::function<void(const std::string&)>& item, bool in_table) {
+             const std::function<void(const std::string&)>& item, bool in_table, ParamGroups* list, PgDrop& drop,
+             const PgMenu& menu) {
     if (n.g)
         for (const std::string& p : n.g->params)
             if (present.count(p)) item(p);
     for (const PgNode& k : n.kids) {
         if (k.count == 0) continue;
-        if (pg_header(k.seg + "  (" + std::to_string(k.count) + ")", k.path, in_table)) {
-            pg_draw(k, present, item, in_table);
+        auto names_of = [&] { std::vector<std::string> v; pg_collect(k, present, v); return v; };
+        if (pg_header(k.seg + "  (" + std::to_string(k.count) + ")", k.path, in_table, list, k.seg, drop, menu,
+                      names_of)) {
+            pg_draw(k, present, item, in_table, list, drop, menu);
             ImGui::TreePop();
         }
     }
 }
 }  // namespace
 
-void draw_param_tree(const ParamGroups* groups, const std::vector<std::string>& names,
-                     const std::function<void(const std::string&)>& item, bool in_table) {
+void draw_param_tree(ParamGroups* groups, const std::vector<std::string>& names,
+                     const std::function<void(const std::string&)>& item, bool in_table,
+                     const std::function<void(const std::vector<std::string>&)>& group_menu) {
     if (groups == nullptr || groups->empty()) {
         for (const std::string& n : names) item(n);
         return;
@@ -1704,13 +1874,20 @@ void draw_param_tree(const ParamGroups* groups, const std::vector<std::string>& 
         for (const std::string& n : names) item(n);
         return;
     }
-    pg_draw(root, present, item, in_table);
+    // У параметров и НУ бывают одноимённые группы ("Capacitors") в одном окне — id по списку.
+    ImGui::PushID(groups);
+    PgDrop drop;
+    pg_draw(root, present, item, in_table, groups, drop, group_menu);
     std::vector<std::string> other;
     for (const std::string& n : names) if (!grouped.count(n)) other.push_back(n);
-    if (!other.empty() && pg_header("Other  (" + std::to_string(other.size()) + ")", "\x01other", in_table)) {
+    if (!other.empty() && pg_header("Other  (" + std::to_string(other.size()) + ")", "\x01other", in_table,
+                                    nullptr, "Other", drop, group_menu, [&] { return other; })) {
         for (const std::string& n : other) item(n);
         ImGui::TreePop();
     }
+    ImGui::PopID();
+    // Узлы держат указатели в groups — менять порядок только после отрисовки.
+    if (!drop.from.empty()) pg_reorder(*groups, drop.from, drop.to, drop.after);
 }
 
 // Секция "CSV output": галка сохранения + путь + пояснение про побочные файлы.

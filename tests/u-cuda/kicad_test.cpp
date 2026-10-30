@@ -2,6 +2,7 @@
 //   - каждая демо-схема share\kicad\demos\simulation: .kicad_sch -> kicad-cli (spice netlist) -> spice_import;
 //     печатается, что импортировано и что отвергнуто (с причиной); простые схемы обязаны импортироваться;
 //   - сверка переходного процесса с ngspice: ngspice.dll из KiCad (shared ngspice, грузится в рантайме).
+#include "num_parse.h"
 #include "test_util.h"
 #include "kicad_import.h"
 #include "spice_parse.h"
@@ -119,9 +120,11 @@ struct Ours {
         throw std::runtime_error("no variable " + v);
     }
 };
-std::string sanitize_node(const std::string& n) {   // как sanitize() в spice_parse.cpp
+std::string sanitize_node(const std::string& n0) {   // как net_short() + sanitize() в spice_parse.cpp
+    std::string n = n0;
+    if (n.size() > 4 && (n.compare(0, 4, "net-") == 0 || n.compare(0, 4, "Net-") == 0)) n = n.substr(4);
     std::string o;
-    for (char c : n) o += std::isalnum((unsigned char)c) ? (char)std::tolower((unsigned char)c) : '_';
+    for (char c : n) o +=std::isalnum((unsigned char)c) ? (char)std::tolower((unsigned char)c) : '_';
     while (!o.empty() && o.back() == '_') o.pop_back();
     size_t a = 0;
     while (a < o.size() && o[a] == '_') ++a;
@@ -140,13 +143,13 @@ double compare(const char* title, const std::string& net, const std::vector<std:
     const DaeSystem d = parse_dae(m.r.plain_text, m.r.vars_text, m.r.alg_text, m.r.params_text);
     m.sys = d.as_codegen_system();
     std::vector<double> a = { 0.5 };
-    for (const auto& p : d.params) a.push_back(std::stod(m.r.param_values.at(p)));
+    for (const auto& p : d.params) a.push_back(parse_num(m.r.param_values.at(p), 0.0));
     a.insert(a.end(), { 4, 1e-12, 25, 1 });
     m.a = a;
     m.X.assign(m.sys.vars.size(), 0.0);
     for (size_t i = 0; i < m.sys.vars.size(); ++i) {
         auto it = m.r.init_conditions.find(m.sys.vars[i]);
-        if (it != m.r.init_conditions.end()) m.X[i] = std::stod(it->second);
+        if (it != m.r.init_conditions.end()) m.X[i] = parse_num(it->second, 0.0);
     }
     if (!m.r.uic && !m.r.has_ic) {
         int it = 0;

@@ -598,7 +598,8 @@ float typeset(MathLayout& L, const char* b, const char* e, float size, Style st)
             if (st.italic)  it = true;
             ImFont* wf = it ? math_italic() : math_roman();
             emit(L, x, g ? font_with_glyph(wf, g) : wf, size, g ? g : w);
-            if (g || w.size() == 1) emit_trailing_digits(L, x, p, e, size);
+            // Внутри индекса цифры остаются в строке: vc_{c1} — это «c1», а не c с индексом 1.
+            if ((g || w.size() == 1) && !st.script) emit_trailing_digits(L, x, p, e, size);
             if (fn && !st.script && func_arg_follows(p, e)) x += size * 0.17f;
             continue;
         }

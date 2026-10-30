@@ -40,6 +40,15 @@ struct SpiceImportOptions {
     // по элементам (вендорская модель); true — идеальный нуллор (копия на идеальных ОУ). ОУ без
     // .subckt в файле — нуллор в обоих случаях (в отчёте).
     bool   ideal_opamps    = false;
+    // Упрощения приборов (облегчённая модель — нежёсткая и без внутренних узлов):
+    //   no_junction_caps — без барьерных ёмкостей переходов D / Q / J / M (и перекрытия CGSO / CGDO): у
+    //     каждой пикофарадной ёмкости своя переменная состояния и своя наносекундная постоянная времени;
+    //   ideal_diodes — диод / LED: порог Vf и Ron (ideal_diode_current; касательная к экспоненте при 10 мА),
+    //     RS входит в Ron, внутреннего узла нет;
+    //   ideal_bjts — Эберс–Молл на таких же переходах БЭ / БК с BF, BR; без эффекта Эрли и RB / RC / RE.
+    bool   no_junction_caps = false;
+    bool   ideal_diodes     = false;
+    bool   ideal_bjts       = false;
     // Каталог файла — от него считаются относительные пути .include.
     std::string base_dir;
 };
@@ -55,6 +64,13 @@ struct SpiceImportResult {
     std::map<std::string, std::string> param_values;
     // Параметр -> путь группы в интерфейсе ("Resistors", "Models/1N4148", "OPA2134/XU1"), см. param_groups.h.
     std::vector<std::pair<std::string, std::string>> param_groups;
+    // Переменная -> группа начальных условий: "Capacitors", "Inductors", "Devices/Q1" (внутренние
+    // состояния прибора), "<подсхема>/<экземпляр>", "Algebraic (computed)/..." (все z — их НУ лишь
+    // старт Ньютона). Группы обоих списков упорядочены по виду (R, C, L, ..., Models, Algebraic).
+    std::vector<std::pair<std::string, std::string>> ic_groups;
+    // Подписи полей (LaTeX) по исходным именам элементов, с регистром netlist'а: номинал R1 -> R_{1},
+    // vc_c1 -> vc_{C1}, il_l1 -> il_{L1}, i_v1 -> i_{V1}, переход vc_q1_cje -> vc_{Q1,cje}.
+    std::map<std::string, std::string> field_labels;
     std::string step_h;       // из .tran (пусто — директивы нет)
     std::string t_stop;
     bool uic = false;          // .tran ... UIC

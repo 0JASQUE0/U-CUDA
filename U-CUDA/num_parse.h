@@ -2,6 +2,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <string>
 #include <system_error>
@@ -19,6 +20,8 @@
 // перед ней обязательно: "2*pi", а не "2pi" — неявное умножение не поддержано
 // намеренно, чтобы не гадать за пользователя; "2pi" честно подсветится как
 // невалидный ввод, а не посчитается молча.
+//
+// Приставки СИ вплотную за числом: 10k, 4.7u, 15n, 1meg (si_prefix ниже).
 //
 // Поддержаны + - * / , унарный минус/плюс и скобки, с обычным приоритетом
 // (* / сильнее + -). Дробь "a/b" — частный случай, ради которого всё и
@@ -59,6 +62,45 @@ inline void skip_ws(const char*& p) {
     while (*p == ' ' || *p == '\t') ++p;
 }
 
+inline bool is_letter(char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
+
+// Приставка СИ вплотную за числом: 10k, 4.7u, 2.2µ, 1.5meg. Регистр важен, как в СИ: m — милли,
+// M — мега; meg / Meg / MEG — тоже мега (так пишет SPICE, где регистр не важен и M — милли).
+// Приставка — одна буква, за которой не идёт другая буква: "2pi" и "5asdf" остаются невалидными
+// (хвост не разобран), "1e-3" — по-прежнему одно число (его целиком съел strtod). Нет приставки —
+// множитель 1 и p не двигается.
+inline int si_prefix(const char*& p) {   // показатель степени 10 (0 — приставки нет)
+    if ((p[0] == 'm' || p[0] == 'M') && (p[1] == 'e' || p[1] == 'E') && (p[2] == 'g' || p[2] == 'G')
+        && !is_letter(p[3])) { p += 3; return 6; }
+    if ((unsigned char)p[0] == 0xC2 && (unsigned char)p[1] == 0xB5 && !is_letter(p[2])) { p += 2; return -6; }   // µ
+    if (!is_letter(p[0]) || is_letter(p[1])) return 0;
+    int e = 0;
+    switch (p[0]) {
+    case 'f': e = -15; break;
+    case 'p': e = -12; break;
+    case 'n': e = -9;  break;
+    case 'u': e = -6;  break;
+    case 'm': e = -3;  break;
+    case 'k': e = 3;   break;
+    case 'M': e = 6;   break;
+    case 'G': e = 9;   break;
+    case 'T': e = 12;  break;
+    default:  return 0;   // не приставка — хвост останется неразобранным
+    }
+    ++p;
+    return e;
+}
+
+// v * 10^e одной корректно округлённой операцией: 10^k до 1e22 в double точны, а дробные
+// приставки — делением (10n = 10 / 1e9 даёт РОВНО то же double, что литерал 1e-8; умножение на
+// неточное 1e-9 ошибалось бы в последнем бите).
+inline double scale_pow10(double v, int e) {
+    if (e == 0) return v;
+    double p10 = 1.0;
+    for (int k = 0; k < (e < 0 ? -e : e); ++k) p10 *= 10.0;
+    return e > 0 ? v * p10 : v / p10;
+}
+
 inline bool parse_expr(const char*& p, double& out);   // взаимная рекурсия со скобками
 
 inline bool parse_primary(const char*& p, double& out) {
@@ -90,7 +132,7 @@ inline bool parse_primary(const char*& p, double& out) {
     const double v = std::strtod(p, &end);
     if (end == p) return false;        // ни одного символа числа не съедено
     p = end;
-    out = v;
+    out = scale_pow10(v, si_prefix(p));
     return true;
 }
 
@@ -206,4 +248,23 @@ inline std::string fmt_num_shortest(double v) {
         return std::string(buf);
     }
     return std::string(buf, r.ptr);
+}
+
+// Номинал с приставкой СИ (15000 -> "15k", 1e-8 -> "10n", 4.7e-6 -> "4.7u"): кратчайший текст,
+// который parse_num читает обратно в ТО ЖЕ double; не вышло (или вне f..T) — fmt_num_shortest.
+inline std::string fmt_num_si(double v) {
+    if (v == 0.0 || !std::isfinite(v)) return fmt_num_shortest(v);
+    static const char* const pre[] = { "f", "p", "n", "u", "m", "", "k", "M", "G", "T" };
+    int e3 = (int)std::floor(std::log10(std::fabs(v)) / 3.0);
+    if (e3 < -5 || e3 > 4) return fmt_num_shortest(v);
+    const double m = v / std::pow(10.0, 3 * e3);
+    for (int prec = 1; prec <= 17; ++prec) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%.*g", prec, m);
+        if (std::strchr(buf, 'e')) continue;   // %.1g от 15 — "2e+01"; нужна точность побольше
+        const std::string s = std::string(buf) + pre[e3 + 5];
+        double back = 0.0;
+        if (parse_num_checked(s, back) && back == v) return s;
+    }
+    return fmt_num_shortest(v);
 }

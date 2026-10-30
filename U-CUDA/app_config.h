@@ -24,6 +24,10 @@ struct AppConfig {
     // греческими буквами и индексами (см. plot_text в plot_axis.h). false →
     // прежний вид: те же строки текущим UI-шрифтом. Чекбокс в Settings.
     bool plot_math_font = true;
+    // Имена параметров и переменных в полях вкладок — формулами (draw_field_name). Чекбокс в Settings.
+    bool field_latex = true;
+    // Поля НУ алгебраических переменных ДАУ (их значения всё равно пересчитываются). Чекбокс в Settings.
+    bool show_alg_ic = false;
 
     // Последний выбранный colormap для HeatmapView (LLE-2D и пр.).
     // 1001..1200 — карта slanCM; 0..8 — легаси, мигрируют при чтении (см.

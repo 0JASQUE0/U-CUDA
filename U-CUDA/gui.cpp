@@ -69,6 +69,8 @@ static void autosave_order_session(AppModel& model, SystemLibrary& lib) {
 }
 
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
+    set_field_latex(model.field_latex);
+    set_field_labels(&model.field_labels);
     // полноэкранный dockspace-хост
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
@@ -1124,6 +1126,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.ui_scale_override      = m.ui_scale_override;
             cfg.use_builtin_font       = m.use_builtin_font;
             cfg.plot_math_font         = m.plot_math_font;
+            cfg.field_latex            = m.field_latex;
+            cfg.show_alg_ic            = m.show_alg_ic;
             cfg.plot_font_scale        = m.plot_font_scale;
             cfg.heatmap_colormap       = m.heatmap_colormap;
             cfg.basins_colormap        = m.basins_colormap;
@@ -1205,6 +1209,24 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::TextDisabled("variables go italic, 1e-05 becomes a power of ten.");
             ImGui::TextDisabled("Computer Modern (the TeX face) is picked up from fonts\\ if");
             ImGui::TextDisabled("present; otherwise Times New Roman. Off: plain UI font.");
+
+            bool field_tex = model.field_latex;
+            if (ImGui::Checkbox("Use LaTeX for parameters and variables", &field_tex)) {
+                model.field_latex = field_tex;
+                persist_settings(model);
+            }
+            ImGui::TextDisabled("On: names next to the parameter and initial-condition fields and in the");
+            ImGui::TextDisabled("projection lists are typeset as formulas (vc_c1 -> vc with subscript C1,");
+            ImGui::TextDisabled("sigma -> greek), or with the labels set in Groups.... Off: the plain names.");
+
+            bool alg_ic = model.show_alg_ic;
+            if (ImGui::Checkbox("Initial conditions of algebraic variables (DAE)", &alg_ic)) {
+                model.show_alg_ic = alg_ic;
+                persist_settings(model);
+            }
+            ImGui::TextDisabled("Off: the tabs show initial conditions of the state variables x only. The algebraic");
+            ImGui::TextDisabled("z are recomputed anyway (DC operating point / projection onto g = 0), their fields");
+            ImGui::TextDisabled("are only Newton's starting guess. The library editor always shows all of them.");
 
             ImGui::Separator();
             ImGui::Text("Axes");

@@ -30,6 +30,21 @@ std::string diode_current(const std::string& vd, const std::string& is, const st
          + num(kDeviceGmin) + "*" + vd + ")";
 }
 
+std::string ideal_diode_current(const std::string& vd, const std::string& vf, const std::string& ron) {
+    const std::string vs = num(kIdealVs);
+    const std::string u = "((" + vd + " - " + vf + ")/" + vs + ")";
+    return "(" + vs + "/" + ron + "*(max(" + u + ", 0) + log(1 + exp(-abs(" + u + ")))) + " + num(kDeviceGmin) + "*" + vd + ")";
+}
+
+IdealJunction ideal_junction_fit(double is, double n, double rs, double iref) {
+    const double nvt = n * kDeviceVt;
+    const double vref = nvt * std::log(iref / is + 1.0) + rs * iref;
+    IdealJunction j;
+    j.ron = nvt / (iref + is) + rs;
+    j.vf = vref - iref * j.ron;
+    return j;
+}
+
 BjtCurrents bjt_currents(const std::string& vbe, const std::string& vbc,
                          const std::string& is, const std::string& bf, const std::string& br,
                          const std::string& nf, const std::string& nr,

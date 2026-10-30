@@ -219,7 +219,10 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
         draw_param_tree(&model.param_groups, params, [&](const std::string& p) {
             const int i = par_idx.at(p);
             ImGui::PushID(p.c_str());
-            if (InputNumStr(p.c_str(), c.param_values[p], kFieldW)) {
+            const bool edited = InputNumStr("##v", c.param_values[p], kFieldW);
+            ImGui::SameLine();
+            draw_field_name(p, &model.field_labels);
+            if (edited) {
                 phase.param_values[p] = c.param_values[p];
                 // Bump debounce timers so the auto-recompute path (L1D
                 // partial + Phase, gated by auto_recompute_1d /

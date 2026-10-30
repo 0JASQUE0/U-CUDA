@@ -25,6 +25,19 @@ std::string dev_explim(const std::string& u);
 // Ток диода от анода к катоду. vd, is, n — выражения (имена параметров a[] или числа).
 std::string diode_current(const std::string& vd, const std::string& is, const std::string& n);
 
+// Упрощённые («идеальные») приборы импорта (SpiceImportOptions::ideal_diodes / ideal_bjts): переход —
+// порог vf и сопротивление ron, излом сглажен на kIdealVs:
+//   I = Vs/Ron (max(u, 0) + log(1 + e^-|u|)) + GMIN vd,  u = (vd - vf)/Vs
+// (softplus: гладкая производная для Ньютона, экспоненты только отрицательного аргумента). vf, ron берутся
+// касательной к экспоненте Шокли при токе kIdealIref (ideal_junction_fit) — точны около этого тока.
+constexpr double kIdealVs = 0.01;     // В
+constexpr double kIdealIref = 0.01;   // А
+std::string ideal_diode_current(const std::string& vd, const std::string& vf, const std::string& ron);
+struct IdealJunction { double vf, ron; };
+// Касательная к I = IS (e^(V/(N Vt)) - 1) с последовательным RS в точке I = iref: ron = N Vt/(iref + IS) + RS,
+// vf — где она пересекает ноль.
+IdealJunction ideal_junction_fit(double is, double n, double rs, double iref = kIdealIref);
+
 // Токи BJT NPN: ic втекает в коллектор, ib — в базу (эмиттер отдаёт ic + ib). Для PNP вызывать
 // с veb, vcb и менять знак токов. vaf_inv / var_inv — 1/VAF, 1/VAR (пусто — эффекта Эрли нет).
 struct BjtCurrents { std::string ic, ib; };

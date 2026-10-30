@@ -498,11 +498,33 @@ bool draw_integration_block(const char* header,
 // Поля параметров по группам (param_groups.h): item рисует одно поле. groups == nullptr / пусто или ни
 // одна группа не относится к names — плоский список, как раньше. in_table — заголовки групп строками
 // таблицы (item сам открывает свою строку).
-void draw_param_tree(const ParamGroups* groups, const std::vector<std::string>& names,
-                     const std::function<void(const std::string&)>& item, bool in_table = false);
-// Окно правки групп параметров модели m (кнопка "Groups..." ставит m.pg_ui.open). names — параметры
-// системы; id отличает окно редактора библиотеки от окна вкладки System.
-void draw_param_groups_window(AppModel& m, const std::vector<std::string>& names, const char* id);
+// Заголовки групп перетаскиваются мышью (порядок среди соседей пишется в *groups).
+// group_menu — содержимое меню по ПКМ на заголовке группы; получает имена группы (с подгруппами).
+void draw_param_tree(ParamGroups* groups, const std::vector<std::string>& names,
+                     const std::function<void(const std::string&)>& item, bool in_table = false,
+                     const std::function<void(const std::vector<std::string>&)>& group_menu = {});
+// Окно правки групп модели m (кнопка "Groups..." ставит m.pg_ui.open): вкладки параметров и
+// начальных условий, свои подписи полей. params / vars — имена системы; id отличает окно редактора
+// библиотеки от окна вкладки System.
+void draw_param_groups_window(AppModel& m, const std::vector<std::string>& params,
+                              const std::vector<std::string>& vars, const char* id);
+// Подпись поля параметра / НУ: своя из labels или автоматическая TeX от имени (vc_c1 -> vc_{c1}).
+[[nodiscard]] std::string field_label_auto(const std::string& name);
+[[nodiscard]] std::string field_label(const FieldLabels* labels, const std::string& name);
+// Подпись формулой отдельным элементом (высотой с поле ввода); наведение показывает имя.
+void draw_field_name(const std::string& name, const FieldLabels* labels);
+// Settings -> "Use LaTeX for parameters and variables" (draw_gui ставит каждый кадр из AppModel).
+void set_field_latex(bool on);
+// Подписи системы, загруженной в модель (draw_gui ставит каждый кадр): field_label(nullptr, ..) берёт их.
+void set_field_labels(const FieldLabels* labels);
+// Выпадающий список переменных с формулами: var_combo_begin вместо BeginCombo (cur — имя переменной или,
+// при cur_is_name = false, обычный текст), пункты — var_selectable, после if (..) { ..; EndCombo(); } —
+// var_combo_preview() (превью формулой рисуется после списка, ImGuiComboFlags_CustomPreview).
+bool var_combo_begin(const char* id, const std::string& cur, bool cur_is_name = true);
+void var_combo_preview();
+bool var_selectable(const std::string& name, bool selected);
+// Имя оси / кривой на графике: подпись TeX при включённых LaTeX-подписях графиков и полей.
+[[nodiscard]] std::string plot_var_name(const std::string& name);
 void draw_named_num_fields(const char* header,
                                   const std::vector<std::string>& names,
                                   std::map<std::string, std::string>& values,

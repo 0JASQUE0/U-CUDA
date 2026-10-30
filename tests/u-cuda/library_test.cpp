@@ -9,6 +9,7 @@
 #include "sysparse.hpp"
 #include "system_library.h"
 #include "dae_ir.h"
+#include "num_parse.h"
 #include "parametric_engine.h"
 #include <cuda.h>
 #include <filesystem>
@@ -33,7 +34,7 @@ std::vector<std::string> split(const std::string& src) {
 double num(const std::map<std::string, std::string>& m, const std::string& k, double def) {
     auto it = m.find(k);
     if (it == m.end()) return def;
-    try { return std::stod(it->second); } catch (...) { return def; }
+    return parse_num(it->second, def);   // как поля приложения: дроби, pi, приставки СИ
 }
 bool any_finite(const std::vector<double>& v) {
     for (double x : v) if (std::isfinite(x)) return true;

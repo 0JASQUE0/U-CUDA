@@ -417,6 +417,8 @@ int main() {
             model.ui_scale_override = app_cfg.ui_scale_override;
         model.use_builtin_font = app_cfg.use_builtin_font;
         model.plot_math_font   = app_cfg.plot_math_font;
+        model.field_latex      = app_cfg.field_latex;
+        model.show_alg_ic      = app_cfg.show_alg_ic;
         model.plot_font_scale  = app_cfg.plot_font_scale;
         // colormap_id_or валидирует и мигрирует легаси 0..8; на невалидном
         // значении остаётся дефолт модели — как и раньше при непрошедшей проверке.

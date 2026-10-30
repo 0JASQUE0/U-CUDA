@@ -360,16 +360,29 @@ public:
     std::string circuit_source;    // ДАУ из схемы: путь к .kicad_sch / .cir (см. SystemRecord)
     std::string circuit_netlist;   // копия netlist'а на момент импорта
     bool circuit_ideal_opamps = false;   // ОУ — идеальные (см. SystemRecord)
+    bool circuit_no_jcaps = false, circuit_ideal_diodes = false, circuit_ideal_bjts = false;   // см. SystemRecord
     // Группы параметров (см. SystemRecord / param_groups.h) и состояние окна их правки.
     ParamGroups param_groups;
+    ParamGroups ic_groups;        // то же для начальных условий
+    FieldLabels field_labels;     // свои подписи полей (LaTeX)
     struct ParamGroupsUi {
         bool open = false;
+        int kind = 0;             // вкладка окна: 0 — параметры, 1 — начальные условия
+        int kind_req = -1;        // кнопка "Groups..." просит открыть эту вкладку (один кадр)
         std::string new_path, filter, target, rename_from, rename_to;
         std::set<std::string> sel;
     } pg_ui;
     // Импорт схемы circuit_source: перезаписывает уравнения, x, z, параметры, НУ и шаг.
     // false + err — файл не читается, kicad-cli не сработал или схема не поддержана.
     bool import_circuit(std::string* report, std::string* err);
+    // Запись схемы без групп НУ (сохранена до них): группы и подписи берутся из повторного разбора
+    // circuit_netlist (уравнения и значения не трогаются); что не нашлось — x в "States", z в
+    // "Algebraic (computed)". Подписи импорта дописываются только там, где своей нет.
+    void circuit_layout_defaults();
+    // Имена для полей начальных условий: vars без алгебраических z (alg_text), если show_alg_ic
+    // выключен; *hidden — сколько убрано. Значения z всё равно пересчитываются (рабочая точка /
+    // проекция на g = 0), их НУ — лишь старт Ньютона. Редактор записи показывает все.
+    std::vector<std::string> ic_fields(const std::vector<std::string>& vars, int* hidden = nullptr) const;
     // Рабочая точка ДАУ (x' = 0, g = 0; у схемы — расчёт по постоянному току) из текущих полей:
     // старт — НУ записи, результат пишется в init_conditions всех переменных.
     bool dae_operating_point(std::string* report, std::string* err);
@@ -736,6 +749,10 @@ public:
     // apply_ui_scale в app_main.cpp, что и use_builtin_font — шрифты живут в
     // общем атласе и пересоздаются вместе с UI-шрифтом.
     bool plot_math_font = true;
+    // Имена параметров и переменных в полях — формулами (AppConfig::field_latex).
+    bool field_latex = true;
+    // Поля НУ алгебраических переменных ДАУ (AppConfig::show_alg_ic); выключено — ic_fields их убирает.
+    bool show_alg_ic = false;
 
     // Последний выбранный colormap для HeatmapView (LLE-2D и пр.). 1001..1200 — карта slanCM
     // (id = 1000 + её родной номер), легаси 0..8 мигрируют при чтении конфига; дефолт 0 = #1

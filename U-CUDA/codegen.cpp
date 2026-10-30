@@ -7311,6 +7311,18 @@ std::string name_to_latex(const std::string& n) {
     static const char* const greek[] = { "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
         "iota", "kappa", "lambda", "mu", "nu", "xi", "pi", "rho", "sigma", "tau", "upsilon", "phi", "chi",
         "psi", "omega", "Gamma", "Delta", "Theta", "Lambda", "Xi", "Pi", "Sigma", "Phi", "Psi", "Omega" };
+    // Имя с '_' (переменные схем): часть после первого '_' — индекс, остальные '_' — запятые
+    // (vc_c1 -> vc_{c1}, vc_q1_cje -> vc_{q1,cje}); буквенная основа — греческая, если совпала.
+    const size_t us = n.find('_');
+    if (us != std::string::npos && us > 0 && us + 1 < n.size()) {
+        std::string base = n.substr(0, us), sub;
+        for (char c : n.substr(us + 1))   // подряд идущие '_' (v_net__led1_k) — одна запятая
+            if (c != '_') sub += c;
+            else if (!sub.empty() && sub.back() != ',') sub += ',';
+        if (!sub.empty() && sub.back() == ',') sub.pop_back();
+        for (const char* g : greek) if (base == g) { base = std::string("\\") + g; break; }
+        return base + "_{" + sub + "}";
+    }
     // хвост из цифр — индекс: x1 -> x_{1}, A11 -> A_{11}; буквенная основа — греческая, если совпала
     size_t k = n.size();
     while (k > 0 && std::isdigit((unsigned char)n[k - 1])) --k;

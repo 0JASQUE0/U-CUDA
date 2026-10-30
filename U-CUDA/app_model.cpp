@@ -29,9 +29,8 @@ System AppModel::build_system() const {
             // Уровень C (индекс 2-3): связи заменяются продифференцированными со стабилизацией
             // (d/dt + alpha)^m g = 0 — дальше это индекс 1 для уровней A/B.
             double alpha = 0;
-            try { alpha = std::stod(dae_stab_alpha); } catch (...) {
+            if (!parse_num_checked(dae_stab_alpha, alpha))
                 throw std::runtime_error("solve as ODE (level C): stabilization alpha is not a number");
-            }
             System s1;
             std::string why;
             if (!dae_stabilized_index1(s, alpha, s1, &why)) throw std::runtime_error("solve as ODE (level C): " + why);
@@ -225,6 +224,9 @@ bool AppModel::import_circuit(std::string* report, std::string* err) {
     SpiceImportOptions o;
     o.base_dir = std::filesystem::u8path(circuit_source).parent_path().u8string();
     o.ideal_opamps = circuit_ideal_opamps;
+    o.no_junction_caps = circuit_no_jcaps;
+    o.ideal_diodes = circuit_ideal_diodes;
+    o.ideal_bjts = circuit_ideal_bjts;
     SpiceImportResult r;
     if (!spice_import(net, o, r, err)) return false;
     // Схема — источник истины: уравнения, номиналы и НУ берутся из неё целиком.
@@ -244,6 +246,10 @@ bool AppModel::import_circuit(std::string* report, std::string* err) {
         std::vector<std::string> names;
         for (const auto& pg : r.param_groups) names.push_back(pg.first);
         pg_merge_auto(param_groups, names, r.param_groups);
+        names.clear();
+        for (const auto& pg : r.ic_groups) names.push_back(pg.first);
+        pg_merge_auto(ic_groups, names, r.ic_groups);
+        for (const auto& kv : r.field_labels) field_labels.emplace(kv.first, kv.second);
     }
     if (!r.step_h.empty()) step_h = r.step_h;
     circuit_netlist = net;
@@ -260,12 +266,12 @@ bool AppModel::import_circuit(std::string* report, std::string* err) {
             std::vector<double> a = { 0.5 };
             for (const std::string& p : d.params) {
                 auto it = param_values.find(p);
-                a.push_back(it == param_values.end() || it->second.empty() ? 0.0 : std::stod(it->second));
+                a.push_back(it == param_values.end() ? 0.0 : parse_num(it->second, 0.0));
             }
             std::vector<double> X;
             for (const std::string& v : s.vars) {
                 auto it = init_conditions.find(v);
-                X.push_back(it == init_conditions.end() || it->second.empty() ? 0.0 : std::stod(it->second));
+                X.push_back(it == init_conditions.end() ? 0.0 : parse_num(it->second, 0.0));
             }
             int it = 0;
             std::string why;
@@ -305,12 +311,12 @@ bool AppModel::dae_operating_point(std::string* report, std::string* err) {
         std::vector<double> a = { 0.5 };
         for (const std::string& p : d.params) {
             auto it = param_values.find(p);
-            a.push_back(it == param_values.end() || it->second.empty() ? 0.0 : std::stod(it->second));
+            a.push_back(it == param_values.end() ? 0.0 : parse_num(it->second, 0.0));
         }
         std::vector<double> X;
         for (const std::string& v : s.vars) {
             auto it = init_conditions.find(v);
-            X.push_back(it == init_conditions.end() || it->second.empty() ? 0.0 : std::stod(it->second));
+            X.push_back(it == init_conditions.end() ? 0.0 : parse_num(it->second, 0.0));
         }
         int it = 0;
         std::string why;
@@ -340,7 +346,12 @@ SystemRecord AppModel::to_record() const {
     r.circuit_source = circuit_source;
     r.circuit_netlist = circuit_netlist;
     r.circuit_ideal_opamps = circuit_ideal_opamps;
+    r.circuit_no_jcaps = circuit_no_jcaps;
+    r.circuit_ideal_diodes = circuit_ideal_diodes;
+    r.circuit_ideal_bjts = circuit_ideal_bjts;
     r.param_groups = param_groups;
+    r.ic_groups = ic_groups;
+    r.field_labels = field_labels;
     switch (mode) {
     case InputMode::Image: r.mode = "Image"; break;
     case InputMode::Latex: r.mode = "LaTeX"; break;
@@ -416,7 +427,12 @@ void AppModel::from_record(const SystemRecord& r) {
     circuit_source = r.circuit_source;
     circuit_netlist = r.circuit_netlist;
     circuit_ideal_opamps = r.circuit_ideal_opamps;
+    circuit_no_jcaps = r.circuit_no_jcaps;
+    circuit_ideal_diodes = r.circuit_ideal_diodes;
+    circuit_ideal_bjts = r.circuit_ideal_bjts;
     param_groups = r.param_groups;
+    ic_groups = r.ic_groups;
+    field_labels = r.field_labels;
     pg_ui = ParamGroupsUi{};
     if (r.mode == "Image") mode = InputMode::Image;
     else if (r.mode == "Plain") mode = InputMode::Plain;
@@ -499,6 +515,64 @@ void AppModel::from_record(const SystemRecord& r) {
         || scheme_gbs || scheme_gbs24 || scheme_gbs246 || scheme_gbs2468 || scheme_gbs246810 || scheme_gbs24681012
         || !custom_schemes.empty() || !wrapper_schemes.empty())   // их код тоже в превью
         generate();
+    circuit_layout_defaults();
+}
+
+std::vector<std::string> AppModel::ic_fields(const std::vector<std::string>& vars, int* hidden) const {
+    if (hidden) *hidden = 0;
+    if (show_alg_ic || !is_dae || alg_text.empty()) return vars;
+    std::set<std::string> alg;
+    std::string cur;
+    for (size_t i = 0; i <= alg_text.size(); ++i) {
+        const char c = i < alg_text.size() ? alg_text[i] : ',';
+        if (c == ',') { if (!cur.empty()) alg.insert(cur); cur.clear(); }
+        else if (c != ' ' && c != '\t' && c != '\r' && c != '\n') cur += c;
+    }
+    std::vector<std::string> out;
+    for (const std::string& v : vars) {
+        if (alg.count(v)) { if (hidden) ++*hidden; }
+        else out.push_back(v);
+    }
+    return out;
+}
+
+void AppModel::circuit_layout_defaults() {
+    if (!is_dae || circuit_netlist.empty() || !ic_groups.empty()) return;
+    auto split = [](const std::string& s) {
+        std::vector<std::string> v;
+        std::string cur;
+        for (size_t i = 0; i <= s.size(); ++i) {
+            const char c = i < s.size() ? s[i] : ',';
+            if (c == ',') { if (!cur.empty()) v.push_back(cur); cur.clear(); }
+            else if (c != ' ' && c != '\t' && c != '\r' && c != '\n') cur += c;
+        }
+        return v;
+    };
+    const std::vector<std::string> xs = split(vars_text), zs = split(alg_text);
+    std::vector<std::string> names = xs;
+    names.insert(names.end(), zs.begin(), zs.end());
+    SpiceImportOptions o;
+    if (!circuit_source.empty()) o.base_dir = std::filesystem::u8path(circuit_source).parent_path().u8string();
+    o.ideal_opamps = circuit_ideal_opamps;
+    o.no_junction_caps = circuit_no_jcaps;
+    o.ideal_diodes = circuit_ideal_diodes;
+    o.ideal_bjts = circuit_ideal_bjts;
+    SpiceImportResult r;
+    std::string err;
+    try {
+        if (spice_import(circuit_netlist, o, r, &err)) {
+            pg_merge_auto(ic_groups, names, r.ic_groups);
+            for (const auto& kv : r.field_labels) field_labels.emplace(kv.first, kv.second);
+        }
+    } catch (const std::exception&) {}
+    // Имена, которых разбор не дал (запись старше правил имён), — по роли.
+    std::set<std::string> placed;
+    for (const ParamGroup& g : ic_groups) placed.insert(g.params.begin(), g.params.end());
+    for (const std::string& x : xs) if (!placed.count(x)) pg_get(ic_groups, "States").params.push_back(x);
+    for (const std::string& z : zs)
+        if (!placed.count(z))
+            pg_get(ic_groups, z.rfind("v_", 0) == 0 ? "Algebraic (computed)/Node potentials"
+                                                    : "Algebraic (computed)/Branch currents").params.push_back(z);
 }
 
 void AppModel::clear() {
@@ -524,7 +598,10 @@ void AppModel::clear() {
     circuit_source.clear();
     circuit_netlist.clear();
     circuit_ideal_opamps = false;
+    circuit_no_jcaps = circuit_ideal_diodes = circuit_ideal_bjts = false;
     param_groups.clear();
+    ic_groups.clear();
+    field_labels.clear();
     pg_ui = ParamGroupsUi{};
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_dopri78_legacy
         = scheme_rk45 = scheme_dop853

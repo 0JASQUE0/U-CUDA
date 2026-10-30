@@ -7,6 +7,7 @@
 //     цепь Чуа на встречных диодах = та же система, выписанная как ОДУ;
 //   - круговой тест: Лоренц -> синтез -> netlist (B и POLY) -> обратно в граф (та же топология)
 //     -> импорт в ДАУ -> траектория = CircuitSolver (идеальные ОУ).
+#include "num_parse.h"
 #include "test_util.h"
 #include "spice_parse.h"
 #include "circuit_netlist.h"
@@ -43,11 +44,11 @@ Imported import(const std::string& net) {
     const DaeSystem d = parse_dae(m.r.plain_text, m.r.vars_text, m.r.alg_text, m.r.params_text);
     m.sys = d.as_codegen_system();
     std::vector<double> a = { 0.5 };
-    for (const auto& p : d.params) a.push_back(std::stod(m.r.param_values.at(p)));
+    for (const auto& p : d.params) a.push_back(parse_num(m.r.param_values.at(p), 0.0));
     m.a = tail(a);
     for (const auto& v : m.sys.vars) {
         auto it = m.r.init_conditions.find(v);
-        m.X.push_back(it == m.r.init_conditions.end() ? 0.0 : std::stod(it->second));
+        m.X.push_back(it == m.r.init_conditions.end() ? 0.0 : parse_num(it->second, 0.0));
     }
     const bool zok = dae_consistent_z(m.sys, m.a.data(), (int)m.a.size(), 0.0, m.X.data(), &err);
     ut::require(zok, "consistent z0: " + err + "\n" + m.r.plain_text);
@@ -132,7 +133,7 @@ void subcircuits() {
     // Интегратор: выход = -(1/(R C)) * t * Vin = -500 t при R = 1k, C = 2u.
     Imported m = import("* integrator\n.param rin=1k\n.subckt integ in out params: c=1u\nR1 in s {rin}\nC1 s out {c}\n"
                         "X1 0 s out TL072\n.ends\nV1 a 0 DC 1\nX2 a b integ c=2u\nRl b 0 10k\n.tran 1e-5 1m\n");
-    ut::require(m.r.param_values.at("x2_r1") == "1000" && m.r.param_values.at("x2_c1") == "2e-06",
+    ut::require(m.r.param_values.at("x2_r1") == "1k" && m.r.param_values.at("x2_c1") == "2u",
                 "subcircuit values: .param and instance override");
     bool note = false;
     for (const auto& s : m.r.notes) note |= s.find("TL072 replaced by an ideal op-amp") != std::string::npos;
@@ -326,7 +327,7 @@ std::vector<double> op_point(const std::string& net, Imported& m, const SpiceImp
     const DaeSystem d = parse_dae(m.r.plain_text, m.r.vars_text, m.r.alg_text, m.r.params_text);
     m.sys = d.as_codegen_system();
     std::vector<double> a = { 0.5 };
-    for (const auto& p : d.params) a.push_back(std::stod(m.r.param_values.at(p)));
+    for (const auto& p : d.params) a.push_back(parse_num(m.r.param_values.at(p), 0.0));
     m.a = tail(a);
     std::vector<double> X(m.sys.vars.size(), 0.0);
     int it = 0;
@@ -597,6 +598,71 @@ void param_groups() {
     ut::require(record_to_json(none).find("param_groups") == std::string::npos, "no groups - no key (old files unchanged)");
     std::printf("  parameter groups: R / C / L / sources / Models/<model> / <subckt>/<instance> at import, user edits"
                 " kept on re-import, system.json round trip (%zu groups)\n", G.size());
+
+    // Порядок групп импорта — по виду элемента (не по алфавиту и не по netlist'у).
+    std::vector<std::string> tops;
+    for (const auto& pg : r.param_groups) {
+        const std::string t = pg.second.substr(0, pg.second.find('/'));
+        if (std::find(tops.begin(), tops.end(), t) == tops.end()) tops.push_back(t);
+    }
+    const std::vector<std::string> want_tops = { "Resistors", "Capacitors", "Inductors", "Sources", "amp1", "Models" };
+    ut::require(tops == want_tops, "import group order: R, C, L, sources, subcircuits, models");
+
+    // Группы начальных условий: x по элементу (переходы прибора — Devices/<прибор>), все z — Algebraic.
+    {
+        SpiceImportResult rq;
+        const bool ok_ = spice_import("* ic groups\nV1 vcc 0 DC 5\nR1 vcc c 1k\nRB vcc b 100k\nQ1 c b 0 qm\nC1 c out 1u\n"
+                                      "R2 out 0 1k\nL1 out 0 1m\n.model qm NPN(IS=1e-14 BF=100 CJE=1p CJC=1p)\n.tran 1u 1m\n",
+                                      {}, rq, &err);
+        ut::require(ok_, "import: " + err);
+        std::map<std::string, std::string> ig(rq.ic_groups.begin(), rq.ic_groups.end());
+        auto ic_in = [&](const std::string& v, const std::string& path) {
+            ut::require(ig.count(v) && ig[v] == path, v + " -> " + (ig.count(v) ? ig[v] : "?") + ", expected " + path);
+        };
+        ic_in("vc_c1", "Capacitors"); ic_in("il_l1", "Inductors"); ic_in("vc_q1_cje", "Devices/Q1");
+        ic_in("v_out", "Algebraic (computed)/Node potentials"); ic_in("ic_c1", "Algebraic (computed)/Branch currents");
+        ut::require(ig.size() == rq.init_conditions.size(), "every variable has an IC group entry");
+        auto lab = [&](const std::string& n, const std::string& want) {
+            auto it = rq.field_labels.find(n);
+            ut::require(it != rq.field_labels.end() && it->second == want,
+                        "label " + n + " = " + (it == rq.field_labels.end() ? "?" : it->second) + ", expected " + want);
+        };
+        lab("vc_c1", "vc_{C1}"); lab("ic_c1", "ic_{C1}"); lab("il_l1", "il_{L1}"); lab("i_v1", "i_{V1}");
+        lab("vc_q1_cje", "vc_{Q1,cje}"); lab("r1", "R_{1}"); lab("rb", "R_{B}"); lab("c1", "C_{1}"); lab("l1", "L_{1}");
+        ut::require(rq.ic_groups.front().second == "Capacitors" && rq.ic_groups.back().second.rfind("Algebraic", 0) == 0,
+                    "IC groups: states first, algebraic last");
+    }
+    // KiCad: неназванная цепь Net-(LED1-K) приходит как net-_led1-k_ — имя без префикса.
+    {
+        SpiceImportResult rn;
+        const bool ok_ = spice_import("* net\nV1 in 0 DC 1\nR1 in net-_led1-k_ 1k\nC1 net-_led1-k_ 0 1u\n", {}, rn, &err);
+        ut::require(ok_, "import: " + err);
+        ut::require(rn.alg_text.find("v_led1_k") != std::string::npos, "net-_led1-k_ -> v_led1_k: " + rn.alg_text);
+    }
+
+    // Перетаскивание: порядок записей = порядок на экране, переставляются только соседи.
+    ParamGroups D = pg_from_text("B: b1\nA: a1\nA/y: y1\nA/x: x1\nC: c1");
+    ut::require(pg_rows(D) == std::vector<std::string>({ "B", "A", "A/y", "A/x", "C" }), "rows keep the file order");
+    pg_reorder(D, "C", "B", false);
+    pg_reorder(D, "A/x", "A/y", false);
+    pg_reorder(D, "A/x", "B", false);   // не соседи — ничего
+    ut::require(pg_rows(D) == std::vector<std::string>({ "C", "B", "A", "A/x", "A/y" }), "reorder among siblings");
+    pg_reorder(D, "A", "C", true);
+    ut::require(pg_rows(D) == std::vector<std::string>({ "C", "A", "A/x", "A/y", "B" }), "a group moves with its subtree");
+    pg_get(D, "A/z");
+    ut::require(pg_rows(D)[4] == "A/z", "a new subgroup goes after its siblings");
+    ut::require(pg_to_text(pg_from_text(pg_to_text(D))) == pg_to_text(D), "order survives the text form");
+
+    // Подписи полей и группы НУ в system.json.
+    SystemRecord lr;
+    lr.name = "labels";
+    lr.ic_groups = pg_from_text("Capacitors: vc_c1\nAlgebraic (computed): v_out");
+    lr.field_labels = { { "vc_c1", "V_{C1}" }, { "sigma", "\\sigma" } };
+    const SystemRecord lb = record_from_json(record_to_json(lr));
+    ut::require(pg_to_text(lb.ic_groups) == pg_to_text(lr.ic_groups) && lb.field_labels == lr.field_labels,
+                "ic_groups and field_labels survive system.json");
+    std::printf("  IC groups (Capacitors / Inductors / Devices/<dev> / Algebraic), KiCad net names, drag reorder,"
+                " labels round trip\n");
 }
 
 // .ic без UIC (SPICE): рабочая точка с удержанным узлом — op_plain_text, KCL узла заменён на v - V = 0.
@@ -609,7 +675,7 @@ void ic_without_uic() {
     const System s = parse_dae(r.op_plain_text, r.vars_text, r.alg_text, r.params_text, "").as_codegen_system();
     std::vector<double> a = { 0.5 };
     const DaeSystem d = parse_dae(r.op_plain_text, r.vars_text, r.alg_text, r.params_text, "");
-    for (const auto& p : d.params) a.push_back(std::stod(r.param_values.at(p)));
+    for (const auto& p : d.params) a.push_back(parse_num(r.param_values.at(p), 0.0));
     a.insert(a.end(), { 4, 1e-10, 25, 1 });
     std::vector<double> X(s.vars.size(), 0.0);
     int it = 0;
@@ -630,6 +696,82 @@ void ic_without_uic() {
     std::printf("  .ic without UIC: DC OP with the node held (v(a) = %.3f V, vc = %.3f V); with UIC no DC OP\n", va, vc);
 }
 
+// Упрощения приборов (SpiceImportOptions): без ёмкостей переходов — меньше переменных состояния; идеальный
+// диод — касательная при 10 мА (точен около этого тока); идеальный BJT — рабочая точка каскада близка к полной.
+// Приставки СИ в полях (num_parse.h) и номиналы импорта с ними (fmt_num_si).
+void si_prefixes() {
+    auto eq = [](const std::string& s, double want) {
+        double v = 0.0;
+        ut::require(parse_num_checked(s, v) && v == want, "'" + s + "' -> " + std::to_string(v));
+    };
+    eq("10k", 1e4); eq("4.7u", 4.7e-6); eq("10n", 1e-8); eq("15p", 15e-12); eq("1m", 1e-3); eq("2M", 2e6);
+    eq("1meg", 1e6); eq("1.5Meg", 1.5e6); eq("3G", 3e9); eq("1T", 1e12); eq("100f", 100e-15);
+    eq("2.2\xC2\xB5", 2.2e-6); eq("1e-3", 1e-3); eq("2*1k", 2e3); eq("1k/4", 250.0); eq("-3.3k", -3300.0);
+    double v = 0.0;
+    for (const char* bad : { "2pi", "5asdf", "1kk", "k", "1x", "1mega" })
+        ut::require(!parse_num_checked(bad, v), std::string("'") + bad + "' must stay invalid");
+    ut::require(parse_num("2*pi", 0.0) == 2.0 * 3.1415926535897932384626433832795, "pi still works");
+    for (double x : { 15000.0, 1e-8, 4.7e-6, 1e-3, 2.2e-12, 100.0, 1.5e6, 0.0, 1e-20, 12345.678 }) {
+        const std::string s = fmt_num_si(x);
+        ut::require(parse_num(s, -1.0) == x, "fmt_num_si round trip: " + s);
+    }
+    ut::require(fmt_num_si(15000.0) == "15k" && fmt_num_si(1e-8) == "10n" && fmt_num_si(4.7e-6) == "4.7u",
+                "fmt_num_si: " + fmt_num_si(15000.0) + " " + fmt_num_si(1e-8) + " " + fmt_num_si(4.7e-6));
+    SpiceImportResult r;
+    std::string err;
+    const bool ok_ = spice_import("* si\nV1 in 0 DC 1\nR1 in a 15k\nC1 a 0 10n\nL1 a 0 4.7m\n", {}, r, &err);
+    ut::require(ok_, "import: " + err);
+    ut::require(r.param_values.at("r1") == "15k" && r.param_values.at("c1") == "10n" && r.param_values.at("l1") == "4.7m",
+                "import values: " + r.param_values.at("r1") + " " + r.param_values.at("c1") + " " + r.param_values.at("l1"));
+    std::printf("  SI prefixes: f p n u/\xC2\xB5 m k M/meg G T, exact (10n == 1e-8), import values 15k / 10n / 4.7m\n");
+}
+
+void device_simplifications() {
+    const std::string rect = "* rect\nV1 in 0 SIN(0 5 50)\nD1 in out dm\nR1 out 0 330\nC1 out 0 10u\n"
+                             ".model dm D(IS=1e-14 N=1.5 RS=0.5 CJO=5p)\n.tran 1u 20m\n";
+    SpiceImportResult full, nocap, ideal;
+    std::string err;
+    SpiceImportOptions o;
+    { const bool ok_ = spice_import(rect, o, full, &err); ut::require(ok_, "full: " + err); }
+    o.no_junction_caps = true;
+    { const bool ok_ = spice_import(rect, o, nocap, &err); ut::require(ok_, "no caps: " + err); }
+    o.ideal_diodes = true;
+    { const bool ok_ = spice_import(rect, o, ideal, &err); ut::require(ok_, "ideal: " + err); }
+    auto count = [](const std::string& s) { return s.empty() ? 0 : (int)std::count(s.begin(), s.end(), ',') + 1; };
+    ut::require(count(full.vars_text) == 2 && count(nocap.vars_text) == 1, "no junction caps: the diode's C(v) state is gone");
+    ut::require(ideal.param_values.count("dm_vf") && ideal.param_values.count("dm_ron") && !ideal.param_values.count("dm_is"),
+                "ideal diode: parameters dm_vf / dm_ron instead of IS / N / RS");
+    // Ток идеального диода при 10 мА — как у экспоненты с RS (касательная в этой точке)
+    const IdealJunction f = ideal_junction_fit(1e-14, 1.5, 0.5);
+    const double v10 = 1.5 * kDeviceVt * std::log(1e-2 / 1e-14 + 1) + 0.5 * 1e-2;
+    ut::approx((v10 - f.vf) / f.ron, 1e-2, 1e-12, "ideal diode: exact at 10 mA");
+    // Идеальный BJT: рабочая точка каскада ОЭ против полной модели
+    const std::string ce = "* ce\nVcc vcc 0 DC 12\nRb vcc b 470k\nRc vcc c 2.2k\nQ1 c b 0 qm\n"
+                           ".model qm NPN(IS=1e-14 BF=150 BR=3 VAF=100 RB=10 RC=1 RE=0.5 CJE=10p CJC=5p)\n.tran 1u 1m\n";
+    auto op_vc = [&](bool ideal_q) {
+        SpiceImportOptions q;
+        q.ideal_bjts = ideal_q;
+        SpiceImportResult r;
+        { const bool ok_ = spice_import(ce, q, r, &err); ut::require(ok_, "CE: " + err); }
+        const DaeSystem d = parse_dae(r.plain_text, r.vars_text, r.alg_text, r.params_text, "");
+        const System s = d.as_codegen_system();
+        std::vector<double> a = { 0.5 };
+        for (const auto& p : d.params) a.push_back(parse_num(r.param_values.at(p), 0.0));
+        a.insert(a.end(), { 4, 1e-10, 25, 1 });
+        std::vector<double> X(s.vars.size(), 0.0);
+        int it = 0;
+        std::string why;
+        { const bool ok_ = dae_dc_operating_point(s, a.data(), (int)a.size(), 0.0, X.data(), &it, &why);
+          ut::require(ok_, "CE OP: " + why); }
+        for (size_t i = 0; i < s.vars.size(); ++i) if (s.vars[i] == "v_c") return X[i];
+        return -1.0;
+    };
+    const double vf = op_vc(false), vi = op_vc(true);
+    std::printf("  device simplifications: no junction caps -1 state; ideal diode exact at 10 mA (Vf %.3f V, Ron %.2f Ohm); "
+                "ideal BJT CE stage Vc %.3f V (full model %.3f V)\n", f.vf, f.ron, vi, vf);
+    ut::approx(vi, vf, 0.1 * vf, "ideal BJT: CE operating point within 10% of the full model");
+}
+
 int main() {
     return ut::run_main("spice", []() -> int {
         sources();
@@ -643,6 +785,8 @@ int main() {
         li_cutsets();
         param_groups();
         ic_without_uic();
+        device_simplifications();
+        si_prefixes();
         return 0;
     });
 }

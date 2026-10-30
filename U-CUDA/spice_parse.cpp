@@ -1,5 +1,6 @@
 ﻿#include "spice_parse.h"
 #include "dae_devices.h"
+#include "num_parse.h"
 
 #include <algorithm>
 #include <cctype>
@@ -318,6 +319,17 @@ struct Subckt {
     std::vector<Card> cards;
 };
 
+// Имя узла без префикса KiCad для неназванных цепей: "net-_led1-k_" (так kicad-cli пишет
+// Net-(LED1-K)) -> "_led1-k_", sanitize дальше даёт led1_k. Ключи — в нижнем регистре; префикс
+// подсхемы "x1." остаётся.
+std::string net_short(const std::string& key) {
+    const size_t dot = key.rfind('.');
+    const std::string pre = dot == std::string::npos ? std::string() : key.substr(0, dot + 1);
+    std::string n = dot == std::string::npos ? key : key.substr(dot + 1);
+    if (n.size() > 4 && n.compare(0, 4, "net-") == 0) n = n.substr(4);
+    return pre + n;
+}
+
 std::string sanitize(const std::string& s) {
     std::string o;
     for (char c : lower(s)) o += std::isalnum((unsigned char)c) ? c : '_';
@@ -620,6 +632,7 @@ struct Builder {
         for (const auto& kv : mutual) {
             const Inductor& L = inductors.at(kv.first);
             dl[kv.first] = uniq("dl_" + sanitize(L.name));
+            labels[dl[kv.first]] = var_tex("dl", L.name);
             zs.push_back(dl[kv.first]);
             x_rhs[L.row] = dl[kv.first];
         }
@@ -640,6 +653,7 @@ struct Builder {
     std::vector<Edge> v_edges;                        // C и ветви, заданные напряжением
 
     int n_r = 0, n_c = 0, n_l = 0, n_src = 0, n_ctl = 0, n_nullor = 0, n_b = 0, n_x = 0;
+    int n_ideal_d = 0, n_ideal_q = 0, n_nocap = 0;   // упрощения приборов (SpiceImportOptions)
 
     std::string uniq(const std::string& base) {
         static const std::set<std::string> reserved = {
@@ -664,6 +678,51 @@ struct Builder {
     // Группа, в которую param() кладёт параметр (только интерфейс, SpiceImportResult::param_groups).
     std::string cur_group;
     std::vector<std::pair<std::string, std::string>> pgroups;
+    // Группы начальных условий: x — по элементу (cur_elem — имя элемента, как в netlist'е), z — в finish.
+    std::string cur_elem;
+    // Подписи полей (SpiceImportResult::field_labels).
+    std::map<std::string, std::string> labels;
+    static std::string tex_list(const std::string& s) {   // '.' и '_' имени -> запятые индекса
+        std::string o = s;
+        for (char& ch : o) if (ch == '.' || ch == '_') ch = ',';
+        return o;
+    }
+    // Номинал элемента: буква типа заглавная, остальное имени — индекс (R1 -> R_{1}, x1.Rb -> R_{b,x1}).
+    static std::string elem_tex(const std::string& full) {
+        const size_t dot = full.rfind('.');
+        const std::string last = dot == std::string::npos ? full : full.substr(dot + 1);
+        std::string sub = tex_list(last.substr(1));
+        if (dot != std::string::npos) sub += (sub.empty() ? "" : ",") + tex_list(full.substr(0, dot));
+        const std::string letter(1, (char)std::toupper((unsigned char)last[0]));
+        return sub.empty() ? letter : letter + "_{" + sub + "}";
+    }
+    // Переменная элемента: vc_{C1}, il_{L1}, i_{V1}.
+    static std::string var_tex(const char* kind, const std::string& full) {
+        return std::string(kind) + "_{" + tex_list(full) + "}";
+    }
+    std::string elem_param(const std::string& name, double v) {
+        const std::string p = param(name, v);
+        labels[p] = elem_tex(name);
+        pvals[p] = fmt_num_si(v);   // номинал как на схеме: 15k, 10n (поля понимают приставки СИ)
+        return p;
+    }
+    std::vector<std::pair<std::string, std::string>> icgroups;
+    std::string state_group() const { return cur_group == "Devices" ? "Devices/" + cur_elem : cur_group; }
+    // Порядок групп на экране: по виду элемента, подсхемы после приборов, модели и z в конце.
+    static int group_rank(const std::string& path) {
+        static const char* const order[] = { "Resistors", "Capacitors", "Inductors", "Coupling (K)", "Sources",
+                                             "Controlled sources", "Devices" };
+        const std::string top = path.substr(0, path.find('/'));
+        for (int i = 0; i < 7; ++i) if (top == order[i]) return i;
+        if (top == "Models") return 9;
+        if (top == "Algebraic (computed)") return 10;
+        return 8;
+    }
+    static void sort_groups(std::vector<std::pair<std::string, std::string>>& v) {
+        std::stable_sort(v.begin(), v.end(), [](const auto& a, const auto& b) {
+            return group_rank(a.second) < group_rank(b.second);
+        });
+    }
     // Верхний уровень — по виду элемента; внутри подсхемы — группа экземпляра.
     static std::string element_group(char type, const Ctx& c) {
         if (!c.group.empty()) return c.group;
@@ -694,7 +753,7 @@ struct Builder {
         node_idx[key] = i;
         node_keys.push_back(key);
         node_disp.push_back(disp);
-        node_var.push_back(uniq("v_" + sanitize(key)));
+        node_var.push_back(uniq("v_" + sanitize(net_short(key))));
         kcl.emplace_back();
         return i;
     }
@@ -949,6 +1008,7 @@ struct Builder {
     // Ветвь, заданная напряжением: z = ток i, связь lin(a, b) - u = 0.
     std::string vbranch(const std::string& key, const std::string& name, int a, int b, const std::string& u) {
         const std::string i = uniq("i_" + sanitize(name));
+        labels[i] = var_tex("i", name);
         zs.push_back(i);
         gs.push_back(lin(a, b) + " - " + u);
         current(a, b, i);
@@ -961,6 +1021,7 @@ struct Builder {
 
     void nullor(const std::string& key, const std::string& name, int out_p, int out_n, int inp, int inn) {
         const std::string i = uniq("i_" + sanitize(name));
+        labels[i] = var_tex("i", name);
         zs.push_back(i);
         gs.push_back(lin(inp, inn));
         current(out_p, out_n, i);
@@ -975,6 +1036,9 @@ struct Builder {
     void capacitor(const std::string& name, int a, int b, const std::string& p, bool has_ic, double v0) {
         const std::string x = uniq("vc_" + sanitize(name)), i = uniq("ic_" + sanitize(name));
         xs.push_back(x);
+        icgroups.push_back({ x, state_group() });
+        labels[x] = var_tex("vc", name);
+        labels[i] = var_tex("ic", name);
         std::string pc = p;
         for (size_t k = pc.find("@V"); k != std::string::npos; k = pc.find("@V", k + x.size())) pc.replace(k, 2, x);
         x_rhs.push_back(i + "/" + (pc == p ? p : "(" + pc + ")"));
@@ -1021,6 +1085,26 @@ struct Builder {
             catch (const std::exception&) { m.bad.insert(kv.first); }
         }
         return model_inst[key] = m;
+    }
+
+    // Число из .model экземпляра (умолчание SPICE, если не задано).
+    static double mpv(const Model& m, const char* k, double def) {
+        auto it = m.p.find(k);
+        return it != m.p.end() ? it->second : def;
+    }
+    // Параметры упрощённой модели (SpiceImportOptions::ideal_*) — a[] "<модель>_<имя>" с вычисленными значениями,
+    // один раз на модель, в той же группе, что параметры .model.
+    std::map<std::string, std::map<std::string, std::string>> ideal_cache;
+    const std::map<std::string, std::string>& ideal_params(const Model& m,
+                                                           const std::vector<std::pair<std::string, double>>& kv) {
+        auto it = ideal_cache.find(lower(m.name));
+        if (it != ideal_cache.end()) return it->second;
+        std::map<std::string, std::string>& out = ideal_cache[lower(m.name)];
+        const std::string saved = cur_group;
+        if (!m.in_subckt) cur_group = "Models/" + m.name;
+        for (const auto& p : kv) out[p.first] = param(m.name + "_" + p.first, p.second);
+        cur_group = saved;
+        return out;
     }
 
     // Параметры модели -> параметры a[] "<модель>_<имя>", один раз на модель. Нулевое умолчание
@@ -1108,6 +1192,7 @@ struct Builder {
         const std::string name = c.prefix + t[0];
         const std::string key = c.prefix + lower(t[0]);
         cur_group = element_group(type, c);
+        cur_elem = t[0];
         auto need = [&](size_t n) { if (t.size() < n) fail(at + "too few fields"); };
         auto value_at = [&](size_t i, const char* kw) {
             need(i + 1);
@@ -1137,7 +1222,7 @@ struct Builder {
                 break;
             }
             if (r == 0.0) fail(at + "zero resistance");
-            current(a, b, vdiff(a, b) + "/" + param(name, r));
+            current(a, b, vdiff(a, b) + "/" + elem_param(name, r));
             conduct(a, b);
             ++n_r;
             break;
@@ -1149,7 +1234,7 @@ struct Builder {
             if (cv == 0.0) fail(at + "zero capacitance");
             double v0 = 0.0;
             const bool has = ic_of(&v0);
-            capacitor(name, a, b, param(name, cv), has, v0);
+            capacitor(name, a, b, elem_param(name, cv), has, v0);
             ++n_c;
             break;
         }
@@ -1159,15 +1244,31 @@ struct Builder {
             const Model& m = model(t[3], "d", at, c);
             const double area = t.size() > 4 && t[4] != "=" && lower(t[4]) != "off" && lower(t[4]) != "ic"
                               ? eval_value(lower(t[4]) == "area" && t.size() > 6 ? t[6] : t[4], *c.scope) : 1.0;
-            const auto& mp = model_params(m, { "is", "n", "rs", "cjo", "vj", "m", "fc" }, { 1e-14, 1, 0, 0, 0, 0, 0 },
-                                          { "bv", "ibv", "tt", "eg", "xti", "kf", "af" });
             auto sc = [&](const std::string& p) { return area == 1.0 ? p : "(" + fmt(area) + "*" + p + ")"; };
-            const int j = internal(a, mp.count("rs") ? mp.at("rs") : std::string(), name, "a", area);
-            current(j, k, diode_current(vdiff(j, k), sc(mp.at("is")), mp.at("n")));
+            const bool caps = !opt.no_junction_caps;
+            int j = a;
+            std::map<std::string, std::string> mp;
+            if (opt.ideal_diodes) {   // порог и Ron (касательная при 10 мА), RS — в Ron, без внутреннего узла
+                const IdealJunction f = ideal_junction_fit(mpv(m, "is", 1e-14), mpv(m, "n", 1), mpv(m, "rs", 0));
+                const auto& ip = ideal_params(m, { { "vf", f.vf }, { "ron", f.ron } });
+                current(a, k, ideal_diode_current(vdiff(a, k), ip.at("vf"),
+                                                  area == 1.0 ? ip.at("ron") : "(" + ip.at("ron") + "/" + fmt(area) + ")"));
+                if (caps) mp = model_params(m, { "cjo", "vj", "m", "fc" }, { 0, 0, 0, 0 },
+                                            { "is", "n", "rs", "bv", "ibv", "tt", "eg", "xti", "kf", "af" });
+                ++n_ideal_d;
+            } else {
+                mp = caps ? model_params(m, { "is", "n", "rs", "cjo", "vj", "m", "fc" }, { 1e-14, 1, 0, 0, 0, 0, 0 },
+                                         { "bv", "ibv", "tt", "eg", "xti", "kf", "af" })
+                          : model_params(m, { "is", "n", "rs" }, { 1e-14, 1, 0 },
+                                         { "cjo", "vj", "m", "fc", "bv", "ibv", "tt", "eg", "xti", "kf", "af" });
+                j = internal(a, mp.count("rs") ? mp.at("rs") : std::string(), name, "a", area);
+                current(j, k, diode_current(vdiff(j, k), sc(mp.at("is")), mp.at("n")));
+            }
             conduct(j, k);
-            if (mp.count("cjo"))
+            if (caps && mp.count("cjo"))
                 capacitor(name + "_cj", j, k, junction_capacitance("@V", sc(mp.at("cjo")), pd(mp, "vj", "1"),
                                                                    pd(mp, "m", "0.5"), pd(mp, "fc", "0.5")), false, 0.0);
+            if (!caps && m.p.count("cjo")) ++n_nocap;
             ++n_dev;
             break;
         }
@@ -1181,34 +1282,55 @@ struct Builder {
             if (!pnp && m.type != "npn") fail(at + "model " + m.name + " is not NPN/PNP");
             const double area = t.size() > mi + 1 && t[mi + 1] != "=" && lower(t[mi + 1]) != "off"
                               ? eval_value(lower(t[mi + 1]) == "area" && t.size() > mi + 3 ? t[mi + 3] : t[mi + 1], *c.scope) : 1.0;
-            const auto& mp = model_params(m, { "is", "bf", "br", "nf", "nr", "vaf", "var", "rb", "rc", "re", "cje", "cjc",
-                                               "vje", "vjc", "mje", "mjc", "fc" },
-                                          { 1e-16, 100, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-                                          { "ikf", "ikr", "ise", "isc", "ne", "nc", "tf", "tr",
-                                            "xtf", "itf", "vtf", "ptf", "eg", "xti", "xtb", "irb", "rbm", "cjs", "kf", "af",
-                                            "nk", "iss", "ns", "bvcbo" });
+            const bool caps = !opt.no_junction_caps, ideal = opt.ideal_bjts;
+            static const std::vector<std::string> kQIgn = { "ikf", "ikr", "ise", "isc", "ne", "nc", "tf", "tr",
+                "xtf", "itf", "vtf", "ptf", "eg", "xti", "xtb", "irb", "rbm", "cjs", "kf", "af", "nk", "iss", "ns", "bvcbo" };
+            static const std::vector<std::string> kQDc = { "is", "bf", "br", "nf", "nr", "vaf", "var", "rb", "rc", "re" };
+            static const std::vector<std::string> kQCap = { "cje", "cjc", "vje", "vjc", "mje", "mjc", "fc" };
+            std::vector<std::string> keys, ign = kQIgn;
+            std::vector<double> defs;
+            if (!ideal) { keys = kQDc; defs = { 1e-16, 100, 1, 1, 1, 0, 0, 0, 0, 0 }; }
+            else ign.insert(ign.end(), kQDc.begin(), kQDc.end());
+            if (caps) { keys.insert(keys.end(), kQCap.begin(), kQCap.end()); defs.insert(defs.end(), kQCap.size(), 0.0); }
+            else ign.insert(ign.end(), kQCap.begin(), kQCap.end());
+            const auto& mp = model_params(m, keys, defs, ign);
             auto sc = [&](const std::string& p) { return area == 1.0 ? p : "(" + fmt(area) + "*" + p + ")"; };
             auto opt_p = [&](const char* k) { return mp.count(k) ? mp.at(k) : std::string(); };
-            const int nc = internal(node_of(t[1], c), opt_p("rc"), name, "c", area);
-            const int nb = internal(node_of(t[2], c), opt_p("rb"), name, "b", area);
-            const int ne = internal(node_of(t[3], c), opt_p("re"), name, "e", area);
+            // Идеальный BJT — без RB / RC / RE: внутренних узлов нет.
+            const int nc = ideal ? node_of(t[1], c) : internal(node_of(t[1], c), opt_p("rc"), name, "c", area);
+            const int nb = ideal ? node_of(t[2], c) : internal(node_of(t[2], c), opt_p("rb"), name, "b", area);
+            const int ne = ideal ? node_of(t[3], c) : internal(node_of(t[3], c), opt_p("re"), name, "e", area);
             auto inv = [&](const char* k) { return mp.count(k) ? "(1/" + mp.at(k) + ")" : std::string(); };
             // NPN: vbe, vbc; PNP: veb, vcb и токи обратного знака (из коллектора и базы).
             const std::string v1 = pnp ? vdiff(ne, nb) : vdiff(nb, ne), v2 = pnp ? vdiff(nc, nb) : vdiff(nb, nc);
-            const BjtCurrents q = bjt_currents(v1, v2, sc(mp.at("is")), mp.at("bf"), mp.at("br"), mp.at("nf"),
-                                               mp.at("nr"), inv("vaf"), inv("var"));
+            BjtCurrents q;
+            if (ideal) {   // Эберс–Молл на идеальных переходах: Ic = Dbe - Dbc - Dbc/BR, Ib = Dbe/BF + Dbc/BR
+                const double is = mpv(m, "is", 1e-16);
+                const IdealJunction fe = ideal_junction_fit(is, mpv(m, "nf", 1), 0), fc_ = ideal_junction_fit(is, mpv(m, "nr", 1), 0);
+                const auto& ip = ideal_params(m, { { "vfbe", fe.vf }, { "ronbe", fe.ron }, { "vfbc", fc_.vf },
+                                                   { "ronbc", fc_.ron }, { "bf", mpv(m, "bf", 100) }, { "br", mpv(m, "br", 1) } });
+                auto ron = [&](const char* k) { return area == 1.0 ? ip.at(k) : "(" + ip.at(k) + "/" + fmt(area) + ")"; };
+                const std::string dbe = ideal_diode_current(v1, ip.at("vfbe"), ron("ronbe"));
+                const std::string dbc = ideal_diode_current(v2, ip.at("vfbc"), ron("ronbc"));
+                q.ic = "(" + dbe + " - " + dbc + "*(1 + 1/" + ip.at("br") + "))";
+                q.ib = "(" + dbe + "/" + ip.at("bf") + " + " + dbc + "/" + ip.at("br") + ")";
+                ++n_ideal_q;
+            } else
+                q = bjt_currents(v1, v2, sc(mp.at("is")), mp.at("bf"), mp.at("br"), mp.at("nf"),
+                                 mp.at("nr"), inv("vaf"), inv("var"));
             if (pnp) { current(ne, nc, q.ic); current(ne, nb, q.ib); }
             else     { current(nc, ne, q.ic); current(nb, ne, q.ib); }
             conduct(nc, ne);
             conduct(nb, ne);
             // Напряжение на ёмкости — vb - ve (vb - vc); прямое смещение перехода у PNP — обратного знака.
             const std::string vj = pnp ? "(-@V)" : "@V", fc = pd(mp, "fc", "0.5");
-            if (mp.count("cje"))
+            if (caps && mp.count("cje"))
                 capacitor(name + "_cje", nb, ne, junction_capacitance(vj, sc(mp.at("cje")), pd(mp, "vje", "0.75"),
                                                                      pd(mp, "mje", "0.33"), fc), false, 0.0);
-            if (mp.count("cjc"))
+            if (caps && mp.count("cjc"))
                 capacitor(name + "_cjc", nb, nc, junction_capacitance(vj, sc(mp.at("cjc")), pd(mp, "vjc", "0.75"),
                                                                      pd(mp, "mjc", "0.33"), fc), false, 0.0);
+            if (!caps && (m.p.count("cje") || m.p.count("cjc"))) ++n_nocap;
             ++n_dev;
             break;
         }
@@ -1217,9 +1339,11 @@ struct Builder {
             const int a = node_of(t[1], c), b = node_of(t[2], c);
             const double lv = value_at(3, "l");
             if (lv == 0.0) fail(at + "zero inductance");
-            const std::string p = param(name, lv);
+            const std::string p = elem_param(name, lv);
             const std::string x = uniq("il_" + sanitize(name));
             xs.push_back(x);
+            icgroups.push_back({ x, state_group() });
+            labels[x] = var_tex("il", name);
             inductors[key] = Inductor{ x_rhs.size(), a, b, p, name };
             x_rhs.push_back(vdiff(a, b) + "/" + p);
             current(a, b, x);
@@ -1338,9 +1462,9 @@ struct Builder {
             conduct(ng, ns);
             const std::string vj = pch ? "(-@V)" : "@V", pb = pd(mp, "pb", "1"), mj = pd(mp, "m", "0.5"),
                               fc = pd(mp, "fc", "0.5");
-            if (mp.count("cgs"))
+            if (!opt.no_junction_caps && mp.count("cgs"))
                 capacitor(name + "_cgs", ng, ns, junction_capacitance(vj, sc(mp.at("cgs")), pb, mj, fc), false, 0.0);
-            if (mp.count("cgd"))
+            if (!opt.no_junction_caps && mp.count("cgd"))
                 capacitor(name + "_cgd", ng, nd, junction_capacitance(vj, sc(mp.at("cgd")), pb, mj, fc), false, 0.0);
             ++n_dev;
             break;
@@ -1389,8 +1513,8 @@ struct Builder {
             if (pch) current(ns, nd, id); else current(nd, ns, id);
             conduct(nd, ns);
             // Затвор изолирован: тока нет, но ёмкости перекрытия CGSO / CGDO (на единицу ширины) — постоянные.
-            if (mp.count("cgso")) capacitor(name + "_cgs", ng, ns, "(" + fmt(mult * W) + "*" + mp.at("cgso") + ")", false, 0.0);
-            if (mp.count("cgdo")) capacitor(name + "_cgd", ng, nd, "(" + fmt(mult * W) + "*" + mp.at("cgdo") + ")", false, 0.0);
+            if (!opt.no_junction_caps && mp.count("cgso")) capacitor(name + "_cgs", ng, ns, "(" + fmt(mult * W) + "*" + mp.at("cgso") + ")", false, 0.0);
+            if (!opt.no_junction_caps && mp.count("cgdo")) capacitor(name + "_cgd", ng, nd, "(" + fmt(mult * W) + "*" + mp.at("cgdo") + ")", false, 0.0);
             touch(ng);
             touch(nb);
             ++n_dev;
@@ -1599,6 +1723,12 @@ struct Builder {
         r.params_text = join(params);
         r.param_values = pvals;
         r.param_groups = pgroups;
+        sort_groups(r.param_groups);
+        r.ic_groups = icgroups;
+        for (const std::string& v : node_var) r.ic_groups.push_back({ v, "Algebraic (computed)/Node potentials" });
+        for (const std::string& z : zs) r.ic_groups.push_back({ z, "Algebraic (computed)/Branch currents" });
+        sort_groups(r.ic_groups);
+        r.field_labels = labels;
         r.init_conditions = ic;
         for (const auto& kv : deck.ic_nodes) {
             auto it = node_idx.find(node_key(kv.first, Ctx{}));
@@ -1609,6 +1739,11 @@ struct Builder {
         if (deck.tstop > 0.0) r.t_stop = fmt_short(deck.tstop);
         for (size_t n = 0; n < node_keys.size(); ++n) r.node_vars.push_back({ node_disp[n], node_var[n] });
         r.notes = notes;
+        if (n_ideal_d) r.notes.push_back(std::to_string(n_ideal_d) + " diode(s) / LED(s) ideal: threshold Vf + Ron (tangent of "
+                                         "the exponential at 10 mA, parameters <model>_vf / _ron)");
+        if (n_ideal_q) r.notes.push_back(std::to_string(n_ideal_q) + " BJT(s) ideal: Ebers-Moll on Vf + Ron junctions "
+                                         "(<model>_vfbe/_ronbe/_vfbc/_ronbc, _bf, _br), no Early effect, no RB / RC / RE");
+        if (n_nocap) r.notes.push_back(std::to_string(n_nocap) + " device(s) without junction capacitances");
         if (!deck.ignored.empty()) {
             std::string s = "ignored directives:";
             for (const std::string& d : deck.ignored) s += " " + d;
