@@ -1829,6 +1829,222 @@ static bool read_network_field(JP& p, NetworkConfig& c, const std::string& key) 
     return true;
 }
 
+static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
+    o << "{\"label\":"; jstr(o, c.label);
+    o << ",\"schedule\":" << (int)c.schedule;
+    o << ",\"scheme\":"; jstr(o, c.scheme);
+    o << ",\"symmetry_s\":"; jstr(o, c.symmetry_s);
+    o << ",\"cd_fp_iters\":"; jstr(o, c.cd_fp_iters);
+    o << ",\"newton_tol\":"; jstr(o, c.newton.tol);
+    o << ",\"newton_max_iters\":"; jstr(o, c.newton.max_iters);
+    o << ",\"newton_full\":" << (c.newton.full ? "true" : "false");
+    o << ",\"h_text\":"; jstr(o, c.h_text);
+    o << ",\"t_max_text\":"; jstr(o, c.t_max_text);
+    o << ",\"transient_text\":"; jstr(o, c.transient_text);
+    o << ",\"pre_scaller_text\":"; jstr(o, c.pre_scaller_text);
+    o << ",\"max_value_text\":"; jstr(o, c.max_value_text);
+    o << ",\"coupling_text\":"; jstr(o, c.coupling_text);
+    o << ",\"seed_text\":"; jstr(o, c.seed_text);
+    o << ",\"observed_per_pop_text\":"; jstr(o, c.observed_per_pop_text);
+    o << ",\"graph_version\":" << kNeuralGraphVersion;
+    o << ",\"graph_recipe\":"; jstr(o, c.graph_recipe);
+    o << ",\"graph_hash\":"; jstr(o, c.graph_hash);
+    o << ",\"model_text\":"; jstr(o, c.model_text);
+    o << ",\"laws\":[";
+    for (size_t i = 0; i < c.laws.size(); ++i) {
+        if (i) o << ",";
+        o << "{\"name\":"; jstr(o, c.laws[i].name);
+        o << ",\"expr\":[";
+        for (size_t k = 0; k < c.laws[i].expr.size(); ++k) {
+            if (k) o << ",";
+            jstr(o, c.laws[i].expr[k]);
+        }
+        o << "]}";
+    }
+    o << "],\"populations\":[";
+    for (size_t i = 0; i < c.populations.size(); ++i) {
+        const NeuralPopulation& p = c.populations[i];
+        if (i) o << ",";
+        o << "{\"name\":"; jstr(o, p.name);
+        o << ",\"size\":"; jstr(o, p.size_text);
+        o << ",\"params\":"; jmap(o, p.param_values);
+        o << ",\"param_spread\":"; jmap_nonempty(o, p.param_spread);
+        o << ",\"ic\":"; jmap(o, p.initial_conditions);
+        o << ",\"ic_spread\":"; jmap_nonempty(o, p.ic_spread);
+        o << "}";
+    }
+    o << "],\"projections\":[";
+    for (size_t i = 0; i < c.projections.size(); ++i) {
+        const NeuralProjection& p = c.projections[i];
+        if (i) o << ",";
+        o << "{\"from\":" << p.from << ",\"to\":" << p.to << ",\"rule\":" << (int)p.rule;
+        o << ",\"p\":"; jstr(o, p.p_text);
+        o << ",\"degree\":"; jstr(o, p.degree_text);
+        o << ",\"k\":"; jstr(o, p.k_text);
+        o << ",\"width\":"; jstr(o, p.width_text);
+        o << ",\"rewire\":"; jstr(o, p.rewire_text);
+        o << ",\"periodic\":" << (p.periodic ? "true" : "false");
+        o << ",\"directed\":" << (p.directed ? "true" : "false");
+        o << ",\"weight\":"; jstr(o, p.weight_text);
+        o << ",\"weight_spread\":"; jstr(o, p.weight_spread_text);
+        o << ",\"norm\":" << (int)p.norm;
+        o << ",\"norm_expected\":" << (p.norm_expected ? "true" : "false");
+        o << ",\"law\":" << p.law << "}";
+    }
+    o << "]}";
+}
+
+static void read_neural_list(JP& p, const std::function<void(const std::string&)>& field) {
+    p.expect('[');
+    if (p.opt(']')) return;
+    while (true) {
+        p.expect('{');
+        if (!p.opt('}')) {
+            while (true) {
+                std::string k = p.str(); p.expect(':');
+                field(k);
+                if (p.opt(',')) continue;
+                p.expect('}'); break;
+            }
+        }
+        field("");
+        if (p.opt(',')) continue;
+        p.expect(']'); break;
+    }
+}
+
+static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
+    if      (key == "label")            c.label = p.str();
+    else if (key == "schedule")         c.schedule = (NeuralSchedule)std::stoi(p.str_or_num());
+    else if (key == "scheme")           c.scheme = p.str();
+    else if (key == "symmetry_s")       c.symmetry_s = p.str();
+    else if (key == "cd_fp_iters")      c.cd_fp_iters = p.str();
+    else if (key == "newton_tol")       c.newton.tol = p.str();
+    else if (key == "newton_max_iters") c.newton.max_iters = p.str();
+    else if (key == "newton_full")      c.newton.full = p.boolean();
+    else if (key == "h_text")           c.h_text = p.str();
+    else if (key == "t_max_text")       c.t_max_text = p.str();
+    else if (key == "transient_text")   c.transient_text = p.str();
+    else if (key == "pre_scaller_text") c.pre_scaller_text = p.str();
+    else if (key == "max_value_text")   c.max_value_text = p.str();
+    else if (key == "coupling_text")    c.coupling_text = p.str();
+    else if (key == "seed_text")        c.seed_text = p.str();
+    else if (key == "observed_per_pop_text") c.observed_per_pop_text = p.str();
+    else if (key == "graph_recipe")     c.graph_recipe = p.str();
+    else if (key == "graph_hash")       c.graph_hash = p.str();
+    else if (key == "model_text")       c.model_text = p.str();
+    else if (key == "laws") {
+        c.laws.clear();
+        NetCouplingLaw l;
+        read_neural_list(p, [&](const std::string& k) {
+            if (k.empty()) { c.laws.push_back(l); l = NetCouplingLaw{}; }
+            else if (k == "name") l.name = p.str();
+            else if (k == "expr") {
+                p.expect('[');
+                if (!p.opt(']')) while (true) { l.expr.push_back(p.str()); if (p.opt(',')) continue; p.expect(']'); break; }
+            }
+            else p.skip_value();
+        });
+    }
+    else if (key == "populations") {
+        c.populations.clear();
+        NeuralPopulation q;
+        read_neural_list(p, [&](const std::string& k) {
+            if (k.empty()) { c.populations.push_back(q); q = NeuralPopulation{}; }
+            else if (k == "name") q.name = p.str();
+            else if (k == "size") q.size_text = p.str();
+            else if (k == "params") q.param_values = p.map_ss();
+            else if (k == "param_spread") q.param_spread = p.map_ss();
+            else if (k == "ic") q.initial_conditions = p.map_ss();
+            else if (k == "ic_spread") q.ic_spread = p.map_ss();
+            else p.skip_value();
+        });
+    }
+    else if (key == "projections") {
+        c.projections.clear();
+        NeuralProjection q;
+        read_neural_list(p, [&](const std::string& k) {
+            if (k.empty()) { c.projections.push_back(q); q = NeuralProjection{}; }
+            else if (k == "from") q.from = std::stoi(p.str_or_num());
+            else if (k == "to") q.to = std::stoi(p.str_or_num());
+            else if (k == "rule") q.rule = (NeuralRule)std::stoi(p.str_or_num());
+            else if (k == "p") q.p_text = p.str();
+            else if (k == "degree") q.degree_text = p.str();
+            else if (k == "k") q.k_text = p.str();
+            else if (k == "width") q.width_text = p.str();
+            else if (k == "rewire") q.rewire_text = p.str();
+            else if (k == "periodic") q.periodic = p.boolean();
+            else if (k == "directed") q.directed = p.boolean();
+            else if (k == "weight") q.weight_text = p.str();
+            else if (k == "weight_spread") q.weight_spread_text = p.str();
+            else if (k == "norm") q.norm = (NeuralNorm)std::stoi(p.str_or_num());
+            else if (k == "norm_expected") q.norm_expected = p.boolean();
+            else if (k == "law") q.law = std::stoi(p.str_or_num());
+            else p.skip_value();
+        });
+    }
+    else return false;
+    return true;
+}
+
+std::string session_to_json_neural(const NeuralSession& s) {
+    std::ostringstream o;
+    o << "{\n  \"active_config_index\":" << s.active_config_index << ",\n  \"configs\":[";
+    for (size_t i = 0; i < s.configs.size(); ++i) {
+        if (i) o << ",";
+        o << "\n    ";
+        write_neural_config(o, s.configs[i]);
+    }
+    if (!s.configs.empty()) o << "\n  ";
+    o << "]\n}\n";
+    return o.str();
+}
+
+bool session_from_json_neural(const std::string& json, NeuralSession& s) {
+    try {
+        JP p(json);
+        p.expect('{');
+        if (p.opt('}')) return true;
+        std::vector<NeuralConfig> configs;
+        int active = 0;
+        while (true) {
+            std::string key = p.str();
+            p.expect(':');
+            if (key == "configs") {
+                p.expect('[');
+                if (!p.opt(']')) {
+                    while (true) {
+                        p.expect('{');
+                        NeuralConfig c;
+                        if (!p.opt('}')) {
+                            while (true) {
+                                std::string k2 = p.str(); p.expect(':');
+                                if (!read_neural_field(p, c, k2)) p.skip_value();
+                                if (p.opt(',')) continue;
+                                p.expect('}'); break;
+                            }
+                        }
+                        if (c.laws.empty()) c.laws.push_back(net_default_law(s.vars));
+                        configs.push_back(std::move(c));
+                        if (p.opt(',')) continue;
+                        p.expect(']'); break;
+                    }
+                }
+            }
+            else if (key == "active_config_index") active = std::stoi(p.str_or_num());
+            else p.skip_value();
+            if (p.opt(',')) continue;
+            p.expect('}'); break;
+        }
+        if (!configs.empty()) s.configs = std::move(configs);
+        s.active_config_index = (active >= 0 && active < (int)s.configs.size()) ? active : 0;
+        s.running_config_index = -1;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 std::string session_to_json_network(const NetworkSession& s) {
     std::ostringstream o;
     o << "{\n";

@@ -172,7 +172,7 @@ D:\U-CUDA\
   `bifurcation2d.template.cu` / `signal_metrics.template.cu`.
 
 ### App Model / State
-- **app_model.h / .cpp** — `AppModel`: modes (Library / Analysis / Parametric / Dft1D / Basins / FastSync / Custom / Order / Network / Settings), task queues (`ParametricQueueItem`, `BasinsQueueItem`, `FastSyncQueueItem`), OCR state (`OcrState`), selected integration schemes
+- **app_model.h / .cpp** — `AppModel`: modes (Library / Analysis / Parametric / Dft1D / Basins / FastSync / Custom / Order / Network / Neural / Settings), task queues (`ParametricQueueItem`, `BasinsQueueItem`, `FastSyncQueueItem`), OCR state (`OcrState`), selected integration schemes
 - **app_config.cpp / .h** — App settings serialization
 - **analysis_session.cpp / .h** — Snapshot of parameters for one "analysis session"
 - **network_session.cpp / .h** — вкладка Network: топология (генераторы кольца,
@@ -181,6 +181,14 @@ D:\U-CUDA\
   считается РАСЩЕПЛЕНИЕМ (шаг узла, затем `X += h*coupling`), как в
   `calculateDiscreteModelforFastSynchro`, — поэтому на вкладке работают все
   схемы, но сама связь интегрируется первым порядком
+- **neural_session.cpp / .h** — вкладка Neural (большие сети, движок `run_neural`): популяции и проекции
+  вместо узлов и рёбер, правила соединения Probability / Fixed in-degree / Chain / Ring / Grid / King /
+  Small world, нормировка на проекции (нет, на проекцию, на все входы узла; фактическая или ожидаемая
+  степень). Сессия хранит рецепт, а не рёбра: граф строит `neural_build_graph` при запуске в рабочем
+  потоке. Случайность своя, поток на (seed, проекция, узел); начало потока обязано идти через mix64,
+  иначе соседние узлы получают одну последовательность со сдвигом (степени смещаются). Хеш графа
+  хранится с рецептом: тот же рецепт с другим хешем отказывает, кнопка пересобирает как новый
+  эксперимент. Изменение генератора: поднять `kNeuralGraphVersion`. Интерфейс: `gui_neural.cpp`
 - **session_io.cpp / .h** — Save/load sessions to JSON; also the step controller
   library file (`load_ctrl_library` / `save_ctrl_library`)
 - **order_session.cpp / .h** — вкладка Order: порядок, Performance (в т.ч.
@@ -203,7 +211,7 @@ D:\U-CUDA\
   fields, scheme combo, Integration/Newton blocks, toolbars, export menus), `gui_system.cpp` (System tab,
   Extr/Comp builders, Generate, parameters, library list/editor incl. DAE), `gui_analysis.cpp`,
   `gui_parametric.cpp` (BD / LLE / LS / Metrics + Parametric windows), `gui_dft_basins.cpp`, `gui_fastsync.cpp`,
-  `gui_order.cpp`, `gui_network.cpp`, `gui_custom.cpp`. **gui_internal.h** — what several of them share:
+  `gui_order.cpp`, `gui_network.cpp`, `gui_neural.cpp`, `gui_custom.cpp`. **gui_internal.h** — what several of them share:
   includes, types, constants, templates, prototypes (default arguments live only there). A helper used by one
   tab stays `static` in that tab's file; when another tab needs it, move its prototype into gui_internal.h and
   drop `static` (and the default arguments from the definition).

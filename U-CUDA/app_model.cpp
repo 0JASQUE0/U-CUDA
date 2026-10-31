@@ -735,6 +735,20 @@ bool AppModel::start_network_analysis() {
     return true;
 }
 
+bool AppModel::start_neural_analysis() {
+    if (!refresh_symbols()) return false;
+    SystemRecord r = to_record();
+    neural_session.load_from_record(r, known_vars, known_params);
+    try {
+        System built = build_system();
+        neural_session.sys = built;
+    }
+    catch (...) {}
+    neural_session.loaded_system_name = name;
+    ++session_epoch[(int)AppMode::Neural];
+    return true;
+}
+
 bool AppModel::start_fastsync_analysis() {
     if (!refresh_symbols()) return false;
     SystemRecord r = to_record();
@@ -1428,6 +1442,7 @@ void AppModel::propagate_to_sessions() {
     custom_session.basins_session.enabled_builtin_schemes = enabled_now;
     order_session.enabled_builtin_schemes                 = enabled_now;
     network_session.enabled_builtin_schemes               = enabled_now;
+    neural_session.enabled_builtin_schemes                = enabled_now;
 
     // sys обновляем для built-in схем (Euler/RK4/...): они используют
     // sys.rhs внутри compute_krs_for_scheme → codegen_scheme. Если уравнения
@@ -1443,6 +1458,7 @@ void AppModel::propagate_to_sessions() {
         dft1d_session.sys       = built;
         basins_session.sys      = built;
         fastsync_session.sys    = built;
+        neural_session.sys      = built;
         custom_session.sys                = built;
         custom_session.bif_session.sys    = built;
         custom_session.lle_session.sys    = built;

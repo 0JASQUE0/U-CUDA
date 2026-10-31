@@ -145,6 +145,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClCompile Include="custom_session.cpp" />
     <ClCompile Include="order_session.cpp" />
     <ClCompile Include="network_session.cpp" />
+    <ClCompile Include="neural_session.cpp" />
     <ClCompile Include="app_main.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <LanguageStandard Condition="'$(Configuration)|$(Platform)'=='Release|x64'">stdcpp17</LanguageStandard>
@@ -172,6 +173,7 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClCompile Include="gui_dft_basins.cpp" />
     <ClCompile Include="gui_fastsync.cpp" />
     <ClCompile Include="gui_network.cpp" />
+    <ClCompile Include="gui_neural.cpp" />
     <ClCompile Include="gui_order.cpp" />
     <ClCompile Include="gui_parametric.cpp" />
     <ClCompile Include="gui_system.cpp" />
@@ -200,6 +202,8 @@ xcopy /Y /I "$(ProjectDir)configCUDA.h"    "$(OutDir)kernels\"</Command>
     <ClInclude Include="custom_session.h" />
     <ClInclude Include="order_session.h" />
     <ClInclude Include="network_session.h" />
+    <ClInclude Include="neural_session.h" />
+    <ClInclude Include="neural_engine.h" />
     <ClInclude Include="app_config.h" />
     <ClInclude Include="app_model.h" />
     <ClInclude Include="circuit_codegen.h" />

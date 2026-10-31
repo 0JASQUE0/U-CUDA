@@ -11979,6 +11979,7 @@ struct ParametricEngine::Impl {
             for (int i = 0; i < N; ++i) for (int k = 0; k < nx; ++k)
                 res.final_state[(size_t)i * nx + k] = (double)soa[(size_t)k * N + i];
         }
+        res.observed = ob.nodes;
         res.traces = std::move(traces);
         res.means = std::move(means);
         res.n_nodes = N; res.n_vars = nx; res.n_points = nPoints;

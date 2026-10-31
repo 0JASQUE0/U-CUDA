@@ -73,6 +73,7 @@ struct NeuralResult {
     double h = 0.0, t0 = 0.0, dt = 0.0;
 
     // Точки после остановки NaN. У post и heun наблюдается состояние до связи.
+    std::vector<int>    observed;      // номера выбранных узлов
     std::vector<double> traces;        // [point][selected][var]
     std::vector<double> means;         // [point][pop][var]
     std::vector<double> final_state;   // [n_nodes * amountOfX], узел за узлом

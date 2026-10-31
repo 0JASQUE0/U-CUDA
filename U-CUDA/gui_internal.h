@@ -444,6 +444,7 @@ static const ModeTab kModeTabs[] = {
     { "Custom",     "Custom",         AppModel::AppMode::Custom,     false },
     { "Order",      "Order",          AppModel::AppMode::Order,      false },
     { "Network",    "Network",        AppModel::AppMode::Network,    false },
+    { "Neural",     "Neural",         AppModel::AppMode::Neural,     false },
     { "Settings",   "Settings",       AppModel::AppMode::Settings,   true  },
 };
 [[nodiscard]] std::vector<const char*> c_str_list(const std::vector<std::string>& v);
@@ -996,6 +997,9 @@ int net_degree(const NetworkConfig& c, int node);
 void net_mark_custom(NetworkConfig& c);
 std::string net_validate_laws(const NetworkSession& s, const NetworkConfig& c);
 void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/);
+// Neural — большие сети: окно настроек и кривые (means: средние по популяциям, иначе выбранные узлы).
+void draw_neural_controls(AppModel& model, SystemLibrary& lib);
+void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DView& view, bool means);
 void draw_network_graph_window(AppModel& model);
 void draw_network_series_window(AppModel& model, PlotRenderer& renderer, Plot2DView& view);
 void draw_network_raster_window(AppModel& model, PlotRenderer& renderer, HeatmapView& view);

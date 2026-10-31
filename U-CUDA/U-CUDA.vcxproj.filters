@@ -73,6 +73,9 @@
     <ClCompile Include="gui_network.cpp">
       <Filter>GUI</Filter>
     </ClCompile>
+    <ClCompile Include="gui_neural.cpp">
+      <Filter>GUI</Filter>
+    </ClCompile>
     <ClCompile Include="gui_order.cpp">
       <Filter>GUI</Filter>
     </ClCompile>
@@ -113,6 +116,9 @@
       <Filter>Compute</Filter>
     </ClCompile>
     <ClCompile Include="network_session.cpp">
+      <Filter>Compute</Filter>
+    </ClCompile>
+    <ClCompile Include="neural_session.cpp">
       <Filter>Compute</Filter>
     </ClCompile>
     <ClCompile Include="phase_portrait_nvrtc.cpp">
@@ -253,6 +259,12 @@
       <Filter>Compute</Filter>
     </ClInclude>
     <ClInclude Include="network_session.h">
+      <Filter>Compute</Filter>
+    </ClInclude>
+    <ClInclude Include="neural_session.h">
+      <Filter>Compute</Filter>
+    </ClInclude>
+    <ClInclude Include="neural_engine.h">
       <Filter>Compute</Filter>
     </ClInclude>
     <ClInclude Include="nvrtc_engine.h">

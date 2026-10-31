@@ -101,6 +101,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.fastsync_session.custom_schemes    = model.custom_schemes;
     model.order_session.custom_schemes       = model.custom_schemes;
     model.network_session.custom_schemes     = model.custom_schemes;
+    model.neural_session.custom_schemes      = model.custom_schemes;
     // Custom tab owns 5 isolated sub-sessions — same per-frame sync applies.
     model.custom_session.custom_schemes                = model.custom_schemes;
     model.custom_session.bif_session.custom_schemes    = model.custom_schemes;
@@ -120,6 +121,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.fastsync_session.wrapper_schemes    = wrappers_on;
     model.order_session.wrapper_schemes       = wrappers_on;
     model.network_session.wrapper_schemes     = wrappers_on;
+    model.neural_session.wrapper_schemes      = wrappers_on;
     model.custom_session.wrapper_schemes                = wrappers_on;
     model.custom_session.bif_session.wrapper_schemes    = wrappers_on;
     model.custom_session.lle_session.wrapper_schemes    = wrappers_on;
@@ -170,7 +172,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                  &model.dft1d_session.enabled_builtin_schemes,
                  &model.fastsync_session.enabled_builtin_schemes,
                  &model.order_session.enabled_builtin_schemes,
-                 &model.network_session.enabled_builtin_schemes })
+                 &model.network_session.enabled_builtin_schemes,
+                 &model.neural_session.enabled_builtin_schemes })
             if (*dst != enabled_fixed) *dst = enabled_fixed;
     }
 
@@ -313,6 +316,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         if (!model.loaded_name.empty())
             lib.save_session(model.loaded_name, "_last_network",
                              session_to_json_network(model.network_session));
+    }
+    if (model.neural_session.poll()) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_neural",
+                             session_to_json_neural(model.neural_session));
     }
     // Custom tab: aggregate poll of all 5 sub-sessions; one bundle save on any completion, чтобы
     // не переписывать _last_custom.json пять раз. Сохраняем и на любой мутации workspace
@@ -756,6 +764,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
            || model.fastsync_session.in_flight
            || model.order_session.in_flight
            || model.network_session.in_flight
+           || model.neural_session.in_flight
            || model.custom_session.any_in_flight();
         const float combo_w = 240.0f;
         std::string preview = model.name.empty() ? std::string("(select system)") : model.name;
@@ -837,8 +846,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                            model.app_mode != AppModel::AppMode::Order;
     bool entering_network = (AppModel::AppMode)mode == AppModel::AppMode::Network &&
                             model.app_mode != AppModel::AppMode::Network;
+    bool entering_neural = (AppModel::AppMode)mode == AppModel::AppMode::Neural &&
+                           model.app_mode != AppModel::AppMode::Neural;
     if (entering_phase || entering_par || entering_dft1d || entering_basins || entering_fastsync
-        || entering_custom || entering_order || entering_network) {
+        || entering_custom || entering_order || entering_network || entering_neural) {
         // обновим known_vars/known_params из живого алфавита, чтобы сравнение
         // ниже было против актуального состояния
         model.refresh_symbols();
@@ -920,6 +931,17 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         if (!model.loaded_name.empty()) {
             std::string jn = lib.load_session(model.loaded_name, "_last_network");
             apply_session_json(model, jn, model.network_session, session_from_json_network, "_last_network");
+        }
+    }
+    auto neural_need_init = model.neural_session.loaded_system_name != model.name
+                         || model.neural_session.vars.empty()
+                         || model.neural_session.vars   != model.known_vars
+                         || model.neural_session.params != model.known_params;
+    if (entering_neural && neural_need_init) {
+        model.start_neural_analysis();
+        if (!model.loaded_name.empty()) {
+            std::string jn = lib.load_session(model.loaded_name, "_last_neural");
+            apply_session_json(model, jn, model.neural_session, session_from_json_neural, "_last_neural");
         }
     }
     // Окна могли не появиться вовсе: несохранённая система (loaded_name пуст,
@@ -1107,6 +1129,29 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::End();
         if (ImGui::Begin("Spatiotemporal")) {
             draw_network_raster_window(model, *rnd_raster, net_raster_view);
+        }
+        ImGui::End();
+    }
+    else if (model.app_mode == AppModel::AppMode::Neural) {
+        static std::unique_ptr<PlotRenderer> rnd_means, rnd_nodes;
+        static Plot2DView neural_means_view, neural_nodes_view;
+        static int seen_epoch = 0;
+        if (session_reloaded(model, AppModel::AppMode::Neural, seen_epoch)) {
+            invalidate_view(neural_means_view);
+            invalidate_view(neural_nodes_view);
+        }
+        if (!rnd_means) rnd_means = std::make_unique<PlotRenderer>();
+        if (!rnd_nodes) rnd_nodes = std::make_unique<PlotRenderer>();
+        if (ImGui::Begin("Neural Controls")) {
+            draw_neural_controls(model, lib);
+        }
+        ImGui::End();
+        if (ImGui::Begin("Population Means")) {
+            draw_neural_series_window(model, *rnd_means, neural_means_view, true);
+        }
+        ImGui::End();
+        if (ImGui::Begin("Observed Nodes")) {
+            draw_neural_series_window(model, *rnd_nodes, neural_nodes_view, false);
         }
         ImGui::End();
     }

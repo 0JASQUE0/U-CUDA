@@ -7,6 +7,7 @@
 #include "custom_session.h"
 #include "order_session.h"
 #include "network_session.h"
+#include "neural_session.h"
 #include "prewarm_watch.h"
 #include <map>
 #include <set>
@@ -218,6 +219,11 @@ struct NetworkQueueItem {
 // Состояние ОТОБРАЖЕНИЯ вкладки Network. В конфиг ему нельзя: конфиг — это
 // то, что уходит в расчёт, а выбранный узел, курсор времени и набор кривых
 // результат не меняют (и в очередь "Run all" не должны попадать).
+// Отображение вкладки Neural; в расчёт не входит, как у Network.
+struct NeuralViewState {
+    int series_var = 0;
+};
+
 struct NetworkViewState {
     int   selected_node = -1;
     int   selected_edge = -1;
@@ -641,13 +647,13 @@ public:
     // Order добавлен В КОНЕЦ намеренно: last_app_mode сериализуется в app_config
     // целым числом, и вставка в середину сбросила бы всем сохранённую вкладку.
     // Порядок кнопок в UI задаётся отдельно (см. draw_gui).
-    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings, Order, Network };
+    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings, Order, Network, Neural };
     AppMode app_mode = AppMode::Library;
 
     // Число элементов AppMode. Нужно для клампа last_app_mode из конфига:
     // литерал в app_main.cpp отставал от enum'а (стоял 8 при девяти режимах,
     // из-за чего Order не восстанавливался на старте).
-    static constexpr int kAppModeCount = 10;
+    static constexpr int kAppModeCount = 11;
 
     // Номер пересоздания сессий вкладки (++ в start_*_analysis). Сессия грузится с
     // data_generation = 0, а static-вью вкладки помнят поколение прошлой: по смене номера gui сбрасывает их.
@@ -664,7 +670,7 @@ public:
     // того, у кого конфиг уже есть, список берётся из него и этот дефолт не
     // применяется вовсе. Тот же дефолт продублирован в AppConfig::hidden_tabs —
     // на случай конфига без ключа.
-    std::vector<std::string> hidden_tabs { "Dft1D", "FastSync", "Order", "Network" };
+    std::vector<std::string> hidden_tabs { "Dft1D", "FastSync", "Order", "Network", "Neural" };
     std::vector<std::string> hidden_schemes;
     // Методы ДАУ, скрытые из списка редактора ДАУ (Settings -> DAE methods). Зеркалит
     // AppConfig::hidden_dae_methods; дефолт свежей установки ставит app_main.
@@ -716,6 +722,9 @@ public:
     // Network — сеть связанных осцилляторов на задаваемой топологии.
     NetworkSession             network_session;
     NetworkViewState           network_view;
+    // Neural — большие сети: популяции и проекции, kernels/neural.template.cu.
+    NeuralSession              neural_session;
+    NeuralViewState            neural_view;
 
     // Custom pipeline — hierarchical 2D → 1D → Phase/Basins with a shared
     // config layer and drill-down click bindings. Owns its OWN Bif/LLE/LS/
@@ -999,6 +1008,7 @@ public:
     bool start_basins_analysis();
     bool start_order_analysis();
     bool start_network_analysis();
+    bool start_neural_analysis();
     bool start_fastsync_analysis();
     // Initialise the Custom pipeline: seeds shared config from the record and
     // populates each sub-session with the fixed 3-slot layout (2D/1D-X/1D-Y).
