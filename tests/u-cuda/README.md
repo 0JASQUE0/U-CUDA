@@ -14,6 +14,7 @@
 | `architecture` | старый JSON сессии, круг JSON для стилей проекций и адаптивных настроек, очередь Parametric при удалении диаграммы, очередь DFT, отмена; записи систем ОДУ/ДАУ (старый формат, поля ДАУ) | CPU |
 | `sessions` | каждый `library/*/system.json` и каждая из 242 сессий `library/*/sessions/*.json` разбираются своим разборщиком (по имени файла, как GUI) и проходят круг разбор -> запись -> разбор -> запись без изменений | CPU |
 | `tabs` | вкладки через их сессии (`load_from_record` -> `run_async` -> `poll`): Order — порядок Euler ~1 / RK4 ~4 на GPU и CPU, Performance, область устойчивости (Dahlquist 2D); Network — кольцо 16 узлов Лоренца, траектории конечны | CPU, GPU |
+| `network` | FHN/HR без локальной Library: 24 комбинации схем/топологий, повторяемость, побитовое равенство при смене чанка, включении таймера; запись/сравнение baseline и benchmark — см. [NETWORK_BASELINE.md](NETWORK_BASELINE.md) | GPU |
 | `library` | вся `library/`: каждая система (ОДУ, отображения, ДАУ) — БД 1D и LLE на GPU и CPU, LS, Metrics, бассейны, DFT на GPU; модуль собирается, результат нужной длины, точки-колебания конечны; пользовательские КРС записей — БД 1D и LLE (их поломка — предупреждение: это данные записи). ~17 минут | CPU, GPU |
 | `kicad` | KiCad (пропуск без него): все демо `demos\simulation` через kicad-cli в импорт (что прошло, что отвергнуто и почему); сверка переходного процесса с ngspice из `ngspice.dll` KiCad: выпрямитель и generic_opamp_bip из демо, BJT с C(v), MOSFET, JFET, K, B ?:, SFFM | CPU |
 | `spice` | импорт SPICE-netlist'а в ДАУ: RC с SIN / PULSE / PWL против эталонной ОДУ, интегратор на TL072 в `.subckt` с параметрами, F/H, отказы; круговой тест Лоренц → синтез → netlist (B и POLY) → граф (та же топология) → ДАУ = `circuit_simulate`; импорт `tests/fixtures/lorenz_reference.cir` | CPU |
@@ -33,5 +34,5 @@ tests\u-cuda\run_tests.bat dae        rem один или несколько
 Каждый тест собирается cl.exe против объектников `U-CUDA\x64\Release` (без `.vcxproj` и CMake),
 запускается из `tests\u-cuda\build` со свежей копией `x64\Release\kernels`. Код выхода: 0 — прошёл,
 77 — нет CUDA (GPU-часть пропущена), иначе — упал; итог — `ALL PASSED` / `SOME TESTS FAILED`.
-`architecture`, `sessions` и `tabs` линкуются со всем приложением (сессии тянут типы окон графиков), остальные — только
+`architecture`, `sessions`, `tabs` и `network` линкуются со всем приложением (сессии тянут типы окон графиков), остальные — только
 с вычислительными объектниками.

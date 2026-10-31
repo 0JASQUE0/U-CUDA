@@ -11421,6 +11421,7 @@ struct ParametricEngine::Impl {
         if (req.transient < 0.0) return fail("transient must be >= 0");
         if (req.pre_scaller < 1) return fail("preScaller must be >= 1");
         if (req.max_points < 2)  return fail("max_points must be >= 2");
+        if (req.steps_per_launch < 0) return fail("steps_per_launch must be >= 0");
 
         // Состояние всей сети живёт в динамической shared — отсюда потолок.
         const size_t shared_bytes = (size_t)req.n_nodes * (size_t)req.amountOfX * sizeof(numb);
@@ -11515,6 +11516,27 @@ struct ParametricEngine::Impl {
         if (stepsPerLaunch < 1)          stepsPerLaunch = 1;
         if (stepsPerLaunch > totalSteps) stepsPerLaunch = totalSteps;
 
+        if (req.steps_per_launch > 0 && req.steps_per_launch < stepsPerLaunch)
+            stepsPerLaunch = req.steps_per_launch;
+
+        // Event pairs are allocated only for an explicit benchmark request.
+        // Record the end before host polling/status copies, so these are excluded.
+        struct NetworkEvents {
+            CUevent begin = nullptr, end = nullptr;
+            ~NetworkEvents() {
+                if (end && cuEventDestroy(end) != CUDA_SUCCESS)
+                    std::fprintf(stderr, "network: cuEventDestroy(end) failed\n");
+                if (begin && cuEventDestroy(begin) != CUDA_SUCCESS)
+                    std::fprintf(stderr, "network: cuEventDestroy(begin) failed\n");
+            }
+        } events;
+        if (req.measure_gpu_time) {
+            CUresult r = cuEventCreate(&events.begin, CU_EVENT_DEFAULT);
+            if (r != CUDA_SUCCESS) return fail("network event create: " + cu_err(r));
+            r = cuEventCreate(&events.end, CU_EVENT_DEFAULT);
+            if (r != CUDA_SUCCESS) return fail("network event create: " + cu_err(r));
+        }
+
         const int    progressStride = progress_stride_for((size_t)totalSteps);
         const double ticksTotal     = (double)totalSteps / (double)progressStride;
         double ticksDone = 0.0;
@@ -11550,14 +11572,30 @@ struct ParametricEngine::Impl {
             };
 
             sig.resetTicks();
+            if (req.measure_gpu_time) {
+                CUresult r = cuEventRecord(events.begin, nullptr);
+                if (r != CUDA_SUCCESS) return fail("network event begin: " + cu_err(r));
+            }
             CUresult r = cuLaunchKernel(cached_network.kernel, 1, 1, 1, blockSize, 1, 1,
                                         (unsigned)shared_bytes, nullptr, args, nullptr);
             if (r != CUDA_SUCCESS) return fail("cuLaunchKernel(network): " + cu_err(r));
+            ++res.launch_count;
+            if (req.measure_gpu_time) {
+                r = cuEventRecord(events.end, nullptr);
+                if (r != CUDA_SUCCESS) return fail("network event end: " + cu_err(r));
+            }
             if (!wait_with_signals(0, sig, req.cancel, req.progress, ticksDone, ticksTotal, err))
                 return fail(err);
             cudaDeviceSynchronize();
             cudaError_t ce = cudaGetLastError();
             if (ce != cudaSuccess) return fail(std::string("network kernel: ") + cudaGetErrorString(ce));
+
+            if (req.measure_gpu_time) {
+                float elapsed = 0.0f; // CUDA event API requires float milliseconds.
+                r = cuEventElapsedTime(&elapsed, events.begin, events.end);
+                if (r != CUDA_SUCCESS) return fail("network event elapsed: " + cu_err(r));
+                res.gpu_ms += elapsed;
+            }
 
             ticksDone += (double)count / (double)progressStride;
 

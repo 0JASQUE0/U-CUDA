@@ -1453,6 +1453,12 @@ struct NetworkRequest {
                                     // pre_scaller, если при заданном не влезает
     double max_value = 1.0e6;
 
+    // Optional chunk cap for reproducibility tests / headless runs. 0 keeps the
+    // existing automatic TDR budget; a positive value can only shorten it.
+    long long steps_per_launch = 0;
+    // CUDA event timing around kernel launches only; opt-in, no events by default.
+    bool measure_gpu_time = false;
+
     // See Bifurcation1DRequest::cancel / ::progress.
     std::shared_ptr<std::atomic<bool>>  cancel;
     std::shared_ptr<std::atomic<float>> progress;
@@ -1481,6 +1487,9 @@ struct NetworkResult {
     std::vector<double> data;
     std::vector<int>    status;     // [n_nodes], NetworkNodeStatus
     int n_diverged = 0;
+
+    double gpu_ms = 0.0;            // sum of kernel event intervals (when requested)
+    int launch_count = 0;
 
     // Диапазоны по переменной, по КОНЕЧНЫМ значениям — для автоскейла кривых
     // и раскраски графа.
