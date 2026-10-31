@@ -42,6 +42,8 @@ U-CUDA/library/
 docs/
 
 # Local-only Claude session notes / tooling state
+/.claude/
+/AGENTS.md
 CLAUDE_QUICKREF.md
 .understand-anything/
 
