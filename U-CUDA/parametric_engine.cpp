@@ -207,6 +207,13 @@ constexpr size_t kNetworkOutCap = 512u * 1024u * 1024u;
 // Узло-шагов на один запуск ядра. Блок один, то есть работает один SM, и
 // запуск на весь расчёт легко перевалил бы за watchdog драйвера.
 constexpr double kNetworkWorkBudget = 1.0e7;
+// Neural: блок и группа средних подобраны замерами; синхронизация по числу обновлений узлов и дуг,
+// порядка 30 мс работы между проверками отмены и разлёта.
+constexpr int    kNeuralDefaultBlock = 16;
+constexpr int    kNeuralObserveBlock = 64;
+constexpr int    kNeuralMeanGroup    = 256;
+constexpr double kNeuralWorkPerSync  = 2.0e8;
+constexpr size_t kNeuralFlushBytes   = 64u * 1024u * 1024u;
 
 // Зеркало constexpr-констант configCUDA.h. Сам заголовок сюда не включается — он читается как
 // ТЕКСТ и уходит в NVRTC (src_configCUDA_h), поэтому значения дублируются литералами, как уже
@@ -2263,6 +2270,7 @@ struct ParametricEngine::Impl {
         reset_cancel_mirror_pool(pool_fs_grid);
         reset_cancel_mirror_pool(pool_order);
         reset_cancel_mirror_pool(pool_network);
+        reset_cancel_mirror_pool(pool_neural);
         reset_cancel_mirror_pool(pool_metrics);
     }
 
@@ -2298,6 +2306,7 @@ struct ParametricEngine::Impl {
     std::string src_template_fs_grid; // fastsync_grid.template.cu (mode 1)
     std::string src_template_order;   // order.template.cu
     std::string src_template_network; // network.template.cu
+    std::string src_template_neural;  // neural.template.cu
     std::string src_template_metrics; // signal_metrics.template.cu
     bool     srcs_loaded     = false;
     uint64_t srcs_peak_epoch = 0;   // != peak_config_epoch() -> пересобрать configCUDA.h
@@ -2451,6 +2460,16 @@ struct ParametricEngine::Impl {
     };
     CachedNetworkModule cached_network;
 
+    // Neural — модуль на расписание: шаг выбирается в шаблоне, а не ветвлением в ядре.
+    struct CachedNeuralModule {
+        std::string key;
+        CUmodule    module = nullptr;
+        CUfunction  step = nullptr;          // neuralStepKernel
+        CUfunction  observe = nullptr;       // neuralObserveKernel
+        CUfunction  mean = nullptr;          // neuralMeanKernel
+    };
+    CachedNeuralModule cached_neural;
+
     // Signal metrics — свой шаблон и одно ядро; ключ как у bif2d (+ par_or_var).
     struct CachedMetricsModule {
         std::string key;
@@ -2492,6 +2511,7 @@ struct ParametricEngine::Impl {
     ModuleLru<CachedFastSyncModule>    pool_fs_grid   { kModuleCacheCapacity };
     ModuleLru<CachedOrderModule>       pool_order     { kModuleCacheCapacity };
     ModuleLru<CachedNetworkModule>     pool_network   { kModuleCacheCapacity };
+    ModuleLru<CachedNeuralModule>      pool_neural    { kModuleCacheCapacity };
     ModuleLru<CachedMetricsModule>     pool_metrics   { kModuleCacheCapacity };
 
     // Activates the module already built for this key, if the pool still holds it.
@@ -2590,6 +2610,7 @@ struct ParametricEngine::Impl {
             drain_pool(pool_fs_grid);
             drain_pool(pool_order);
             drain_pool(pool_network);
+            drain_pool(pool_neural);
             drain_pool(pool_metrics);
             cuCtxDestroy(context);
         }
@@ -2652,6 +2673,7 @@ struct ParametricEngine::Impl {
         src_template_fs_grid  = read_text_file(root + "fastsync_grid.template.cu",     e); if (!e.empty()) { err = e; return false; }
         src_template_order    = read_text_file(root + "order.template.cu",            e); if (!e.empty()) { err = e; return false; }
         src_template_network  = read_text_file(root + "network.template.cu",          e); if (!e.empty()) { err = e; return false; }
+        src_template_neural   = read_text_file(root + "neural.template.cu",           e); if (!e.empty()) { err = e; return false; }
         src_template_metrics  = read_text_file(root + "signal_metrics.template.cu",   e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cu    = read_text_file(root + "cudaLibrary.cu",            e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }
@@ -11647,6 +11669,324 @@ struct ParametricEngine::Impl {
         res.ok          = true;
         return res;
     }
+
+    // -----------------------------------------------------------------------
+    // Neural — одна сеть на много блоков (kernels/neural.template.cu).
+
+    bool compile_neural_module(bool activate, const NeuralRequest& req, std::string& err) {
+        cuCtxSetCurrent(context);
+        const int sched = (int)req.schedule;
+        const std::string key = hash_key(req.krs_body, req.amountOfX) + ":neural:v"
+                              + std::to_string(req.amountOfValues) + ":s" + std::to_string(sched)
+                              + ":l" + std::to_string(req.n_laws)
+                              + ":c" + std::to_string(std::hash<std::string>{}(req.coupling_body))
+                              + ":r" + std::to_string(std::hash<std::string>{}(req.rhs_body));
+        return compile_into(pool_neural, key, cached_neural, activate, [&](CachedNeuralModule& fresh) {
+            CUmodule mod = nullptr;
+            std::vector<std::string> lowered;
+            if (!build_module(snapshot_sources(src_template_neural), "neural.cu",
+                              { { "{{AMOUNT_OF_X}}",      std::to_string(req.amountOfX) },
+                                { "{{AMOUNT_OF_VALUES}}", std::to_string(req.amountOfValues) },
+                                { "{{NEURAL_SCHED}}",     std::to_string(sched) },
+                                { "{{NEURAL_LAWS}}",      std::to_string(req.n_laws) },
+                                { "{{KRS_BODY}}",         req.krs_body },
+                                { "{{KRS_RHS_BODY}}",     req.rhs_body },
+                                { "{{COUPLING_BODY}}",    req.coupling_body } },
+                              {}, mod, lowered, err))
+                return false;
+            fresh.key = key;
+            fresh.module = mod;
+            if (!module_fn(mod, "neuralStepKernel", fresh.step, err)
+                || !module_fn(mod, "neuralObserveKernel", fresh.observe, err)
+                || !module_fn(mod, "neuralMeanKernel", fresh.mean, err)) { cuModuleUnload(mod); return false; }
+            return true;
+        }, err);
+    }
+
+    NeuralResult run_neural(const NeuralRequest& req) {
+        // Раскладки совпадают с шаблоном.
+        struct StepArgs {
+            const numb* values; numb* s0; numb* s1; numb* s2; numb* s3;
+            const int* edgeStart; const int* edgeSrc; const numb* edgeW; const int* edgeLaw;
+            const int* inChannel; const numb* inGain; const numb* inSample;
+            int* badFlag; int* status;
+            numb h; numb maxValue;
+            int nNodes; int phase; int inVar; int pad;
+        };
+        struct ObserveArgs { const numb* state; const int* nodes; const int* vars; numb* out; int nNodes, nSel, nVars, pad; };
+        struct MeanArgs { const numb* state; const int* groupStart; const int* groupPop; const int* vars; numb* out; int nNodes, nGroups, nVars, pad; };
+
+        NeuralResult res;
+        auto fail = [&](const std::string& msg) -> NeuralResult& { res.error = msg; return res; };
+        const auto wall0 = std::chrono::steady_clock::now();
+
+        const int N = req.n_nodes, nx = req.amountOfX;
+        const size_t nStates = (size_t)N * (size_t)nx;
+        if (N <= 0) return fail("the network has no nodes");
+        if (nx <= 0 || nx > kMaxAmountOfX) return fail("amountOfX out of range");
+        if (req.amountOfValues <= 0 || req.amountOfValues > kMaxAmountOfValues) return fail("amountOfValues out of range");
+        if (req.values.size() != (size_t)N * (size_t)req.amountOfValues) return fail("values.size() != n_nodes * amountOfValues");
+        if (req.initial_conditions.size() != nStates) return fail("initial_conditions.size() != n_nodes * amountOfX");
+        if (req.edge_start.size() != (size_t)N + 1) return fail("edge_start.size() != n_nodes + 1");
+        if (req.n_laws < 1) return fail("n_laws must be >= 1");
+        const int n_arcs = req.edge_start.back();
+        if (n_arcs < 0 || (int)req.edge_src.size() != n_arcs || (int)req.edge_w.size() != n_arcs)
+            return fail("the CSR arrays disagree on the number of arcs");
+        if (req.n_laws > 1 && (int)req.edge_law.size() != n_arcs) return fail("edge_law is required with several laws");
+        for (int i = 0; i < N; ++i)
+            if (req.edge_start[(size_t)i] > req.edge_start[(size_t)i + 1]) return fail("edge_start is not monotonic");
+        for (int e = 0; e < n_arcs; ++e)
+            if (req.edge_src[(size_t)e] < 0 || req.edge_src[(size_t)e] >= N) return fail("an arc points outside the node list");
+        if (req.krs_body.empty()) return fail("krs_body is empty");
+        if (req.schedule == NeuralSchedule::Stage && req.rhs_body.empty()) return fail("stage coupling needs rhs_body");
+        if (step_body_uses_time(req.krs_body) || step_body_uses_time(req.rhs_body))
+            return fail("explicit time t is not supported in the large network engine yet");
+        if (!(req.h > 0.0) || !(req.t_max > 0.0) || req.transient < 0.0 || req.pre_scaller < 1) return fail("bad time settings");
+
+        const NeuralInput& in = req.input;
+        if (in.channels > 0) {
+            if (in.hold_steps < 1 || in.var < 0 || in.var >= nx) return fail("bad input settings");
+            if (in.samples.empty() || in.samples.size() % (size_t)in.channels != 0) return fail("input samples are not whole rows");
+            if (in.node_channel.size() != (size_t)N || in.node_gain.size() != (size_t)N) return fail("input maps need one entry per node");
+            for (int c : in.node_channel) if (c >= in.channels) return fail("input channel out of range");
+        }
+        const NeuralObservation& ob = req.observe;
+        for (int v : ob.vars) if (v < 0 || v >= nx) return fail("observed variable out of range");
+        for (int i : ob.nodes) if (i < 0 || i >= N) return fail("observed node out of range");
+        const int nPops = ob.pop_start.empty() ? 0 : (int)ob.pop_start.size() - 1;
+        if (nPops > 0) {
+            if (ob.pop_start.front() != 0 || ob.pop_start.back() != N) return fail("populations must cover all nodes");
+            for (int p = 0; p < nPops; ++p)
+                if (ob.pop_start[(size_t)p] >= ob.pop_start[(size_t)p + 1]) return fail("an empty population");
+        }
+
+        const long long skipSteps  = (long long)steps_from_time_size_t(req.transient, req.h);
+        const long long workSteps  = (long long)steps_from_time_size_t(req.t_max, req.h);
+        const long long totalSteps = skipSteps + workSteps;
+        if (totalSteps <= 0) return fail("t_max / h gives no steps");
+
+        const int nVars = (int)ob.vars.size(), nSel = nVars ? (int)ob.nodes.size() : 0, nMean = nVars ? nPops : 0;
+        const long long nPointsLL = (nSel + nMean > 0) ? workSteps / req.pre_scaller + 1 : 0;
+        const size_t rowElems = ((size_t)nSel + (size_t)nMean) * (size_t)nVars;
+        if ((double)nPointsLL * (double)rowElems * sizeof(double) > (double)req.max_output_bytes)
+            return fail("the recorded output is above max_output_bytes: raise the decimation or select less");
+        const int nPoints = (int)nPointsLL;
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        cudaGetLastError();   // сброс sticky-ошибки прошлого прогона, см. run_fastsync
+        if (!compile_neural_module(true, req, err)) return fail(err);
+
+        const bool stage = req.schedule == NeuralSchedule::Stage, heun = req.schedule == NeuralSchedule::Heun;
+        const int phases = stage ? 4 : heun ? 2 : 1;
+
+        // Отсчёты копятся на устройстве и сливаются на хост порциями: память устройства не растёт с числом точек.
+        const int flushRows = nPoints > 0 ? (int)std::min<long long>(nPoints, std::max<long long>(1, (long long)(kNeuralFlushBytes / std::max<size_t>(1, rowElems * sizeof(numb))))) : 0;
+
+        OrderDevBuf d_values, d_buf[4], d_eStart, d_eSrc, d_eW, d_eLaw, d_inCh, d_inGain, d_inRows, d_bad, d_status,
+                    d_sel, d_vars, d_gStart, d_gPop, d_out;
+        auto dev = [&](OrderDevBuf& b, size_t bytes, const char* what) {
+            res.device_bytes += bytes;
+            return b.alloc(std::max<size_t>(bytes, sizeof(numb)), what, err);
+        };
+        auto up = [&](OrderDevBuf& b, const void* src, size_t bytes, const char* what) {
+            if (bytes == 0) return true;
+            if (cudaMemcpy(b.p, src, bytes, cudaMemcpyHostToDevice) == cudaSuccess) return true;
+            err = std::string("memcpy ") + what; return false;
+        };
+        const size_t stateBytes = nStates * sizeof(numb);
+        const int buffers = stage ? 4 : heun ? 3 : 2;
+        if (!dev(d_values, req.values.size() * sizeof(numb), "values")) return fail(err);
+        for (int k = 0; k < buffers; ++k) if (!dev(d_buf[k], stateBytes, "state")) return fail(err);
+        if (!dev(d_eStart, req.edge_start.size() * sizeof(int), "edgeStart")) return fail(err);
+        if (!dev(d_eSrc, (size_t)n_arcs * sizeof(int), "edgeSrc")) return fail(err);
+        if (!dev(d_eW, (size_t)n_arcs * sizeof(numb), "edgeW")) return fail(err);
+        if (req.n_laws > 1 && !dev(d_eLaw, (size_t)n_arcs * sizeof(int), "edgeLaw")) return fail(err);
+        if (!dev(d_bad, sizeof(int), "badFlag")) return fail(err);
+        if (!dev(d_status, (size_t)N * sizeof(int), "status")) return fail(err);
+
+        {
+            const std::vector<numb> hv = to_numb(req.values), hw = to_numb(req.edge_w);
+            std::vector<numb> soa(nStates);
+            for (int i = 0; i < N; ++i) for (int k = 0; k < nx; ++k)
+                soa[(size_t)k * N + i] = (numb)req.initial_conditions[(size_t)i * nx + k];
+            if (!up(d_values, hv.data(), hv.size() * sizeof(numb), "values")) return fail(err);
+            for (int k = 0; k < 2; ++k) if (!up(d_buf[k], soa.data(), stateBytes, "state")) return fail(err);
+            if (!up(d_eStart, req.edge_start.data(), req.edge_start.size() * sizeof(int), "edgeStart")) return fail(err);
+            if (!up(d_eSrc, req.edge_src.data(), (size_t)n_arcs * sizeof(int), "edgeSrc")) return fail(err);
+            if (!up(d_eW, hw.data(), (size_t)n_arcs * sizeof(numb), "edgeW")) return fail(err);
+            if (req.n_laws > 1 && !up(d_eLaw, req.edge_law.data(), (size_t)n_arcs * sizeof(int), "edgeLaw")) return fail(err);
+        }
+        if (cudaMemset(d_status.p, 0, (size_t)N * sizeof(int)) != cudaSuccess || cudaMemset(d_bad.p, 0, sizeof(int)) != cudaSuccess)
+            return fail("memset status");
+
+        std::vector<numb> inRows;
+        long long nInRows = 0;
+        if (in.channels > 0) {
+            inRows = to_numb(in.samples);
+            nInRows = (long long)(in.samples.size() / (size_t)in.channels);
+            const std::vector<numb> gain = to_numb(in.node_gain);
+            if (!dev(d_inRows, inRows.size() * sizeof(numb), "inSamples")) return fail(err);
+            if (!dev(d_inCh, (size_t)N * sizeof(int), "inChannel")) return fail(err);
+            if (!dev(d_inGain, (size_t)N * sizeof(numb), "inGain")) return fail(err);
+            if (!up(d_inRows, inRows.data(), inRows.size() * sizeof(numb), "inSamples")) return fail(err);
+            if (!up(d_inCh, in.node_channel.data(), (size_t)N * sizeof(int), "inChannel")) return fail(err);
+            if (!up(d_inGain, gain.data(), (size_t)N * sizeof(numb), "inGain")) return fail(err);
+        }
+
+        // Популяции режутся на группы, чтобы atomicAdd шёл один на группу.
+        std::vector<int> gStart, gPop;
+        if (nMean > 0) {
+            for (int p = 0; p < nMean; ++p)
+                for (int i = ob.pop_start[(size_t)p]; i < ob.pop_start[(size_t)p + 1]; i += kNeuralMeanGroup) { gStart.push_back(i); gPop.push_back(p); }
+            gStart.push_back(N);
+            if (!dev(d_gStart, gStart.size() * sizeof(int), "groupStart") || !dev(d_gPop, gPop.size() * sizeof(int), "groupPop")) return fail(err);
+            if (!up(d_gStart, gStart.data(), gStart.size() * sizeof(int), "groupStart") || !up(d_gPop, gPop.data(), gPop.size() * sizeof(int), "groupPop")) return fail(err);
+        }
+        if (nVars > 0) {
+            if (!dev(d_vars, (size_t)nVars * sizeof(int), "vars") || !up(d_vars, ob.vars.data(), (size_t)nVars * sizeof(int), "vars")) return fail(err);
+        }
+        if (nSel > 0) {
+            if (!dev(d_sel, (size_t)nSel * sizeof(int), "selected") || !up(d_sel, ob.nodes.data(), (size_t)nSel * sizeof(int), "selected")) return fail(err);
+        }
+        if (flushRows > 0 && !dev(d_out, (size_t)flushRows * rowElems * sizeof(numb), "out")) return fail(err);
+
+        std::vector<double> traces, means;
+        if (nSel > 0) traces.assign((size_t)nPoints * nSel * nVars, std::numeric_limits<double>::quiet_NaN());
+        if (nMean > 0) means.assign((size_t)nPoints * nMean * nVars, std::numeric_limits<double>::quiet_NaN());
+        std::vector<numb> hostRows((size_t)flushRows * rowElems);
+        int rowsOnDevice = 0, rowsFlushed = 0;
+        const auto flush = [&]() {
+            if (rowsOnDevice == 0) return true;
+            if (cudaMemcpy(hostRows.data(), d_out.p, (size_t)rowsOnDevice * rowElems * sizeof(numb), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+            for (int r = 0; r < rowsOnDevice; ++r) {
+                const numb* row = hostRows.data() + (size_t)r * rowElems;
+                const size_t p = (size_t)rowsFlushed + r;
+                for (size_t e = 0; e < (size_t)nSel * nVars; ++e) traces[p * nSel * nVars + e] = (double)row[e];
+                const numb* pops = row + (size_t)nSel * nVars;
+                for (int q = 0; q < nMean; ++q) {
+                    const double size = (double)(ob.pop_start[(size_t)q + 1] - ob.pop_start[(size_t)q]);
+                    for (int v = 0; v < nVars; ++v) means[(p * nMean + q) * nVars + v] = (double)pops[(size_t)q * nVars + v] / size;
+                }
+            }
+            rowsFlushed += rowsOnDevice;
+            rowsOnDevice = 0;
+            return true;
+        };
+
+        const int block = req.block_size > 0 ? req.block_size : kNeuralDefaultBlock;
+        const unsigned blocks = (unsigned)(((long long)N + block - 1) / block);
+        const double workPerStep = ((double)N + (double)n_arcs) * phases;
+        long long syncEvery = (long long)(kNeuralWorkPerSync / workPerStep);
+        if (syncEvery < 1) syncEvery = 1;
+        if (req.steps_per_sync > 0 && req.steps_per_sync < syncEvery) syncEvery = req.steps_per_sync;
+        res.block_size = block;
+        res.steps_per_sync = syncEvery;
+
+        StepArgs sa{};
+        sa.values = d_values.as<numb>();
+        sa.edgeStart = d_eStart.as<int>(); sa.edgeSrc = d_eSrc.as<int>(); sa.edgeW = d_eW.as<numb>();
+        sa.edgeLaw = req.n_laws > 1 ? d_eLaw.as<int>() : nullptr;
+        sa.inChannel = in.channels > 0 ? d_inCh.as<int>() : nullptr;
+        sa.inGain = in.channels > 0 ? d_inGain.as<numb>() : nullptr;
+        sa.badFlag = d_bad.as<int>(); sa.status = d_status.as<int>();
+        sa.h = (numb)req.h; sa.maxValue = (numb)req.max_value;
+        sa.nNodes = N; sa.inVar = in.var;
+
+        const auto record = [&](const numb* state) -> bool {
+            numb* row = d_out.as<numb>() + (size_t)rowsOnDevice * rowElems;
+            if (nSel > 0) {
+                ObserveArgs oa{ state, d_sel.as<int>(), d_vars.as<int>(), row, N, nSel, nVars, 0 };
+                void* args[] = { &oa };
+                const unsigned b = (unsigned)((nSel + kNeuralObserveBlock - 1) / kNeuralObserveBlock);
+                CUresult r = cuLaunchKernel(cached_neural.observe, b, 1, 1, kNeuralObserveBlock, 1, 1, 0, nullptr, args, nullptr);
+                if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(neural observe): " + cu_err(r); return false; }
+                ++res.launches;
+            }
+            if (nMean > 0) {
+                numb* sums = row + (size_t)nSel * nVars;
+                if (cudaMemsetAsync(sums, 0, (size_t)nMean * nVars * sizeof(numb), 0) != cudaSuccess) { err = "memset means"; return false; }
+                MeanArgs ma{ state, d_gStart.as<int>(), d_gPop.as<int>(), d_vars.as<int>(), sums, N, (int)gPop.size(), nVars, 0 };
+                void* args[] = { &ma };
+                const unsigned b = (unsigned)((gPop.size() + kNeuralObserveBlock - 1) / kNeuralObserveBlock);
+                CUresult r = cuLaunchKernel(cached_neural.mean, b, 1, 1, kNeuralObserveBlock, 1, 1, 0, nullptr, args, nullptr);
+                if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(neural mean): " + cu_err(r); return false; }
+                ++res.launches;
+            }
+            ++rowsOnDevice;
+            return true;
+        };
+
+        if (skipSteps == 0 && nPoints > 0 && !record(d_buf[0].as<numb>())) return fail(err);
+
+        long long done = 0;
+        bool stopped = false;
+        while (done < totalSteps && !stopped) {
+            const long long left = totalSteps - done;
+            const long long count = (std::min)(syncEvery, left);
+            for (long long c = 0; c < count; ++c) {
+                const int odd = stage ? 0 : (int)(done & 1);
+                sa.s0 = d_buf[odd].as<numb>();
+                sa.s1 = d_buf[stage ? 1 : 1 - odd].as<numb>();
+                sa.s2 = (stage || heun) ? d_buf[2].as<numb>() : nullptr;
+                sa.s3 = stage ? d_buf[3].as<numb>() : nullptr;
+                if (in.channels > 0) {
+                    const long long row = std::min<long long>(done / in.hold_steps, nInRows - 1);
+                    sa.inSample = d_inRows.as<numb>() + (size_t)row * in.channels;
+                }
+                void* args[] = { &sa };
+                for (int ph = 0; ph < phases; ++ph) {
+                    sa.phase = ph;
+                    CUresult r = cuLaunchKernel(cached_neural.step, blocks, 1, 1, block, 1, 1, 0, nullptr, args, nullptr);
+                    if (r != CUDA_SUCCESS) return fail("cuLaunchKernel(neural): " + cu_err(r));
+                    ++res.launches;
+                }
+                ++done;
+                if (nPoints > 0 && done >= skipSteps && (done - skipSteps) % req.pre_scaller == 0
+                    && (done - skipSteps) / req.pre_scaller < nPoints) {
+                    const numb* state = d_buf[stage ? 0 : (int)(done & 1)].as<numb>();
+                    if (!record(state)) return fail(err);
+                    if (rowsOnDevice == flushRows) {
+                        cudaDeviceSynchronize();
+                        if (!flush()) return fail("memcpy D2H out");
+                    }
+                }
+            }
+            cudaDeviceSynchronize();
+            ++res.syncs;
+            cudaError_t ce = cudaGetLastError();
+            if (ce != cudaSuccess) return fail(std::string("neural kernel: ") + cudaGetErrorString(ce));
+            if (!flush()) return fail("memcpy D2H out");
+            if (req.progress) req.progress->store((float)((double)done / (double)totalSteps), std::memory_order_relaxed);
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { res.cancelled = true; stopped = true; break; }
+            int bad = 0;
+            if (cudaMemcpy(&bad, d_bad.p, sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return fail("memcpy D2H flag");
+            if (bad) { res.diverged = true; stopped = true; }
+        }
+        res.steps_done = done;
+
+        res.status.assign((size_t)N, 0);
+        if (cudaMemcpy(res.status.data(), d_status.p, (size_t)N * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess)
+            return fail("memcpy D2H status");
+        for (int v : res.status) res.n_diverged += v != 0;
+
+        if (req.keep_final_state) {
+            std::vector<numb> soa(nStates);
+            if (cudaMemcpy(soa.data(), d_buf[stage ? 0 : (int)(done & 1)].p, stateBytes, cudaMemcpyDeviceToHost) != cudaSuccess)
+                return fail("memcpy D2H state");
+            res.final_state.resize(nStates);
+            for (int i = 0; i < N; ++i) for (int k = 0; k < nx; ++k)
+                res.final_state[(size_t)i * nx + k] = (double)soa[(size_t)k * N + i];
+        }
+        res.traces = std::move(traces);
+        res.means = std::move(means);
+        res.n_nodes = N; res.n_vars = nx; res.n_points = nPoints;
+        res.h = req.h; res.t0 = (double)skipSteps * req.h; res.dt = (double)req.pre_scaller * req.h;
+        res.wall_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0).count();
+        res.ok = !res.cancelled;
+        return res;
+    }
 };
 
 ParametricEngine::ParametricEngine()  : impl_(std::make_unique<Impl>()) {}
@@ -11860,6 +12200,10 @@ SignalMetricsResult ParametricEngine::run_signal_metrics(const SignalMetricsRequ
 
 NetworkResult ParametricEngine::run_network(const NetworkRequest& req) {
     return impl_->run_network(req);
+}
+
+NeuralResult ParametricEngine::run_neural(const NeuralRequest& req) {
+    return impl_->run_neural(req);
 }
 
 FastSyncResult ParametricEngine::run_fastsync(const FastSyncRequest& req) {

@@ -22,6 +22,7 @@
 #include "configCUDA.h"   // typedef numb, REGIME_*, BF_* feature codes, mult_avg_* defaults
 #include "data_export.h"  // snapshot structs embedded into *Result for right-click export
 #include "adaptive_settings.h" // UcudaAdaptParams: адаптивный шаг в свипах
+#include "neural_engine.h"     // NeuralRequest / NeuralResult: большие сети
 
 // PeakConfig — knobs configCUDA.h, настраиваемые из GUI (вкладка Settings).
 // В NVRTC-сборке инжектятся как #define ПЕРЕД текстом configCUDA.h (тот оборачивает свои дефолты
@@ -1727,6 +1728,7 @@ public:
 
     // Network — интегрирование сети связанных осцилляторов.
     NetworkResult run_network(const NetworkRequest& req);
+    NeuralResult run_neural(const NeuralRequest& req);
 
     // Signal metrics — max/min/mean, частоты по пикам и параметры Хьорта
     // на 1D-отрезке или 2D-сетке свипа.

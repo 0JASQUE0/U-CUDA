@@ -322,6 +322,8 @@ constexpr int kAdaptMaxLow    = 2;
 bool scheme_supports_adaptive(Scheme sch);
 // Бросает std::runtime_error для схемы без встроенной оценки.
 AdaptiveCode codegen_adaptive(const System& s, Scheme sch);
+// Тело F[i] = f_i(X) без шага: связь внутри стадий в движке больших сетей.
+std::string codegen_rhs_body(const System& s);
 
 // Адаптивный шаг экстраполяторов: вложенная пара из одних и тех же стадий. Y — по всем K
 // стадиям (веса и порядок постоянного шага), младшее решение — по первым K-1 (свои веса,
