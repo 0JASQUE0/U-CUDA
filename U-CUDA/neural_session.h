@@ -47,7 +47,7 @@ struct NeuralProjection {
 };
 
 // Свип: значения идут отдельными экземплярами одного запуска, графом из несвязных компонент.
-enum class NeuralSweepKind { Coupling = 0, Parameter, ParameterSpread, Replica };
+enum class NeuralSweepKind { Coupling = 0, Parameter, ParameterSpread, Replica, InputGain };
 
 struct NeuralSweep {
     bool enabled = false;
@@ -57,6 +57,32 @@ struct NeuralSweep {
     std::string lo_text = "0", hi_text = "1", points_text = "8";
     bool log = false;
 };
+
+// Канал входа. Система из библиотеки хранится снимком, эксперимент от правок библиотеки не зависит.
+enum class NeuralSourceKind { Constant = 0, Sine, Square, Noise, System };
+
+struct NeuralSource {
+    std::string name = "input";
+    NeuralSourceKind kind = NeuralSourceKind::Sine;
+    std::string amplitude_text = "1", frequency_text = "0.1", phase_text = "0", offset_text = "0";
+    std::string system_name;
+    std::vector<std::string> vars, params, rhs;
+    bool latex = false;                    // rhs записаны LaTeX-именами: \\sigma вместо sigma
+    std::map<std::string, std::string> initial_conditions, param_values;
+    int variable = 0;
+    std::string step_text = "0.01";        // шаг RK4 источника, в его времени
+    std::string time_scale_text = "1";     // времени источника на единицу времени сети
+    std::string skip_text = "100";         // переходный процесс источника
+    bool normalize = true;                 // среднее 0 и СКО 1 по поданным отсчётам
+};
+
+// Доля узлов популяции на канал: у одного узла один канал, доли одной популяции не пересекаются.
+struct NeuralLink {
+    int source = 0, population = 0;
+    std::string gain_text = "1", gain_spread_text = "0", fraction_text = "1";
+};
+
+enum class NeuralProtocol { Continuous = 0, Trials };
 
 struct NeuralConfig {
     std::string label = "Experiment";
@@ -77,7 +103,19 @@ struct NeuralConfig {
     std::string observed_per_pop_text = "8";
     int order_var = 0;                 // -1 = R не считается
     std::string order_threshold_text = "0";
+    std::vector<int> obs_vars_off;     // не записывать эти переменные
+    std::string output_limit_text = "1024";   // МБ на хосте
     NeuralSweep sweep;
+
+    std::vector<NeuralSource> sources;
+    std::vector<NeuralLink> links;
+    int input_var = 0;
+    std::string input_hold_text = "0";  // время удержания отсчёта, кратно h; 0 = каждый шаг
+
+    // Попытки идут после transient: пауза, затем стимул. В паузе вход 0, время стимула отсчитывается заново.
+    NeuralProtocol protocol = NeuralProtocol::Continuous;
+    std::string trials_text = "4", rest_text = "50", stimulus_text = "50";
+    bool reset_state = true;           // каждая попытка с initial conditions
 
     std::vector<NetCouplingLaw> laws;
     std::vector<NeuralPopulation> populations;
@@ -90,6 +128,8 @@ struct NeuralConfig {
     std::vector<int>    instance_start;   // последнего расчёта
     std::vector<double> sweep_values;     // [instances], пусто без свипа
     std::vector<double> sweep_order, sweep_spread;  // [instance][pop], среднее по времени, NaN у разлетевшихся
+    std::vector<double> input_view;       // [point][source], прореженный вход первого экземпляра
+    double input_view_t0 = 0.0, input_view_dt = 0.0;
     int pops_per_instance = 0;
     long long arcs = 0;
     int degree_min = 0, degree_max = 0;
@@ -118,12 +158,15 @@ struct NeuralPlan {
     int degree_min = 0, degree_max = 0;
     int pops_per_instance = 0;
     std::vector<double> sweep_values;
+    std::vector<double> input_view;
+    double input_view_t0 = 0.0, input_view_dt = 0.0;
 };
 
 struct NeuralOutcome {
     NeuralResult result;
     std::vector<int>    instance_start;
-    std::vector<double> sweep_values, sweep_order, sweep_spread;
+    std::vector<double> sweep_values, sweep_order, sweep_spread, input_view;
+    double input_view_t0 = 0.0, input_view_dt = 0.0;
     int pops_per_instance = 0;
     std::string hash, recipe;
     long long arcs = 0;
@@ -173,6 +216,9 @@ struct NeuralSession {
 const char* neural_rule_name(NeuralRule r);
 const char* neural_schedule_name(NeuralSchedule s);
 const char* neural_sweep_name(NeuralSweepKind k);
+const char* neural_source_name(NeuralSourceKind k);
+// Снимок системы библиотеки в источник. Бросает на отображениях и ДАУ.
+void neural_source_set_system(NeuralSource& src, const std::string& name, const SystemRecord& r, const System& sys);
 NeuralPopulation neural_default_population(const SystemRecord* r, const std::vector<std::string>& vars,
                                            const std::vector<std::string>& params);
 
@@ -187,6 +233,8 @@ NeuralRequest neural_build_request(const System& sys, const std::vector<CustomSc
                                    const NeuralConfig& c, const NeuralGraph& g);
 // Значения свипа, пусто = свип выключен. Бросает на неверном диапазоне.
 std::vector<double> neural_sweep_values(const NeuralConfig& c);
+// Длительность записи с учётом протокола: при попытках это попытки * (пауза + стимул), а не t_max.
+double neural_record_time(const NeuralConfig& c);
 // Конфигурация одного значения: в эксперименте меняется только то, что свипается.
 NeuralConfig neural_sweep_instance(const NeuralConfig& c, int index, double value);
 NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custom_schemes,

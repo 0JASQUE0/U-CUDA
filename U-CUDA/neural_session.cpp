@@ -10,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
+#include <array>
 
 namespace {
 
@@ -49,13 +50,191 @@ struct Stream {
     int below(int n) { return (int)(uni() * (double)n); }
 };
 
+// Шаги времени, которое обязано быть кратно h: иначе граница входа или попытки легла бы внутрь шага.
+long long steps_of(double t, double h, const char* what) {
+    const double n = t / h;
+    if (!std::isfinite(n) || n < 0.0 || std::fabs(n - std::round(n)) > 1e-9 * (std::max)(1.0, std::fabs(n)))
+        throw std::runtime_error(std::string(what) + " must be a multiple of h");
+    return std::llround(n);
+}
+
+// Значение источника на одном отсчёте; у системы это заранее посчитанный ряд.
+struct SourceSeries {
+    const NeuralSource* src = nullptr;
+    int index = 0;
+    uint64_t seed = 0;
+    double a = 1.0, f = 0.0, phase = 0.0, offset = 0.0;
+    std::vector<double> series;    // система: по одному значению на активный отсчёт
+    double value(double tau, long long sample, size_t active) const {
+        const double two_pi = 6.283185307179586476925286766559;
+        switch (src->kind) {
+        case NeuralSourceKind::Constant: return offset + a;
+        case NeuralSourceKind::Sine:     return offset + a * std::sin(two_pi * f * tau + phase);
+        case NeuralSourceKind::Square:   return offset + (std::sin(two_pi * f * tau + phase) >= 0.0 ? a : -a);
+        case NeuralSourceKind::Noise: {
+            Stream g(seed ^ 0x4E4F4953ULL, (uint64_t)index, (uint64_t)sample);
+            const double u = 1.0 - g.uni(), v = g.uni();
+            return offset + a * std::sqrt(-2.0 * std::log(u)) * std::cos(two_pi * v);
+        }
+        case NeuralSourceKind::System:   return offset + a * series[active];
+        }
+        return 0.0;
+    }
+};
+
+// RK4 снимка системы: active отсчётов через dt времени источника, после skip.
+std::vector<double> source_system_series(const NeuralSource& s, size_t active, double dt) {
+    if (s.rhs.empty()) throw std::runtime_error("input source '" + s.name + "' has no system: pick one from the library");
+    if (s.variable < 0 || s.variable >= (int)s.vars.size()) throw std::runtime_error("input source '" + s.name + "': bad variable");
+    System sys;
+    sys.vars = s.vars; sys.params = s.params; sys.rhs = s.rhs;
+    // Снимки до появления флага: по самому тексту.
+    sys.latex = s.latex;
+    for (const std::string& e : s.rhs) if (e.find('\\') != std::string::npos) sys.latex = true;
+    const SystemEvaluator ev(sys);
+    const int n = ev.dim();
+    std::vector<double> a(s.params.size() + 1 + kSchemeTailSlots, 0.0), x((size_t)n), k1(x), k2(x), k3(x), k4(x), y(x);
+    for (size_t j = 0; j < s.params.size(); ++j) {
+        auto it = s.param_values.find(s.params[j]);
+        a[j + 1] = it == s.param_values.end() ? 0.0 : num_or(it->second, 0.0);
+    }
+    for (int i = 0; i < n; ++i) {
+        auto it = s.initial_conditions.find(s.vars[(size_t)i]);
+        x[(size_t)i] = it == s.initial_conditions.end() ? 0.0 : num_or(it->second, 0.0);
+    }
+    const double step = num_or(s.step_text, 0.01), skip = num_or(s.skip_text, 0.0);
+    if (!(step > 0.0) || !(dt > 0.0)) throw std::runtime_error("input source '" + s.name + "': bad step");
+    const long long sub = (long long)std::ceil(dt / step - 1e-9), first = (long long)std::ceil(skip / step - 1e-9);
+    const double h = dt / (double)(std::max)(1LL, sub), h0 = skip > 0.0 && first > 0 ? skip / (double)first : 0.0;
+    const auto advance = [&](double q) {
+        ev.eval(x.data(), a.data(), k1.data());
+        for (int i = 0; i < n; ++i) y[(size_t)i] = x[(size_t)i] + 0.5 * q * k1[(size_t)i];
+        ev.eval(y.data(), a.data(), k2.data());
+        for (int i = 0; i < n; ++i) y[(size_t)i] = x[(size_t)i] + 0.5 * q * k2[(size_t)i];
+        ev.eval(y.data(), a.data(), k3.data());
+        for (int i = 0; i < n; ++i) y[(size_t)i] = x[(size_t)i] + q * k3[(size_t)i];
+        ev.eval(y.data(), a.data(), k4.data());
+        for (int i = 0; i < n; ++i) x[(size_t)i] += q / 6.0 * (k1[(size_t)i] + 2.0 * k2[(size_t)i] + 2.0 * k3[(size_t)i] + k4[(size_t)i]);
+    };
+    for (long long q = 0; q < first; ++q) advance(h0);
+    std::vector<double> out(active);
+    for (size_t q = 0; q < active; ++q) {
+        out[q] = x[(size_t)s.variable];
+        if (!std::isfinite(out[q])) throw std::runtime_error("input source '" + s.name + "' diverged");
+        for (long long m = 0; m < (std::max)(1LL, sub); ++m) advance(h);
+    }
+    if (s.normalize && active > 1) {
+        double m = 0.0, v = 0.0;
+        for (double e : out) m += e;
+        m /= (double)active;
+        for (double e : out) v += (e - m) * (e - m);
+        v = std::sqrt(v / (double)active);
+        if (!(v > 0.0)) throw std::runtime_error("input source '" + s.name + "' is constant, it cannot be normalised");
+        for (double& e : out) e = (e - m) / v;
+    }
+    return out;
+}
+
+// Отсчёты входа и какие узлы их получают; шаги сброса протокола.
+void fill_input(const NeuralConfig& c, const NeuralGraph& g, uint64_t seed, NeuralRequest& r) {
+    const long long skip = steps_of(r.transient, r.h, "the transient");
+    const long long total = skip + (long long)std::llround(r.t_max / r.h);
+    const bool trials = c.protocol == NeuralProtocol::Trials;
+    long long rest = 0, stim = 0, cycle = 0, n_trials = 0;
+    if (trials) {
+        rest = steps_of(num_or(c.rest_text, 0.0), r.h, "the rest time");
+        stim = steps_of(num_or(c.stimulus_text, 0.0), r.h, "the stimulus time");
+        cycle = rest + stim;
+        n_trials = int_or(c.trials_text, 0);
+        if (n_trials < 1 || cycle < 1) throw std::runtime_error("a protocol needs at least one trial of non-zero length");
+        if (c.reset_state) for (long long k = 0; k < n_trials; ++k) r.reset_at.push_back(skip + k * cycle);
+    }
+    if (c.sources.empty() || c.links.empty()) return;
+
+    NeuralInput& in = r.input;
+    if (c.input_var < 0 || c.input_var >= r.amountOfX) throw std::runtime_error("the input variable is out of range");
+    in.var = c.input_var;
+    const double hold_t = num_or(c.input_hold_text, 0.0);
+    in.hold_steps = hold_t > 0.0 ? (std::max)(1LL, steps_of(hold_t, r.h, "the input sample time")) : 1;
+    in.channels = (int)c.sources.size();
+    const long long rows = total / in.hold_steps + 1;
+    if ((double)rows * in.channels * sizeof(double) > 4.0e9) throw std::runtime_error("the input needs too many samples: raise the sample time");
+    in.samples.assign((size_t)rows * in.channels, 0.0);
+
+    // Активен ли отсчёт и сколько времени идёт его стимул. Граница отсчёта лежит на шаге, поэтому всё в шагах.
+    const auto active_at = [&](long long row, long long& tau, long long& trial) {
+        const long long step = row * in.hold_steps;
+        tau = step; trial = 0;
+        if (!trials) return true;
+        if (step < skip) return false;
+        trial = (step - skip) / cycle;
+        if (trial >= n_trials) return false;
+        const long long o = (step - skip) % cycle;
+        tau = o - rest;
+        return o >= rest;
+    };
+    size_t n_active = 0;
+    for (long long row = 0; row < rows; ++row) { long long tau, trial; n_active += active_at(row, tau, trial); }
+    for (int q = 0; q < in.channels; ++q) {
+        const NeuralSource& s = c.sources[(size_t)q];
+        SourceSeries v;
+        v.src = &s; v.index = q; v.seed = seed;
+        v.a = num_or(s.amplitude_text, 1.0); v.f = num_or(s.frequency_text, 0.0);
+        v.phase = num_or(s.phase_text, 0.0); v.offset = num_or(s.offset_text, 0.0);
+        if (s.kind == NeuralSourceKind::System)
+            v.series = source_system_series(s, n_active, (double)in.hold_steps * r.h * num_or(s.time_scale_text, 1.0));
+        size_t active = 0;
+        for (long long row = 0; row < rows; ++row) {
+            long long tau, trial;
+            if (!active_at(row, tau, trial)) continue;
+            in.samples[(size_t)row * in.channels + q] = v.value((double)tau * r.h, row, active);
+            ++active;
+        }
+    }
+
+    in.node_channel.assign((size_t)g.N, -1);
+    in.node_gain.assign((size_t)g.N, 0.0);
+    const int nPops = (int)g.pop_start.size() - 1;
+    for (int pop = 0; pop < nPops; ++pop) {
+        const int i0 = g.pop_start[(size_t)pop], n = g.pop_start[(size_t)pop + 1] - i0;
+        std::vector<int> order((size_t)n);
+        std::iota(order.begin(), order.end(), i0);
+        Stream gp(seed ^ 0x494E5055ULL, (uint64_t)pop, 0);
+        for (int i = n - 1; i > 0; --i) std::swap(order[(size_t)i], order[(size_t)gp.below(i + 1)]);
+        long long at = 0;
+        double taken = 0.0;
+        for (size_t q = 0; q < c.links.size(); ++q) {
+            const NeuralLink& l = c.links[q];
+            if (l.source < 0 || l.source >= in.channels) throw std::runtime_error("an input link points to a missing source");
+            if (l.population < 0 || l.population >= nPops) throw std::runtime_error("an input link points to a missing population");
+            if (l.population != pop) continue;
+            const double frac = num_or(l.fraction_text, 1.0);
+            if (!(frac >= 0.0 && frac <= 1.0)) throw std::runtime_error("an input fraction must be in [0, 1]");
+            taken += frac;
+            if (taken > 1.0 + 1e-9) throw std::runtime_error("input fractions of one population add up to more than 1");
+            const long long m = (std::min)((long long)n - at, std::llround(frac * n));
+            const double gain = num_or(l.gain_text, 1.0), spread = num_or(l.gain_spread_text, 0.0);
+            for (long long j = 0; j < m; ++j) {
+                const int node = order[(size_t)(at + j)];
+                Stream gg(seed ^ 0x4741494EULL, (uint64_t)q, (uint64_t)node);
+                in.node_channel[(size_t)node] = l.source;
+                in.node_gain[(size_t)node] = gain * (spread != 0.0 ? 1.0 + spread * (2.0 * gg.uni() - 1.0) : 1.0);
+            }
+            at += m;
+        }
+    }
+}
+
 // Среднее по времени конечных значений; у остановленного экземпляра NaN, а не среднее по началу.
 void neural_sweep_summary(NeuralOutcome& out, int order_var) {
     const NeuralResult& r = out.result;
     const int nInst = (int)r.instance_stop.size(), K = out.pops_per_instance;
     if (nInst < 1 || K < 1 || r.n_points < 1) return;
     const double nan = std::numeric_limits<double>::quiet_NaN();
-    const int nPops = nInst * K, var = order_var >= 0 ? order_var : 0;
+    const int nPops = nInst * K, nRec = (int)r.observed_vars.size();
+    // Разброс той переменной, по которой считается R, если она записана.
+    const int want = order_var >= 0 ? order_var : 0;
+    const int var = (int)(std::find(r.observed_vars.begin(), r.observed_vars.end(), want) - r.observed_vars.begin());
     out.sweep_order.assign((size_t)nPops, nan);
     out.sweep_spread.assign((size_t)nPops, nan);
     for (int q = 0; q < nPops; ++q) {
@@ -67,8 +246,8 @@ void neural_sweep_summary(NeuralOutcome& out, int order_var) {
                 const double v = r.order[(size_t)p * nPops + q];
                 if (std::isfinite(v)) { so += v; ++no; }
             }
-            if (!r.spread.empty()) {
-                const double v = r.spread[((size_t)p * nPops + q) * r.n_vars + var];
+            if (!r.spread.empty() && var < nRec) {
+                const double v = r.spread[((size_t)p * nPops + q) * nRec + var];
                 if (std::isfinite(v)) { ss += v; ++ns; }
             }
         }
@@ -272,12 +451,32 @@ const char* neural_schedule_name(NeuralSchedule s) {
     }
     return "?";
 }
+void neural_source_set_system(NeuralSource& src, const std::string& name, const SystemRecord& r, const System& sys) {
+    if (sys.rhs.empty()) throw std::runtime_error("the system does not parse");
+    if (sys.is_map || sys.dae_nx >= 0) throw std::runtime_error("an input source must be an ODE system");
+    src.system_name = name;
+    src.vars = sys.vars; src.params = sys.params; src.rhs = sys.rhs; src.latex = sys.latex;
+    src.initial_conditions = r.init_conditions; src.param_values = r.param_values;
+    src.variable = 0;
+}
+
 const char* neural_sweep_name(NeuralSweepKind k) {
     switch (k) {
     case NeuralSweepKind::Coupling:        return "Coupling K";
     case NeuralSweepKind::Parameter:       return "Parameter";
     case NeuralSweepKind::ParameterSpread: return "Parameter spread";
     case NeuralSweepKind::Replica:         return "Replicas (seed)";
+    case NeuralSweepKind::InputGain:       return "Input gain";
+    }
+    return "?";
+}
+const char* neural_source_name(NeuralSourceKind k) {
+    switch (k) {
+    case NeuralSourceKind::Constant: return "Constant";
+    case NeuralSourceKind::Sine:     return "Sine";
+    case NeuralSourceKind::Square:   return "Square";
+    case NeuralSourceKind::Noise:    return "Gaussian noise";
+    case NeuralSourceKind::System:   return "System from the library";
     }
     return "?";
 }
@@ -451,22 +650,32 @@ NeuralRequest neural_build_request(const System& sys, const std::vector<CustomSc
         }
     }
     r.h = parse_num(c.h_text, 0.01);
-    r.t_max = parse_num(c.t_max_text, 100.0);
+    r.t_max = neural_record_time(c);
     r.transient = parse_num(c.transient_text, 0.0);
     r.pre_scaller = std::max(1, int_or(c.pre_scaller_text, 1));
     r.max_value = parse_num(c.max_value_text, 1.0e6);
+    fill_input(c, g, seed, r);
 
-    for (size_t k = 0; k < vars.size(); ++k) r.observe.vars.push_back((int)k);
+    for (size_t k = 0; k < vars.size(); ++k)
+        if (std::find(c.obs_vars_off.begin(), c.obs_vars_off.end(), (int)k) == c.obs_vars_off.end()) r.observe.vars.push_back((int)k);
     r.observe.pop_start = g.pop_start;
     r.observe.spread = true;
-    r.observe.order_var = c.order_var < (int)vars.size() ? c.order_var : -1;
+    r.observe.order_var = r.reset_at.empty() && c.order_var < (int)vars.size() ? c.order_var : -1;
     r.observe.order_threshold = num_or(c.order_threshold_text, 0.0);
+    const double limit_mb = num_or(c.output_limit_text, 1024.0);
+    if (!(limit_mb > 0.0)) throw std::runtime_error("the output limit must be positive");
+    r.max_output_bytes = (size_t)(limit_mb * 1024.0 * 1024.0);
     const int per_pop = std::max(0, int_or(c.observed_per_pop_text, 8));
     for (size_t pop = 0; pop + 1 < g.pop_start.size(); ++pop) {
         const int n = g.pop_start[pop + 1] - g.pop_start[pop], m = std::min(per_pop, n);
         for (int j = 0; j < m; ++j) r.observe.nodes.push_back(g.pop_start[pop] + (int)((long long)j * n / m));
     }
     return r;
+}
+
+double neural_record_time(const NeuralConfig& c) {
+    if (c.protocol == NeuralProtocol::Continuous) return parse_num(c.t_max_text, 100.0);
+    return num_or(c.trials_text, 0.0) * (num_or(c.rest_text, 0.0) + num_or(c.stimulus_text, 0.0));
 }
 
 std::vector<double> neural_sweep_values(const NeuralConfig& c) {
@@ -499,6 +708,10 @@ NeuralConfig neural_sweep_instance(const NeuralConfig& c, int index, double valu
     const std::string text = fmt_num_shortest(value);
     if (s.kind == NeuralSweepKind::Coupling) o.coupling_text = text;
     else if (s.kind == NeuralSweepKind::Replica) o.seed_text = std::to_string(int_or(c.seed_text, 1) + index);
+    else if (s.kind == NeuralSweepKind::InputGain) {
+        if (o.links.empty()) throw std::runtime_error("the sweep over the input gain needs an input link");
+        for (NeuralLink& l : o.links) l.gain_text = text;
+    }
     else {
         if (s.param.empty()) throw std::runtime_error("the sweep has no parameter");
         if (s.population >= (int)o.populations.size()) throw std::runtime_error("the sweep points to a missing population");
@@ -517,9 +730,24 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
     NeuralPlan plan;
     plan.pops_per_instance = (int)c.populations.size();
     plan.sweep_values = neural_sweep_values(c);
+    // Вход для окна: не больше 4096 точек на канал, каналы первого экземпляра.
+    const auto take_view = [&](const NeuralRequest& r) {
+        if (r.input.channels <= 0) return;
+        const int ch = (int)c.sources.size();
+        // Только запись, без transient: окно сравнивается с остальными по одной оси времени.
+        const size_t rows = r.input.samples.size() / (size_t)r.input.channels;
+        const long long skip = std::llround(r.transient / r.h);
+        const size_t first = (std::min)(rows, (size_t)((skip + r.input.hold_steps - 1) / r.input.hold_steps));
+        const size_t step = (std::max<size_t>)(1, (rows - first) / 4096);
+        plan.input_view_t0 = (double)first * (double)r.input.hold_steps * r.h;
+        plan.input_view_dt = (double)step * (double)r.input.hold_steps * r.h;
+        for (size_t row = first; row < rows; row += step)
+            for (int q = 0; q < ch; ++q) plan.input_view.push_back(r.input.samples[row * r.input.channels + q]);
+    };
     if (plan.sweep_values.empty()) {
         const NeuralGraph g = neural_build_graph(c);
         plan.request = neural_build_request(sys, custom_schemes, vars, params, c, g);
+        take_view(plan.request);
         plan.hash = g.hash;
         plan.arcs = (long long)g.src.size();
         plan.degree_min = g.degree_min; plan.degree_max = g.degree_max;
@@ -529,6 +757,7 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
     NeuralRequest& a = plan.request;
     Fnv f;
     long long nodes = 0;
+    std::vector<std::vector<double>> input_blocks;   // разные отсчёты у экземпляров: каналы идут подряд
     plan.degree_min = std::numeric_limits<int>::max();
     for (int i = 0; i < (int)plan.sweep_values.size(); ++i) {
         const NeuralConfig one = neural_sweep_instance(c, i, plan.sweep_values[(size_t)i]);
@@ -545,7 +774,17 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
             a = std::move(r);
             a.instance_start = { 0, a.n_nodes };
             nodes = a.n_nodes;
+            take_view(a);
+            input_blocks.push_back(a.input.samples);
             continue;
+        }
+        if (r.input.channels > 0) {
+            a.input.node_gain.insert(a.input.node_gain.end(), r.input.node_gain.begin(), r.input.node_gain.end());
+            int shift = -1;
+            for (size_t q = 0; q < input_blocks.size() && shift < 0; ++q)
+                if (input_blocks[q] == r.input.samples) shift = (int)q * r.input.channels;
+            if (shift < 0) { shift = (int)input_blocks.size() * r.input.channels; input_blocks.push_back(r.input.samples); }
+            for (int v : r.input.node_channel) a.input.node_channel.push_back(v < 0 ? -1 : v + shift);
         }
         a.values.insert(a.values.end(), r.values.begin(), r.values.end());
         a.initial_conditions.insert(a.initial_conditions.end(), r.initial_conditions.begin(), r.initial_conditions.end());
@@ -560,6 +799,16 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
         nodes += r.n_nodes;
         a.n_nodes = (int)nodes;
         a.instance_start.push_back(a.n_nodes);
+    }
+    if (input_blocks.size() > 1) {
+        const int ch = a.input.channels, K = (int)input_blocks.size();
+        const size_t rows = input_blocks[0].size() / (size_t)ch;
+        std::vector<double>& out = a.input.samples;
+        out.assign(rows * (size_t)ch * K, 0.0);
+        for (int q = 0; q < K; ++q)
+            for (size_t row = 0; row < rows; ++row)
+                for (int m = 0; m < ch; ++m) out[(row * K + q) * ch + m] = input_blocks[(size_t)q][row * ch + m];
+        a.input.channels = ch * K;
     }
     plan.hash = hex64(f.h);
     return plan;
@@ -592,7 +841,7 @@ void NeuralSession::add_config() {
     if (!configs.empty()) {
         c = configs.back();
         c.result = NeuralResult{};
-        c.instance_start.clear(); c.sweep_values.clear(); c.sweep_order.clear(); c.sweep_spread.clear();
+        c.instance_start.clear(); c.sweep_values.clear(); c.sweep_order.clear(); c.sweep_spread.clear(); c.input_view.clear();
         c.last_run_ok = false;
         c.last_error.clear();
         c.data_generation = 0;
@@ -654,6 +903,9 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx) {
             if (out.instance_start.empty()) out.instance_start = { 0, plan.request.n_nodes };
             out.pops_per_instance = plan.pops_per_instance;
             out.sweep_values = std::move(plan.sweep_values);
+            out.input_view = std::move(plan.input_view);
+            out.input_view_t0 = plan.input_view_t0;
+            out.input_view_dt = plan.input_view_dt;
             neural_sweep_summary(out, plan.request.observe.order_var);
         } catch (const std::exception& e) {
             out.result.error = e.what();
@@ -698,6 +950,9 @@ bool NeuralSession::poll() {
             c.sweep_values = std::move(out.sweep_values);
             c.sweep_order = std::move(out.sweep_order);
             c.sweep_spread = std::move(out.sweep_spread);
+            c.input_view = std::move(out.input_view);
+            c.input_view_t0 = out.input_view_t0;
+            c.input_view_dt = out.input_view_dt;
             c.pops_per_instance = out.pops_per_instance;
             ++c.data_generation;
         }

@@ -11865,6 +11865,9 @@ struct ParametricEngine::Impl {
         }
         if (ob.order_var >= nx) return fail("the order parameter variable is out of range");
         if (ob.order_var >= 0 && nPops == 0) return fail("the order parameter needs populations");
+        if (ob.order_var >= 0 && !req.reset_at.empty()) return fail("the order parameter does not work across state resets");
+        for (size_t q = 0; q < req.reset_at.size(); ++q)
+            if (req.reset_at[q] < 0 || (q > 0 && req.reset_at[q] <= req.reset_at[q - 1])) return fail("reset steps must increase");
 
         const long long skipSteps  = (long long)steps_from_time_size_t(req.transient, req.h);
         const long long workSteps  = (long long)steps_from_time_size_t(req.t_max, req.h);
@@ -11915,9 +11918,9 @@ struct ParametricEngine::Impl {
         if (!dev(d_bad, sizeof(int), "badFlag")) return fail(err);
         if (!dev(d_status, (size_t)N * sizeof(int), "status")) return fail(err);
 
+        std::vector<numb> soa(nStates);
         {
             const std::vector<numb> hv = to_numb(req.values), hw = to_numb(req.edge_w);
-            std::vector<numb> soa(nStates);
             for (int i = 0; i < N; ++i) for (int k = 0; k < nx; ++k)
                 soa[(size_t)k * N + i] = (numb)req.initial_conditions[(size_t)i * nx + k];
             if (!up(d_values, hv.data(), hv.size() * sizeof(numb), "values")) return fail(err);
@@ -12044,6 +12047,25 @@ struct ParametricEngine::Impl {
         sa.h = (numb)req.h; sa.maxValue = (numb)req.max_value;
         sa.nNodes = N; sa.inVar = in.var;
 
+        bool trackFirst = true;
+        const auto track = [&](const numb* state, double t) -> bool {
+            if (crossFull) return true;
+            if (crossWorst + N > crossCap) {
+                cudaDeviceSynchronize();
+                if (!flush_cross()) { err = "memcpy crossings"; return false; }
+                if (crossNode.size() >= crossLimit) { crossFull = true; crossEnd = t; return true; }
+            }
+            OrderArgs oa{ state + (size_t)ob.order_var * N, d_prev.as<numb>(), d_crossCount.as<int>(), d_crossNode.as<int>(), d_crossTime.as<numb>(),
+                          (numb)ob.order_threshold, (numb)t, (numb)((double)req.pre_scaller * req.h), N, trackFirst ? 1 : 0, crossCap, 0 };
+            void* args[] = { &oa };
+            const unsigned b = (unsigned)((N + kNeuralObserveBlock - 1) / kNeuralObserveBlock);
+            CUresult r = cuLaunchKernel(cached_neural.order, b, 1, 1, kNeuralObserveBlock, 1, 1, 0, nullptr, args, nullptr);
+            if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(neural order): " + cu_err(r); return false; }
+            ++res.launches;
+            crossWorst += N;
+            trackFirst = false;
+            return true;
+        };
         const auto record = [&](const numb* state) -> bool {
             numb* row = d_out.as<numb>() + (size_t)rowsOnDevice * rowElems;
             if (nSel > 0) {
@@ -12065,36 +12087,30 @@ struct ParametricEngine::Impl {
                 if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(neural mean): " + cu_err(r); return false; }
                 ++res.launches;
             }
-            if (nOrder > 0 && !crossFull) {
+            if (nOrder > 0) {
                 const long long point = (long long)rowsFlushed + rowsOnDevice;
-                const double t = (double)(skipSteps + point * req.pre_scaller) * req.h;
-                if (crossWorst + N > crossCap) {
-                    cudaDeviceSynchronize();
-                    if (!flush_cross()) { err = "memcpy crossings"; return false; }
-                    if (crossNode.size() >= crossLimit) { crossFull = true; crossEnd = t; }
-                }
-                if (!crossFull) {
-                    OrderArgs oa{ state + (size_t)ob.order_var * N, d_prev.as<numb>(), d_crossCount.as<int>(), d_crossNode.as<int>(), d_crossTime.as<numb>(),
-                                  (numb)ob.order_threshold, (numb)t, (numb)((double)req.pre_scaller * req.h), N, point == 0 ? 1 : 0, crossCap, 0 };
-                    void* args[] = { &oa };
-                    const unsigned b = (unsigned)((N + kNeuralObserveBlock - 1) / kNeuralObserveBlock);
-                    CUresult r = cuLaunchKernel(cached_neural.order, b, 1, 1, kNeuralObserveBlock, 1, 1, 0, nullptr, args, nullptr);
-                    if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(neural order): " + cu_err(r); return false; }
-                    ++res.launches;
-                    crossWorst += N;
-                }
+                if (!track(state, (double)(skipSteps + point * req.pre_scaller) * req.h)) return false;
             }
             ++rowsOnDevice;
             return true;
         };
 
         if (skipSteps == 0 && nPoints > 0 && !record(d_buf[0].as<numb>())) return fail(err);
+        // Интервал, на который попадает начало записи, начался раньше: пересечения считаются и в transient.
+        if (skipSteps > 0 && nOrder > 0 && skipSteps % req.pre_scaller == 0 && !track(d_buf[0].as<numb>(), 0.0)) return fail(err);
 
         std::vector<long long> instStop((size_t)nInst, -1);
         long long done = 0;
+        size_t nextReset = 0;
         bool stopped = false;
         while (done < totalSteps && !stopped) {
-            const long long left = totalSteps - done;
+            if (nextReset < req.reset_at.size() && req.reset_at[nextReset] == done) {
+                ++nextReset;
+                if (cudaMemcpy(d_buf[stage ? 0 : (int)(done & 1)].p, soa.data(), stateBytes, cudaMemcpyHostToDevice) != cudaSuccess)
+                    return fail("memcpy reset");
+            }
+            long long left = totalSteps - done;
+            if (nextReset < req.reset_at.size()) left = (std::min)(left, req.reset_at[nextReset] - done);
             const long long count = (std::min)(syncEvery, left);
             for (long long c = 0; c < count; ++c) {
                 const int odd = stage ? 0 : (int)(done & 1);
@@ -12115,6 +12131,8 @@ struct ParametricEngine::Impl {
                     ++res.launches;
                 }
                 ++done;
+                if (nOrder > 0 && done < skipSteps && (skipSteps - done) % req.pre_scaller == 0
+                    && !track(d_buf[stage ? 0 : (int)(done & 1)].as<numb>(), (double)done * req.h)) return fail(err);
                 if (nPoints > 0 && done >= skipSteps && (done - skipSteps) % req.pre_scaller == 0
                     && (done - skipSteps) / req.pre_scaller < nPoints) {
                     const numb* state = d_buf[stage ? 0 : (int)(done & 1)].as<numb>();
@@ -12209,6 +12227,7 @@ struct ParametricEngine::Impl {
                 res.final_state[(size_t)i * nx + k] = (double)soa[(size_t)k * N + i];
         }
         res.observed = ob.nodes;
+        res.observed_vars = ob.vars;
         res.traces = std::move(traces);
         res.means = std::move(means);
         res.spread = std::move(spreads);

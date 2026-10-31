@@ -7,7 +7,10 @@ static const char* const kNeuralRules[] = { "Probability", "Fixed in-degree", "C
 static const char* const kNeuralNorms[] = { "None", "This projection", "All inputs of the node" };
 static const NeuralSchedule kNeuralSchedules[] = { NeuralSchedule::Stage, NeuralSchedule::Heun, NeuralSchedule::Post };
 static const NeuralSweepKind kNeuralSweeps[] = { NeuralSweepKind::Coupling, NeuralSweepKind::Parameter,
-                                                 NeuralSweepKind::ParameterSpread, NeuralSweepKind::Replica };
+                                                 NeuralSweepKind::ParameterSpread, NeuralSweepKind::Replica,
+                                                 NeuralSweepKind::InputGain };
+static const NeuralSourceKind kNeuralSources[] = { NeuralSourceKind::Constant, NeuralSourceKind::Sine, NeuralSourceKind::Square,
+                                                   NeuralSourceKind::Noise, NeuralSourceKind::System };
 
 static void draw_neural_populations(NeuralSession& s, NeuralConfig& c) {
     if (!ImGui::CollapsingHeader("Populations", ImGuiTreeNodeFlags_DefaultOpen)) return;
@@ -127,6 +130,128 @@ static void draw_neural_laws(NeuralSession& s, NeuralConfig& c) {
     }
 }
 
+// Снимок системы библиотеки: дальше источник от записи не зависит.
+static void neural_take_system(SystemLibrary& lib, const std::string& name, NeuralSource& src, std::string& error) {
+    try {
+        const SystemRecord r = lib.load(name);
+        AppModel tmp(nullptr);
+        tmp.from_record(r);
+        if (!tmp.start_neural_analysis()) throw std::runtime_error("the system does not parse");
+        neural_source_set_system(src, name, r, tmp.neural_session.sys);
+        error.clear();
+    } catch (const std::exception& e) {
+        error = "input source: " + std::string(e.what());
+    }
+}
+
+static void draw_neural_input(SystemLibrary& lib, NeuralSession& s, NeuralConfig& c) {
+    if (!ImGui::CollapsingHeader("Input", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!s.vars.empty()) {
+        const std::vector<const char*> items = c_str_list(s.vars);
+        if (c.input_var < 0 || c.input_var >= (int)items.size()) c.input_var = 0;
+        ImGui::SetNextItemWidth(kFieldW);
+        ImGui::Combo("input variable", &c.input_var, items.data(), (int)items.size());
+    }
+    InputNumStr("sample time", c.input_hold_text, kFieldW);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Each sample is held this long, a multiple of h. 0 = a new sample every step.");
+    int remove = -1;
+    for (size_t i = 0; i < c.sources.size(); ++i) {
+        NeuralSource& q = c.sources[i];
+        ImGui::PushID((int)i + 3000);
+        const std::string title = q.name + ": " + neural_source_name(q.kind) + "###src";
+        if (ImGui::TreeNodeEx(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+            InputTextStr("name", q.name, kFieldW);
+            ImGui::SetNextItemWidth(kFieldW + 100.0f);
+            if (ImGui::BeginCombo("source", neural_source_name(q.kind))) {
+                for (NeuralSourceKind v : kNeuralSources)
+                    if (ImGui::Selectable(neural_source_name(v), v == q.kind)) q.kind = v;
+                ImGui::EndCombo();
+            }
+            if (q.kind == NeuralSourceKind::System) {
+                ImGui::SetNextItemWidth(kFieldW + 100.0f);
+                if (ImGui::BeginCombo("system", q.system_name.empty() ? "(pick a system)" : q.system_name.c_str())) {
+                    for (const std::string& name : library_list_cached(lib).names)
+                        if (ImGui::Selectable(name.c_str(), name == q.system_name)) neural_take_system(lib, name, q, c.last_error);
+                    ImGui::EndCombo();
+                }
+                if (!q.vars.empty()) {
+                    const std::vector<const char*> items = c_str_list(q.vars);
+                    if (q.variable < 0 || q.variable >= (int)items.size()) q.variable = 0;
+                    ImGui::SetNextItemWidth(kFieldW);
+                    ImGui::Combo("signal", &q.variable, items.data(), (int)items.size());
+                }
+                InputNumStr("integration step", q.step_text, kFieldW);
+                InputNumStr("time scale", q.time_scale_text, kFieldW);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Source time per unit of network time.");
+                InputNumStr("source transient", q.skip_text, kFieldW);
+                ImGui::Checkbox("normalise to zero mean, unit deviation", &q.normalize);
+            }
+            InputNumStr(q.kind == NeuralSourceKind::Noise ? "deviation" : "amplitude", q.amplitude_text, kFieldW);
+            if (q.kind == NeuralSourceKind::Sine || q.kind == NeuralSourceKind::Square) {
+                InputNumStr("frequency", q.frequency_text, kFieldW);
+                InputNumStr("phase, rad", q.phase_text, kFieldW);
+            }
+            InputNumStr("offset", q.offset_text, kFieldW);
+            if (ImGui::Button("Remove source")) remove = (int)i;
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    if (remove >= 0) {
+        c.sources.erase(c.sources.begin() + remove);
+        c.links.erase(std::remove_if(c.links.begin(), c.links.end(), [&](const NeuralLink& l) { return l.source == remove; }), c.links.end());
+        for (NeuralLink& l : c.links) l.source -= l.source > remove;
+    }
+    if (ImGui::Button("Add source")) {
+        NeuralSource q;
+        q.name = "input " + std::to_string(c.sources.size() + 1);
+        c.sources.push_back(std::move(q));
+    }
+    remove = -1;
+    std::vector<const char*> sources, pops;
+    for (const NeuralSource& q : c.sources) sources.push_back(q.name.c_str());
+    for (const NeuralPopulation& p : c.populations) pops.push_back(p.name.c_str());
+    for (size_t i = 0; i < c.links.size(); ++i) {
+        NeuralLink& l = c.links[i];
+        ImGui::PushID((int)i + 4000);
+        const char* from = l.source >= 0 && l.source < (int)sources.size() ? sources[(size_t)l.source] : "?";
+        const char* to = l.population >= 0 && l.population < (int)pops.size() ? pops[(size_t)l.population] : "?";
+        const std::string title = std::string(from) + " -> " + to + "###link";
+        if (ImGui::TreeNodeEx(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SetNextItemWidth(kFieldW);
+            ImGui::Combo("from", &l.source, sources.data(), (int)sources.size());
+            ImGui::SetNextItemWidth(kFieldW);
+            ImGui::Combo("to population", &l.population, pops.data(), (int)pops.size());
+            InputNumStr("gain", l.gain_text, kFieldW);
+            InputNumStr("relative gain spread", l.gain_spread_text, kFieldW);
+            InputNumStr("fraction of nodes", l.fraction_text, kFieldW);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Picked at random by the seed. A node takes one channel,\nfractions of one population must add up to 1 or less.");
+            if (ImGui::Button("Remove link")) remove = (int)i;
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    if (remove >= 0) c.links.erase(c.links.begin() + remove);
+    if (c.sources.empty()) ImGui::BeginDisabled();
+    if (ImGui::Button("Add link")) c.links.push_back(NeuralLink{});
+    if (c.sources.empty()) ImGui::EndDisabled();
+}
+
+static void draw_neural_protocol(NeuralConfig& c) {
+    if (!ImGui::CollapsingHeader("Protocol", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    int kind = (int)c.protocol;
+    static const char* const kinds[] = { "One continuous run", "Separate trials" };
+    ImGui::SetNextItemWidth(kFieldW + 100.0f);
+    if (ImGui::Combo("protocol", &kind, kinds, IM_ARRAYSIZE(kinds))) c.protocol = (NeuralProtocol)kind;
+    if (c.protocol != NeuralProtocol::Trials) return;
+    InputNumStr("trials", c.trials_text, kFieldW);
+    InputNumStr("rest before the stimulus", c.rest_text, kFieldW);
+    InputNumStr("stimulus", c.stimulus_text, kFieldW);
+    ImGui::Checkbox("restart each trial from the initial conditions", &c.reset_state);
+    if (c.reset_state) ImGui::TextDisabled("The order parameter is off: a phase across a reset has no meaning.");
+    ImGui::TextDisabled("Recorded time %g replaces t max.", neural_record_time(c));
+}
+
 static void draw_neural_sweep(NeuralSession& s, NeuralConfig& c) {
     if (!ImGui::CollapsingHeader("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) return;
     NeuralSweep& w = c.sweep;
@@ -164,7 +289,7 @@ static void draw_neural_sweep(NeuralSession& s, NeuralConfig& c) {
     InputNumStr("points", w.points_text, kFieldW);
 }
 
-void draw_neural_controls(AppModel& model, SystemLibrary& /*lib*/) {
+void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
     NeuralSession& s = model.neural_session;
     if (s.configs.empty()) {
         ImGui::TextDisabled("No system loaded. Pick a system in the list above.");
@@ -243,7 +368,20 @@ void draw_neural_controls(AppModel& model, SystemLibrary& /*lib*/) {
                               "There is no R before the first and after the last crossings; a node gone silent\n"
                               "lowers R. R is per population and ignores amplitudes: see the spread.");
         if (c.order_var >= 0) InputNumStr("order parameter threshold", c.order_threshold_text, kFieldW);
+        for (size_t k = 0; k < s.vars.size(); ++k) {
+            auto it = std::find(c.obs_vars_off.begin(), c.obs_vars_off.end(), (int)k);
+            bool on = it == c.obs_vars_off.end();
+            if (k) ImGui::SameLine();
+            if (ImGui::Checkbox((s.vars[k] + "##rec").c_str(), &on)) {
+                if (on) c.obs_vars_off.erase(it); else c.obs_vars_off.push_back((int)k);
+            }
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("recorded variables");
+        InputNumStr("output limit, MB", c.output_limit_text, kFieldW);
     }
+    draw_neural_input(lib, s, c);
+    draw_neural_protocol(c);
     draw_neural_sweep(s, c);
     draw_neural_populations(s, c);
     draw_neural_projections(c);
@@ -305,36 +443,49 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     NeuralConfig& c = s.configs[(size_t)s.active_config_index];
     const NeuralResult& r = c.result;
     NeuralViewState& vs = model.neural_view;
-    const int nVars = (int)s.vars.size(), K = c.pops_per_instance;
+    const int nVars = (int)r.observed_vars.size(), K = c.pops_per_instance;
+    const int recorded = (int)(std::find(r.observed_vars.begin(), r.observed_vars.end(), vs.series_var) - r.observed_vars.begin());
     const int nInst = (int)c.instance_start.size() - 1, nPops = (std::max)(0, nInst) * K;
-    if (vs.series_var < 0 || vs.series_var >= nVars) vs.series_var = 0;
+    if (vs.series_var < 0 || vs.series_var >= (int)s.vars.size()) vs.series_var = 0;
 
-    const bool sync = what == kNeuralSync, sweep = what == kNeuralSweep;
+    if (what == kNeuralInput) {
+        const int ch = (int)c.sources.size();
+        if (ch == 0 || c.input_view.empty()) { ImGui::TextDisabled("No input yet: add a source and a link, then press Run."); return; }
+    }
+    const bool sync = what == kNeuralSync, sweep = what == kNeuralSweep, input = what == kNeuralInput;
     if (sync || sweep) {
         static const char* const kinds[] = { "Order parameter R", "Spread across nodes" };
         ImGui::SetNextItemWidth(170.0f);
         ImGui::Combo(sweep ? "##neural_sweep_kind" : "##neural_sync_kind", &vs.sync_kind, kinds, IM_ARRAYSIZE(kinds));
     }
     const bool spread = (sync || sweep) && vs.sync_kind == 1;
-    if (!sweep && !s.vars.empty() && (!sync || spread)) {
+    if (!sweep && !input && !s.vars.empty() && (!sync || spread)) {
         const std::vector<const char*> items = c_str_list(s.vars);
         if (sync) ImGui::SameLine();
         ImGui::SetNextItemWidth(90.0f);
         ImGui::Combo(what == kNeuralMeans ? "variable##means" : what == kNeuralNodes ? "variable##nodes" : "variable##sync",
                      &vs.series_var, items.data(), (int)items.size());
     }
-    if (!sweep) neural_instance_picker(c, vs, what == kNeuralMeans ? "instance##means" : what == kNeuralNodes ? "instance##nodes" : "instance##sync");
+    if (!sweep && !input) neural_instance_picker(c, vs, what == kNeuralMeans ? "instance##means" : what == kNeuralNodes ? "instance##nodes" : "instance##sync");
 
     // Точка p кривой k.
     std::function<double(int)> xof = [&](int p) { return r.t0 + r.dt * (double)p; };
     std::function<double(int, int)> yof;
     int curves = 0, points = r.n_points;
     std::vector<int> nodes;
-    std::string yname = nVars > 0 ? s.vars[(size_t)vs.series_var] : std::string();
+    std::string yname = !s.vars.empty() ? s.vars[(size_t)vs.series_var] : std::string();
     const std::string none = "No data yet - press Run on the Neural tab.";
     std::string empty;
     const int p0 = vs.instance * K;
-    if (r.n_points <= 0 || nPops <= 0 || nVars <= 0) empty = none;
+    if (input) {
+        const int ch = (int)c.sources.size();
+        curves = ch; points = (int)(c.input_view.size() / (size_t)ch);
+        xof = [&c](int p) { return c.input_view_t0 + c.input_view_dt * (double)p; };
+        yof = [&c, ch](int k, int p) { return c.input_view[(size_t)p * ch + k]; };
+        yname = "input";
+    }
+    else if (r.n_points <= 0 || nPops <= 0) empty = none;
+    else if (!sweep && !(sync && !spread) && recorded >= nVars) empty = "This variable is not recorded.";
     else if (sweep) {
         const std::vector<double>& d = spread ? c.sweep_spread : c.sweep_order;
         if (c.sweep_values.empty()) empty = "Turn on the sweep and press Run.";
@@ -351,7 +502,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         if (d.size() != (size_t)r.n_points * nPops * nVars) empty = none;
         else {
             curves = K;
-            const int v = vs.series_var;
+            const int v = recorded;
             yof = [&d, nPops, nVars, p0, v](int k, int p) { return d[((size_t)p * nPops + p0 + k) * nVars + v]; };
             if (sync) yname = "spread " + yname;
         }
@@ -371,7 +522,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
             const int i0 = c.instance_start[(size_t)vs.instance], i1 = c.instance_start[(size_t)vs.instance + 1];
             for (size_t q = 0; q < nSel; ++q) if (r.observed[q] >= i0 && r.observed[q] < i1) nodes.push_back((int)q);
             curves = (int)nodes.size();
-            const int v = vs.series_var;
+            const int v = recorded;
             yof = [&r, &nodes, nSel, nVars, v](int k, int p) { return r.traces[((size_t)p * nSel + nodes[(size_t)k]) * nVars + v]; };
             if (curves == 0) empty = "No nodes are observed.";
         }
@@ -380,10 +531,10 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
 
     // Вид держит указатели между кадрами.
     static std::vector<std::vector<double>> buffers[kNeuralWindowCount];
-    static int filled[kNeuralWindowCount] = { -1, -1, -1, -1 };
+    static int filled[kNeuralWindowCount] = {};
     std::vector<std::vector<double>>& bufs = buffers[what];
     const int gen = ((((c.data_generation * 131 + vs.series_var) * 131 + s.active_config_index) * 131 + vs.instance) * 131 + vs.sync_kind) * 131 + curves;
-    const bool fresh = (int)bufs.size() != curves || filled[what] != gen;
+    const bool fresh = (int)bufs.size() != curves || filled[what] != gen + 1;
     if (fresh) {
         bufs.assign((size_t)curves, {});
         for (int k = 0; k < curves; ++k) {
@@ -396,7 +547,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
                 b.push_back(v);
             }
         }
-        filled[what] = gen;
+        filled[what] = gen + 1;
     }
     std::vector<PlotSeriesInput> series;
     std::vector<bool> vis((size_t)curves, true);
@@ -409,13 +560,24 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         si.n_points = (int)(b.size() / 2);
         const float t = curves > 1 ? (float)k / (float)(curves - 1) : 0.0f;
         si.color = ImGui::ColorConvertU32ToFloat4(cmap_sample_id(t, model.heatmap_colormap));
-        si.label = what == kNeuralNodes ? std::to_string(r.observed[(size_t)nodes[(size_t)k]]) : c.populations[(size_t)k].name;
+        si.label = what == kNeuralNodes ? std::to_string(r.observed[(size_t)nodes[(size_t)k]])
+                 : input ? c.sources[(size_t)k].name : c.populations[(size_t)k].name;
         series.push_back(si);
     }
     view.x_axis.name = sweep ? neural_sweep_name(c.sweep.kind) : "t";
     view.y_axis.name = yname;
+    if (longest == 0) {
+        ImGui::TextDisabled(sync || sweep ? "No finite values. R needs two threshold crossings of every node: run longer."
+                                          : "No finite values.");
+        return;
+    }
     // Без запаса вырожденный диапазон (одна точка, все значения равны) даёт ось нулевой длины.
     view.pad_x = longest <= 1;
+    // Ось времени по записи, а не по данным: у R края могут быть пустыми, окна должны совпадать по t.
+    const double t_end = r.t0 + r.dt * (double)(r.n_points - 1);
+    view.x_fit_use_explicit = !sweep && t_end > r.t0;
+    view.x_fit_min = r.t0;
+    view.x_fit_max = t_end;
     view.pad_y = true;
     view.show_zero_x = view.show_zero_y = false;
     view.point_markers = sweep;

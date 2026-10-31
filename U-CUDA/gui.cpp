@@ -1154,7 +1154,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             draw_neural_controls(model, lib);
         }
         ImGui::End();
-        static const char* const neural_titles[kNeuralWindowCount] = { "Population Means", "Observed Nodes", "Synchronisation", "Neural Sweep" };
+        static const char* const neural_titles[kNeuralWindowCount] = { "Population Means", "Observed Nodes", "Synchronisation", "Neural Sweep", "Neural Input" };
         for (int w = 0; w < kNeuralWindowCount; ++w) {
             if (ImGui::Begin(neural_titles[w]))
                 draw_neural_series_window(model, *neural_rnd[w], neural_views[w], w);

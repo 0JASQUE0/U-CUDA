@@ -1856,6 +1856,55 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
     o << ",\"sweep_hi\":"; jstr(o, c.sweep.hi_text);
     o << ",\"sweep_points\":"; jstr(o, c.sweep.points_text);
     o << ",\"sweep_log\":" << (c.sweep.log ? "true" : "false");
+    o << ",\"obs_vars_off\":[";
+    for (size_t i = 0; i < c.obs_vars_off.size(); ++i) o << (i ? "," : "") << c.obs_vars_off[i];
+    o << "],\"output_limit\":"; jstr(o, c.output_limit_text);
+    o << ",\"input_var\":" << c.input_var;
+    o << ",\"input_hold\":"; jstr(o, c.input_hold_text);
+    o << ",\"protocol\":" << (int)c.protocol;
+    o << ",\"trials\":"; jstr(o, c.trials_text);
+    o << ",\"rest\":"; jstr(o, c.rest_text);
+    o << ",\"stimulus\":"; jstr(o, c.stimulus_text);
+    o << ",\"reset_state\":" << (c.reset_state ? "true" : "false");
+    const auto strings = [&o](const std::vector<std::string>& v) {
+        o << "[";
+        for (size_t k = 0; k < v.size(); ++k) { if (k) o << ","; jstr(o, v[k]); }
+        o << "]";
+    };
+    o << ",\"sources\":[";
+    for (size_t i = 0; i < c.sources.size(); ++i) {
+        const NeuralSource& s = c.sources[i];
+        if (i) o << ",";
+        o << "{\"name\":"; jstr(o, s.name);
+        o << ",\"kind\":" << (int)s.kind;
+        o << ",\"amplitude\":"; jstr(o, s.amplitude_text);
+        o << ",\"frequency\":"; jstr(o, s.frequency_text);
+        o << ",\"phase\":"; jstr(o, s.phase_text);
+        o << ",\"offset\":"; jstr(o, s.offset_text);
+        o << ",\"system\":"; jstr(o, s.system_name);
+        o << ",\"vars\":"; strings(s.vars);
+        o << ",\"params\":"; strings(s.params);
+        o << ",\"rhs\":"; strings(s.rhs);
+        o << ",\"latex\":" << (s.latex ? "true" : "false");
+        o << ",\"ic\":"; jmap(o, s.initial_conditions);
+        o << ",\"values\":"; jmap(o, s.param_values);
+        o << ",\"variable\":" << s.variable;
+        o << ",\"step\":"; jstr(o, s.step_text);
+        o << ",\"time_scale\":"; jstr(o, s.time_scale_text);
+        o << ",\"skip\":"; jstr(o, s.skip_text);
+        o << ",\"normalize\":" << (s.normalize ? "true" : "false") << "}";
+    }
+    o << "],\"links\":[";
+    for (size_t i = 0; i < c.links.size(); ++i) {
+        const NeuralLink& l = c.links[i];
+        if (i) o << ",";
+        o << "{\"source\":" << l.source << ",\"population\":" << l.population;
+        o << ",\"gain\":"; jstr(o, l.gain_text);
+        o << ",\"gain_spread\":"; jstr(o, l.gain_spread_text);
+        o << ",\"fraction\":"; jstr(o, l.fraction_text);
+        o << "}";
+    }
+    o << "]";
     o << ",\"graph_version\":" << kNeuralGraphVersion;
     o << ",\"graph_recipe\":"; jstr(o, c.graph_recipe);
     o << ",\"graph_hash\":"; jstr(o, c.graph_hash);
@@ -1950,6 +1999,61 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
     else if (key == "sweep_hi")         c.sweep.hi_text = p.str();
     else if (key == "sweep_points")     c.sweep.points_text = p.str();
     else if (key == "sweep_log")        c.sweep.log = p.boolean();
+    else if (key == "obs_vars_off") {
+        p.expect('[');
+        if (!p.opt(']')) while (true) { c.obs_vars_off.push_back(std::stoi(p.str_or_num())); if (p.opt(',')) continue; p.expect(']'); break; }
+    }
+    else if (key == "output_limit")     c.output_limit_text = p.str();
+    else if (key == "input_var")        c.input_var = std::stoi(p.str_or_num());
+    else if (key == "input_hold")       c.input_hold_text = p.str();
+    else if (key == "protocol")         c.protocol = (NeuralProtocol)std::stoi(p.str_or_num());
+    else if (key == "trials")           c.trials_text = p.str();
+    else if (key == "rest")             c.rest_text = p.str();
+    else if (key == "stimulus")         c.stimulus_text = p.str();
+    else if (key == "reset_state")      c.reset_state = p.boolean();
+    else if (key == "sources") {
+        c.sources.clear();
+        NeuralSource q;
+        const auto strings = [&p](std::vector<std::string>& v) {
+            p.expect('[');
+            if (!p.opt(']')) while (true) { v.push_back(p.str()); if (p.opt(',')) continue; p.expect(']'); break; }
+        };
+        read_neural_list(p, [&](const std::string& k) {
+            if (k.empty()) { c.sources.push_back(q); q = NeuralSource{}; }
+            else if (k == "name") q.name = p.str();
+            else if (k == "kind") q.kind = (NeuralSourceKind)std::stoi(p.str_or_num());
+            else if (k == "amplitude") q.amplitude_text = p.str();
+            else if (k == "frequency") q.frequency_text = p.str();
+            else if (k == "phase") q.phase_text = p.str();
+            else if (k == "offset") q.offset_text = p.str();
+            else if (k == "system") q.system_name = p.str();
+            else if (k == "vars") strings(q.vars);
+            else if (k == "params") strings(q.params);
+            else if (k == "rhs") strings(q.rhs);
+            else if (k == "latex") q.latex = p.boolean();
+            else if (k == "ic") q.initial_conditions = p.map_ss();
+            else if (k == "values") q.param_values = p.map_ss();
+            else if (k == "variable") q.variable = std::stoi(p.str_or_num());
+            else if (k == "step") q.step_text = p.str();
+            else if (k == "time_scale") q.time_scale_text = p.str();
+            else if (k == "skip") q.skip_text = p.str();
+            else if (k == "normalize") q.normalize = p.boolean();
+            else p.skip_value();
+        });
+    }
+    else if (key == "links") {
+        c.links.clear();
+        NeuralLink q;
+        read_neural_list(p, [&](const std::string& k) {
+            if (k.empty()) { c.links.push_back(q); q = NeuralLink{}; }
+            else if (k == "source") q.source = std::stoi(p.str_or_num());
+            else if (k == "population") q.population = std::stoi(p.str_or_num());
+            else if (k == "gain") q.gain_text = p.str();
+            else if (k == "gain_spread") q.gain_spread_text = p.str();
+            else if (k == "fraction") q.fraction_text = p.str();
+            else p.skip_value();
+        });
+    }
     else if (key == "graph_recipe")     c.graph_recipe = p.str();
     else if (key == "graph_hash")       c.graph_hash = p.str();
     else if (key == "model_text")       c.model_text = p.str();
