@@ -215,6 +215,82 @@ constexpr int    kNeuralMeanGroup    = 256;
 constexpr double kNeuralWorkPerSync  = 2.0e8;
 constexpr size_t kNeuralFlushBytes   = 64u * 1024u * 1024u;
 
+// R(t) по спискам пересечений порога: times[start[i]..start[i + 1]) у узла i по возрастанию. Фаза линейна между
+// соседними пересечениями, косинус и синус идут поворотом, а не sincos на точку.
+void neural_order_from_crossings(const std::vector<size_t>& start, const std::vector<double>& times,
+                                 const std::vector<int>& pop_start, int n_points, double t0, double dt, double t_end,
+                                 std::vector<double>& out) {
+    const int N = (int)start.size() - 1, nPops = (int)pop_start.size() - 1;
+    const int T = (std::max)(1, (std::min)((int)std::thread::hardware_concurrency(), N));
+    struct Part { int pop0 = 0, pops = 0; std::vector<double> c, s, n, silent; };
+    std::vector<Part> parts((size_t)T);
+    const auto work = [&](int j) {
+        Part& a = parts[(size_t)j];
+        const int i0 = (int)((long long)N * j / T), i1 = (int)((long long)N * (j + 1) / T);
+        if (i0 >= i1) return;
+        const auto pop_of = [&](int i) { return (int)(std::upper_bound(pop_start.begin(), pop_start.end(), i) - pop_start.begin()) - 1; };
+        a.pop0 = pop_of(i0);
+        a.pops = pop_of(i1 - 1) - a.pop0 + 1;
+        const size_t cells = (size_t)a.pops * n_points;
+        a.c.assign(cells, 0.0); a.s.assign(cells, 0.0); a.n.assign(cells, 0.0); a.silent.assign(cells + a.pops, 0.0);
+        const double two_pi = 6.283185307179586476925286766559;
+        for (int i = i0; i < i1; ++i) {
+            const int q = pop_of(i) - a.pop0;
+            double* cs = a.c.data() + (size_t)q * n_points;
+            double* sn = a.s.data() + (size_t)q * n_points;
+            double* nn = a.n.data() + (size_t)q * n_points;
+            const size_t m = start[(size_t)i + 1] - start[(size_t)i];
+            const double* ts = times.data() + start[(size_t)i];
+            double widest = 0.0;
+            for (size_t k = 0; k + 1 < m; ++k) {
+                const double a0 = ts[k], b0 = ts[k + 1], len = b0 - a0;
+                widest = (std::max)(widest, len);
+                const long long p0 = (std::max)(0LL, (long long)std::ceil((a0 - t0) / dt));
+                const double step = two_pi * dt / len, cd = std::cos(step), sd = std::sin(step);
+                double phi = two_pi * (t0 + (double)p0 * dt - a0) / len, c = std::cos(phi), s = std::sin(phi);
+                for (long long p = p0; p < n_points && t0 + (double)p * dt < b0; ++p) {
+                    cs[p] += c; sn[p] += s; nn[p] += 1.0;
+                    const double c1 = c * cd - s * sd;
+                    s = s * cd + c * sd; c = c1;
+                }
+            }
+            // Замолчал до конца запуска: дольше двух своих самых длинных интервалов. Иначе следующего пересечения просто не дождались.
+            const double last = m > 0 ? ts[m - 1] : t0;
+            if (m == 0 || (m >= 2 && t_end - last > 2.0 * widest)) {
+                const long long from = m == 0 ? 0 : (std::max)(0LL, (long long)std::ceil((last - t0) / dt));
+                if (from < n_points) a.silent[(size_t)q * (n_points + 1) + (size_t)from] += 1.0;
+            }
+        }
+    };
+    std::vector<std::thread> pool;
+    for (int j = 1; j < T; ++j) pool.emplace_back(work, j);
+    work(0);
+    for (std::thread& t : pool) t.join();
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    out.assign((size_t)n_points * nPops, nan);
+    std::vector<double> c((size_t)nPops * n_points, 0.0), s(c), n(c), silent((size_t)nPops * (n_points + 1), 0.0);
+    for (const Part& a : parts) {
+        for (int q = 0; q < a.pops; ++q) {
+            const size_t to = (size_t)(a.pop0 + q) * n_points, from = (size_t)q * n_points;
+            for (int p = 0; p < n_points; ++p) { c[to + p] += a.c[from + p]; s[to + p] += a.s[from + p]; n[to + p] += a.n[from + p]; }
+            for (int p = 0; p <= n_points; ++p) silent[(size_t)(a.pop0 + q) * (n_points + 1) + p] += a.silent[(size_t)q * (n_points + 1) + p];
+        }
+    }
+    for (int q = 0; q < nPops; ++q) {
+        const double size = (double)(pop_start[(size_t)q + 1] - pop_start[(size_t)q]);
+        double quiet = 0.0;
+        for (int p = 0; p < n_points; ++p) {
+            quiet += silent[(size_t)q * (n_points + 1) + p];
+            if (t0 + (double)p * dt > t_end) break;
+            const double have = n[(size_t)q * n_points + p], den = have + quiet;
+            if (have <= 0.0 || den < size) continue;
+            const double cv = c[(size_t)q * n_points + p], sv = s[(size_t)q * n_points + p];
+            out[(size_t)p * nPops + q] = std::sqrt(cv * cv + sv * sv) / den;
+        }
+    }
+}
+
 // Зеркало constexpr-констант configCUDA.h. Сам заголовок сюда не включается — он читается как
 // ТЕКСТ и уходит в NVRTC (src_configCUDA_h), поэтому значения дублируются литералами, как уже
 // сделано в run_bif1d. При правке configCUDA.h эти значения надо править вместе с ним.
@@ -2462,6 +2538,7 @@ struct ParametricEngine::Impl {
 
     // Neural — модуль на расписание: шаг выбирается в шаблоне, а не ветвлением в ядре.
     struct CachedNeuralModule {
+        CUfunction order = nullptr;
         std::string key;
         CUmodule    module = nullptr;
         CUfunction  step = nullptr;          // neuralStepKernel
@@ -11676,9 +11753,11 @@ struct ParametricEngine::Impl {
     bool compile_neural_module(bool activate, const NeuralRequest& req, std::string& err) {
         cuCtxSetCurrent(context);
         const int sched = (int)req.schedule;
+        const int inst = req.instance_start.size() > 2 ? 1 : 0;
         const std::string key = hash_key(req.krs_body, req.amountOfX) + ":neural:v"
                               + std::to_string(req.amountOfValues) + ":s" + std::to_string(sched)
                               + ":l" + std::to_string(req.n_laws)
+                              + ":i" + std::to_string(inst)
                               + ":c" + std::to_string(std::hash<std::string>{}(req.coupling_body))
                               + ":r" + std::to_string(std::hash<std::string>{}(req.rhs_body));
         return compile_into(pool_neural, key, cached_neural, activate, [&](CachedNeuralModule& fresh) {
@@ -11689,6 +11768,7 @@ struct ParametricEngine::Impl {
                                 { "{{AMOUNT_OF_VALUES}}", std::to_string(req.amountOfValues) },
                                 { "{{NEURAL_SCHED}}",     std::to_string(sched) },
                                 { "{{NEURAL_LAWS}}",      std::to_string(req.n_laws) },
+                                { "{{NEURAL_INST}}",      std::to_string(inst) },
                                 { "{{KRS_BODY}}",         req.krs_body },
                                 { "{{KRS_RHS_BODY}}",     req.rhs_body },
                                 { "{{COUPLING_BODY}}",    req.coupling_body } },
@@ -11698,7 +11778,8 @@ struct ParametricEngine::Impl {
             fresh.module = mod;
             if (!module_fn(mod, "neuralStepKernel", fresh.step, err)
                 || !module_fn(mod, "neuralObserveKernel", fresh.observe, err)
-                || !module_fn(mod, "neuralMeanKernel", fresh.mean, err)) { cuModuleUnload(mod); return false; }
+                || !module_fn(mod, "neuralMeanKernel", fresh.mean, err)
+                || !module_fn(mod, "neuralOrderKernel", fresh.order, err)) { cuModuleUnload(mod); return false; }
             return true;
         }, err);
     }
@@ -11711,10 +11792,15 @@ struct ParametricEngine::Impl {
             const int* inChannel; const numb* inGain; const numb* inSample;
             int* badFlag; int* status;
             numb h; numb maxValue;
-            int nNodes; int phase; int inVar; int pad;
+            int nNodes; int phase; int inVar; int step;
         };
         struct ObserveArgs { const numb* state; const int* nodes; const int* vars; numb* out; int nNodes, nSel, nVars, pad; };
-        struct MeanArgs { const numb* state; const int* groupStart; const int* groupPop; const int* vars; numb* out; int nNodes, nGroups, nVars, pad; };
+        struct MeanArgs { const numb* state; const int* groupStart; const int* groupPop; const int* vars; numb* out; numb* out2; int nNodes, nGroups, nVars, pad; };
+        struct OrderArgs {
+            const numb* column; numb* prev; int* count; int* outNode; numb* outTime;
+            numb threshold; numb t; numb dt;
+            int nNodes; int first; int capacity; int pad;
+        };
 
         NeuralResult res;
         auto fail = [&](const std::string& msg) -> NeuralResult& { res.error = msg; return res; };
@@ -11750,6 +11836,22 @@ struct ParametricEngine::Impl {
             if (in.node_channel.size() != (size_t)N || in.node_gain.size() != (size_t)N) return fail("input maps need one entry per node");
             for (int c : in.node_channel) if (c >= in.channels) return fail("input channel out of range");
         }
+        // Экземпляр не делит дуг и популяций с другими: на этом держится вся изоляция.
+        std::vector<int> instStart = req.instance_start;
+        if (instStart.empty()) instStart = { 0, N };
+        const int nInst = (int)instStart.size() - 1;
+        if (nInst < 1 || instStart.front() != 0 || instStart.back() != N) return fail("instances must cover all nodes");
+        for (int q = 0; q < nInst; ++q) {
+            const int i0 = instStart[(size_t)q], i1 = instStart[(size_t)q + 1];
+            if (i0 >= i1) return fail("an empty instance");
+            if (nInst > 1)
+                for (int e = req.edge_start[(size_t)i0]; e < req.edge_start[(size_t)i1]; ++e)
+                    if (req.edge_src[(size_t)e] < i0 || req.edge_src[(size_t)e] >= i1) return fail("an arc joins two instances");
+        }
+        const auto instance_of = [&](int node) {
+            return (int)(std::upper_bound(instStart.begin(), instStart.end(), node) - instStart.begin()) - 1;
+        };
+
         const NeuralObservation& ob = req.observe;
         for (int v : ob.vars) if (v < 0 || v >= nx) return fail("observed variable out of range");
         for (int i : ob.nodes) if (i < 0 || i >= N) return fail("observed node out of range");
@@ -11758,7 +11860,11 @@ struct ParametricEngine::Impl {
             if (ob.pop_start.front() != 0 || ob.pop_start.back() != N) return fail("populations must cover all nodes");
             for (int p = 0; p < nPops; ++p)
                 if (ob.pop_start[(size_t)p] >= ob.pop_start[(size_t)p + 1]) return fail("an empty population");
+            for (int p = 0; p < nPops; ++p)
+                if (instance_of(ob.pop_start[(size_t)p]) != instance_of(ob.pop_start[(size_t)p + 1] - 1)) return fail("a population crosses two instances");
         }
+        if (ob.order_var >= nx) return fail("the order parameter variable is out of range");
+        if (ob.order_var >= 0 && nPops == 0) return fail("the order parameter needs populations");
 
         const long long skipSteps  = (long long)steps_from_time_size_t(req.transient, req.h);
         const long long workSteps  = (long long)steps_from_time_size_t(req.t_max, req.h);
@@ -11766,8 +11872,11 @@ struct ParametricEngine::Impl {
         if (totalSteps <= 0) return fail("t_max / h gives no steps");
 
         const int nVars = (int)ob.vars.size(), nSel = nVars ? (int)ob.nodes.size() : 0, nMean = nVars ? nPops : 0;
-        const long long nPointsLL = (nSel + nMean > 0) ? workSteps / req.pre_scaller + 1 : 0;
-        const size_t rowElems = ((size_t)nSel + (size_t)nMean) * (size_t)nVars;
+        const int nOrder = ob.order_var >= 0 ? nPops : 0;
+        const bool wantSpread = ob.spread && nMean > 0;
+        const long long nPointsLL = (nSel + nMean + nOrder > 0) ? workSteps / req.pre_scaller + 1 : 0;
+        // Строка записи: выбранные узлы, суммы, суммы квадратов.
+        const size_t rowElems = ((size_t)nSel + (size_t)nMean * (wantSpread ? 2 : 1)) * (size_t)nVars;
         if ((double)nPointsLL * (double)rowElems * sizeof(double) > (double)req.max_output_bytes)
             return fail("the recorded output is above max_output_bytes: raise the decimation or select less");
         const int nPoints = (int)nPointsLL;
@@ -11785,7 +11894,7 @@ struct ParametricEngine::Impl {
         const int flushRows = nPoints > 0 ? (int)std::min<long long>(nPoints, std::max<long long>(1, (long long)(kNeuralFlushBytes / std::max<size_t>(1, rowElems * sizeof(numb))))) : 0;
 
         OrderDevBuf d_values, d_buf[4], d_eStart, d_eSrc, d_eW, d_eLaw, d_inCh, d_inGain, d_inRows, d_bad, d_status,
-                    d_sel, d_vars, d_gStart, d_gPop, d_out;
+                    d_sel, d_vars, d_gStart, d_gPop, d_out, d_prev, d_crossCount, d_crossNode, d_crossTime;
         auto dev = [&](OrderDevBuf& b, size_t bytes, const char* what) {
             res.device_bytes += bytes;
             return b.alloc(std::max<size_t>(bytes, sizeof(numb)), what, err);
@@ -11838,7 +11947,7 @@ struct ParametricEngine::Impl {
         // Популяции режутся на группы, чтобы atomicAdd шёл один на группу.
         std::vector<int> gStart, gPop;
         if (nMean > 0) {
-            for (int p = 0; p < nMean; ++p)
+            for (int p = 0; p < nPops; ++p)
                 for (int i = ob.pop_start[(size_t)p]; i < ob.pop_start[(size_t)p + 1]; i += kNeuralMeanGroup) { gStart.push_back(i); gPop.push_back(p); }
             gStart.push_back(N);
             if (!dev(d_gStart, gStart.size() * sizeof(int), "groupStart") || !dev(d_gPop, gPop.size() * sizeof(int), "groupPop")) return fail(err);
@@ -11851,10 +11960,42 @@ struct ParametricEngine::Impl {
             if (!dev(d_sel, (size_t)nSel * sizeof(int), "selected") || !up(d_sel, ob.nodes.data(), (size_t)nSel * sizeof(int), "selected")) return fail(err);
         }
         if (flushRows > 0 && !dev(d_out, (size_t)flushRows * rowElems * sizeof(numb), "out")) return fail(err);
+        // Список пересечений: за запись узел даёт не больше одного, поэтому хост забирает его до переполнения.
+        const int crossCap = (int)(std::max)((long long)N * 2, std::clamp((long long)N * 64, 1LL << 20, 1LL << 26));
+        const size_t crossLimit = req.max_output_bytes / (sizeof(int) + sizeof(double));
+        if (nOrder > 0) {
+            const int zero = 0;
+            if (!dev(d_prev, (size_t)N * sizeof(numb), "orderPrev") || !dev(d_crossCount, sizeof(int), "crossCount")
+                || !dev(d_crossNode, (size_t)crossCap * sizeof(int), "crossNode")
+                || !dev(d_crossTime, (size_t)crossCap * sizeof(numb), "crossTime")) return fail(err);
+            if (!up(d_crossCount, &zero, sizeof(int), "crossCount")) return fail(err);
+        }
+        std::vector<int> crossNode;
+        std::vector<double> crossTime;
+        long long crossWorst = 0;
+        bool crossFull = false;
+        double crossEnd = (double)(skipSteps + (long long)(nPoints > 0 ? nPoints - 1 : 0) * req.pre_scaller) * req.h;
+        const auto flush_cross = [&]() {
+            int n = 0;
+            const int zero = 0;
+            if (cudaMemcpy(&n, d_crossCount.p, sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+            n = (std::min)(n, crossCap);
+            if (n > 0) {
+                std::vector<int> hn((size_t)n);
+                std::vector<numb> ht((size_t)n);
+                if (cudaMemcpy(hn.data(), d_crossNode.p, (size_t)n * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess
+                    || cudaMemcpy(ht.data(), d_crossTime.p, (size_t)n * sizeof(numb), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+                crossNode.insert(crossNode.end(), hn.begin(), hn.end());
+                crossTime.insert(crossTime.end(), ht.begin(), ht.end());
+            }
+            crossWorst = 0;
+            return cudaMemcpy(d_crossCount.p, &zero, sizeof(int), cudaMemcpyHostToDevice) == cudaSuccess;
+        };
 
-        std::vector<double> traces, means;
+        std::vector<double> traces, means, spreads, orders;
         if (nSel > 0) traces.assign((size_t)nPoints * nSel * nVars, std::numeric_limits<double>::quiet_NaN());
         if (nMean > 0) means.assign((size_t)nPoints * nMean * nVars, std::numeric_limits<double>::quiet_NaN());
+        if (wantSpread) spreads.assign((size_t)nPoints * nMean * nVars, std::numeric_limits<double>::quiet_NaN());
         std::vector<numb> hostRows((size_t)flushRows * rowElems);
         int rowsOnDevice = 0, rowsFlushed = 0;
         const auto flush = [&]() {
@@ -11869,6 +12010,15 @@ struct ParametricEngine::Impl {
                     const double size = (double)(ob.pop_start[(size_t)q + 1] - ob.pop_start[(size_t)q]);
                     for (int v = 0; v < nVars; ++v) means[(p * nMean + q) * nVars + v] = (double)pops[(size_t)q * nVars + v] / size;
                 }
+                const numb* tail = pops + (size_t)nMean * nVars;
+                if (wantSpread)
+                    for (int q = 0; q < nMean; ++q) {
+                        const double size = (double)(ob.pop_start[(size_t)q + 1] - ob.pop_start[(size_t)q]);
+                        for (int v = 0; v < nVars; ++v) {
+                            const double m = (double)pops[(size_t)q * nVars + v] / size, m2 = (double)tail[(size_t)q * nVars + v] / size;
+                            spreads[(p * nMean + q) * nVars + v] = std::sqrt((std::max)(0.0, m2 - m * m));
+                        }
+                    }
             }
             rowsFlushed += rowsOnDevice;
             rowsOnDevice = 0;
@@ -11906,13 +12056,33 @@ struct ParametricEngine::Impl {
             }
             if (nMean > 0) {
                 numb* sums = row + (size_t)nSel * nVars;
-                if (cudaMemsetAsync(sums, 0, (size_t)nMean * nVars * sizeof(numb), 0) != cudaSuccess) { err = "memset means"; return false; }
-                MeanArgs ma{ state, d_gStart.as<int>(), d_gPop.as<int>(), d_vars.as<int>(), sums, N, (int)gPop.size(), nVars, 0 };
+                numb* squares = wantSpread ? sums + (size_t)nMean * nVars : nullptr;
+                if (cudaMemsetAsync(sums, 0, (size_t)nMean * nVars * (wantSpread ? 2 : 1) * sizeof(numb), 0) != cudaSuccess) { err = "memset means"; return false; }
+                MeanArgs ma{ state, d_gStart.as<int>(), d_gPop.as<int>(), d_vars.as<int>(), sums, squares, N, (int)gPop.size(), nVars, 0 };
                 void* args[] = { &ma };
                 const unsigned b = (unsigned)((gPop.size() + kNeuralObserveBlock - 1) / kNeuralObserveBlock);
                 CUresult r = cuLaunchKernel(cached_neural.mean, b, 1, 1, kNeuralObserveBlock, 1, 1, 0, nullptr, args, nullptr);
                 if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(neural mean): " + cu_err(r); return false; }
                 ++res.launches;
+            }
+            if (nOrder > 0 && !crossFull) {
+                const long long point = (long long)rowsFlushed + rowsOnDevice;
+                const double t = (double)(skipSteps + point * req.pre_scaller) * req.h;
+                if (crossWorst + N > crossCap) {
+                    cudaDeviceSynchronize();
+                    if (!flush_cross()) { err = "memcpy crossings"; return false; }
+                    if (crossNode.size() >= crossLimit) { crossFull = true; crossEnd = t; }
+                }
+                if (!crossFull) {
+                    OrderArgs oa{ state + (size_t)ob.order_var * N, d_prev.as<numb>(), d_crossCount.as<int>(), d_crossNode.as<int>(), d_crossTime.as<numb>(),
+                                  (numb)ob.order_threshold, (numb)t, (numb)((double)req.pre_scaller * req.h), N, point == 0 ? 1 : 0, crossCap, 0 };
+                    void* args[] = { &oa };
+                    const unsigned b = (unsigned)((N + kNeuralObserveBlock - 1) / kNeuralObserveBlock);
+                    CUresult r = cuLaunchKernel(cached_neural.order, b, 1, 1, kNeuralObserveBlock, 1, 1, 0, nullptr, args, nullptr);
+                    if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(neural order): " + cu_err(r); return false; }
+                    ++res.launches;
+                    crossWorst += N;
+                }
             }
             ++rowsOnDevice;
             return true;
@@ -11920,6 +12090,7 @@ struct ParametricEngine::Impl {
 
         if (skipSteps == 0 && nPoints > 0 && !record(d_buf[0].as<numb>())) return fail(err);
 
+        std::vector<long long> instStop((size_t)nInst, -1);
         long long done = 0;
         bool stopped = false;
         while (done < totalSteps && !stopped) {
@@ -11935,6 +12106,7 @@ struct ParametricEngine::Impl {
                     const long long row = std::min<long long>(done / in.hold_steps, nInRows - 1);
                     sa.inSample = d_inRows.as<numb>() + (size_t)row * in.channels;
                 }
+                sa.step = (int)(std::min<long long>)(done + 1, (std::numeric_limits<int>::max)());
                 void* args[] = { &sa };
                 for (int ph = 0; ph < phases; ++ph) {
                     sa.phase = ph;
@@ -11962,14 +12134,71 @@ struct ParametricEngine::Impl {
             if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { res.cancelled = true; stopped = true; break; }
             int bad = 0;
             if (cudaMemcpy(&bad, d_bad.p, sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return fail("memcpy D2H flag");
-            if (bad) { res.diverged = true; stopped = true; }
+            if (!bad) continue;
+            res.diverged = true;
+            if (nInst == 1) { instStop[0] = done; stopped = true; continue; }
+            // Шаг разлёта экземпляра = минимум по его узлам, от длины чанка он не зависит.
+            std::vector<int> st((size_t)N);
+            if (cudaMemcpy(st.data(), d_status.p, (size_t)N * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return fail("memcpy D2H status");
+            int running = 0;
+            for (int q = 0; q < nInst; ++q) {
+                if (instStop[(size_t)q] >= 0) continue;
+                const int i0 = instStart[(size_t)q], i1 = instStart[(size_t)q + 1];
+                int first = 0;
+                for (int i = i0; i < i1; ++i)
+                    if (st[(size_t)i] > 0 && (first == 0 || st[(size_t)i] < first)) first = st[(size_t)i];
+                if (first == 0) { ++running; continue; }
+                instStop[(size_t)q] = first;
+                for (int i = i0; i < i1; ++i) if (st[(size_t)i] == 0) st[(size_t)i] = -1;
+            }
+            int zero = 0;
+            if (cudaMemcpy(d_status.p, st.data(), (size_t)N * sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess
+                || cudaMemcpy(d_bad.p, &zero, sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) return fail("memcpy H2D status");
+            if (running == 0) stopped = true;
         }
         res.steps_done = done;
 
         res.status.assign((size_t)N, 0);
         if (cudaMemcpy(res.status.data(), d_status.p, (size_t)N * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess)
             return fail("memcpy D2H status");
-        for (int v : res.status) res.n_diverged += v != 0;
+        for (int& v : res.status) v = v > 0 ? 1 : 0;
+        for (int v : res.status) res.n_diverged += v;
+
+        if (nOrder > 0) {
+            cudaDeviceSynchronize();
+            if (!flush_cross()) return fail("memcpy crossings");
+            std::vector<size_t> at((size_t)N + 1, 0);
+            for (int i : crossNode) ++at[(size_t)i + 1];
+            for (int i = 0; i < N; ++i) at[(size_t)i + 1] += at[(size_t)i];
+            std::vector<double> sorted(crossTime.size());
+            std::vector<size_t> put(at.begin(), at.end() - 1);
+            for (size_t e = 0; e < crossNode.size(); ++e) sorted[put[(size_t)crossNode[e]]++] = crossTime[e];
+            neural_order_from_crossings(at, sorted, ob.pop_start, nPoints, (double)skipSteps * req.h,
+                                        (double)req.pre_scaller * req.h, (std::min)(crossEnd, (double)done * req.h), orders);
+        }
+
+        // Записанное после шага разлёта зависит от чанка и данных не несёт.
+        if (nInst > 1 && nPoints > 0) {
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+            std::vector<long long> stopOfPop((size_t)nPops, -1), stopOfSel((size_t)nSel, -1);
+            for (int q = 0; q < nPops; ++q) stopOfPop[(size_t)q] = instStop[(size_t)instance_of(ob.pop_start[(size_t)q])];
+            for (int q = 0; q < nSel; ++q) stopOfSel[(size_t)q] = instStop[(size_t)instance_of(ob.nodes[(size_t)q])];
+            for (int p = 0; p < nPoints; ++p) {
+                const long long step = skipSteps + (long long)p * req.pre_scaller;
+                const size_t at = (size_t)p;
+                for (int q = 0; q < nSel; ++q)
+                    if (stopOfSel[(size_t)q] >= 0 && step >= stopOfSel[(size_t)q])
+                        for (int v = 0; v < nVars; ++v) traces[(at * nSel + q) * nVars + v] = nan;
+                for (int q = 0; q < nPops; ++q) {
+                    if (stopOfPop[(size_t)q] < 0 || step < stopOfPop[(size_t)q]) continue;
+                    for (int v = 0; v < nVars && nMean > 0; ++v) {
+                        means[(at * nMean + q) * nVars + v] = nan;
+                        if (wantSpread) spreads[(at * nMean + q) * nVars + v] = nan;
+                    }
+                    if (nOrder > 0) orders[at * nOrder + q] = nan;
+                }
+            }
+        }
 
         if (req.keep_final_state) {
             std::vector<numb> soa(nStates);
@@ -11982,6 +12211,9 @@ struct ParametricEngine::Impl {
         res.observed = ob.nodes;
         res.traces = std::move(traces);
         res.means = std::move(means);
+        res.spread = std::move(spreads);
+        res.order = std::move(orders);
+        res.instance_stop = std::move(instStop);
         res.n_nodes = N; res.n_vars = nx; res.n_points = nPoints;
         res.h = req.h; res.t0 = (double)skipSteps * req.h; res.dt = (double)req.pre_scaller * req.h;
         res.wall_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0).count();

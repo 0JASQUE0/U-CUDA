@@ -2189,6 +2189,16 @@ void AppModel::remove_network_config(int i) {
         if (it.index > i) --it.index;
 }
 
+void AppModel::remove_neural_config(int i) {
+    neural_session.remove_config(i);
+    for (auto it = neural_queue.begin(); it != neural_queue.end(); ) {
+        if (it->index == i) it = neural_queue.erase(it);
+        else ++it;
+    }
+    for (auto& it : neural_queue)
+        if (it.index > i) --it.index;
+}
+
 bool AppModel::start_next_in_basins_queue() {
     if (basins_session.in_flight) return false;
     if (basins_queue.empty()) return false;
@@ -2231,6 +2241,20 @@ bool AppModel::start_next_in_network_queue() {
             if (network_session.run_async(*parametric_engine, it.index)) return true;
         }
         // ok == false — last_error выставлен run_async; идём дальше.
+    }
+    return false;
+}
+
+bool AppModel::start_next_in_neural_queue() {
+    if (neural_session.in_flight) return false;
+    if (neural_queue.empty()) return false;
+    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
+    while (!neural_queue.empty()) {
+        NeuralQueueItem it = neural_queue.front();
+        neural_queue.pop_front();
+        if (it.index >= 0 && it.index < (int)neural_session.configs.size()) {
+            if (neural_session.run_async(*parametric_engine, it.index)) return true;
+        }
     }
     return false;
 }

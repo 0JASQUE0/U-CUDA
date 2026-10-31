@@ -11,13 +11,17 @@
 //   2 heun:  то же с подшагом Хойна для связи: два обмена, порядок 1, порог почти точный
 //   3 stage: RK4 со связью в каждой стадии: четыре обмена, порядок 4
 //
-// Плейсхолдеры: AMOUNT_OF_X, AMOUNT_OF_VALUES, NEURAL_SCHED, NEURAL_LAWS, KRS_BODY (шаг узла),
+// NEURAL_INST 1: несвязные экземпляры. status[node] = шаг разлёта, узел с ненулевым status замирает, хост
+// замораживает весь экземпляр на границе чанка; при 0 текст ядра шага прежний.
+//
+// Плейсхолдеры: AMOUNT_OF_X, AMOUNT_OF_VALUES, NEURAL_SCHED, NEURAL_LAWS, NEURAL_INST, KRS_BODY (шаг узла),
 // KRS_RHS_BODY (F = f(X), нужен stage), COUPLING_BODY (case-ветки из codegen_coupling).
 
 #define AMOUNTOFX {{AMOUNT_OF_X}}
 #define AMOUNTOFVALUES {{AMOUNT_OF_VALUES}}
 #define NEURAL_SCHED {{NEURAL_SCHED}}
 #define NEURAL_LAWS {{NEURAL_LAWS}}
+#define NEURAL_INST {{NEURAL_INST}}
 
 // Шаблон не зовёт свип-ядра cudaLibrary.cu, но configCUDA.h внутри
 // cudaLibrary.cuh требует par_or_var определённым.
@@ -84,7 +88,7 @@ struct NeuralStepArgs {
     int   nNodes;
     int   phase;
     int   inVar;
-    int   pad;
+    int   step;       // номер шага с 1
 };
 
 // Сосед читается только по тем переменным, что есть в законе связи: Xj[k] как у codegen_coupling.
@@ -126,7 +130,11 @@ __device__ __forceinline__ void neuralCheck(const NeuralStepArgs& A, const int n
     numb acc = (numb)0;
     for (int k = 0; k < AMOUNTOFX; ++k) acc += fabs(X[k]);
     if (isnan(acc) || isinf(acc) || (A.maxValue != (numb)0 && acc > A.maxValue)) {
+#if NEURAL_INST
+        A.status[node] = A.step;
+#else
         A.status[node] = 1;
+#endif
         *A.badFlag = 1;     // гонка безобидна: все пишут одно и то же
     }
 }
@@ -138,6 +146,19 @@ extern "C" __global__ void neuralStepKernel(const NeuralStepArgs A) {
     const numb h = A.h;
     const numb* ai = A.values + (size_t)node * AMOUNTOFVALUES;
     numb X[AMOUNTOFX], C[AMOUNTOFX];
+
+#if NEURAL_INST
+    if (A.status[node] != 0) {
+#if NEURAL_SCHED != 3
+        // Буферы меняются местами: состояние переносится в тот, что станет текущим.
+        if (A.phase == (NEURAL_SCHED == 2 ? 1 : 0)) {
+            neuralRead(A.s0, N, node, X);
+            neuralWrite(A.s1, N, node, X);
+        }
+#endif
+        return;
+    }
+#endif
 
 #if NEURAL_SCHED == 3
     const int j = A.phase;
@@ -219,6 +240,7 @@ struct NeuralMeanArgs {
     const int*  groupPop;
     const int*  vars;
     numb* out;
+    numb* out2;               // суммы квадратов, nullptr = не нужны
     int nNodes, nGroups, nVars, pad;
 };
 
@@ -230,8 +252,37 @@ extern "C" __global__ void neuralMeanKernel(const NeuralMeanArgs A) {
     const int i0 = A.groupStart[g], i1 = A.groupStart[g + 1], pop = A.groupPop[g];
     for (int v = 0; v < A.nVars; ++v) {
         const numb* col = A.state + (size_t)A.vars[v] * A.nNodes;
-        numb sum = (numb)0;
-        for (int i = i0; i < i1; ++i) sum += col[i];
+        numb sum = (numb)0, sum2 = (numb)0;
+        for (int i = i0; i < i1; ++i) { const numb x = col[i]; sum += x; sum2 += x * x; }
         atomicAdd(A.out + (size_t)pop * A.nVars + v, sum);
+        if (A.out2 != nullptr) atomicAdd(A.out2 + (size_t)pop * A.nVars + v, sum2);
     }
+}
+
+struct NeuralOrderArgs {
+    const numb* column;       // наблюдаемая переменная всех узлов
+    numb* prev;               // значение в прошлой записи
+    int*  count;              // занято в списке пересечений
+    int*  outNode;
+    numb* outTime;
+    numb  threshold;
+    numb  t;
+    numb  dt;
+    int   nNodes;
+    int   first;              // первая запись: только запомнить значение
+    int   capacity;
+    int   pad;
+};
+
+// Только пересечения порога снизу вверх на сетке записи: фазу между ними считает хост, ему нужно и следующее.
+extern "C" __global__ void neuralOrderKernel(const NeuralOrderArgs A) {
+    const int node = blockIdx.x * blockDim.x + threadIdx.x;
+    if (node >= A.nNodes) return;
+    const numb x = A.column[node], p = A.prev[node];
+    A.prev[node] = x;
+    if (A.first || !(p < A.threshold && x >= A.threshold)) return;
+    const int at = atomicAdd(A.count, 1);
+    if (at >= A.capacity) return;
+    A.outNode[at] = node;
+    A.outTime[at] = A.t - A.dt + A.dt * (A.threshold - p) / (x - p);
 }

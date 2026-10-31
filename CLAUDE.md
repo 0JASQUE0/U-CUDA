@@ -162,7 +162,15 @@ D:\U-CUDA\
   `post` (1 обмен, порог смещён на -hK^2), `old` (семантика Network, только для сверки). Запрос и
   результат в `neural_engine.h`, вход в `ParametricEngine::run_neural`. Блок по умолчанию 16 по замерам.
   Законы связи те же, что у Network (`codegen_coupling`), `Xj` там view: читается только нужная
-  переменная соседа. Network свой предел и своё ядро сохраняет.
+  переменная соседа. Network свой предел и своё ядро сохраняет. Экземпляры (`instance_start`, модуль с
+  `NEURAL_INST 1`): несвязные сети одного запуска, узлы подряд, дуга или популяция через границу отказывают.
+  `status[node]` = шаг разлёта, хост на границе чанка берёт минимум по экземпляру и замораживает его, поэтому
+  шаг остановки и записи от длины чанка не зависят; после него записи NaN. Наблюдения: разброс по узлам
+  (`spread`, пол около 1e-8 |x| из-за m2 - m^2) и R(t): `neuralOrderKernel` только копит пересечения порога
+  на сетке записи, фазу линейно между соседними пересечениями считает хост в конце запуска
+  (`neural_order_from_crossings`, определение из 1.3). Фаза по прошлому периоду на бёрстах не годится: интервалы
+  чередуются, короткие и длинные, и у половины узлов фазы не было. HR, 100 узлов: 0.17 вместо 0.086 при K = 0
+  (независимые узлы, теория 0.089), 0.12 вместо 0.18 при K = 0.1; при R = 1 оба варианта совпадают.
 - `kernels/order.template.cu` — вкладка Order: оценка порядка, замер
   Performance (`perfIntegrateKernel`), область устойчивости.
 - Адаптивный шаг (см. раздел «Adaptive step» ниже): `kernels/ucuda_adaptive.cuh`
@@ -188,7 +196,9 @@ D:\U-CUDA\
   потоке. Случайность своя, поток на (seed, проекция, узел); начало потока обязано идти через mix64,
   иначе соседние узлы получают одну последовательность со сдвигом (степени смещаются). Хеш графа
   хранится с рецептом: тот же рецепт с другим хешем отказывает, кнопка пересобирает как новый
-  эксперимент. Изменение генератора: поднять `kNeuralGraphVersion`. Интерфейс: `gui_neural.cpp`
+  эксперимент. Изменение генератора: поднять `kNeuralGraphVersion`. Интерфейс: `gui_neural.cpp`.
+  Свип (`NeuralSweep`: K, параметр, его разброс, повторы по seed) собирается `neural_plan`: значения идут
+  экземплярами одного запуска, хеш свипа составлен из хешей графов (параметры и разброс в него не входят)
 - **session_io.cpp / .h** — Save/load sessions to JSON; also the step controller
   library file (`load_ctrl_library` / `save_ctrl_library`)
 - **order_session.cpp / .h** — вкладка Order: порядок, Performance (в т.ч.
@@ -215,6 +225,7 @@ D:\U-CUDA\
   includes, types, constants, templates, prototypes (default arguments live only there). A helper used by one
   tab stays `static` in that tab's file; when another tab needs it, move its prototype into gui_internal.h and
   drop `static` (and the default arguments from the definition).
+- **gui_tree_state.h** — свёрнутые блоки между запусками: раздел `[UcudaTree]` в imgui.ini (StateStorage окон, значения 0/1)
 - **plot_renderer.cpp / .h** — General plot renderer
 - **plot_view_2d.cpp / .h** — 2D phase portraits, time series
 - **plot_view_3d.cpp / .h** — 3D phase portraits

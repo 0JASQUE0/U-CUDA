@@ -26,6 +26,14 @@ struct NeuralObservation {
     std::vector<int> nodes;           // выбранные узлы
     std::vector<int> vars;            // их переменные и переменные средних; пусто = ничего не пишем
     std::vector<int> pop_start;       // [pops + 1]; пусто = без средних
+    bool spread = false;              // СКО по узлам популяции для тех же переменных
+
+    // R(t) по популяциям. Фаза узла растёт на 2 pi линейно между соседними пересечениями порога снизу вверх,
+    // поэтому до первого и после последнего пересечения её нет, а R считается в конце запуска.
+    // Узел, замолчавший до конца, понижает R; точка, где фазы нет хотя бы у одного из остальных, остаётся NaN:
+    // неполный набор фаз смещает R.
+    int    order_var = -1;            // -1 = без R
+    double order_threshold = 0.0;
 };
 
 struct NeuralRequest {
@@ -44,6 +52,10 @@ struct NeuralRequest {
     std::vector<int>    edge_src;
     std::vector<double> edge_w;
     std::vector<int>    edge_law;            // можно пустым при n_laws == 1
+
+    // Несвязные сети одного запуска: узлы подряд, [instances + 1], пусто = одна сеть. Дуга между экземплярами
+    // и популяция на их границе отказывают. Разлетевшийся экземпляр замирает, остальные считаются дальше.
+    std::vector<int>    instance_start;
 
     double h = 0.01;
     double t_max = 100.0;
@@ -72,13 +84,17 @@ struct NeuralResult {
     int n_nodes = 0, n_vars = 0, n_points = 0;
     double h = 0.0, t0 = 0.0, dt = 0.0;
 
-    // Точки после остановки NaN. У post и heun наблюдается состояние до связи.
+    // Точки после остановки NaN: у экземпляра с шага разлёта, он от длины чанка не зависит.
+    // У post и heun наблюдается состояние до связи.
     std::vector<int>    observed;      // номера выбранных узлов
     std::vector<double> traces;        // [point][selected][var]
     std::vector<double> means;         // [point][pop][var]
+    std::vector<double> spread;        // [point][pop][var]
+    std::vector<double> order;         // [point][pop], NaN = ни у одного узла нет фазы
     std::vector<double> final_state;   // [n_nodes * amountOfX], узел за узлом
     std::vector<int>    status;        // [n_nodes], 1 = разлетелся
     int n_diverged = 0;
+    std::vector<long long> instance_stop;  // [instances], шаг остановки, -1 = дошёл до конца
 
     long long launches = 0, syncs = 0, steps_done = 0;
     int block_size = 0;

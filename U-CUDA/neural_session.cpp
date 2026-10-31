@@ -49,6 +49,34 @@ struct Stream {
     int below(int n) { return (int)(uni() * (double)n); }
 };
 
+// Среднее по времени конечных значений; у остановленного экземпляра NaN, а не среднее по началу.
+void neural_sweep_summary(NeuralOutcome& out, int order_var) {
+    const NeuralResult& r = out.result;
+    const int nInst = (int)r.instance_stop.size(), K = out.pops_per_instance;
+    if (nInst < 1 || K < 1 || r.n_points < 1) return;
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const int nPops = nInst * K, var = order_var >= 0 ? order_var : 0;
+    out.sweep_order.assign((size_t)nPops, nan);
+    out.sweep_spread.assign((size_t)nPops, nan);
+    for (int q = 0; q < nPops; ++q) {
+        if (r.instance_stop[(size_t)(q / K)] >= 0) continue;
+        double so = 0.0, ss = 0.0;
+        int no = 0, ns = 0;
+        for (int p = 0; p < r.n_points; ++p) {
+            if (!r.order.empty()) {
+                const double v = r.order[(size_t)p * nPops + q];
+                if (std::isfinite(v)) { so += v; ++no; }
+            }
+            if (!r.spread.empty()) {
+                const double v = r.spread[((size_t)p * nPops + q) * r.n_vars + var];
+                if (std::isfinite(v)) { ss += v; ++ns; }
+            }
+        }
+        if (no > 0) out.sweep_order[(size_t)q] = so / no;
+        if (ns > 0) out.sweep_spread[(size_t)q] = ss / ns;
+    }
+}
+
 struct Rows {
     std::vector<long long> start;   // [n_to + 1]
     std::vector<int> src;           // локальные номера источника
@@ -244,6 +272,15 @@ const char* neural_schedule_name(NeuralSchedule s) {
     }
     return "?";
 }
+const char* neural_sweep_name(NeuralSweepKind k) {
+    switch (k) {
+    case NeuralSweepKind::Coupling:        return "Coupling K";
+    case NeuralSweepKind::Parameter:       return "Parameter";
+    case NeuralSweepKind::ParameterSpread: return "Parameter spread";
+    case NeuralSweepKind::Replica:         return "Replicas (seed)";
+    }
+    return "?";
+}
 
 NeuralGraph neural_build_graph(const NeuralConfig& c) {
     NeuralGraph g;
@@ -340,6 +377,9 @@ std::string neural_graph_recipe(const NeuralConfig& c) {
         o << "|proj:" << p.from << ">" << p.to << ":" << (int)p.rule << ":" << p.p_text << ":" << p.degree_text << ":" << p.k_text
           << ":" << p.width_text << ":" << p.rewire_text << ":" << p.periodic << p.directed << ":" << p.weight_text << ":"
           << p.weight_spread_text << ":" << (int)p.norm << p.norm_expected << ":" << p.law;
+    if (c.sweep.enabled)
+        o << "|sweep:" << (int)c.sweep.kind << ":" << c.sweep.population << ":" << c.sweep.param << ":" << c.sweep.lo_text
+          << ":" << c.sweep.hi_text << ":" << c.sweep.points_text << ":" << c.sweep.log;
     return o.str();
 }
 
@@ -418,12 +458,111 @@ NeuralRequest neural_build_request(const System& sys, const std::vector<CustomSc
 
     for (size_t k = 0; k < vars.size(); ++k) r.observe.vars.push_back((int)k);
     r.observe.pop_start = g.pop_start;
+    r.observe.spread = true;
+    r.observe.order_var = c.order_var < (int)vars.size() ? c.order_var : -1;
+    r.observe.order_threshold = num_or(c.order_threshold_text, 0.0);
     const int per_pop = std::max(0, int_or(c.observed_per_pop_text, 8));
     for (size_t pop = 0; pop + 1 < g.pop_start.size(); ++pop) {
         const int n = g.pop_start[pop + 1] - g.pop_start[pop], m = std::min(per_pop, n);
         for (int j = 0; j < m; ++j) r.observe.nodes.push_back(g.pop_start[pop] + (int)((long long)j * n / m));
     }
     return r;
+}
+
+std::vector<double> neural_sweep_values(const NeuralConfig& c) {
+    std::vector<double> out;
+    const NeuralSweep& s = c.sweep;
+    if (!s.enabled) return out;
+    const int n = int_or(s.points_text, 0);
+    if (n < 1) throw std::runtime_error("a sweep needs at least one point");
+    out.resize((size_t)n);
+    if (s.kind == NeuralSweepKind::Replica) {
+        const int seed = int_or(c.seed_text, 1);
+        for (int i = 0; i < n; ++i) out[(size_t)i] = (double)seed + i;
+        return out;
+    }
+    const double lo = num_or(s.lo_text, 0.0), hi = num_or(s.hi_text, 0.0);
+    if (!std::isfinite(lo) || !std::isfinite(hi)) throw std::runtime_error("the sweep range is not a number");
+    if (s.log && !(lo > 0.0 && hi > 0.0)) throw std::runtime_error("a log sweep needs a positive range");
+    for (int i = 0; i < n; ++i) {
+        const double f = n > 1 ? (double)i / (double)(n - 1) : 0.0;
+        out[(size_t)i] = s.log ? std::exp(std::log(lo) + f * (std::log(hi) - std::log(lo))) : lo + f * (hi - lo);
+    }
+    if (n > 1) out.back() = hi;
+    return out;
+}
+
+NeuralConfig neural_sweep_instance(const NeuralConfig& c, int index, double value) {
+    NeuralConfig o = c;
+    o.sweep.enabled = false;
+    const NeuralSweep& s = c.sweep;
+    const std::string text = fmt_num_shortest(value);
+    if (s.kind == NeuralSweepKind::Coupling) o.coupling_text = text;
+    else if (s.kind == NeuralSweepKind::Replica) o.seed_text = std::to_string(int_or(c.seed_text, 1) + index);
+    else {
+        if (s.param.empty()) throw std::runtime_error("the sweep has no parameter");
+        if (s.population >= (int)o.populations.size()) throw std::runtime_error("the sweep points to a missing population");
+        for (int p = 0; p < (int)o.populations.size(); ++p) {
+            if (s.population >= 0 && s.population != p) continue;
+            auto& m = s.kind == NeuralSweepKind::Parameter ? o.populations[(size_t)p].param_values : o.populations[(size_t)p].param_spread;
+            m[s.param] = text;
+        }
+    }
+    return o;
+}
+
+NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custom_schemes,
+                       const std::vector<std::string>& vars, const std::vector<std::string>& params,
+                       const NeuralConfig& c) {
+    NeuralPlan plan;
+    plan.pops_per_instance = (int)c.populations.size();
+    plan.sweep_values = neural_sweep_values(c);
+    if (plan.sweep_values.empty()) {
+        const NeuralGraph g = neural_build_graph(c);
+        plan.request = neural_build_request(sys, custom_schemes, vars, params, c, g);
+        plan.hash = g.hash;
+        plan.arcs = (long long)g.src.size();
+        plan.degree_min = g.degree_min; plan.degree_max = g.degree_max;
+        return plan;
+    }
+    // Экземпляры подряд: номера узлов и популяций сдвигаются, дуга наружу экземпляра появиться не может.
+    NeuralRequest& a = plan.request;
+    Fnv f;
+    long long nodes = 0;
+    plan.degree_min = std::numeric_limits<int>::max();
+    for (int i = 0; i < (int)plan.sweep_values.size(); ++i) {
+        const NeuralConfig one = neural_sweep_instance(c, i, plan.sweep_values[(size_t)i]);
+        const NeuralGraph g = neural_build_graph(one);
+        NeuralRequest r = neural_build_request(sys, custom_schemes, vars, params, one, g);
+        if (nodes + r.n_nodes > 2000000000LL) throw std::runtime_error("the sweep holds too many nodes");
+        plan.arcs += (long long)r.edge_src.size();
+        if (plan.arcs > kMaxArcs) throw std::runtime_error("the sweep would hold more than " + std::to_string(kMaxArcs) + " arcs");
+        const int off = (int)nodes, arc_off = (int)a.edge_src.size();
+        for (const char ch : g.hash) f.add((uint64_t)(uint8_t)ch);
+        plan.degree_min = (std::min)(plan.degree_min, g.degree_min);
+        plan.degree_max = (std::max)(plan.degree_max, g.degree_max);
+        if (i == 0) {
+            a = std::move(r);
+            a.instance_start = { 0, a.n_nodes };
+            nodes = a.n_nodes;
+            continue;
+        }
+        a.values.insert(a.values.end(), r.values.begin(), r.values.end());
+        a.initial_conditions.insert(a.initial_conditions.end(), r.initial_conditions.begin(), r.initial_conditions.end());
+        a.edge_start.pop_back();
+        for (int v : r.edge_start) a.edge_start.push_back(v + arc_off);
+        for (int v : r.edge_src) a.edge_src.push_back(v + off);
+        a.edge_w.insert(a.edge_w.end(), r.edge_w.begin(), r.edge_w.end());
+        a.edge_law.insert(a.edge_law.end(), r.edge_law.begin(), r.edge_law.end());
+        a.observe.pop_start.pop_back();
+        for (int v : r.observe.pop_start) a.observe.pop_start.push_back(v + off);
+        for (int v : r.observe.nodes) a.observe.nodes.push_back(v + off);
+        nodes += r.n_nodes;
+        a.n_nodes = (int)nodes;
+        a.instance_start.push_back(a.n_nodes);
+    }
+    plan.hash = hex64(f.h);
+    return plan;
 }
 
 void NeuralSession::load_from_record(const SystemRecord& r, const std::vector<std::string>& vars_,
@@ -453,6 +592,7 @@ void NeuralSession::add_config() {
     if (!configs.empty()) {
         c = configs.back();
         c.result = NeuralResult{};
+        c.instance_start.clear(); c.sweep_values.clear(); c.sweep_order.clear(); c.sweep_spread.clear();
         c.last_run_ok = false;
         c.last_error.clear();
         c.data_generation = 0;
@@ -496,21 +636,25 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx) {
         NeuralOutcome out;
         try {
             const auto t0 = std::chrono::steady_clock::now();
-            const NeuralGraph g = neural_build_graph(snap);
+            NeuralPlan plan = neural_plan(sys_copy, cs, v, q, snap);
             out.build_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-            out.hash = g.hash;
+            out.hash = plan.hash;
             out.recipe = neural_graph_recipe(snap);
-            out.arcs = (long long)g.src.size();
-            out.degree_min = g.degree_min; out.degree_max = g.degree_max;
-            if (!snap.graph_hash.empty() && snap.graph_recipe == out.recipe && snap.graph_hash != g.hash) {
+            out.arcs = plan.arcs;
+            out.degree_min = plan.degree_min; out.degree_max = plan.degree_max;
+            if (!snap.graph_hash.empty() && snap.graph_recipe == out.recipe && snap.graph_hash != plan.hash) {
                 out.hash_mismatch = true;
-                out.result.error = "this recipe no longer gives the saved graph (hash " + snap.graph_hash + ", now " + g.hash
+                out.result.error = "this recipe no longer gives the saved graph (hash " + snap.graph_hash + ", now " + plan.hash
                                  + "): the generator or its library changed";
                 return out;
             }
-            NeuralRequest req = neural_build_request(sys_copy, cs, v, q, snap, g);
-            req.cancel = cancel; req.progress = progress;
-            out.result = engine.run_neural(req);
+            plan.request.cancel = cancel; plan.request.progress = progress;
+            out.result = engine.run_neural(plan.request);
+            out.instance_start = plan.request.instance_start;
+            if (out.instance_start.empty()) out.instance_start = { 0, plan.request.n_nodes };
+            out.pops_per_instance = plan.pops_per_instance;
+            out.sweep_values = std::move(plan.sweep_values);
+            neural_sweep_summary(out, plan.request.observe.order_var);
         } catch (const std::exception& e) {
             out.result.error = e.what();
         }
@@ -548,7 +692,15 @@ bool NeuralSession::poll() {
             c.arcs = out.arcs; c.degree_min = out.degree_min; c.degree_max = out.degree_max;
             c.build_seconds = out.build_seconds;
         }
-        if (out.result.ok) { c.result = std::move(out.result); ++c.data_generation; }
+        if (out.result.ok) {
+            c.result = std::move(out.result);
+            c.instance_start = std::move(out.instance_start);
+            c.sweep_values = std::move(out.sweep_values);
+            c.sweep_order = std::move(out.sweep_order);
+            c.sweep_spread = std::move(out.sweep_spread);
+            c.pops_per_instance = out.pops_per_instance;
+            ++c.data_generation;
+        }
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();

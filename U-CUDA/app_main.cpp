@@ -1,4 +1,5 @@
-﻿#include "plot_renderer.h"
+﻿#include "gui_tree_state.h"
+#include "plot_renderer.h"
 #include <vector>
 #include <cmath>
 #include "gpu_line_series_3d.h"
@@ -385,6 +386,7 @@ int main() {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    tree_state::install();
     ImPlot::CreateContext();
     ImPlot3D::CreateContext();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
@@ -600,6 +602,7 @@ int main() {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        tree_state::apply();
 
         // Once the async OCR ctor finishes, peek at the result so we can show
         // a warning banner if it failed. .get() is safe to call repeatedly on

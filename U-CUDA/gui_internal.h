@@ -999,7 +999,8 @@ std::string net_validate_laws(const NetworkSession& s, const NetworkConfig& c);
 void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/);
 // Neural — большие сети: окно настроек и кривые (means: средние по популяциям, иначе выбранные узлы).
 void draw_neural_controls(AppModel& model, SystemLibrary& lib);
-void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DView& view, bool means);
+enum { kNeuralMeans = 0, kNeuralNodes, kNeuralSync, kNeuralSweep, kNeuralWindowCount };
+void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DView& view, int what);
 void draw_network_graph_window(AppModel& model);
 void draw_network_series_window(AppModel& model, PlotRenderer& renderer, Plot2DView& view);
 void draw_network_raster_window(AppModel& model, PlotRenderer& renderer, HeatmapView& view);
@@ -1053,7 +1054,7 @@ void draw_custom_mode_layout(AppModel& model, SystemLibrary& lib,
 // почти одинаковых веток: каждая доставала из своей сессии одну и ту же четвёрку — подпись
 // запущенного конфига, время старта, cancel_token, progress_token. Ветки успели разойтись:
 // три подставляли запасное имя только при выходе индекса за границы, три — ещё и при пустом label.
-enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync, Custom, Order, Metrics };
+enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync, Custom, Order, Metrics, Neural };
 
 struct BusyInfo {
     BusyKind    kind = BusyKind::None;

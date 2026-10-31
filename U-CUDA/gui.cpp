@@ -356,6 +356,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.start_next_in_order_queue();
     // То же для network-очереди (независимая).
     model.start_next_in_network_queue();
+    model.start_next_in_neural_queue();
     // Custom tab has its own queue (2D → 1D → Phase/Basins pipeline).
     model.start_next_in_custom_queue();
     // Фоновая компиляция под текущие настройки параметрики, чтобы первый Run не ждал NVRTC.
@@ -474,6 +475,9 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     else if (ord.in_flight)
         busy = busy_from(ord, BusyKind::Order,
                          running_label(ord.configs, ord.running_config_index, "order"));
+    else if (model.neural_session.in_flight)
+        busy = busy_from(model.neural_session, BusyKind::Neural,
+                         running_label(model.neural_session.configs, model.neural_session.running_config_index, "neural"));
     else if (cus.any_in_flight()) {
         // Custom-tab: queue is drained serially, so at most one sub-session is
         // in-flight at any time — pick whichever one it is and surface its
@@ -509,7 +513,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // Метки у них свои ("Custom 2D", "Custom 1D X", ...), так что префикс
         // не нужен.
         struct DoneCand { BusyKind kind; std::chrono::steady_clock::time_point ts; const std::string* label; bool ok; double secs; };
-        DoneCand candidates[11] = {
+        DoneCand candidates[12] = {
             { BusyKind::Bif,    model.bifurcation_session.last_run_completed_at,
               &model.bifurcation_session.last_run_label,
               model.bifurcation_session.last_run_succeeded,
@@ -538,6 +542,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
               &model.order_session.last_run_label,
               model.order_session.last_run_succeeded,
               model.order_session.last_run_seconds },
+            { BusyKind::Neural, model.neural_session.last_run_completed_at,
+              &model.neural_session.last_run_label,
+              model.neural_session.last_run_succeeded,
+              model.neural_session.last_run_seconds },
             { BusyKind::Custom, cus.bif_session.last_run_completed_at,
               &cus.bif_session.last_run_label,
               cus.bif_session.last_run_succeeded,
@@ -671,6 +679,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             else if (busy.kind == BusyKind::Dft1D)    queue_n = model.dft1d_queue.size();
             else if (busy.kind == BusyKind::Custom)   queue_n = model.custom_queue.size();
             else if (busy.kind == BusyKind::Order)    queue_n = model.order_queue.size();
+            else if (busy.kind == BusyKind::Neural)   queue_n = model.neural_queue.size();
             else                                      queue_n = model.parametric_queue.size();
             if (queue_n > 0)
                 std::snprintf(text, sizeof(text), "Computing %s%s... %.1fs (+%zu)",
@@ -733,6 +742,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     case BusyKind::Basins:   model.basins_session.request_cancel();      break;
                     case BusyKind::FastSync: model.fastsync_session.request_cancel();    break;
                     case BusyKind::Order:    model.order_session.request_cancel();       break;
+                    case BusyKind::Neural:   model.neural_session.request_cancel();      break;
                     case BusyKind::Custom:   model.custom_session.request_cancel_all();  break;
                     default: break;
                 }
@@ -742,6 +752,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 model.basins_queue.clear();
                 model.fastsync_queue.clear();
                 model.order_queue.clear();
+                model.neural_queue.clear();
                 model.custom_queue.clear();
             }
             ImGui::PopStyleColor(3);
@@ -1133,27 +1144,22 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Neural) {
-        static std::unique_ptr<PlotRenderer> rnd_means, rnd_nodes;
-        static Plot2DView neural_means_view, neural_nodes_view;
+        static std::unique_ptr<PlotRenderer> neural_rnd[kNeuralWindowCount];
+        static Plot2DView neural_views[kNeuralWindowCount];
         static int seen_epoch = 0;
-        if (session_reloaded(model, AppModel::AppMode::Neural, seen_epoch)) {
-            invalidate_view(neural_means_view);
-            invalidate_view(neural_nodes_view);
-        }
-        if (!rnd_means) rnd_means = std::make_unique<PlotRenderer>();
-        if (!rnd_nodes) rnd_nodes = std::make_unique<PlotRenderer>();
+        if (session_reloaded(model, AppModel::AppMode::Neural, seen_epoch))
+            for (Plot2DView& v : neural_views) invalidate_view(v);
+        for (auto& r : neural_rnd) if (!r) r = std::make_unique<PlotRenderer>();
         if (ImGui::Begin("Neural Controls")) {
             draw_neural_controls(model, lib);
         }
         ImGui::End();
-        if (ImGui::Begin("Population Means")) {
-            draw_neural_series_window(model, *rnd_means, neural_means_view, true);
+        static const char* const neural_titles[kNeuralWindowCount] = { "Population Means", "Observed Nodes", "Synchronisation", "Neural Sweep" };
+        for (int w = 0; w < kNeuralWindowCount; ++w) {
+            if (ImGui::Begin(neural_titles[w]))
+                draw_neural_series_window(model, *neural_rnd[w], neural_views[w], w);
+            ImGui::End();
         }
-        ImGui::End();
-        if (ImGui::Begin("Observed Nodes")) {
-            draw_neural_series_window(model, *rnd_nodes, neural_nodes_view, false);
-        }
-        ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Custom) {
         // Custom mode: split-region layout (Controls | Workspace) drawn into

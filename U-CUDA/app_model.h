@@ -215,6 +215,7 @@ struct OrderQueueItem {
 struct NetworkQueueItem {
     int index = 0;
 };
+using NeuralQueueItem = NetworkQueueItem;
 
 // Состояние ОТОБРАЖЕНИЯ вкладки Network. В конфиг ему нельзя: конфиг — это
 // то, что уходит в расчёт, а выбранный узел, курсор времени и набор кривых
@@ -222,6 +223,9 @@ struct NetworkQueueItem {
 // Отображение вкладки Neural; в расчёт не входит, как у Network.
 struct NeuralViewState {
     int series_var = 0;
+    int instance = 0;    // экземпляр в окнах от времени
+    int sync_kind = 0;   // 0 = R, 1 = разброс по узлам
+    bool spread_log[2] = { true, true };   // окна Synchronisation и Neural Sweep; у R оси всегда линейная
 };
 
 struct NetworkViewState {
@@ -974,6 +978,8 @@ public:
     // Network batch queue — независимая (см. NetworkQueueItem).
     std::deque<NetworkQueueItem> network_queue;
     bool start_next_in_network_queue();
+    std::deque<NeuralQueueItem> neural_queue;
+    bool start_next_in_neural_queue();
 
     // Custom-tab pipeline queue — drives the 2D→1D→Phase/Basins ordering.
     // Items are pushed by the Run buttons and by drill-down clicks; drained
@@ -995,6 +1001,7 @@ public:
     void remove_fastsync_config(int i);
     void remove_order_config(int i);
     void remove_network_config(int i);
+    void remove_neural_config(int i);
 
     // Подготовить сессию анализа из ТЕКУЩЕЙ системы (после refresh_symbols).
     // Копирует параметры/НУ в сессию; изменения в сессии не идут в библиотеку.

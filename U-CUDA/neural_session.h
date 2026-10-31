@@ -46,6 +46,18 @@ struct NeuralProjection {
     int law = 0;
 };
 
+// Свип: значения идут отдельными экземплярами одного запуска, графом из несвязных компонент.
+enum class NeuralSweepKind { Coupling = 0, Parameter, ParameterSpread, Replica };
+
+struct NeuralSweep {
+    bool enabled = false;
+    NeuralSweepKind kind = NeuralSweepKind::Coupling;
+    int population = -1;               // Parameter, ParameterSpread: -1 = во всех популяциях
+    std::string param;
+    std::string lo_text = "0", hi_text = "1", points_text = "8";
+    bool log = false;
+};
+
 struct NeuralConfig {
     std::string label = "Experiment";
     NeuralSchedule schedule = NeuralSchedule::Stage;
@@ -63,6 +75,9 @@ struct NeuralConfig {
     std::string coupling_text = "0.1";
     std::string seed_text = "1";
     std::string observed_per_pop_text = "8";
+    int order_var = 0;                 // -1 = R не считается
+    std::string order_threshold_text = "0";
+    NeuralSweep sweep;
 
     std::vector<NetCouplingLaw> laws;
     std::vector<NeuralPopulation> populations;
@@ -72,6 +87,10 @@ struct NeuralConfig {
     std::string graph_recipe, graph_hash, model_text;
 
     NeuralResult result;
+    std::vector<int>    instance_start;   // последнего расчёта
+    std::vector<double> sweep_values;     // [instances], пусто без свипа
+    std::vector<double> sweep_order, sweep_spread;  // [instance][pop], среднее по времени, NaN у разлетевшихся
+    int pops_per_instance = 0;
     long long arcs = 0;
     int degree_min = 0, degree_max = 0;
     double build_seconds = 0.0;
@@ -91,8 +110,21 @@ struct NeuralGraph {
     int degree_min = 0, degree_max = 0;
 };
 
+// Готовый запуск: граф и запрос всех экземпляров. Без свипа это один граф и его же хеш.
+struct NeuralPlan {
+    NeuralRequest request;
+    std::string hash;
+    long long arcs = 0;
+    int degree_min = 0, degree_max = 0;
+    int pops_per_instance = 0;
+    std::vector<double> sweep_values;
+};
+
 struct NeuralOutcome {
     NeuralResult result;
+    std::vector<int>    instance_start;
+    std::vector<double> sweep_values, sweep_order, sweep_spread;
+    int pops_per_instance = 0;
     std::string hash, recipe;
     long long arcs = 0;
     int degree_min = 0, degree_max = 0;
@@ -140,6 +172,7 @@ struct NeuralSession {
 
 const char* neural_rule_name(NeuralRule r);
 const char* neural_schedule_name(NeuralSchedule s);
+const char* neural_sweep_name(NeuralSweepKind k);
 NeuralPopulation neural_default_population(const SystemRecord* r, const std::vector<std::string>& vars,
                                            const std::vector<std::string>& params);
 
@@ -152,3 +185,10 @@ std::string neural_model_text(const System& sys);
 NeuralRequest neural_build_request(const System& sys, const std::vector<CustomScheme>& custom_schemes,
                                    const std::vector<std::string>& vars, const std::vector<std::string>& params,
                                    const NeuralConfig& c, const NeuralGraph& g);
+// Значения свипа, пусто = свип выключен. Бросает на неверном диапазоне.
+std::vector<double> neural_sweep_values(const NeuralConfig& c);
+// Конфигурация одного значения: в эксперименте меняется только то, что свипается.
+NeuralConfig neural_sweep_instance(const NeuralConfig& c, int index, double value);
+NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custom_schemes,
+                       const std::vector<std::string>& vars, const std::vector<std::string>& params,
+                       const NeuralConfig& c);
