@@ -1181,7 +1181,7 @@ public:
             if (dae_native()) {
                 bool any = false;
                 for (const auto& n : dae_scheme_names()) {
-                    if (!dae_scheme_on(n)) continue;
+                    if (!dae_scheme_on(n) || dae_method_hidden(n)) continue;
                     any = true;
                     DaeScheme ds;
                     dae_scheme_from_name(n, &ds);
@@ -1191,7 +1191,7 @@ public:
                     out += "\n";
                 }
                 // BDF 1-5: тела постоянного шага нет — драйвер (kernels/ucuda_bdf.cuh) берёт невязку и якобиан
-                if (dae_scheme_on(kBdfSchemeDae)) {
+                if (dae_scheme_on(kBdfSchemeDae) && !dae_method_hidden(kBdfSchemeDae)) {
                     any = true;
                     out += "// ===== " + std::string(kBdfSchemeDae) + " (multistep driver kernels/ucuda_bdf.cuh: "
                            "residual F = [f; g] and Jacobian J; adaptive step only) =====\n";
@@ -1261,7 +1261,7 @@ public:
             };
             bool any = false;
             for (const auto& it : items) {
-                if (!it.on) continue;
+                if (!it.on || scheme_hidden(it.name)) continue;
                 any = true;
                 out += "// ===== ";
                 out += it.name;

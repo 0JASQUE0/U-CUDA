@@ -8,6 +8,7 @@
 // Линкуется со всем приложением (сессии тянут типы окон графиков), поэтому собирается с /DUT_FULL_APP.
 #include "test_util.h"
 #include "app_model.h"
+#include "gui_internal.h"
 #include "dae_ir.h"
 #include "num_parse.h"
 #include "session_io.h"
@@ -136,6 +137,30 @@ void records() {
     std::filesystem::remove(cir);
 }
 
+void generated_method_selection() {
+    AppModel m([](const std::vector<unsigned char>&) { return std::string{}; });
+    m.mode = InputMode::Plain;
+    m.plain_text = "x' = -x";
+    m.vars_text = "x";
+    m.params_text.clear();
+    for (const auto& b : kBuiltinSchemes) m.*b.flag = false;
+    m.scheme_euler = m.scheme_rk4 = true;
+    m.hidden_schemes = { "Euler" };
+    ut::require(m.generate(), "selected visible method must generate: " + m.error_message);
+    ut::require(m.generated_code.find("// ===== RK4 =====") != std::string::npos &&
+                m.generated_code.find("// ===== Euler =====") == std::string::npos,
+                "hidden method leaked into generated KRS");
+    m.hidden_schemes.clear();
+    ut::require(m.generate() && m.generated_code.find("// ===== Euler =====") != std::string::npos,
+                "showing a method must restore its selected KRS");
+    m.scheme_euler = false;
+    ut::require(m.generate() && m.generated_code.find("// ===== Euler =====") == std::string::npos,
+                "unselected visible method leaked into generated KRS");
+    m.hidden_schemes = { "RK4" };
+    ut::require(!m.generate() && m.generated_code.empty(), "all selected methods hidden must leave no stale KRS");
+    ut::require(m.scheme_rk4, "visibility must preserve the system's method selection");
+}
+
 }  // namespace
 
 int main() {
@@ -143,6 +168,7 @@ int main() {
         session_compatibility();
         queue_cleanup();
         cancellation();
+        generated_method_selection();
         records();
         return 0;
     });

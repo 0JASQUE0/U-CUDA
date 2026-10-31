@@ -3,6 +3,7 @@
 // пользуются несколько вкладок. Получено механическим разносом gui.cpp; определения функций — в
 // gui_*.cpp по вкладкам (gui_widgets.cpp — общие виджеты).
 #include "gui.h"
+void invalidate_library_cache();
 #include "circuit_netlist.h"
 #include "dae_ir.h"
 #include "kicad_import.h"   // circuit_source_mtime — слежение за файлом схемы (вкладка DAE)

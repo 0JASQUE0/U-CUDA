@@ -386,6 +386,11 @@ std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch);
 // std::runtime_error при ошибке разбора.
 std::vector<std::string> codegen_rhs(const System& s);
 
+// Parse and substitute whole symbols, returning a plain expression (not CUDA).
+// Replacement values are plain expressions; unknown source symbols are rejected.
+std::string codegen_substitute_expression(const std::string& expr, bool latex,
+    const std::map<std::string, std::string>& replacements);
+
 // Явное время t (этап 2 плана DAE). Правая часть с символом t, который не
 // переменная и не параметр, делает систему неавтономной: тело шага читает
 // время шага из аргумента kStepTimeArg и печатает время каждой стадии.

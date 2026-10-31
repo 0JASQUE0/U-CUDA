@@ -5581,6 +5581,26 @@ AdaptiveCode codegen_adaptive(const System& s, Scheme sch) {
     return c;
 }
 
+std::string codegen_substitute_expression(const std::string& expr, bool latex,
+    const std::map<std::string, std::string>& replacements) {
+    Parser parser(expr, latex);
+    const PN root = parser.parse();
+    std::map<std::string, PN> subst;
+    for (const auto& entry : replacements) {
+        Parser value(entry.second, false);
+        subst[entry.first] = value.parse();
+    }
+    std::function<void(const PN&)> check = [&](const PN& node) {
+        if (!node) return;
+        if (node->kind == Node::Sym && subst.find(node->name) == subst.end())
+            throw std::runtime_error("unknown symbol: " + node->name);
+        check(node->a); check(node->b);
+        for (const auto& arg : node->args) check(arg);
+    };
+    check(root);
+    return pn_print(pn_subst(root, subst), false);
+}
+
 std::string codegen_coupling(const System& s, const std::vector<std::string>& exprs,
                              const std::string& self_state, const std::string& nbr_state,
                              const std::string& self_par, const std::string& nbr_par,

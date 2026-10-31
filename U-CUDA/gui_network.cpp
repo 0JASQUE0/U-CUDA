@@ -355,7 +355,7 @@ static void draw_network_edges_table(AppModel& model, NetworkSession& s, Network
     (void)s;
 }
 
-void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/) {
+void draw_network_controls(AppModel& model, SystemLibrary& lib) {
     NetworkSession& s = model.network_session;
     if (s.configs.empty()) {
         ImGui::TextDisabled("No system loaded. Pick a system in the list above.");
@@ -404,6 +404,28 @@ void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/) {
     NetworkConfig& c = s.configs[(size_t)s.active_config_index];
 
     draw_label_rename("Label##net", c.label);
+
+    if (ImGui::Button("Save monolithic ODE to Library")) {
+        s.monolithic_error.clear();
+        s.monolithic_saved_name.clear();
+        try {
+            auto snapshot = net_monolithic_snapshot(s, c);
+            const std::string base = snapshot.record.name;
+            for (int i = 2; lib.exists(snapshot.record.name); ++i)
+                snapshot.record.name = base + " (" + std::to_string(i) + ")";
+            s.monolithic_saved_name = lib.save(snapshot.record);
+            invalidate_library_cache();
+            model.library_selected_name = s.monolithic_saved_name;
+        } catch (const std::exception& e) { s.monolithic_error = e.what(); }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Save an independent ODE snapshot: coupling is part of every scheme stage.\n"
+                          "Shared parameters stay shared; node overrides become separate parameters.\n"
+                          "K controls global coupling; current initial spread is stored.\n"
+                          "Limits: 32 state variables and 59 parameters. Existing records are kept.");
+    if (!s.monolithic_saved_name.empty())
+        ImGui::TextWrapped("Saved to Library: %s", s.monolithic_saved_name.c_str());
+    if (!s.monolithic_error.empty()) draw_error_box("##net_monolithic_error", s.monolithic_error);
 
     draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
                       nullptr, s.sys.is_map, &s.wrapper_schemes);
