@@ -250,19 +250,29 @@ struct NeuralSpikeArgs {
     const numb* srcP;         // вероятность за шаг, < 0 = обычный узел; nullptr = источников нет
     const int*  srcFrom;
     const int*  srcTo;
+    const unsigned long long* srcSeed;
+    const int*  inChannel;    // nullptr = без внешнего входа
+    const numb* inGain;
+    const numb* inSamples;    // [строки][подстроки][каналы], весь ряд
+    const numb* invW;         // масштаб целых весов узла: свой у экземпляра, иначе значение свипа не равно отдельному запуску
+    int*  status;             // шаг разлёта узла + 1, -1 = экземпляр заморожен хостом
     int*  badFlag;
     numb  decay[NEURAL_REC_MAX];
     numb  decayHalf[NEURAL_REC_MAX];
     numb  h;
-    numb  invW;
     numb  maxValue;
-    unsigned long long seed;
     long long step0;
     long long logBase;
+    long long inHold;
+    long long inLast;
     int   nNodes;
     int   slots;
     int   steps;
     int   logCap;
+    int   inChannels;
+    int   inSub;              // 3 = значения t, t + h/2, t + h
+    int   inVar;
+    int   pad;
 };
 
 __device__ __forceinline__ unsigned long long neuralMix(unsigned long long z) {
@@ -270,29 +280,32 @@ __device__ __forceinline__ unsigned long long neuralMix(unsigned long long z) {
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
     return z ^ (z >> 31);
 }
-// Число от узла и шага: не зависит от разбиения на запуски.
-__device__ __forceinline__ numb neuralUniform(unsigned long long seed, int node, long long step) {
-    const unsigned long long z = neuralMix(neuralMix(seed + 0x9E3779B97F4A7C15ULL) ^ ((unsigned long long)node + 1ULL) * 0xC2B2AE3D27D4EB4FULL);
-    return (numb)(neuralMix(z ^ ((unsigned long long)step + 1ULL) * 0x165667B19E3779F9ULL) >> 11) * (numb)1.1102230246251565e-16;
+// Число от узла и шага: не зависит от разбиения на запуски. Сид узла считает хост от его номера в экземпляре.
+__device__ __forceinline__ numb neuralUniform(unsigned long long nodeSeed, long long step) {
+    return (numb)(neuralMix(nodeSeed ^ ((unsigned long long)step + 1ULL) * 0x165667B19E3779F9ULL) >> 11) * (numb)1.1102230246251565e-16;
 }
 
 __device__ __forceinline__ void neuralSpikeRule(numb* X, const numb* a, bool& spiked) {
 {{SPIKE_BODY}}
 }
 
-__device__ __forceinline__ void neuralSpikeRk4(numb* X, const numb* ai, const NeuralSpikeArgs& A) {
+__device__ __forceinline__ void neuralSpikeRk4(numb* X, const numb* ai, const NeuralSpikeArgs& A, const numb u0, const numb uh, const numb u1) {
     const numb h = A.h;
     numb Y[AMOUNTOFX], F[AMOUNTOFX], acc[AMOUNTOFX];
     for (int k = 0; k < AMOUNTOFX; ++k) Y[k] = X[k];
     neuralRhs(Y, ai, F);
+    F[A.inVar] += u0;
     for (int k = 0; k < NEURAL_NV; ++k) { acc[k] = F[k]; Y[k] = X[k] + (numb)0.5 * h * F[k]; }
     for (int r = 0; r < NEURAL_REC; ++r) Y[NEURAL_NV + r] = X[NEURAL_NV + r] * A.decayHalf[r];
     neuralRhs(Y, ai, F);
+    F[A.inVar] += uh;
     for (int k = 0; k < NEURAL_NV; ++k) { acc[k] += (numb)2 * F[k]; Y[k] = X[k] + (numb)0.5 * h * F[k]; }
     neuralRhs(Y, ai, F);
+    F[A.inVar] += uh;
     for (int k = 0; k < NEURAL_NV; ++k) { acc[k] += (numb)2 * F[k]; Y[k] = X[k] + h * F[k]; }
     for (int r = 0; r < NEURAL_REC; ++r) Y[NEURAL_NV + r] = X[NEURAL_NV + r] * A.decay[r];
     neuralRhs(Y, ai, F);
+    F[A.inVar] += u1;
     const numb q = h / (numb)6;
     for (int k = 0; k < NEURAL_NV; ++k) X[k] += q * (acc[k] + F[k]);
 }
@@ -300,9 +313,11 @@ __device__ __forceinline__ void neuralSpikeRk4(numb* X, const numb* ai, const Ne
 extern "C" __global__ void neuralSpikeKernel(const NeuralSpikeArgs A) {
     const int node = blockIdx.x * blockDim.x + threadIdx.x;
     const int N = A.nNodes;
-    if (node >= N) return;
+    if (node >= N || A.status[node] != 0) return;
     const numb* ai = A.values + (size_t)node * AMOUNTOFVALUES;
     const bool source = A.srcP != nullptr && A.srcP[node] >= (numb)0;
+    const int ch = A.inChannel != nullptr ? A.inChannel[node] : -1;
+    const numb gain = ch >= 0 ? A.inGain[node] : (numb)0;
     numb X[AMOUNTOFX];
     neuralRead(A.state, N, node, X);
     int refr = A.refr[node], fired = 0;
@@ -313,16 +328,32 @@ extern "C" __global__ void neuralSpikeKernel(const NeuralSpikeArgs A) {
         const int base = (int)(step % A.slots) * NEURAL_REC;
         bool spiked = false;
         if (source) {
-            spiked = step >= A.srcFrom[node] && step < A.srcTo[node] && neuralUniform(A.seed, node, step) < A.srcP[node];
+            spiked = step >= A.srcFrom[node] && step < A.srcTo[node] && neuralUniform(A.srcSeed[node], step) < A.srcP[node];
         } else {
             for (int r = 0; r < NEURAL_REC; ++r) {
                 unsigned long long* cell = A.ring + (size_t)(base + r) * N + node;
                 const unsigned long long w = *cell;
-                if (w != 0ULL) { X[NEURAL_NV + r] += (numb)(long long)w * A.invW; *cell = 0ULL; }
+                if (w != 0ULL) { X[NEURAL_NV + r] += (numb)(long long)w * A.invW[node]; *cell = 0ULL; }
             }
             if (refr > 0) --refr;
             else {
-                neuralSpikeRk4(X, ai, A);
+                numb u0 = (numb)0, uh = (numb)0, u1 = (numb)0;
+                if (ch >= 0) {
+                    long long row = step / A.inHold;
+                    if (row > A.inLast) row = A.inLast;
+                    const numb* q = A.inSamples + (size_t)row * A.inSub * A.inChannels + ch;
+                    u0 = gain * q[0];
+                    uh = A.inSub == 3 ? gain * q[A.inChannels] : u0;
+                    u1 = A.inSub == 3 ? gain * q[2 * A.inChannels] : u0;
+                }
+                neuralSpikeRk4(X, ai, A, u0, uh, u1);
+                numb acc = (numb)0;
+                for (int k = 0; k < NEURAL_NV; ++k) acc += fabs(X[k]);
+                if (isnan(acc) || isinf(acc) || (A.maxValue != (numb)0 && acc > A.maxValue)) {
+                    A.status[node] = (int)step + 1;
+                    *A.badFlag = 1;
+                    break;
+                }
                 neuralSpikeRule(X, ai, spiked);
                 if (spiked) refr = A.refrSteps[node];
             }
@@ -342,9 +373,6 @@ extern "C" __global__ void neuralSpikeKernel(const NeuralSpikeArgs A) {
     neuralWrite(A.state, N, node, X);
     A.refr[node] = refr;
     if (fired != 0) A.spikes[node] += fired;
-    numb acc = (numb)0;
-    for (int k = 0; k < NEURAL_NV; ++k) acc += fabs(X[k]);
-    if (isnan(acc) || isinf(acc) || (A.maxValue != (numb)0 && acc > A.maxValue)) *A.badFlag = 1;
 }
 #endif
 

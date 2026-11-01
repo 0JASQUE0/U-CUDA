@@ -165,7 +165,7 @@ void fill_input(const NeuralConfig& c, const NeuralGraph& g, uint64_t seed, Neur
     in.hold_steps = hold_t > 0.0 ? (std::max)(1LL, steps_of(hold_t, r.h, "the input sample time")) : 1;
     in.channels = (int)c.sources.size();
     // Отсчёт на шаг и связь в стадиях: гладкий источник видит время своей стадии, иначе порядок по нему первый.
-    const bool three = c.schedule == NeuralSchedule::Stage && in.hold_steps == 1;
+    const bool three = (c.schedule == NeuralSchedule::Stage || c.schedule == NeuralSchedule::Spike) && in.hold_steps == 1;
     in.stage_rows = three ? 3 : 1;
     const long long rows = total / in.hold_steps + 1;
     if ((double)rows * in.stage_rows * in.channels * sizeof(double) > 4.0e9) throw std::runtime_error("the input needs too many samples: raise the sample time");
@@ -662,8 +662,6 @@ NeuralPopulation neural_default_population(const SystemRecord* r, const std::vec
 // Всё, чем импульсная сеть отличается от непрерывной: система с синапсами, правило спайка, источники, задержки.
 static void fill_spiking(const System& sys, const std::vector<std::string>& vars, const NeuralConfig& c, const NeuralGraph& g, uint64_t seed, NeuralRequest& r) {
     if (sys.is_map) throw std::runtime_error("a spiking network needs a flow, not a map");
-    if (!c.sources.empty() || !c.links.empty()) throw std::runtime_error("input channels do not work on a spiking network yet: use a spike source");
-    if (c.protocol != NeuralProtocol::Continuous) throw std::runtime_error("trials do not work on a spiking network yet");
     if (c.lyap_on) throw std::runtime_error("the Lyapunov exponent does not work on a spiking network");
     if (c.threshold_var < 0 || c.threshold_var >= (int)vars.size()) throw std::runtime_error("the threshold variable is missing");
     if (c.threshold_text.empty()) throw std::runtime_error("the threshold is empty");
@@ -695,6 +693,7 @@ static void fill_spiking(const System& sys, const std::vector<std::string>& vars
     r.spike.refractory_steps.assign((size_t)g.N, spike_steps(c.refractory_text, r.h, "the refractory time", 0));
     r.amountOfX = (int)spk.vars.size();
     r.edge_law = g.law;
+    if (c.input_var < 0 || c.input_var >= (int)vars.size()) throw std::runtime_error("the input variable is out of range");
 
     for (size_t pop = 0; pop < c.populations.size(); ++pop) {
         const NeuralPopulation& p = c.populations[pop];
@@ -703,6 +702,8 @@ static void fill_spiking(const System& sys, const std::vector<std::string>& vars
             r.spike.source_p.assign((size_t)g.N, -1.0);
             r.spike.source_from.assign((size_t)g.N, 0);
             r.spike.source_to.assign((size_t)g.N, 0);
+            r.spike.source_seed.resize((size_t)g.N);
+            for (int i = 0; i < g.N; ++i) r.spike.source_seed[(size_t)i] = neural_source_seed(seed, i);
         }
         const double rate = num_or(p.rate_text, 0.0), to = num_or(p.source_to_text, 0.0);
         if (!(rate >= 0.0) || rate * r.h > 1.0) throw std::runtime_error("population " + p.name + ": the rate must lie between 0 and 1 / h");
@@ -767,7 +768,7 @@ NeuralRequest neural_build_request(const System& sys, const std::vector<CustomSc
     r.transient = parse_num(c.transient_text, 0.0);
     r.pre_scaller = std::max(1, int_or(c.pre_scaller_text, 1));
     r.max_value = parse_num(c.max_value_text, 1.0e6);
-    if (!spike) fill_input(c, g, seed, r);
+    fill_input(c, g, seed, r);
     r.lyapunov.enabled = c.lyap_on;
     r.lyapunov.eps = num_or(c.lyap_eps_text, 1.0e-8);
     r.lyapunov.interval = num_or(c.lyap_interval_text, 1.0);
@@ -864,9 +865,9 @@ std::string neural_sweep_csv(const NeuralConfig& c) {
     if (c.sweep_values.empty() || c.pops_per_instance < 1) return o.str();
     o.precision(17);
     const int K = c.pops_per_instance, n2 = (std::max)(1, (int)c.sweep2_values.size()), nInst = (int)c.result.instance_stop.size();
-    const bool two = !c.sweep2_values.empty();
+    const bool two = !c.sweep2_values.empty(), spikes = c.schedule == NeuralSchedule::Spike;
     o << neural_sweep_name(c.sweep.kind) << (two ? std::string(",") + neural_sweep_name(c.sweep2.kind) : std::string())
-      << ",population,R,spread,lyapunov,stop_step\n";
+      << ",population," << (spikes ? "rate" : "R,spread,lyapunov") << ",stop_step\n";
     for (int q = 0; q < nInst; ++q) {
         for (int p = 0; p < K; ++p) {
             const size_t at = (size_t)q * K + p;
@@ -877,9 +878,12 @@ std::string neural_sweep_csv(const NeuralConfig& c) {
             o << c.sweep_values[(size_t)(q / n2)];
             if (two) o << "," << c.sweep2_values[(size_t)(q % n2)];
             o << "," << c.populations[(size_t)p].name;
-            cell(c.sweep_order, at);
-            cell(c.sweep_spread, at);
-            cell(c.sweep_lyap, (size_t)q);
+            if (spikes) cell(c.pop_rate, at);
+            else {
+                cell(c.sweep_order, at);
+                cell(c.sweep_spread, at);
+                cell(c.sweep_lyap, (size_t)q);
+            }
             o << "," << c.result.instance_stop[(size_t)q] << "\n";
         }
     }
@@ -890,8 +894,6 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
                        const std::vector<std::string>& vars, const std::vector<std::string>& params,
                        const NeuralConfig& c) {
     NeuralPlan plan;
-    // Здесь, а не при сборке запроса: у экземпляра свипа флаг уже снят.
-    if (c.schedule == NeuralSchedule::Spike && c.sweep.enabled) throw std::runtime_error("sweeps do not work on a spiking network yet");
     plan.pops_per_instance = (int)c.populations.size();
     plan.sweep_values = neural_sweep_values(c);
     plan.sweep2_values = neural_sweep2_values(c);
@@ -963,6 +965,13 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
         for (int v : r.edge_src) a.edge_src.push_back(v + off);
         a.edge_w.insert(a.edge_w.end(), r.edge_w.begin(), r.edge_w.end());
         a.edge_law.insert(a.edge_law.end(), r.edge_law.begin(), r.edge_law.end());
+        const auto append = [](auto& to, const auto& from) { to.insert(to.end(), from.begin(), from.end()); };
+        append(a.spike.edge_delay, r.spike.edge_delay);
+        append(a.spike.refractory_steps, r.spike.refractory_steps);
+        append(a.spike.source_p, r.spike.source_p);
+        append(a.spike.source_from, r.spike.source_from);
+        append(a.spike.source_to, r.spike.source_to);
+        append(a.spike.source_seed, r.spike.source_seed);
         a.observe.pop_start.pop_back();
         for (int v : r.observe.pop_start) a.observe.pop_start.push_back(v + off);
         for (int v : r.observe.nodes) a.observe.nodes.push_back(v + off);
@@ -1079,7 +1088,10 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx) {
                 for (size_t p = 0; p + 1 < out.pop_start.size(); ++p) {
                     long long sum = 0;
                     for (int i = out.pop_start[p]; i < out.pop_start[p + 1]; ++i) sum += out.result.spike_count[(size_t)i];
-                    out.pop_rate.push_back(span > 0.0 ? (double)sum / (double)(out.pop_start[p + 1] - out.pop_start[p]) / span : 0.0);
+                    const int K = out.pops_per_instance, q = K > 0 ? (int)p / K : 0;
+                    const bool stopped = q < (int)out.result.instance_stop.size() && out.result.instance_stop[(size_t)q] >= 0;
+                    out.pop_rate.push_back(stopped ? std::numeric_limits<double>::quiet_NaN()
+                                                   : span > 0.0 ? (double)sum / (double)(out.pop_start[p + 1] - out.pop_start[p]) / span : 0.0);
                 }
             }
             out.sweep_values = std::move(plan.sweep_values);
@@ -1141,7 +1153,7 @@ bool NeuralSession::poll() {
             c.pop_start = std::move(out.pop_start);
             c.pop_rate = std::move(out.pop_rate);
             ++c.data_generation;
-            const bool spikes = c.schedule == NeuralSchedule::Spike;
+            const bool spikes = c.schedule == NeuralSchedule::Spike && c.sweep_values.empty();
             if (c.csv_save_enabled && !c.csv_output_path.empty() && (spikes || !c.sweep_values.empty())) {
                 std::ofstream f(c.csv_output_path, std::ios::binary);
                 f << (spikes ? neural_spike_csv(c) : neural_sweep_csv(c));

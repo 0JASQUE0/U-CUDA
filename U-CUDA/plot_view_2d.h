@@ -216,6 +216,9 @@ public:
     // a phase run in Custom. Used by the Custom-tab 1D slice to drill
     // into Phase at the released parameter value.
     std::function<void(double world_x)> on_left_click;
+    // Простой клик ЛКМ без сдвига тоже зовёт on_left_click; без флага ЛКМ только панорамирует.
+    bool left_click_plain = false;
+    ImVec2 left_press_pos{-1e6f, -1e6f};
 
     // Live-drag callback for the crosshair gesture (MMB or Shift+LMB).
     // Fires every frame while the button is held inside the plot, with

@@ -11814,10 +11814,11 @@ struct ParametricEngine::Impl {
             const int* outStart; const int* outDst; const int* outPack; const unsigned long long* outW;
             unsigned long long* ring; const int* refrSteps; int* refr; int* spikes;
             int* logCount; int* logNode; int* logStep;
-            const numb* srcP; const int* srcFrom; const int* srcTo; int* badFlag;
-            numb decay[kNeuralMaxReceptors]; numb decayHalf[kNeuralMaxReceptors]; numb h; numb invW; numb maxValue;
-            unsigned long long seed; long long step0; long long logBase;
-            int nNodes; int slots; int steps; int logCap;
+            const numb* srcP; const int* srcFrom; const int* srcTo; const unsigned long long* srcSeed;
+            const int* inChannel; const numb* inGain; const numb* inSamples; const numb* invW; int* status; int* badFlag;
+            numb decay[kNeuralMaxReceptors]; numb decayHalf[kNeuralMaxReceptors]; numb h; numb maxValue;
+            long long step0; long long logBase; long long inHold; long long inLast;
+            int nNodes; int slots; int steps; int logCap; int inChannels; int inSub; int inVar; int pad;
         };
         struct ObserveArgs { const numb* state; const int* nodes; const int* vars; numb* out; int nNodes, nSel, nVars, pad; };
         struct MeanArgs { const numb* state; const int* groupStart; const int* groupPop; const int* vars; numb* out; numb* out2; int nNodes, nGroups, nVars, pad; };
@@ -11845,8 +11846,21 @@ struct ParametricEngine::Impl {
         if (req.rhs_body.empty() || sp.spike_body.empty()) return fail("a spiking network needs rhs_body and spike_body");
         if (!(req.h > 0.0) || !(req.t_max > 0.0) || req.transient < 0.0 || req.pre_scaller < 1) return fail("bad time settings");
         if (step_body_uses_time(req.rhs_body)) return fail("explicit time t is not supported in the large network engine yet");
-        if (req.input.channels > 0) return fail("a spiking network has no input channels yet");
-        if (!req.reset_at.empty() || req.lyapunov.enabled || req.instance_start.size() > 2) return fail("resets, instances and the Lyapunov exponent do not work on a spiking network yet");
+        const NeuralInput& in = req.input;
+        if (in.channels > 0) {
+            if (in.hold_steps < 1 || in.var < 0 || in.var >= nx - R) return fail("bad input settings");
+            if (in.stage_rows != 1 && (in.stage_rows != 3 || in.hold_steps != 1)) return fail("stage_rows = 3 needs hold_steps = 1");
+            if (in.samples.empty() || in.samples.size() % ((size_t)in.channels * in.stage_rows) != 0) return fail("input samples are not whole rows");
+            if (in.node_channel.size() != (size_t)N || in.node_gain.size() != (size_t)N) return fail("input maps need one entry per node");
+            for (int c : in.node_channel) if (c >= in.channels) return fail("input channel out of range");
+        }
+        if (req.lyapunov.enabled) return fail("the Lyapunov exponent does not work on a spiking network");
+        for (size_t q = 0; q < req.reset_at.size(); ++q)
+            if (req.reset_at[q] < 0 || (q > 0 && req.reset_at[q] <= req.reset_at[q - 1])) return fail("reset steps must increase");
+        std::vector<int> instStart = req.instance_start;
+        if (instStart.empty()) instStart = { 0, N };
+        const int nInst = (int)instStart.size() - 1;
+        if (nInst < 1 || instStart.front() != 0 || instStart.back() != N) return fail("instances must cover all nodes");
         if (req.observe.order_var >= 0 || req.observe.spread) return fail("R and the spread do not work on a spiking network");
         if (!sp.refractory_steps.empty() && sp.refractory_steps.size() != (size_t)N) return fail("refractory_steps needs one value per node");
         const bool sources = !sp.source_p.empty();
@@ -11858,7 +11872,15 @@ struct ParametricEngine::Impl {
         std::vector<int> outStart((size_t)N + 1, 0), outDst((size_t)n_arcs), outPack((size_t)n_arcs);
         std::vector<unsigned long long> outW((size_t)n_arcs);
         int minDelay = (std::numeric_limits<int>::max)(), maxDelay = 0;
-        double maxW = 0.0;
+        std::vector<double> maxW((size_t)nInst, 0.0);
+        std::vector<int> instOf((size_t)N);
+        for (int q = 0; q < nInst; ++q) {
+            if (instStart[(size_t)q] >= instStart[(size_t)q + 1]) return fail("an empty instance");
+            for (int i = instStart[(size_t)q]; i < instStart[(size_t)q + 1]; ++i) instOf[(size_t)i] = q;
+        }
+        for (int dst = 0; dst < N; ++dst)
+            for (int e = req.edge_start[(size_t)dst]; e < req.edge_start[(size_t)dst + 1]; ++e)
+                if (req.edge_src[(size_t)e] >= 0 && req.edge_src[(size_t)e] < N && instOf[(size_t)req.edge_src[(size_t)e]] != instOf[(size_t)dst]) return fail("an arc joins two instances");
         for (int e = 0; e < n_arcs; ++e) {
             const int src = req.edge_src[(size_t)e], d = sp.edge_delay[(size_t)e], rec = req.edge_law[(size_t)e];
             if (src < 0 || src >= N) return fail("an arc points outside the node list");
@@ -11866,10 +11888,12 @@ struct ParametricEngine::Impl {
             if (rec < 0 || rec >= R) return fail("an arc points to a missing receptor");
             ++outStart[(size_t)src + 1];
             minDelay = (std::min)(minDelay, d); maxDelay = (std::max)(maxDelay, d);
-            maxW = (std::max)(maxW, std::fabs(req.edge_w[(size_t)e]));
+            double& top = maxW[(size_t)instOf[(size_t)src]];
+            top = (std::max)(top, std::fabs(req.edge_w[(size_t)e]));
         }
-        // Запас 2^22 наибольших весов в один слот, точность 2^-40 наибольшего.
-        const int wExp = maxW > 0.0 ? 40 - std::ilogb(maxW) - 1 : 0;
+        // Запас 2^22 наибольших весов в один слот, точность 2^-40 наибольшего; дуги не выходят из экземпляра.
+        std::vector<int> wExp((size_t)nInst, 0);
+        for (int q = 0; q < nInst; ++q) if (maxW[(size_t)q] > 0.0) wExp[(size_t)q] = 40 - std::ilogb(maxW[(size_t)q]) - 1;
         for (int i = 0; i < N; ++i) outStart[(size_t)i + 1] += outStart[(size_t)i];
         {
             std::vector<int> put(outStart.begin(), outStart.end() - 1);
@@ -11878,7 +11902,7 @@ struct ParametricEngine::Impl {
                     const int at = put[(size_t)req.edge_src[(size_t)e]]++;
                     outDst[(size_t)at] = dst;
                     outPack[(size_t)at] = sp.edge_delay[(size_t)e] * R + req.edge_law[(size_t)e];
-                    outW[(size_t)at] = (unsigned long long)std::llround(std::ldexp(req.edge_w[(size_t)e], wExp));
+                    outW[(size_t)at] = (unsigned long long)std::llround(std::ldexp(req.edge_w[(size_t)e], wExp[(size_t)instOf[(size_t)dst]]));
                 }
         }
 
@@ -11921,8 +11945,8 @@ struct ParametricEngine::Impl {
         const size_t logLimit = req.max_output_bytes / (sizeof(long long) + sizeof(int));
 
         OrderDevBuf d_values, d_state, d_oStart, d_oDst, d_oPack, d_oW, d_ring, d_refrSteps, d_refr, d_spikes,
-                    d_logCount, d_logNode, d_logStep, d_srcP, d_srcFrom, d_srcTo, d_bad,
-                    d_sel, d_vars, d_gStart, d_gPop, d_out;
+                    d_logCount, d_logNode, d_logStep, d_srcP, d_srcFrom, d_srcTo, d_srcSeed, d_bad, d_status, d_invW,
+                    d_inCh, d_inGain, d_inRows, d_sel, d_vars, d_gStart, d_gPop, d_out;
         auto dev = [&](OrderDevBuf& b, size_t bytes, const char* what) {
             res.device_bytes += bytes;
             return b.alloc(std::max<size_t>(bytes, sizeof(numb)), what, err);
@@ -11932,13 +11956,16 @@ struct ParametricEngine::Impl {
             if (cudaMemcpy(b.p, src, bytes, cudaMemcpyHostToDevice) == cudaSuccess) return true;
             err = std::string("memcpy ") + what; return false;
         };
+        std::vector<numb> soa((size_t)N * nx);
+        for (int i = 0; i < N; ++i) for (int k = 0; k < nx; ++k)
+            soa[(size_t)k * N + i] = (numb)req.initial_conditions[(size_t)i * nx + k];
         {
             const std::vector<numb> hv = to_numb(req.values);
-            std::vector<numb> soa((size_t)N * nx);
-            for (int i = 0; i < N; ++i) for (int k = 0; k < nx; ++k)
-                soa[(size_t)k * N + i] = (numb)req.initial_conditions[(size_t)i * nx + k];
             std::vector<int> refrSteps = sp.refractory_steps;
             refrSteps.resize((size_t)N, 0);
+            std::vector<numb> invW((size_t)N);
+            for (int i = 0; i < N; ++i) invW[(size_t)i] = (numb)std::ldexp(1.0, -wExp[(size_t)instOf[(size_t)i]]);
+            if (!dev(d_invW, invW.size() * sizeof(numb), "invW") || !up(d_invW, invW.data(), invW.size() * sizeof(numb), "invW")) return fail(err);
             if (!dev(d_values, hv.size() * sizeof(numb), "values") || !up(d_values, hv.data(), hv.size() * sizeof(numb), "values")
                 || !dev(d_state, soa.size() * sizeof(numb), "state") || !up(d_state, soa.data(), soa.size() * sizeof(numb), "state")
                 || !dev(d_oStart, outStart.size() * sizeof(int), "outStart") || !up(d_oStart, outStart.data(), outStart.size() * sizeof(int), "outStart")
@@ -11948,8 +11975,22 @@ struct ParametricEngine::Impl {
                 || !dev(d_refrSteps, (size_t)N * sizeof(int), "refrSteps") || !up(d_refrSteps, refrSteps.data(), (size_t)N * sizeof(int), "refrSteps")
                 || !dev(d_ring, ringBytes, "ring") || !dev(d_refr, (size_t)N * sizeof(int), "refr") || !dev(d_spikes, (size_t)N * sizeof(int), "spikes")
                 || !dev(d_logCount, sizeof(int), "logCount") || !dev(d_logNode, (size_t)logCap * sizeof(int), "logNode")
-                || !dev(d_logStep, (size_t)logCap * sizeof(int), "logStep") || !dev(d_bad, sizeof(int), "badFlag")) return fail(err);
+                || !dev(d_logStep, (size_t)logCap * sizeof(int), "logStep") || !dev(d_bad, sizeof(int), "badFlag")
+                || !dev(d_status, (size_t)N * sizeof(int), "status")) return fail(err);
+            if (in.channels > 0) {
+                const std::vector<numb> rows = to_numb(in.samples), gain = to_numb(in.node_gain);
+                if (!dev(d_inRows, rows.size() * sizeof(numb), "inSamples") || !up(d_inRows, rows.data(), rows.size() * sizeof(numb), "inSamples")
+                    || !dev(d_inCh, (size_t)N * sizeof(int), "inChannel") || !up(d_inCh, in.node_channel.data(), (size_t)N * sizeof(int), "inChannel")
+                    || !dev(d_inGain, (size_t)N * sizeof(numb), "inGain") || !up(d_inGain, gain.data(), (size_t)N * sizeof(numb), "inGain")) return fail(err);
+            }
             if (sources) {
+                std::vector<unsigned long long> seeds = sp.source_seed;
+                if (seeds.empty()) {
+                    seeds.resize((size_t)N);
+                    for (int i = 0; i < N; ++i) seeds[(size_t)i] = neural_source_seed(sp.seed, i);
+                }
+                if (seeds.size() != (size_t)N) return fail("source_seed needs one value per node");
+                if (!dev(d_srcSeed, (size_t)N * sizeof(unsigned long long), "srcSeed") || !up(d_srcSeed, seeds.data(), (size_t)N * sizeof(unsigned long long), "srcSeed")) return fail(err);
                 const std::vector<numb> p = to_numb(sp.source_p);
                 if (!dev(d_srcP, p.size() * sizeof(numb), "srcP") || !up(d_srcP, p.data(), p.size() * sizeof(numb), "srcP")
                     || !dev(d_srcFrom, (size_t)N * sizeof(int), "srcFrom") || !up(d_srcFrom, sp.source_from.data(), (size_t)N * sizeof(int), "srcFrom")
@@ -11958,7 +11999,7 @@ struct ParametricEngine::Impl {
         }
         if ((ringBytes > 0 && cudaMemset(d_ring.p, 0, ringBytes) != cudaSuccess) || cudaMemset(d_refr.p, 0, (size_t)N * sizeof(int)) != cudaSuccess
             || cudaMemset(d_spikes.p, 0, (size_t)N * sizeof(int)) != cudaSuccess || cudaMemset(d_logCount.p, 0, sizeof(int)) != cudaSuccess
-            || cudaMemset(d_bad.p, 0, sizeof(int)) != cudaSuccess) return fail("memset spike buffers");
+            || cudaMemset(d_bad.p, 0, sizeof(int)) != cudaSuccess || cudaMemset(d_status.p, 0, (size_t)N * sizeof(int)) != cudaSuccess) return fail("memset spike buffers");
 
         std::vector<int> gStart, gPop;
         if (nMean > 0) {
@@ -12032,13 +12073,21 @@ struct ParametricEngine::Impl {
         sa.refrSteps = d_refrSteps.as<int>(); sa.refr = d_refr.as<int>(); sa.spikes = d_spikes.as<int>();
         sa.logCount = d_logCount.as<int>(); sa.logNode = d_logNode.as<int>(); sa.logStep = d_logStep.as<int>();
         sa.srcP = sources ? d_srcP.as<numb>() : nullptr; sa.srcFrom = sources ? d_srcFrom.as<int>() : nullptr; sa.srcTo = sources ? d_srcTo.as<int>() : nullptr;
+        sa.srcSeed = sources ? d_srcSeed.as<unsigned long long>() : nullptr;
+        sa.inChannel = in.channels > 0 ? d_inCh.as<int>() : nullptr;
+        sa.inGain = in.channels > 0 ? d_inGain.as<numb>() : nullptr;
+        sa.inSamples = in.channels > 0 ? d_inRows.as<numb>() : nullptr;
+        sa.inChannels = in.channels; sa.inSub = in.stage_rows; sa.inVar = in.var; sa.inHold = in.hold_steps;
+        sa.inLast = in.channels > 0 ? (long long)(in.samples.size() / ((size_t)in.channels * in.stage_rows)) - 1 : 0;
+        sa.invW = d_invW.as<numb>();
+        sa.status = d_status.as<int>();
         sa.badFlag = d_bad.as<int>();
         for (int r = 0; r < R; ++r) {
             sa.decay[r] = (numb)std::exp(-req.h / sp.tau[(size_t)r]);
             sa.decayHalf[r] = (numb)std::exp(-0.5 * req.h / sp.tau[(size_t)r]);
         }
-        sa.h = (numb)req.h; sa.invW = (numb)std::ldexp(1.0, -wExp); sa.maxValue = (numb)req.max_value;
-        sa.seed = sp.seed; sa.nNodes = N; sa.slots = slots; sa.logCap = logCap;
+        sa.h = (numb)req.h; sa.maxValue = (numb)req.max_value;
+        sa.nNodes = N; sa.slots = slots; sa.logCap = logCap;
 
         // Журнал копится упакованным: сортировка по шагу и узлу убирает порядок потоков.
         std::vector<unsigned long long> packed;
@@ -12063,12 +12112,22 @@ struct ParametricEngine::Impl {
 
         if (skipSteps == 0 && nPoints > 0 && !record()) return fail(err);
 
+        std::vector<long long> instStop((size_t)nInst, -1);
         long long done = 0;
+        size_t nextReset = 0;
         bool stopped = false;
         while (done < totalSteps && !stopped) {
+            // Попытка с чистого листа: и отложенные спайки, и рефрактерность.
+            if (nextReset < req.reset_at.size() && req.reset_at[nextReset] == done) {
+                ++nextReset;
+                if (cudaMemcpy(d_state.p, soa.data(), soa.size() * sizeof(numb), cudaMemcpyHostToDevice) != cudaSuccess
+                    || (ringBytes > 0 && cudaMemset(d_ring.p, 0, ringBytes) != cudaSuccess)
+                    || cudaMemset(d_refr.p, 0, (size_t)N * sizeof(int)) != cudaSuccess) return fail("memcpy reset");
+            }
             const long long chunk0 = done;
             long long chunkEnd = (std::min)(done + syncEvery, totalSteps);
             if (done < skipSteps) chunkEnd = (std::min)(chunkEnd, skipSteps);
+            if (nextReset < req.reset_at.size()) chunkEnd = (std::min)(chunkEnd, req.reset_at[nextReset]);
             sa.logBase = chunk0;
             while (done < chunkEnd) {
                 long long to = chunkEnd;
@@ -12099,10 +12158,36 @@ struct ParametricEngine::Impl {
             if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { res.cancelled = true; stopped = true; break; }
             int bad = 0;
             if (cudaMemcpy(&bad, d_bad.p, sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return fail("memcpy D2H flag");
-            if (bad) { res.diverged = true; stopped = true; }
+            if (!bad) continue;
+            res.diverged = true;
+            // Шаг разлёта экземпляра = минимум по его узлам, от длины чанка он не зависит.
+            std::vector<int> st((size_t)N);
+            if (cudaMemcpy(st.data(), d_status.p, (size_t)N * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return fail("memcpy D2H status");
+            int running = 0;
+            for (int q = 0; q < nInst; ++q) {
+                if (instStop[(size_t)q] >= 0) continue;
+                int first = 0;
+                for (int i = instStart[(size_t)q]; i < instStart[(size_t)q + 1]; ++i)
+                    if (st[(size_t)i] > 0 && (first == 0 || st[(size_t)i] < first)) first = st[(size_t)i];
+                if (first == 0) { ++running; continue; }
+                instStop[(size_t)q] = first;
+                for (int i = instStart[(size_t)q]; i < instStart[(size_t)q + 1]; ++i) if (st[(size_t)i] == 0) st[(size_t)i] = -1;
+            }
+            const int zero = 0;
+            if (cudaMemcpy(d_status.p, st.data(), (size_t)N * sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess
+                || cudaMemcpy(d_bad.p, &zero, sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) return fail("memcpy H2D status");
+            if (running == 0) stopped = true;
         }
         res.steps_done = done;
+        res.instance_stop = instStop;
 
+        // После шага разлёта экземпляр считался до конца чанка: эти спайки зависят от чанка и данных не несут.
+        if (res.diverged) {
+            packed.erase(std::remove_if(packed.begin(), packed.end(), [&](unsigned long long v) {
+                const long long stop = instStop[(size_t)instOf[(size_t)(v & 0xFFFFFFFFULL)]];
+                return stop >= 0 && (long long)(v >> 32) >= stop;
+            }), packed.end());
+        }
         std::sort(packed.begin(), packed.end());
         res.spike_step.resize(packed.size());
         res.spike_node.resize(packed.size());
@@ -12124,6 +12209,20 @@ struct ParametricEngine::Impl {
         res.t0 = (double)skipSteps * req.h; res.dt = (double)req.pre_scaller * req.h;
         res.observed = nSel > 0 ? ob.nodes : std::vector<int>();
         res.observed_vars = ob.vars;
+        if (res.diverged && nPoints > 0) {
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+            for (int p = 0; p < nPoints; ++p) {
+                const long long step = skipSteps + (long long)p * req.pre_scaller;
+                for (int q = 0; q < nSel; ++q) {
+                    const long long stop = instStop[(size_t)instOf[(size_t)ob.nodes[(size_t)q]]];
+                    if (stop >= 0 && step >= stop) for (int v = 0; v < nVars; ++v) traces[((size_t)p * nSel + q) * nVars + v] = nan;
+                }
+                for (int q = 0; q < nMean; ++q) {
+                    const long long stop = instStop[(size_t)instOf[(size_t)ob.pop_start[(size_t)q]]];
+                    if (stop >= 0 && step >= stop) for (int v = 0; v < nVars; ++v) means[((size_t)p * nMean + q) * nVars + v] = nan;
+                }
+            }
+        }
         res.traces = std::move(traces);
         res.means = std::move(means);
         res.wall_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0).count();

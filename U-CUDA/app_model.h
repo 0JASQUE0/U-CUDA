@@ -231,7 +231,7 @@ struct NeuralViewState {
     int map_kind = 0;    // Neural Map: 0 = R, 1 = разброс, 2 = показатель Ляпунова
     int map_pop = 0;
     bool map_log = true; // разброс в log10: он меняется на 7 порядков
-    double rate_bin = 0.0;     // окно Population Rate, 0 = авто
+    std::string rate_bin_text = "0";   // окно Population Rate, 0 = авто
 };
 
 struct NetworkViewState {

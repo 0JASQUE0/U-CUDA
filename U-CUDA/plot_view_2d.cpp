@@ -986,6 +986,15 @@ void Plot2DView::render(PlotRenderer& renderer,
 
         bool crosshair_released = ImGui::IsMouseReleased(ImGuiMouseButton_Middle)
                                || (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && io.KeyShift);
+        // Своя точка нажатия: пан каждый кадр сбрасывает MouseClickedPos, по ней сдвиг не виден.
+        if (left_click_plain) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) left_press_pos = io.MousePos;
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                const float mx = io.MousePos.x - left_press_pos.x, my = io.MousePos.y - left_press_pos.y;
+                if (mx * mx + my * my < io.MouseDragThreshold * io.MouseDragThreshold) crosshair_released = true;
+                left_press_pos = ImVec2(-1e6f, -1e6f);
+            }
+        }
         if (crosshair_released && on_left_click && !plot_dbl)
             on_left_click(cursor_wx());
     }

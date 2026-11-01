@@ -68,10 +68,21 @@ struct NeuralSpiking {
     std::vector<double> source_p;     // [n_nodes], пусто = источников нет
     std::vector<int> source_from, source_to;
     unsigned long long seed = 1;
+    std::vector<unsigned long long> source_seed;   // [n_nodes], neural_source_seed; пусто = от seed и номера узла
 
     int window = 0;                   // шагов на запуск, 0 = авто; не больше наименьшей задержки
     int log_capacity = 0;             // записей журнала на чанк, 0 = авто; лишние отбрасываются, счётчики узлов точны
 };
+
+// Сид источника от номера узла внутри экземпляра: значение свипа = отдельный запуск.
+inline unsigned long long neural_source_seed(unsigned long long seed, long long node) {
+    const auto mix = [](unsigned long long z) {
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        return z ^ (z >> 31);
+    };
+    return mix(mix(seed + 0x9E3779B97F4A7C15ULL) ^ ((unsigned long long)node + 1ULL) * 0xC2B2AE3D27D4EB4FULL);
+}
 
 struct NeuralRequest {
     NeuralSchedule schedule = NeuralSchedule::Stage;
