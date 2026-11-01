@@ -27,6 +27,19 @@ struct NeuralPopulation {
     // Значение и половина ширины равномерного разброса вокруг него; пустое = 0.
     std::map<std::string, std::string> param_values, param_spread;
     std::map<std::string, std::string> initial_conditions, ic_spread;
+    // Импульсный режим: источник спайков без динамики, спайк с вероятностью rate * h за шаг на [from, to), to = 0 = до конца.
+    bool spike_source = false;
+    std::string rate_text = "0.1", source_from_text = "0", source_to_text = "0";
+};
+
+// Синапс импульсной сети: своя постоянная спада и свой вклад в правую часть, gain * s или gain * s * (E - x).
+struct NeuralReceptor {
+    std::string name = "syn";
+    std::string tau_text = "5";
+    int target = 0;                    // переменная узла
+    bool conductance = false;
+    std::string reversal_text = "0";
+    std::string gain_text = "1";       // выражение над параметрами узла
 };
 
 struct NeuralProjection {
@@ -44,6 +57,8 @@ struct NeuralProjection {
     NeuralNorm norm = NeuralNorm::Total;
     bool norm_expected = false;        // делить на ожидаемую степень, а не на фактическую
     int law = 0;
+    int receptor = 0;                  // импульсный режим вместо закона связи
+    std::string delay_text = "0";      // кратна h, 0 = один шаг
 };
 
 // Свип: значения идут отдельными экземплярами одного запуска, графом из несвязных компонент.
@@ -132,6 +147,13 @@ struct NeuralConfig {
     std::vector<NeuralPopulation> populations;
     std::vector<NeuralProjection> projections;
 
+    // Импульсный режим: X[threshold_var] >= threshold, затем сброс; reset_text[k] пусто = переменная не меняется.
+    int threshold_var = 0;
+    std::string threshold_text = "1";
+    std::vector<std::string> reset_text;
+    std::string refractory_text = "0";
+    std::vector<NeuralReceptor> receptors;
+
     // Рецепт, по которому получен graph_hash, и система на момент расчёта.
     std::string graph_recipe, graph_hash, model_text;
 
@@ -144,6 +166,8 @@ struct NeuralConfig {
     std::vector<double> input_view;       // [point][source], прореженный вход первого экземпляра
     double input_view_t0 = 0.0, input_view_dt = 0.0;
     int pops_per_instance = 0;
+    std::vector<int> pop_start;           // [pops + 1] последнего расчёта
+    std::vector<double> pop_rate;         // импульсный режим: спайков на узел в единицу времени
     long long arcs = 0;
     int degree_min = 0, degree_max = 0;
     double build_seconds = 0.0;
@@ -158,6 +182,7 @@ struct NeuralGraph {
     int N = 0;
     std::vector<int> pop_start;
     std::vector<int> start, src, law;
+    std::vector<int> delay;            // только импульсный режим, в шагах
     std::vector<double> w;
     std::string hash;
     int degree_min = 0, degree_max = 0;
@@ -181,6 +206,8 @@ struct NeuralOutcome {
     std::vector<double> sweep_values, sweep2_values, sweep_order, sweep_spread, sweep_lyap, input_view;
     double input_view_t0 = 0.0, input_view_dt = 0.0;
     int pops_per_instance = 0;
+    std::vector<int> pop_start;
+    std::vector<double> pop_rate;
     std::string hash, recipe;
     long long arcs = 0;
     int degree_min = 0, degree_max = 0;
@@ -252,6 +279,8 @@ std::vector<double> neural_sweep2_values(const NeuralConfig& c);
 std::string neural_sweep_csv(const NeuralConfig& c);
 // Длительность записи с учётом протокола: при попытках это попытки * (пауза + стимул), а не t_max.
 double neural_record_time(const NeuralConfig& c);
+// Спайки строками: шаг, время, узел. Время спайка шага n = (n + 1) h.
+std::string neural_spike_csv(const NeuralConfig& c);
 // Конфигурация одного значения: в эксперименте меняется только то, что свипается.
 NeuralConfig neural_sweep_instance(const NeuralConfig& c, int index, double value);
 NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custom_schemes,

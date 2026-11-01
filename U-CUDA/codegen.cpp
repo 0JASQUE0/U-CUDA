@@ -5639,6 +5639,23 @@ std::string codegen_coupling(const System& s, const std::vector<std::string>& ex
     return o.str();
 }
 
+System codegen_spike_system(const System& s, const std::vector<std::string>& names, const std::vector<int>& target,
+                            const std::vector<std::string>& terms) {
+    System o = s;
+    o.latex = false;
+    for (size_t i = 0; i < o.rhs.size(); ++i) {
+        Parser p(s.rhs[i], s.latex);
+        o.rhs[i] = pn_print(p.parse(), false);
+    }
+    for (size_t k = 0; k < names.size(); ++k) {
+        if (target[k] < 0 || target[k] >= (int)s.vars.size()) throw std::runtime_error("spike: a synapse points to a missing variable");
+        o.rhs[(size_t)target[k]] += " + " + terms[k];
+        o.vars.push_back(names[k]);
+    }
+    for (size_t k = 0; k < names.size(); ++k) o.rhs.push_back("0");
+    return o;
+}
+
 std::string codegen_spike_body(const System& s, int var, const std::string& threshold, const std::vector<std::string>& reset) {
     if (var < 0 || var >= (int)s.vars.size()) throw std::runtime_error("spike: threshold variable out of range");
     if (reset.size() != s.vars.size()) throw std::runtime_error("spike: reset count != number of variables");

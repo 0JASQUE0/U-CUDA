@@ -1944,6 +1944,11 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
         o << ",\"param_spread\":"; jmap_nonempty(o, p.param_spread);
         o << ",\"ic\":"; jmap(o, p.initial_conditions);
         o << ",\"ic_spread\":"; jmap_nonempty(o, p.ic_spread);
+        if (p.spike_source) {
+            o << ",\"spike_source\":true,\"rate\":"; jstr(o, p.rate_text);
+            o << ",\"source_from\":"; jstr(o, p.source_from_text);
+            o << ",\"source_to\":"; jstr(o, p.source_to_text);
+        }
         o << "}";
     }
     o << "],\"projections\":[";
@@ -1962,9 +1967,32 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
         o << ",\"weight_spread\":"; jstr(o, p.weight_spread_text);
         o << ",\"norm\":" << (int)p.norm;
         o << ",\"norm_expected\":" << (p.norm_expected ? "true" : "false");
-        o << ",\"law\":" << p.law << "}";
+        o << ",\"law\":" << p.law;
+        // Импульсные поля пишутся только у импульсных сессий: старые файлы не меняются.
+        if (c.schedule == NeuralSchedule::Spike) { o << ",\"receptor\":" << p.receptor << ",\"delay\":"; jstr(o, p.delay_text); }
+        o << "}";
     }
-    o << "]}";
+    o << "]";
+    if (c.schedule == NeuralSchedule::Spike) {
+        o << ",\"threshold_var\":" << c.threshold_var;
+        o << ",\"threshold\":"; jstr(o, c.threshold_text);
+        o << ",\"reset\":"; strings(c.reset_text);
+        o << ",\"refractory\":"; jstr(o, c.refractory_text);
+        o << ",\"receptors\":[";
+        for (size_t i = 0; i < c.receptors.size(); ++i) {
+            const NeuralReceptor& q = c.receptors[i];
+            if (i) o << ",";
+            o << "{\"name\":"; jstr(o, q.name);
+            o << ",\"tau\":"; jstr(o, q.tau_text);
+            o << ",\"target\":" << q.target;
+            o << ",\"conductance\":" << (q.conductance ? "true" : "false");
+            o << ",\"reversal\":"; jstr(o, q.reversal_text);
+            o << ",\"gain\":"; jstr(o, q.gain_text);
+            o << "}";
+        }
+        o << "]";
+    }
+    o << "}";
 }
 
 static void read_neural_list(JP& p, const std::function<void(const std::string&)>& field) {
@@ -2109,6 +2137,10 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
             else if (k == "param_spread") q.param_spread = p.map_ss();
             else if (k == "ic") q.initial_conditions = p.map_ss();
             else if (k == "ic_spread") q.ic_spread = p.map_ss();
+            else if (k == "spike_source") q.spike_source = p.boolean();
+            else if (k == "rate") q.rate_text = p.str();
+            else if (k == "source_from") q.source_from_text = p.str();
+            else if (k == "source_to") q.source_to_text = p.str();
             else p.skip_value();
         });
     }
@@ -2132,6 +2164,30 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
             else if (k == "norm") q.norm = (NeuralNorm)std::stoi(p.str_or_num());
             else if (k == "norm_expected") q.norm_expected = p.boolean();
             else if (k == "law") q.law = std::stoi(p.str_or_num());
+            else if (k == "receptor") q.receptor = std::stoi(p.str_or_num());
+            else if (k == "delay") q.delay_text = p.str();
+            else p.skip_value();
+        });
+    }
+    else if (key == "threshold_var")    c.threshold_var = std::stoi(p.str_or_num());
+    else if (key == "threshold")        c.threshold_text = p.str();
+    else if (key == "refractory")       c.refractory_text = p.str();
+    else if (key == "reset") {
+        c.reset_text.clear();
+        p.expect('[');
+        if (!p.opt(']')) while (true) { c.reset_text.push_back(p.str()); if (p.opt(',')) continue; p.expect(']'); break; }
+    }
+    else if (key == "receptors") {
+        c.receptors.clear();
+        NeuralReceptor q;
+        read_neural_list(p, [&](const std::string& k) {
+            if (k.empty()) { c.receptors.push_back(q); q = NeuralReceptor{}; }
+            else if (k == "name") q.name = p.str();
+            else if (k == "tau") q.tau_text = p.str();
+            else if (k == "target") q.target = std::stoi(p.str_or_num());
+            else if (k == "conductance") q.conductance = p.boolean();
+            else if (k == "reversal") q.reversal_text = p.str();
+            else if (k == "gain") q.gain_text = p.str();
             else p.skip_value();
         });
     }

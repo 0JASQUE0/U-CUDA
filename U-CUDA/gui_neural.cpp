@@ -3,9 +3,10 @@
 // Вкладка Neural: описание сети популяциями и проекциями. Узлы и рёбра не показываются: их слишком много,
 // вместо них статистика графа и наблюдаемые величины.
 
+static constexpr size_t kNeuralRasterPoints = 2000000;   // GL рисует столько точек без задержки кадра
 static const char* const kNeuralRules[] = { "Probability", "Fixed in-degree", "Chain", "Ring", "Grid", "King graph", "Small world" };
 static const char* const kNeuralNorms[] = { "None", "This projection", "All inputs of the node" };
-static const NeuralSchedule kNeuralSchedules[] = { NeuralSchedule::Stage, NeuralSchedule::Heun, NeuralSchedule::Post };
+static const NeuralSchedule kNeuralSchedules[] = { NeuralSchedule::Stage, NeuralSchedule::Heun, NeuralSchedule::Post, NeuralSchedule::Spike };
 static const NeuralSweepKind kNeuralSweeps[] = { NeuralSweepKind::Coupling, NeuralSweepKind::Parameter,
                                                  NeuralSweepKind::ParameterSpread, NeuralSweepKind::Replica,
                                                  NeuralSweepKind::InputGain };
@@ -22,6 +23,15 @@ static void draw_neural_populations(NeuralSession& s, NeuralConfig& c) {
         if (ImGui::TreeNodeEx(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
             InputTextStr("name", p.name, kFieldW);
             InputNumStr("size", p.size_text, kFieldW);
+            if (c.schedule == NeuralSchedule::Spike) {
+                ImGui::Checkbox("spike source", &p.spike_source);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Nodes without dynamics: each fires at random with this rate, independently.");
+                if (p.spike_source) {
+                    InputNumStr("rate, per unit of time", p.rate_text, kFieldW);
+                    InputNumStr("from", p.source_from_text, kFieldW);
+                    InputNumStr("to (0 = to the end)", p.source_to_text, kFieldW);
+                }
+            }
             draw_named_num_fields("Parameters", s.params, p.param_values);
             // Id поля — имя переменной, поэтому блоки разброса нужно отделить от блоков значений.
             ImGui::PushID("spread");
@@ -91,10 +101,20 @@ static void draw_neural_projections(NeuralConfig& c) {
                 ImGui::SetTooltip("Divide the weight by the number of inputs: of this projection,\n"
                                   "or of the node over all projections, as on the Network tab.");
             if (p.norm != NeuralNorm::None) ImGui::Checkbox("expected degree", &p.norm_expected);
-            std::vector<const char*> laws;
-            for (const NetCouplingLaw& l : c.laws) laws.push_back(l.name.c_str());
-            ImGui::SetNextItemWidth(kFieldW);
-            ImGui::Combo("coupling law", &p.law, laws.data(), (int)laws.size());
+            if (c.schedule == NeuralSchedule::Spike) {
+                std::vector<const char*> synapses;
+                for (const NeuralReceptor& q : c.receptors) synapses.push_back(q.name.c_str());
+                ImGui::SetNextItemWidth(kFieldW);
+                ImGui::Combo("synapse", &p.receptor, synapses.data(), (int)synapses.size());
+                InputNumStr("delay", p.delay_text, kFieldW);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("A multiple of h. 0 = one step, the shortest possible.");
+            }
+            else {
+                std::vector<const char*> laws;
+                for (const NetCouplingLaw& l : c.laws) laws.push_back(l.name.c_str());
+                ImGui::SetNextItemWidth(kFieldW);
+                ImGui::Combo("coupling law", &p.law, laws.data(), (int)laws.size());
+            }
             if (ImGui::Button("Remove projection")) remove = (int)i;
             ImGui::TreePop();
         }
@@ -102,6 +122,55 @@ static void draw_neural_projections(NeuralConfig& c) {
     }
     if (remove >= 0) c.projections.erase(c.projections.begin() + remove);
     if (ImGui::Button("Add projection")) c.projections.push_back(NeuralProjection{});
+}
+
+static void draw_neural_spiking(NeuralSession& s, NeuralConfig& c) {
+    if (!ImGui::CollapsingHeader("Spiking", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    const std::vector<const char*> items = c_str_list(s.vars);
+    if (c.threshold_var < 0 || c.threshold_var >= (int)items.size()) c.threshold_var = 0;
+    ImGui::SetNextItemWidth(kFieldW);
+    ImGui::Combo("threshold variable", &c.threshold_var, items.data(), (int)items.size());
+    InputTextStr("threshold", c.threshold_text, kFieldW + 120.0f);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("A spike when the variable is at or above this expression, checked after every step.");
+    c.reset_text.resize(s.vars.size());
+    for (size_t k = 0; k < s.vars.size(); ++k) InputTextStr((s.vars[k] + " after a spike").c_str(), c.reset_text[k], kFieldW + 120.0f);
+    ImGui::TextDisabled("Empty = the variable does not change. All resets read the state before the spike.");
+    InputNumStr("refractory time", c.refractory_text, kFieldW);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("A multiple of h. The node is held after a spike, its synapses keep decaying.");
+
+    ImGui::SeparatorText("Synapses");
+    int remove = -1;
+    for (size_t i = 0; i < c.receptors.size(); ++i) {
+        NeuralReceptor& q = c.receptors[i];
+        ImGui::PushID((int)i + 5000);
+        const std::string title = q.name + "###syn";
+        if (ImGui::TreeNodeEx(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+            InputTextStr("name", q.name, kFieldW);
+            InputNumStr("decay time", q.tau_text, kFieldW);
+            if (q.target < 0 || q.target >= (int)items.size()) q.target = 0;
+            ImGui::SetNextItemWidth(kFieldW);
+            ImGui::Combo("acts on", &q.target, items.data(), (int)items.size());
+            ImGui::Checkbox("conductance", &q.conductance);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Off: adds gain * s to the equation.\nOn: adds gain * s * (reversal - variable).");
+            if (q.conductance) InputTextStr("reversal", q.reversal_text, kFieldW + 120.0f);
+            InputTextStr("gain", q.gain_text, kFieldW + 120.0f);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("An expression over the parameters of the node, for example 1/Cm.");
+            if (ImGui::Button("Remove synapse")) remove = (int)i;
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    if (remove >= 0) {
+        c.receptors.erase(c.receptors.begin() + remove);
+        for (NeuralProjection& p : c.projections) { if (p.receptor == remove) p.receptor = 0; else p.receptor -= p.receptor > remove; }
+    }
+    if (c.receptors.size() < 8 && ImGui::Button("Add synapse")) {
+        NeuralReceptor q;
+        q.name = "syn " + std::to_string(c.receptors.size() + 1);
+        c.receptors.push_back(std::move(q));
+    }
+    draw_csv_output_block("CSV output##neural_spike_csv", "Save spikes to file", c.csv_save_enabled, "##neural_spike_csv_path", c.csv_output_path,
+                          "One row per spike: step, time, node. Written after every run.");
 }
 
 static void draw_neural_laws(NeuralSession& s, NeuralConfig& c) {
@@ -371,8 +440,12 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::SetTooltip("Stage: coupling in every RK4 stage, order 4, four exchanges per step.\n"
                           "Heun: order 1 on trajectories, synchronisation threshold nearly exact, two exchanges.\n"
                           "Post: order 1, threshold shifted by about -h K^2, one exchange.\n"
-                          "Heun and Post are checked on diffusive coupling of Hindmarsh-Rose pairs only.");
-    if (c.schedule != NeuralSchedule::Stage)
+                          "Heun and Post are checked on diffusive coupling of Hindmarsh-Rose pairs only.\n"
+                          "Spikes: nodes interact only through spike events with a delay.");
+    const bool spiking = c.schedule == NeuralSchedule::Spike;
+    if (spiking)
+        ImGui::TextDisabled("Node step: RK4, synapses by the exact exponential.");
+    else if (c.schedule != NeuralSchedule::Stage)
         draw_scheme_combo("node scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
                           nullptr, s.sys.is_map, &s.wrapper_schemes);
     else
@@ -381,25 +454,27 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
     IntegrationFields f;
     f.h = &c.h_text; f.symmetry_s = &c.symmetry_s; f.cd_fp_iters = &c.cd_fp_iters; f.newton = &c.newton;
     f.t_max = &c.t_max_text; f.transient = &c.transient_text; f.pre_scaller = &c.pre_scaller_text; f.max_value = &c.max_value_text;
-    draw_integration_block("Integration", c.schedule == NeuralSchedule::Stage ? std::string("RK4") : c.scheme,
+    draw_integration_block("Integration", c.schedule == NeuralSchedule::Stage || spiking ? std::string("RK4") : c.scheme,
                            s.custom_schemes, f, nullptr, s.sys.is_map);
 
     if (ImGui::CollapsingHeader("Network", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("coupling K", c.coupling_text, kFieldW);
         InputNumStr("seed", c.seed_text, kFieldW);
         InputNumStr("observed nodes per population", c.observed_per_pop_text, kFieldW);
-        std::vector<const char*> names = { "off" };
-        for (const std::string& v : s.vars) names.push_back(v.c_str());
-        int order = c.order_var + 1;
-        if (order < 0 || order >= (int)names.size()) order = 0;
-        ImGui::SetNextItemWidth(kFieldW);
-        if (ImGui::Combo("order parameter variable", &order, names.data(), (int)names.size())) c.order_var = order - 1;
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("R(t) per population. The phase of a node grows by 2 pi between upward threshold\n"
-                              "crossings, found on the output grid: keep the output step far below the period.\n"
-                              "There is no R before the first and after the last crossings; a node gone silent\n"
-                              "lowers R. R is per population and ignores amplitudes: see the spread.");
-        if (c.order_var >= 0) InputNumStr("order parameter threshold", c.order_threshold_text, kFieldW);
+        if (!spiking) {
+            std::vector<const char*> names = { "off" };
+            for (const std::string& v : s.vars) names.push_back(v.c_str());
+            int order = c.order_var + 1;
+            if (order < 0 || order >= (int)names.size()) order = 0;
+            ImGui::SetNextItemWidth(kFieldW);
+            if (ImGui::Combo("order parameter variable", &order, names.data(), (int)names.size())) c.order_var = order - 1;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("R(t) per population. The phase of a node grows by 2 pi between upward threshold\n"
+                                  "crossings, found on the output grid: keep the output step far below the period.\n"
+                                  "There is no R before the first and after the last crossings; a node gone silent\n"
+                                  "lowers R. R is per population and ignores amplitudes: see the spread.");
+            if (c.order_var >= 0) InputNumStr("order parameter threshold", c.order_threshold_text, kFieldW);
+        }
         for (size_t k = 0; k < s.vars.size(); ++k) {
             auto it = std::find(c.obs_vars_off.begin(), c.obs_vars_off.end(), (int)k);
             bool on = it == c.obs_vars_off.end();
@@ -412,13 +487,19 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::TextDisabled("recorded variables");
         InputNumStr("output limit, MB", c.output_limit_text, kFieldW);
     }
-    draw_neural_input(lib, s, c);
-    draw_neural_protocol(c);
-    draw_neural_sweep(s, c);
-    draw_neural_lyapunov(c);
+    if (spiking) {
+        draw_neural_spiking(s, c);
+        ImGui::TextDisabled("Input channels, trials and sweeps do not work on a spiking network yet.");
+    }
+    else {
+        draw_neural_input(lib, s, c);
+        draw_neural_protocol(c);
+        draw_neural_sweep(s, c);
+        draw_neural_lyapunov(c);
+    }
     draw_neural_populations(s, c);
     draw_neural_projections(c);
-    draw_neural_laws(s, c);
+    if (!spiking) draw_neural_laws(s, c);
 
     if (c.arcs > 0 || c.last_run_ok) {
         ImGui::Separator();
@@ -426,6 +507,10 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::Text("graph %.2f s, run %.2f s, %.0f MB on the GPU", c.build_seconds, c.result.wall_ms / 1000.0,
                     (double)c.result.device_bytes / (1024.0 * 1024.0));
         ImGui::TextDisabled("graph hash %s", c.graph_hash.c_str());
+        for (size_t p = 0; p < c.pop_rate.size() && p < c.populations.size(); ++p)
+            ImGui::Text("%s: %.4g spikes per node per unit of time", c.populations[p].name.c_str(), c.pop_rate[p]);
+        if (c.result.spikes_dropped > 0)
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "The spike log is cut: %lld spikes dropped, rates stay exact.", c.result.spikes_dropped);
         const int nInst = (int)c.result.instance_stop.size();
         if (c.result.lyapunov.size() == 1)
             ImGui::Text("largest Lyapunov exponent %.6g, %d blocks", c.result.lyapunov[0], c.result.lyap_blocks);
@@ -495,7 +580,13 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         const int ch = (int)c.sources.size();
         if (ch == 0 || c.input_view.empty()) { ImGui::TextDisabled("No input yet: add a source and a link, then press Run."); return; }
     }
-    const bool sync = what == kNeuralSync, sweep = what == kNeuralSweep, input = what == kNeuralInput, lyapWindow = what == kNeuralLyap;
+    const bool sync = what == kNeuralSync, sweep = what == kNeuralSweep, input = what == kNeuralInput, lyapWindow = what == kNeuralLyap, rate = what == kNeuralRate, raster = what == kNeuralRaster;
+    if ((rate || raster) && r.spike_count.empty()) { ImGui::TextDisabled("Pick the Spikes schedule and press Run."); return; }
+    if (rate) {
+        ImGui::SetNextItemWidth(110.0f);
+        ImGui::InputDouble("bin (0 = auto)", &vs.rate_bin);
+        if (vs.rate_bin < 0.0) vs.rate_bin = 0.0;
+    }
     if (sync || sweep) {
         static const char* const kinds[] = { "Order parameter R", "Spread across nodes", "Lyapunov exponent" };
         ImGui::SetNextItemWidth(170.0f);
@@ -520,14 +611,14 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     // Показатель от значения свипа рисуется как сводка свипа.
     const bool byValue = sweep || (lyapWindow && r.lyapunov.size() > 1 && vs.lyap_kind == 0);
     const bool spread = (sync && vs.sync_kind == 1) || (sweep && vs.sweep_kind == 1);
-    if (!sweep && !input && !lyap && !s.vars.empty() && (!sync || spread)) {
+    if (!sweep && !input && !lyap && !rate && !raster && !s.vars.empty() && (!sync || spread)) {
         const std::vector<const char*> items = c_str_list(s.vars);
         if (sync) ImGui::SameLine();
         ImGui::SetNextItemWidth(90.0f);
         ImGui::Combo(what == kNeuralMeans ? "variable##means" : what == kNeuralNodes ? "variable##nodes" : "variable##sync",
                      &vs.series_var, items.data(), (int)items.size());
     }
-    if (!byValue && !input) neural_instance_picker(c, vs, what == kNeuralMeans ? "instance##means" : what == kNeuralNodes ? "instance##nodes" : lyap ? "instance##lyap" : "instance##sync");
+    if (!byValue && !input && !rate && !raster) neural_instance_picker(c, vs, what == kNeuralMeans ? "instance##means" : what == kNeuralNodes ? "instance##nodes" : lyap ? "instance##lyap" : "instance##sync");
 
     // Точка p кривой k.
     std::function<double(int)> xof = [&](int p) { return r.t0 + r.dt * (double)p; };
@@ -544,6 +635,59 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         xof = [&c](int p) { return c.input_view_t0 + c.input_view_dt * (double)p; };
         yof = [&c, ch](int k, int p) { return c.input_view[(size_t)p * ch + k]; };
         yname = "input";
+    }
+    else if (rate) {
+        // Спайки уже упорядочены по шагу, поэтому гистограмма считается один раз на расчёт и ширину окна.
+        static std::vector<double> table;
+        static int tableKey = -1;
+        const int pops = (int)c.pop_start.size() - 1;
+        const double t0 = r.t0, span = (double)r.steps_done * r.h - t0;
+        const double bin = vs.rate_bin > 0.0 ? vs.rate_bin : span / 512.0;
+        points = bin > 0.0 ? (std::max)(1, (std::min)(1 << 20, (int)std::ceil(span / bin))) : 0;
+        curves = pops;
+        const int key = (c.data_generation * 131 + s.active_config_index) * 131 + points;
+        if (pops < 1 || points < 1) empty = none;
+        else if (tableKey != key) {
+            tableKey = key;
+            table.assign((size_t)points * pops, 0.0);
+            for (size_t e = 0; e < r.spike_step.size(); ++e) {
+                const int b = (std::min)(points - 1, (int)(((double)(r.spike_step[e] + 1) * r.h - t0) / bin));
+                const int q = (int)(std::upper_bound(c.pop_start.begin(), c.pop_start.end(), r.spike_node[e]) - c.pop_start.begin()) - 1;
+                if (b >= 0 && q >= 0 && q < pops) table[(size_t)b * pops + q] += 1.0;
+            }
+            for (int q = 0; q < pops; ++q) {
+                const double norm = (double)(c.pop_start[(size_t)q + 1] - c.pop_start[(size_t)q]) * bin;
+                for (int b = 0; b < points; ++b) table[(size_t)b * pops + q] /= norm;
+            }
+        }
+        xof = [t0, bin](int p) { return t0 + ((double)p + 0.5) * bin; };
+        yof = [pops](int k, int p) { return table[(size_t)p * pops + k]; };
+        yname = "rate";
+    }
+    else if (raster) {
+        // Точка на спайк, серия на популяцию. Сверх лимита показывается каждый stride-й узел: его спайки все, строки не рвутся.
+        static std::vector<int> shown;
+        static int shownKey = -1;
+        static int stride = 1;
+        const int pops = (int)c.pop_start.size() - 1;
+        const int key = c.data_generation * 131 + s.active_config_index;
+        if (shownKey != key) {
+            shownKey = key;
+            stride = (int)((r.spike_step.size() + kNeuralRasterPoints - 1) / kNeuralRasterPoints);
+            if (stride < 1) stride = 1;
+            shown.clear();
+            for (size_t e = 0; e < r.spike_step.size(); ++e)
+                if (r.spike_node[e] % stride == 0) shown.push_back((int)e);
+        }
+        curves = pops; points = (int)shown.size();
+        if (pops < 1 || points < 1) empty = "No spikes in the record.";
+        xof = [&r](int p) { return (double)(r.spike_step[(size_t)shown[(size_t)p]] + 1) * r.h; };
+        yof = [&r, &c](int k, int p) {
+            const int node = r.spike_node[(size_t)shown[(size_t)p]];
+            return node >= c.pop_start[(size_t)k] && node < c.pop_start[(size_t)k + 1] ? (double)node : std::numeric_limits<double>::quiet_NaN();
+        };
+        yname = "node";
+        ImGui::TextDisabled(stride > 1 ? "%zu spikes, every %d-th node is shown" : "%zu spikes", r.spike_step.size(), stride);
     }
     else if (!lyap && (r.n_points <= 0 || nPops <= 0)) empty = none;
     else if (!sweep && !lyap && !(sync && !spread) && recorded >= nVars) empty = "This variable is not recorded.";
@@ -614,7 +758,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     static std::vector<std::vector<double>> buffers[kNeuralWindowCount];
     static int filled[kNeuralWindowCount] = {};
     std::vector<std::vector<double>>& bufs = buffers[what];
-    const int gen = (((((c.data_generation * 131 + vs.series_var) * 131 + s.active_config_index) * 131 + vs.instance) * 131 + vs.sync_kind * 3 + vs.sweep_kind) * 131 + curves) * 131 + vs.lyap_kind;
+    const int gen = (((((c.data_generation * 131 + vs.series_var) * 131 + s.active_config_index) * 131 + vs.instance) * 131 + vs.sync_kind * 3 + vs.sweep_kind) * 131 + curves) * 131 + vs.lyap_kind + (rate ? points * 7 : 0);
     const bool fresh = (int)bufs.size() != curves || filled[what] != gen + 1;
     if (fresh) {
         bufs.assign((size_t)curves, {});
@@ -669,6 +813,9 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     view.pad_y = true;
     view.show_zero_x = view.show_zero_y = false;
     view.point_markers = byValue;
+    view.points_mode = raster;
+    view.point_size_px = 2.0f;
+    view.point_marker = -1;
     // Вид один на R и разброс: log10(R) на линейной оси дал бы отрицательные значения.
     bool* spread_log = sync ? &vs.spread_log[0] : sweep ? &vs.spread_log[1] : nullptr;
     if (spread_log) view.y_axis.display_log = spread && *spread_log;
