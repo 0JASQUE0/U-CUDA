@@ -4,22 +4,23 @@ using namespace ucuda::storage_detail;
 
  // namespace
 
-std::string session_to_json_custom(const CustomSession& s) {
+std::string custom_state_to_json(const CustomState& s, const CustomSubStates& sub) {
     std::ostringstream o;
     o << "{\n";
     o << "  \"shared\":";  write_shared_config(o, s.shared);            o << ",\n";
-    o << "  \"bif\":";     o << session_to_json_parametric(s.bif_session); o << ",\n";
-    o << "  \"lle\":";     o << session_to_json_lle(s.lle_session);        o << ",\n";
-    o << "  \"ls\":";      o << session_to_json_ls(s.ls_session);          o << ",\n";
-    o << "  \"phase\":";   o << session_to_json(s.phase_session);          o << ",\n";
-    o << "  \"basins\":";  o << session_to_json_basins(s.basins_session);   o << ",\n";
+    o << "  \"bif\":";     o << session_to_json_parametric(sub.bif); o << ",\n";
+    o << "  \"lle\":";     o << session_to_json_lle(sub.lle);        o << ",\n";
+    o << "  \"ls\":";      o << session_to_json_ls(sub.ls);          o << ",\n";
+    o << "  \"phase\":";   o << session_to_json(sub.phase);          o << ",\n";
+    o << "  \"basins\":";  o << basins_state_to_json(sub.basins, sub.basins_phase_projections); o << ",\n";
     o << "  \"workspace\":"; write_workspace(o, s.workspace);
     o << "\n}\n";
     return o.str();
 }
 
 
-bool session_from_json_custom(const std::string& json, CustomSession& s) {
+bool custom_state_from_json(const std::string& json, CustomState& s, CustomSubStatesMut& sub) {
+    sub.basins_slots = BasinsSlotsAfterLoad::Keep;
     try {
         JP p(json);
         p.expect('{');
@@ -120,11 +121,12 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                     }
                 }
             }
-            else if (key == "bif")    session_from_json_parametric(raw, s.bif_session);
-            else if (key == "lle")    session_from_json_lle(raw, s.lle_session);
-            else if (key == "ls")     session_from_json_ls(raw, s.ls_session);
-            else if (key == "phase")  session_from_json(raw, s.phase_session);
-            else if (key == "basins") session_from_json_basins(raw, s.basins_session);
+            else if (key == "bif")    session_from_json_parametric(raw, sub.bif);
+            else if (key == "lle")    session_from_json_lle(raw, sub.lle);
+            else if (key == "ls")     session_from_json_ls(raw, sub.ls);
+            else if (key == "phase")  session_from_json(raw, sub.phase);
+            else if (key == "basins") basins_state_from_json(raw, sub.basins, sub.basins_phase_projections,
+                                                             sub.basins_slots);
             else if (key == "workspace") {
                 JP q(raw); auto& ws = s.workspace;
                 ws.tabs.clear();

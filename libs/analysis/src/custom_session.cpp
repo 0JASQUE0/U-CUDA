@@ -282,7 +282,7 @@ void apply_shared_to_ls1d(const CustomTabSharedConfig& s, const LSCurveConfig& c
     c.nt_text  = c2d.nt_text;
 }
 
-void apply_shared_to_phase(const CustomTabSharedConfig& s, PhaseAnalysisSession& ph,
+void apply_shared_to_phase(const CustomTabSharedConfig& s, PhaseAnalysisState& ph,
                            const std::vector<std::string>& /*vars*/) {
     // Shared config drives the integrator + parameter values on Run. IC-sets are owned by
     // PhaseAnalysisSession and edited via the L3 Phase controls panel (parity with the Analysis tab),

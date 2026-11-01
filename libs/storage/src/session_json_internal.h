@@ -197,7 +197,7 @@ void read_basins_phase_projections(JP& p, std::vector<Projection>& out) ;
 
 
 void write_basins_config(std::ostringstream& o, const BasinsConfig& c,
-                                const BasinsPhaseSlot* phase_slot) ;
+                                const std::vector<Projection>* phase_projections) ;
 
 
 // Чтение одного поля BasinsConfig. Возвращает true если ключ распознан и

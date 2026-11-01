@@ -1,6 +1,6 @@
 # Historical CTest names retained for existing scripts; the suite checks fixed and upstream adaptive integration.
 add_executable(adaptive_test adaptive_test.cpp)
-target_link_libraries(adaptive_test PRIVATE ucuda::analysis ucuda::numerics ucuda::storage ucuda::platform CUDA::cuda_driver)
+target_link_libraries(adaptive_test PRIVATE ucuda::application ucuda::analysis ucuda::numerics ucuda::storage ucuda::platform CUDA::cuda_driver)
 ucuda_runtime(adaptive_test)
 add_test(NAME adaptive_cpu COMMAND adaptive_test)
 add_test(NAME adaptive_gpu COMMAND adaptive_test --gpu)

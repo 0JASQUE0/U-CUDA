@@ -1,6 +1,6 @@
 ﻿#include "test_util.h"
 #include "network_fixtures.h"
-#include "ucuda/domain/network_session.h"
+#include "ucuda/analysis/network_session.h"
 #include <cuda.h>
 #include <nvrtc.h>
 #include <algorithm>

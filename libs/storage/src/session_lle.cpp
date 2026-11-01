@@ -5,7 +5,7 @@ using namespace ucuda::storage_detail;
 
  // namespace
 
-std::string session_to_json_lle(const LLEAnalysisSession& s) {
+std::string session_to_json_lle(const LLEAnalysisState& s) {
     std::ostringstream o;
     o << "{\n";
     o << "  \"active_curve_index\":" << s.active_curve_index << ",\n";
@@ -22,7 +22,7 @@ std::string session_to_json_lle(const LLEAnalysisSession& s) {
 }
 
 
-bool session_from_json_lle(const std::string& json, LLEAnalysisSession& s) {
+bool session_from_json_lle(const std::string& json, LLEAnalysisState& s) {
     try {
         JP p(json);
         p.expect('{');

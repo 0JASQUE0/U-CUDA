@@ -8,13 +8,15 @@ Owns `AppModel`, the active system, application-wide state, cross-analysis queue
 
 The public surface is `app_model.h`. `app_model.cpp` handles model actions and queue-safe edits; `tick.cpp` polls work, advances queues, and persists completed state.
 
+`session_persistence.h` saves and loads whole sessions that own other sessions (Basins phase slots, Custom sub-sessions) on top of storage's state serializers; that is why storage is a public dependency.
+
 `time_estimate.h` owns asynchronous GPU cost/calibration estimation. Its plain
 trajectory work descriptions (`TrajWork`) remain in domain `traj_work.h`; domain
 never launches calibration.
 
 ## Dependencies and consumers
 
-Target `ucuda::application` exposes analysis and platform requirements and privately uses storage and OCR. UI consumes it.
+Target `ucuda::application` exposes analysis, platform and storage requirements and privately uses OCR. UI consumes it.
 
 It must not depend on plotting, ImGui, OpenGL, GLFW, or desktop startup code. Public dependencies are limited to types visible from `app_model.h`.
 

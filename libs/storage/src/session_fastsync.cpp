@@ -3,7 +3,7 @@
 using namespace ucuda::storage_detail;
 
 
-std::string session_to_json_fastsync(const FastSyncAnalysisSession& s) {
+std::string session_to_json_fastsync(const FastSyncAnalysisState& s) {
     std::ostringstream o;
     o << "{\n";
     o << "  \"active_config_index\":" << s.active_config_index << ",\n";
@@ -20,7 +20,7 @@ std::string session_to_json_fastsync(const FastSyncAnalysisSession& s) {
 }
 
 
-bool session_from_json_fastsync(const std::string& json, FastSyncAnalysisSession& s) {
+bool session_from_json_fastsync(const std::string& json, FastSyncAnalysisState& s) {
     try {
         JP p(json);
         p.expect('{');

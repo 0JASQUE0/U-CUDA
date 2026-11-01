@@ -121,7 +121,7 @@ bool read_order_field(JP& p, OrderConfig& c, const std::string& key) {
 
 }
 using namespace ucuda::storage_detail;
-std::string session_to_json_order(const OrderAnalysisSession& s) {
+std::string session_to_json_order(const OrderAnalysisState& s) {
     std::ostringstream o;
     o << "{\n";
     o << "  \"active_config_index\":" << s.active_config_index << ",\n";
@@ -138,7 +138,7 @@ std::string session_to_json_order(const OrderAnalysisSession& s) {
 }
 
 
-bool session_from_json_order(const std::string& json, OrderAnalysisSession& s) {
+bool session_from_json_order(const std::string& json, OrderAnalysisState& s) {
     try {
         JP p(json);
         p.expect('{');

@@ -80,30 +80,6 @@ void SignalMetricsAnalysisSession::load_from_record(const SystemRecord& r,
 }
 
 
-void SignalMetricsAnalysisSession::add_config() {
-    SignalMetricsConfig c;
-    if (!configs.empty()) {
-        c = configs.back();
-        c.result = SignalMetricsResult{};
-        c.result_2d = SignalMetricsResult{};
-        c.last_run_ok = false;
-        c.last_run_2d_ok = false;
-        c.last_error.clear();
-        c.data_generation = 0;
-        c.data_generation_2d = 0;
-        c.fit_request = false;
-        c.fit_request_2d = false;
-    } else {
-        for (const auto& v : vars) c.initial_conditions[v] = "";
-        for (const auto& p : params) c.param_values[p] = "";
-    }
-    c.label = "Metrics " + std::to_string(configs.size() + 1);
-    c.label_is_manual = false;
-    configs.push_back(std::move(c));
-    active_config_index = (int)configs.size() - 1;
-}
-
-
 void SignalMetricsAnalysisSession::remove_config(int i) {
     if (i < 0 || i >= (int)configs.size()) return;
     if (in_flight && running_config_index == i) return;

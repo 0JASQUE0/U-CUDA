@@ -46,6 +46,44 @@ void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
 }
 
 
+void BasinsAnalysisSession::ensure_phase_slots() {
+    while (phase_slots.size() < configs.size()) {
+        auto slot = std::unique_ptr<BasinsPhaseSlot>(new BasinsPhaseSlot());
+        slot->phase.vars           = vars;
+        slot->phase.params         = params;
+        slot->phase.sys            = sys;
+        slot->phase.custom_schemes = custom_schemes;
+        // Одно окно Phase 2D по умолчанию — как у PhaseAnalysisSession после
+        // load_from_record. Time domain пользователь добавляет кнопкой.
+        slot->phase.add_projection();
+        phase_slots.push_back(std::move(slot));
+    }
+    if (phase_slots.size() > configs.size())
+        phase_slots.resize(configs.size());
+}
+
+
+std::vector<const std::vector<Projection>*> BasinsAnalysisSession::phase_projections() const {
+    std::vector<const std::vector<Projection>*> out(configs.size(), nullptr);
+    for (size_t i = 0; i < configs.size() && i < phase_slots.size(); ++i)
+        if (phase_slots[i]) out[i] = &phase_slots[i]->phase.projections;
+    return out;
+}
+
+
+void BasinsAnalysisSession::restore_phase_slots(std::vector<std::vector<Projection>>&& projs) {
+    // Слоты портретов подгоняем под новый список configs и раскладываем
+    // сохранённые окна. Пустой список (старая сессия без ключа) оставляет
+    // дефолт из ensure_phase_slots — одно окно Phase 2D.
+    phase_slots.clear();
+    ensure_phase_slots();
+    for (size_t i = 0; i < projs.size() && i < phase_slots.size(); ++i) {
+        if (projs[i].empty()) continue;
+        phase_slots[i]->phase.projections = std::move(projs[i]);
+    }
+}
+
+
 void BasinsAnalysisSession::add_config() {
     BasinsConfig c;
     if (!configs.empty()) {

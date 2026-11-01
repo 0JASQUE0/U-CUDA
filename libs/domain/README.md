@@ -16,7 +16,7 @@ It may use the C++ standard library, but it must not include CUDA runtime, JSON,
 
 ## Runtime data flow and ownership
 
-Parsers and UI create domain requests; analysis and compute libraries fill domain results; storage serializes the persistent subset. Session structures also carry runtime futures and cancellation/progress state, but analysis owns their lifecycle. Plot descriptions and runtime IDs are values only: UI owns views and plotting owns GL handles.
+Parsers and UI create domain requests; analysis and compute libraries fill domain results; storage serializes the persistent subset. Every analysis session is split in two: `<Name>State` here holds the serializable state (configs, results, labels, data-only helpers such as `add_curve`/`add_config` that storage calls while loading), and `<Name>` in analysis derives from it and adds futures, cancellation/progress tokens, `in_flight` and the run/poll methods. Domain headers include no `<future>` and name no engine. Plot descriptions and runtime IDs are values only: UI owns views and plotting owns GL handles.
 
 ## Change this when
 

@@ -17,7 +17,7 @@
 
 #include "ucuda/application/app_model.h"
 #include "ucuda/storage/app_config.h"
-#include "ucuda/storage/session_io.h"
+#include "ucuda/application/session_persistence.h"
 #include "ucuda/plotting/plot_axis.h"
 #include "ucuda/ui/gui.h"
 #include "ucuda/storage/system_library.h"

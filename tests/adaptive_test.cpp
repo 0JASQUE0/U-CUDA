@@ -6,7 +6,7 @@
 #include "ucuda/numerics/integrator.h"
 #include "ucuda/numerics/krs_cpu.h"
 #include "ucuda/platform/platform_paths.h"
-#include "ucuda/storage/session_io.h"
+#include "ucuda/application/session_persistence.h"
 #include "ucuda/storage/data_export.h"
 #include <cuda.h>
 #include <cmath>

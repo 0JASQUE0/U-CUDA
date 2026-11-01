@@ -1,7 +1,7 @@
 ﻿#include "ucuda/application/app_model.h"
 #include "ucuda/equations/codegen.hpp"
 #include "ucuda/domain/num_parse.h"   // fmt_num_shortest — round-trip формат для пинов узлов
-#include "ucuda/storage/session_io.h"
+#include "ucuda/application/session_persistence.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>

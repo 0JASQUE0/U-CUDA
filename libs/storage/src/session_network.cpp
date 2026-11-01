@@ -207,7 +207,7 @@ bool read_network_field(JP& p, NetworkConfig& c, const std::string& key) {
 
 }
 using namespace ucuda::storage_detail;
-std::string session_to_json_network(const NetworkSession& s) {
+std::string session_to_json_network(const NetworkState& s) {
     std::ostringstream o;
     o << "{\n";
     o << "  \"active_config_index\":" << s.active_config_index << ",\n";
@@ -224,7 +224,7 @@ std::string session_to_json_network(const NetworkSession& s) {
 }
 
 
-bool session_from_json_network(const std::string& json, NetworkSession& s) {
+bool session_from_json_network(const std::string& json, NetworkState& s) {
     try {
         JP p(json);
         p.expect('{');

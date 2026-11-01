@@ -15,7 +15,7 @@
 #include "implot.h"
 #include "implot3d.h"
 #include "ucuda/plotting/plot_renderer.h"
-#include "ucuda/storage/session_io.h"
+#include "ucuda/application/session_persistence.h"
 #include "ucuda/plotting/plot_view_2d.h"
 #include "ucuda/plotting/plot_view_3d.h"
 #include "ucuda/plotting/heatmap_view.h"
@@ -1142,11 +1142,12 @@ void draw_network_raster_window(AppModel& model, PlotRenderer& renderer, Heatmap
 void draw_parametric_controls(AppModel& model, SystemLibrary& lib);
 
 
-template <class Session>
+// Target — то, что принимает parse: сама сессия или её сохраняемое состояние (*State).
+template <class Session, class Target>
 static bool apply_session_json(AppModel& model,
                                const std::string& json,
                                Session& dst,
-                               bool (*parse)(const std::string&, Session&),
+                               bool (*parse)(const std::string&, Target&),
                                const char* what)
 {
     if (json.empty()) return true;

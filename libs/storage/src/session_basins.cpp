@@ -3,7 +3,8 @@
 using namespace ucuda::storage_detail;
 
 
-std::string session_to_json_basins(const BasinsAnalysisSession& s) {
+std::string basins_state_to_json(const BasinsAnalysisState& s,
+                                 const std::vector<const std::vector<Projection>*>& phase_projections) {
     std::ostringstream o;
     o << "{\n";
     o << "  \"active_config_index\":" << s.active_config_index << ",\n";
@@ -11,9 +12,8 @@ std::string session_to_json_basins(const BasinsAnalysisSession& s) {
     for (size_t i = 0; i < s.configs.size(); ++i) {
         if (i) o << ",";
         o << "\n    ";
-        const BasinsPhaseSlot* slot =
-            (i < s.phase_slots.size() && s.phase_slots[i]) ? s.phase_slots[i].get() : nullptr;
-        write_basins_config(o, s.configs[i], slot);
+        const std::vector<Projection>* projs = i < phase_projections.size() ? phase_projections[i] : nullptr;
+        write_basins_config(o, s.configs[i], projs);
     }
     if (!s.configs.empty()) o << "\n  ";
     o << "]\n";
@@ -22,7 +22,10 @@ std::string session_to_json_basins(const BasinsAnalysisSession& s) {
 }
 
 
-bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s) {
+bool basins_state_from_json(const std::string& json, BasinsAnalysisState& s,
+                            std::vector<std::vector<Projection>>& phase_projections,
+                            BasinsSlotsAfterLoad& slots) {
+    slots = BasinsSlotsAfterLoad::Keep;
     try {
         JP p(json);
         p.expect('{');
@@ -93,7 +96,7 @@ bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s)
         if (s.configs.empty()) {
             // JSON был пустой или только non-config поля — оставим хотя бы
             // один config (load_from_record уже положил дефолт).
-            s.ensure_phase_slots();
+            slots = BasinsSlotsAfterLoad::Ensure;
             return true;
         }
         if (s.active_config_index < 0 ||
@@ -102,16 +105,11 @@ bool session_from_json_basins(const std::string& json, BasinsAnalysisSession& s)
         }
         s.running_config_index = -1;
 
-        // Слоты портретов подгоняем под новый список configs и раскладываем
-        // сохранённые окна. Пустой список (старая сессия без ключа) оставляет
-        // дефолт из ensure_phase_slots — одно окно Phase 2D.
-        s.phase_slots.clear();
+        // Слоты портретов пересоздаёт владелец слотов (BasinsAnalysisSession::restore_phase_slots)
+        // и раскладывает в них эти окна.
         s.phase_queue.clear();
-        s.ensure_phase_slots();
-        for (size_t i = 0; i < phase_projs.size() && i < s.phase_slots.size(); ++i) {
-            if (phase_projs[i].empty()) continue;
-            s.phase_slots[i]->phase.projections = std::move(phase_projs[i]);
-        }
+        phase_projections = std::move(phase_projs);
+        slots = BasinsSlotsAfterLoad::Reset;
         return true;
     }
     catch (...) {

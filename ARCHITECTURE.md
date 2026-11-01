@@ -72,10 +72,10 @@ When device helpers, `configCUDA.h` or kernel includes change, update the packer
 
 ## Persistence and ownership
 
-- Domain owns serializable types, settings, request/result values, plot descriptions, and export snapshots.
-- Analysis owns futures, progress/cancellation tokens, session transitions, and computation orchestration.
-- Storage owns JSON, settings, system-library layout, and CSV formatting.
-- Application owns the active system, cross-analysis queues, dirty/save decisions, and global ticking.
+- Domain owns serializable types, settings, request/result values, plot descriptions, and export snapshots. Each session's persistent part is a domain `<Name>State`.
+- Analysis owns futures, progress/cancellation tokens, session transitions, and computation orchestration: each session is `<Name> : <Name>State` in analysis.
+- Storage owns JSON, settings, system-library layout, and CSV formatting. It serializes `<Name>State`; sessions owning other sessions (Basins phase slots, Custom) pass the owned parts explicitly.
+- Application owns the active system, cross-analysis queues, dirty/save decisions, and global ticking, and wraps storage's state serializers for whole sessions (`session_persistence.h`).
 - UI owns widget state and plot-view instances.
 - Plotting owns OpenGL buffers, textures, cameras, renderers, and framebuffer capture.
 - Platform owns clipboard transfer and OS-specific paths/processes/dialogs.

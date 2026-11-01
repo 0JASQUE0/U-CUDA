@@ -3,7 +3,7 @@
 using namespace ucuda::storage_detail;
 
 
-std::string session_to_json_parametric(const BifurcationAnalysisSession& s) {
+std::string session_to_json_parametric(const BifurcationAnalysisState& s) {
     std::ostringstream o;
     o << "{\n";
     o << "  \"active_diagram_index\":" << s.active_diagram_index << ",\n";
@@ -20,7 +20,7 @@ std::string session_to_json_parametric(const BifurcationAnalysisSession& s) {
 }
 
 
-bool session_from_json_parametric(const std::string& json, BifurcationAnalysisSession& s) {
+bool session_from_json_parametric(const std::string& json, BifurcationAnalysisState& s) {
     try {
         JP p(json);
         p.expect('{');

@@ -4,7 +4,7 @@ using namespace ucuda::storage_detail;
 
  // namespace
 
-std::string session_to_json(const PhaseAnalysisSession& s) {
+std::string session_to_json(const PhaseAnalysisState& s) {
     std::ostringstream o;
     o << "{\n";
     o << "  \"step_h\":"; jstr(o, s.step_h); o << ",\n";
@@ -60,7 +60,7 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
 }
 
 
-bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
+bool session_from_json(const std::string& json, PhaseAnalysisState& s) {
     try {
         JP p(json);
         p.expect('{');

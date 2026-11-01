@@ -2,11 +2,6 @@
 #include "ucuda/domain/analysis_session.h"
 #include "ucuda/domain/system_record.h"
 #include "ucuda/domain/analysis_types.h"
-class ParametricEngine;
-struct AdaptiveCode;
-#include <atomic>
-#include <chrono>
-#include <future>
 #include <map>
 #include <memory>
 #include <string>
@@ -213,7 +208,7 @@ struct OrderConfig {
     bool            stab_fit_request = false;
 };
 
-struct OrderAnalysisSession {
+struct OrderAnalysisState {
     std::vector<std::string> vars;
     std::vector<std::string> params;
     System sys;
@@ -228,45 +223,17 @@ struct OrderAnalysisSession {
     int active_config_index  = 0;
     int running_config_index = -1;
 
-    std::future<OrderResult> run_future;
-    // Каждый расчёт вкладки возвращает свой тип, поэтому у каждого своё
-    // future; running_kind (kOrderCalc*) говорит poll'у, какое забирать.
-    std::future<PerfResult>       perf_future;
-    std::future<StabilityResult>  stab_future;
     int  running_kind = kOrderCalcOrder;
-    bool in_flight = false;
-    std::chrono::steady_clock::time_point compute_start_time;
 
-    std::shared_ptr<std::atomic<bool>>  cancel_token;
-    std::shared_ptr<std::atomic<float>> progress_token;
 
     std::string last_run_label;
     double last_run_seconds = 0.0;
     bool   last_run_succeeded = false;
-    std::chrono::steady_clock::time_point last_run_completed_at;
 
-    OrderAnalysisSession() = default;
-    OrderAnalysisSession(OrderAnalysisSession&&) = default;
-    OrderAnalysisSession& operator=(OrderAnalysisSession&&) = default;
-    OrderAnalysisSession(const OrderAnalysisSession&) = delete;
-    OrderAnalysisSession& operator=(const OrderAnalysisSession&) = delete;
 
-    void load_from_record(const SystemRecord& r,
-                          const std::vector<std::string>& vars_,
-                          const std::vector<std::string>& params_);
 
-    void add_config();
-    void remove_config(int i);
 
-    bool run_async(ParametricEngine& engine, int config_idx);
-    void request_cancel();
-    bool poll();
 
-    // Подписи для селектора оси: "h" + "s (a[0])" + параметры системы.
-    // Индекс в возвращаемом векторе = target + 1 (target -1 идёт первым).
-    std::vector<std::string> axis_target_names() const;
-    // target -> человекочитаемое имя (для подписей осей графика).
-    std::string axis_target_label(int target) const;
 };
 
 // Сколько грубых шагов сделает ячейка при данных h и t_max — та же формула,

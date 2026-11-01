@@ -111,7 +111,7 @@ bool read_metrics_config_field(JP& p, SignalMetricsConfig& c, const std::string&
 // везде, не сохраняется.
 }
 using namespace ucuda::storage_detail;
-std::string session_to_json_metrics(const SignalMetricsAnalysisSession& s) {
+std::string session_to_json_metrics(const SignalMetricsAnalysisState& s) {
     std::ostringstream o;
     o << "{\n";
     o << "  \"active_config_index\":" << s.active_config_index << ",\n";
@@ -128,7 +128,7 @@ std::string session_to_json_metrics(const SignalMetricsAnalysisSession& s) {
 }
 
 
-bool session_from_json_metrics(const std::string& json, SignalMetricsAnalysisSession& s) {
+bool session_from_json_metrics(const std::string& json, SignalMetricsAnalysisState& s) {
     try {
         JP p(json);
         p.expect('{');

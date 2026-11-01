@@ -3,7 +3,7 @@
 using namespace ucuda::storage_detail;
 
 
-std::string session_to_json_dft1d(const Dft1DAnalysisSession& s) {
+std::string session_to_json_dft1d(const Dft1DAnalysisState& s) {
     std::ostringstream o;
     o << "{\n";
     o << "  \"active_config_index\":" << s.active_config_index << ",\n";
@@ -20,7 +20,7 @@ std::string session_to_json_dft1d(const Dft1DAnalysisSession& s) {
 }
 
 
-bool session_from_json_dft1d(const std::string& json, Dft1DAnalysisSession& s) {
+bool session_from_json_dft1d(const std::string& json, Dft1DAnalysisState& s) {
     try {
         JP p(json);
         p.expect('{');

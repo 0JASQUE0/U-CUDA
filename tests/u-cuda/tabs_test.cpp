@@ -4,8 +4,8 @@
 //   - Network: кольцо из 16 узлов Лоренца с диффузионной связью — расчёт проходит, траектории конечны.
 // FastSync покрыт тестом adaptive, остальные вкладки — library / dae / adaptive.
 #include "test_util.h"
-#include "ucuda/domain/order_session.h"
-#include "ucuda/domain/network_session.h"
+#include "ucuda/analysis/order_session.h"
+#include "ucuda/analysis/network_session.h"
 #include "ucuda/cuda/parametric_engine.h"
 #include "ucuda/storage/system_library.h"
 #include "ucuda/equations/sysparse.hpp"

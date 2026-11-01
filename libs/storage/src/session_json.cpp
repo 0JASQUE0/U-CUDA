@@ -850,7 +850,7 @@ void read_basins_phase_projections(JP& p, std::vector<Projection>& out) {
 
 
 void write_basins_config(std::ostringstream& o, const BasinsConfig& c,
-                                const BasinsPhaseSlot* phase_slot) {
+                                const std::vector<Projection>* phase_projections) {
     o << "{";
     o << "\"label\":";            jstr(o, c.label);            o << ",";
     o << "\"scheme\":";           jstr(o, c.scheme);           o << ",";
@@ -904,7 +904,7 @@ void write_basins_config(std::ostringstream& o, const BasinsConfig& c,
     o << "\"scatter_point_size\":"   << c.scatter_point_size   << ",";
     o << "\"scatter_alpha\":"        << c.scatter_alpha        << ",";
     o << "\"phase_projections\":";
-    if (phase_slot) write_basins_phase_projections(o, phase_slot->phase.projections);
+    if (phase_projections) write_basins_phase_projections(o, *phase_projections);
     else            o << "[]";
     o << "}";
 }

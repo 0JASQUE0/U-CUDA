@@ -2,10 +2,6 @@
 #include "ucuda/domain/analysis_session.h"
 #include "ucuda/domain/system_record.h"
 #include "ucuda/domain/analysis_types.h"
-class ParametricEngine;
-#include <atomic>
-#include <chrono>
-#include <future>
 #include <map>
 #include <memory>
 #include <string>
@@ -138,7 +134,7 @@ struct NetworkConfig {
     int         data_generation = 0;
 };
 
-struct NetworkSession {
+struct NetworkState {
     std::vector<std::string> vars;
     std::vector<std::string> params;
     System sys;
@@ -152,34 +148,15 @@ struct NetworkSession {
     int active_config_index  = 0;
     int running_config_index = -1;
 
-    std::future<NetworkResult> run_future;
-    bool in_flight = false;
-    std::chrono::steady_clock::time_point compute_start_time;
 
-    std::shared_ptr<std::atomic<bool>>  cancel_token;
-    std::shared_ptr<std::atomic<float>> progress_token;
 
     std::string last_run_label;
     double last_run_seconds = 0.0;
     bool   last_run_succeeded = false;
-    std::chrono::steady_clock::time_point last_run_completed_at;
 
-    NetworkSession() = default;
-    NetworkSession(NetworkSession&&) = default;
-    NetworkSession& operator=(NetworkSession&&) = default;
-    NetworkSession(const NetworkSession&) = delete;
-    NetworkSession& operator=(const NetworkSession&) = delete;
 
-    void load_from_record(const SystemRecord& r,
-                          const std::vector<std::string>& vars_,
-                          const std::vector<std::string>& params_);
 
-    void add_config();
-    void remove_config(int i);
 
-    bool run_async(ParametricEngine& engine, int config_idx);
-    void request_cancel();
-    bool poll();
 };
 
 // Закон связи по умолчанию для системы размерности n_vars: диффузионная связь

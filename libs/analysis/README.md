@@ -6,7 +6,7 @@ Implements analysis sessions for phase portraits, bifurcation, LLE, Lyapunov spe
 
 ## Public API and internals
 
-Public headers re-export session interfaces from domain: `analysis_session.h`, `custom_session.h`, and `order_session.h`. Implementations are split by analysis family.
+Public headers `analysis_session.h`, `custom_session.h`, `order_session.h` and `network_session.h` define the sessions: each `<Name> : <Name>State` adds to the domain state its futures, cancellation/progress tokens, `in_flight`, and the load/run/poll methods. `analysis_session.h` also declares the scheme-name resolver (`compute_krs_for_scheme`, `adaptive_code_for_scheme`, ...) and `BasinsPhaseSlot` (a phase session per basins config). Implementations are split by analysis family.
 
 ## Dependencies and consumers
 

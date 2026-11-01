@@ -8,6 +8,8 @@ Owns application settings, system-library layout, JSON session persistence, and 
 
 Public APIs are `app_config.h`, `system_library.h`, `session_io.h`, and `data_export.h`. The internal `ucuda_export_format` target shares byte-identical writers with compute-time streaming.
 
+Session serializers take the domain `<Name>State`. Sessions that own other sessions get the owned parts explicitly: `basins_state_to_json` / `basins_state_from_json` take the phase-portrait projections of the slots as a list and report what the slot owner must do (`BasinsSlotsAfterLoad`); `custom_state_to_json` / `custom_state_from_json` take the five sub-states. The whole-session wrappers with the old names (`session_to_json_basins`, `session_from_json_custom`, ...) are in application `session_persistence.h`.
+
 ## Dependencies and consumers
 
 `ucuda::storage` depends on domain and privately on platform/export formatting. Application and UI consume it. Storage must remain GUI-free.

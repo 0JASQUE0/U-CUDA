@@ -3,7 +3,7 @@
 // Analysis) и проходит круг "разбор -> запись -> разбор -> запись": вторая запись равна первой
 // (запись идемпотентна, ни одно поле не теряется и не искажается при повторном сохранении).
 #include "test_util.h"
-#include "ucuda/storage/session_io.h"
+#include "ucuda/application/session_persistence.h"
 #include "ucuda/storage/system_library.h"
 #include <filesystem>
 #include <fstream>
