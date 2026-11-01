@@ -5,6 +5,10 @@ CUDA/NVRTC 13.0, MSVC 19.44 and CMake 4.2.0-rc1 on Windows.
 The merged implementation is commit a9adf0d9a58ed421ffe9227c39eae95c504a0b7d;
 subsequent commits refine the test runner and references.
 
+A later direct comparison builds the unmodified main source independently.
+The [paired comparison report](parity/RESULTS.md) records exact CPU/GPU results,
+additional interpreted CPU coverage and the deliberate compatibility differences.
+
 ## Correctness and builds
 
 - Original modular branch: 4/4 original CTest checks passed before integration.

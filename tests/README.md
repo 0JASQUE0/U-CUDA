@@ -5,6 +5,9 @@ commits in [TestDependencies.cmake](TestDependencies.cmake). The runner needs no
 Python and builds with `U_CUDA_BUILD_GUI=OFF`. CUDA Toolkit remains required.
 Optional OCR Python services are unrelated to these checks.
 
+For a separate build of the original main sources and direct CPU/GPU output
+comparison, see [upstream parity](parity/README.md) and its [results](parity/RESULTS.md).
+
 ```powershell
 cmake --preset windows -DU_CUDA_BUILD_LEGACY=ON
 cmake --build --preset windows-release --target check-smoke

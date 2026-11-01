@@ -1,0 +1,6 @@
+﻿file(MAKE_DIRECTORY "${destination}/kernels")
+file(COPY "${source}/kernels/" DESTINATION "${destination}/kernels")
+foreach(header cudaLibrary.cu cudaLibrary.cuh cudaMacros.cuh configCUDA.h sparse_lu.h)
+    file(COPY "${source}/${header}" DESTINATION "${destination}/kernels")
+endforeach()
+file(COPY "${source}/library_template" DESTINATION "${destination}")

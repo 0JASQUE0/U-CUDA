@@ -262,7 +262,11 @@ TEST(TimeGpu, NonAutonomousStagesTransientAndRepeatedRunStartAtTheCorrectTime) {
 TEST(MatrixCpu, EveryBuiltinEnumIsEnumerated) {
     EXPECT_EQ(methods().size(), 2u * regression::builtin_cases().size());
     EXPECT_EQ((int)Scheme::Euler, 0);
+#ifdef UCUDA_TEST_REFERENCE
+    const std::filesystem::path file = std::filesystem::path(UCUDA_TEST_REFERENCE) / "codegen.hpp";
+#else
     const std::filesystem::path file = std::filesystem::path(UCUDA_TEST_SOURCE) / "libs/equations/include/ucuda/equations/codegen.hpp";
+#endif
     std::ifstream in(file); ASSERT_TRUE(in.good());
     const std::string source{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
     const auto begin = source.find("enum class Scheme {"); ASSERT_NE(begin, std::string::npos);
@@ -289,7 +293,11 @@ TEST(MatrixCpu, EveryBuiltinEnumIsEnumerated) {
     EXPECT_EQ(count, regression::builtin_cases().size()) << "New enum values need explicit test matrix coverage";
 }
 TEST(MatrixCpu, EveryAnalysisFacadeHasAWorkload) {
+#ifdef UCUDA_TEST_REFERENCE
+    const auto path = std::filesystem::path(UCUDA_TEST_REFERENCE) / "parametric_engine.h";
+#else
     const auto path = std::filesystem::path(UCUDA_TEST_SOURCE) / "libs/cuda/include/ucuda/cuda/parametric_engine.h";
+#endif
     std::ifstream in(path); ASSERT_TRUE(in.good());
     const std::string source{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
     std::set<std::string> declared, covered;
