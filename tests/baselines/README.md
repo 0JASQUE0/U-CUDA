@@ -7,6 +7,14 @@ Raw run histories remain under build/<preset>/test-results/ and are not pruned.
 See [the runner documentation](../README.md) for explicit acceptance commands.
 Actual local checks and timing limitations are recorded in [validation](../VALIDATION.md).
 
+The merged reference contains 1,502 numerical scenarios and 168 stable timing
+scenarios. Timings were accepted selectively: 130 from run 1793543155109894600,
+27 from 1793545746103918500, and 11 from 1793546738462598300. The last run's
+one-second measurement interval resolved the remaining noise without changing
+either 10% limit. Six CD fast/FP numerical cases include step-halving convergence
+checks in version 2; kernel-only Network workload version 2 batches more work.
+Each case records its source run/revision; the manifests preserve prior versions.
+
 The pre-merge source was modular-adaptive
 68d05ba4899d1e74377148f42bc7225c53b7151a; incoming main was
 81989f49193f990d0311b8dab73f1282ff52e486. Original CTest passed 4/4 on

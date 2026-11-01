@@ -15,7 +15,7 @@ are removed; CMake remains the build definition. User library files are untouche
 GL caches belong to UI resources; background polling, queue progression and
 Order autosave remain in AppModel::tick, including when views are hidden.
 
-Accepted upstream behavior changes to review with the merged reference:
+Accepted upstream behavior changes recorded with the merged reference:
 
 - DAE structural indices, consistency, constraint solvers, GGL reduction,
   implicit/explicit/Rosenbrock methods and native adaptive DAE execution.
@@ -36,6 +36,9 @@ NVCC and NVRTC use the same split device sources and packaged adaptive/BDF,
 sparse-LU and scheme headers. Native CPU compilation keeps Windows/POSIX exports
 and paths. The native regression runner, matrix and acceptance policy are
 documented in [tests/README.md](tests/README.md).
+Imported upstream regression tests and versioned fixtures, complemented by
+independent analytic checks, verify the new main behavior. Actual local results
+and remaining platform limitations are recorded in [tests/VALIDATION.md](tests/VALIDATION.md).
 
 The adaptive implementation comes from [0JASQUE0/U-CUDA, commit 77568e0](https://github.com/0JASQUE0/U-CUDA/commit/77568e0349f8190187db28748f8783bbe161f355). It replaces the retired local DOPRI5 wrapper. The upstream sources are adapted to this repository's modules and portable runtime compilation; the user library is not copied or overwritten.
 

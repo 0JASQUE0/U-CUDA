@@ -85,8 +85,10 @@ and hardware/compiler/driver/build metadata. Accepted references live separately
 in tests/baselines/. No history is automatically deleted.
 
 [test_config.json](test_config.json) controls tolerances, thresholds and timing
-(--config selects another file). Defaults: 10% slowdown, 300 ms warmup, three
-series of nine repetitions. Per-ID cases overrides allow absolute, relative,
+(--config selects another file). Defaults: 10% slowdown, one-second warmup and
+minimum measurement time, three series of nine repetitions. The longer timing
+interval avoids the observed noise of short Windows/GPU measurements; both
+durations remain configurable. Per-ID cases overrides allow absolute, relative,
 slowdown_limit. Release measurements run serially and compare series medians
 only on compatible hardware/software. Excess variation yields inconclusive,
 which is not success; sustained threshold excess is a regression. Correctness
