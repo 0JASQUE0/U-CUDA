@@ -1,7 +1,7 @@
 ﻿#include "ucuda/cuda/nvrtc_engine.h"
 #include "ucuda/cuda/runtime_settings.h"   // get_nvrtc_fmad(): режим FMA общий с картами
 #include "perf_warmup.h"
-#include "ucuda/equations/adaptive_settings.h"       // прогрев GPU перед замером Performance
+#include "ucuda/equations/adaptive_params.h"       // прогрев GPU перед замером Performance
 #include "ucuda/equations/krs_prep.h"
 #include "ucuda/equations/codegen.hpp"
 #include <cuda.h>

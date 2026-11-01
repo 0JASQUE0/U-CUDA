@@ -1,6 +1,6 @@
 ﻿#pragma once
 #include "ucuda/cuda/nvrtc_engine.h"
-#include "ucuda/equations/adaptive_settings.h"
+#include "ucuda/equations/adaptive_params.h"
 #include "ucuda/equations/dae_ir.h"
 #include "ucuda/numerics/integrator.h"
 #include "ucuda/numerics/krs_cpu.h"

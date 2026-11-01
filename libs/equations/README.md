@@ -6,7 +6,9 @@ Turns user equations into executable numerical source. It parses systems and exp
 
 ## Public API and internals
 
-Public APIs are `sysparse.hpp` and `codegen.hpp`. Private parsing/evaluation helpers are split across `expression_parser.cpp`, `system_evaluator.cpp`, and `expression_internal.h`.
+Public APIs are `sysparse.hpp` and `codegen.hpp`. `adaptive_params.h` turns domain
+`AdaptiveSettings` and generated `AdaptiveCode` into the driver's `UcudaAdaptParams`;
+the settings themselves stay in domain `adaptive_settings.h`. Private parsing/evaluation helpers are split across `expression_parser.cpp`, `system_evaluator.cpp`, and `expression_internal.h`.
 
 `dae_ir.h` represents differential/algebraic equations and index metadata;
 `dae_devices.h` expands circuit devices. DAE, BDF residual/Jacobian, adaptive

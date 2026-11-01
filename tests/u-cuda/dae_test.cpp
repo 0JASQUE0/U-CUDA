@@ -19,7 +19,7 @@
 //   Свипы на BDF (драйвер UCUDA_BDF_DRIVER): Metrics на ДАУ с z0 по точкам, БД 1D Ван дер Поля, LLE / LS на ДАУ.
 #include "test_util.h"
 #include "ucuda/equations/dae_ir.h"
-#include "ucuda/equations/adaptive_settings.h"
+#include "ucuda/equations/adaptive_params.h"
 #include "ucuda/numerics/krs_cpu.h"
 #include "ucuda/numerics/multistep_bdf.h"
 #include "ucuda/cuda/nvrtc_engine.h"

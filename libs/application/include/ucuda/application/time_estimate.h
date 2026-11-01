@@ -1,5 +1,5 @@
 ﻿#pragma once
-#include "ucuda/domain/time_estimate.h"
+#include "ucuda/domain/traj_work.h"
 #include "ucuda/cuda/runtime_settings.h"
 #include <fstream>
 #include <functional>

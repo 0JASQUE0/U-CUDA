@@ -1,7 +1,7 @@
 ﻿#pragma once
 #include "ucuda/equations/codegen.hpp"
 #include "ucuda/domain/configCUDA.h"   // typedef numb — состояние считается в точности GPU
-#include "ucuda/equations/adaptive_settings.h"
+#include "ucuda/equations/adaptive_params.h"
 #include <atomic>
 #include <vector>
 #include <string>

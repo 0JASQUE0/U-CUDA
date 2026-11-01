@@ -6,7 +6,7 @@
 //    композиционные схемы — точность на x' = -x.
 // Без CUDA проверяется только CPU-часть, код выхода 77.
 #include "test_util.h"
-#include "ucuda/equations/adaptive_settings.h"
+#include "ucuda/equations/adaptive_params.h"
 #include "ucuda/equations/codegen.hpp"
 #include "ucuda/numerics/integrator.h"
 #include "ucuda/numerics/krs_cpu.h"

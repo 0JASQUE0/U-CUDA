@@ -9,7 +9,8 @@ Owns `AppModel`, the active system, application-wide state, cross-analysis queue
 The public surface is `app_model.h`. `app_model.cpp` handles model actions and queue-safe edits; `tick.cpp` polls work, advances queues, and persists completed state.
 
 `time_estimate.h` owns asynchronous GPU cost/calibration estimation. Its plain
-trajectory work descriptions remain in domain; domain never launches calibration.
+trajectory work descriptions (`TrajWork`) remain in domain `traj_work.h`; domain
+never launches calibration.
 
 ## Dependencies and consumers
 

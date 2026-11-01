@@ -6,7 +6,7 @@ class ParametricEngine;
 struct AdaptiveCode;
 #include "ucuda/domain/circuit_solver.h"
 #include "ucuda/domain/adaptive_settings.h"
-#include "ucuda/domain/time_estimate.h"
+#include "ucuda/domain/traj_work.h"
 
 // Настройки Ньютона новой вкладки — из записи системы (поля Newton solver в редакторе
 // системы задают значения по умолчанию, как symmetry s).

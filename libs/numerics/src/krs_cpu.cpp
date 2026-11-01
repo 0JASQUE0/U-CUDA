@@ -651,7 +651,7 @@ bool KrsCpuStep::compile(const std::string& body, int amountOfX, int amountOfVal
     return true;
 }
 
-#include "ucuda/equations/adaptive_settings.h"
+#include "ucuda/equations/adaptive_params.h"
 #include <fstream>
 #include <cstring>
 #include <cerrno>

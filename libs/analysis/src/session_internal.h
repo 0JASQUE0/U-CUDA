@@ -19,7 +19,7 @@
 
 #include "ucuda/cuda/parametric_engine.h"
 #include "ucuda/cuda/nvrtc_engine.h"
-#include "ucuda/equations/adaptive_settings.h"
+#include "ucuda/equations/adaptive_params.h"
 namespace ucuda::analysis_detail {
 int sweep_param_slot(int idx, int nparams) ;
 void log_run_completed(const char* label, bool ok, double secs) ;
