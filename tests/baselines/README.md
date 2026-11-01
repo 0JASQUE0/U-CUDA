@@ -1,8 +1,11 @@
 # Accepted baselines and migration evidence
 
-Accepted JSON references and their immutable history versions live here.
+Accepted JSON manifests, immutable case artifacts and history versions live here.
+`active.json` is the current manifest; `active-data/` shares unchanged case files
+between the manifests in `active-history/`. All three belong in version control.
 Raw run histories remain under build/<preset>/test-results/ and are not pruned.
 See [the runner documentation](../README.md) for explicit acceptance commands.
+Actual local checks and timing limitations are recorded in [validation](../VALIDATION.md).
 
 The pre-merge source was modular-adaptive
 68d05ba4899d1e74377148f42bc7225c53b7151a; incoming main was

@@ -43,9 +43,9 @@ void fixed_case(int method, bool gpu) {
     ASSERT_TRUE(computePhasePortraitCPU_custom(step.fn(), ic, 2, a.data(), (int)a.size(), h, count, 0, cpu));
     ASSERT_EQ(cpu.size(), count);
     std::vector<std::vector<double>> actual = cpu;
+    NvrtcEngine engine;
     if (gpu) {
         ASSERT_EQ(cuInit(0), CUDA_SUCCESS) << "GPU coverage requires a real CUDA device";
-        NvrtcEngine engine;
         ASSERT_TRUE(engine.compile(body, 2)) << engine.error();
         std::vector<std::vector<std::vector<double>>> out;
         ASSERT_TRUE(engine.run_phase_portraits({1, 1}, 1, a, h, count, 0, out)) << engine.error();
@@ -62,8 +62,29 @@ void fixed_case(int method, bool gpu) {
             values.push_back(actual[i][k]);
         }
     }
-    regression::snapshot("fixed." + std::string(gpu ? "gpu." : "cpu.") + std::to_string(method),
-        {{"method", method}, {"rhs", system.rhs}, {"initial", {1, 1}}, {"parameters", a}, {"h", h}, {"count", count}}, values);
+    Json inputs = {{"method", method}, {"rhs", system.rhs}, {"initial", {1, 1}}, {"parameters", a}, {"h", h}, {"count", count}};
+    const bool new_cd = scheme == Scheme::CDFast || scheme == Scheme::CDFP || scheme == Scheme::CDFastFP;
+    if (new_cd) {
+        std::vector<double> errors;
+        for (int n : {10, 20, 40}) {
+            std::vector<std::vector<double>> trajectory;
+            if (gpu) {
+                std::vector<std::vector<std::vector<double>>> result;
+                ASSERT_TRUE(engine.run_phase_portraits({1, 1}, 1, a, 1.0 / n, n + 1, 0, result)) << engine.error();
+                trajectory = result.at(0);
+            } else {
+                ASSERT_TRUE(computePhasePortraitCPU_custom(step.fn(), ic, 2, a.data(), (int)a.size(), 1.0 / n, n + 1, 0, trajectory));
+            }
+            errors.push_back(std::fabs(trajectory.back()[0] - std::exp(-1.0)));
+        }
+        for (size_t i = 1; i < errors.size(); ++i) {
+            const double order = std::log2(errors[i - 1] / errors[i]);
+            ASSERT_GT(order, 1.8); ASSERT_LT(order, 2.2);
+        }
+        inputs["convergence_steps"] = {10, 20, 40};
+        values.insert(values.end(), errors.begin(), errors.end());
+    }
+    regression::snapshot("fixed." + std::string(gpu ? "gpu." : "cpu.") + std::to_string(method), inputs, values, new_cd ? 2 : 1);
 }
 class FixedMethods : public ::testing::TestWithParam<std::pair<int, bool>> {};
 TEST_P(FixedMethods, AnalyticTrajectoryAndBackendAgreement) { fixed_case(GetParam().first, GetParam().second); }

@@ -57,7 +57,10 @@ comma-separated snapshot ID list. --benchmarks is a benchmark regex.
 Acceptance requires completed independent checks and complete results. It prints
 differences, records a reason, writes a new immutable history version and
 atomically replaces the active file. Previous versions stay in
-<baseline-name>-history/. Selected acceptance preserves other scenarios. Runs
+<baseline-name>-history/. Version manifests share immutable, content-addressed
+JSON case files in <baseline-name>-data/, avoiding duplicated numerical arrays.
+Each accepted case records its originating run and Git revision.
+Commit the manifests and their case directory together. Selected acceptance preserves other scenarios. Runs
 and comparisons never update accepted references. Changing scenario inputs or
 meaning requires a new version and review. Analytic failures cannot be hidden
 by accepting a baseline. Commit reviewed baseline files explicitly.
@@ -68,6 +71,10 @@ previous accepted cases are retained. For long selections use
 command-line length limits. Changed inputs require an incremented scenario
 version (`snapshot` accepts an optional final version argument; benchmarks use
 the `input_workload_version` counter).
+
+Partial acceptance exposes a standard submode only after every required case
+in that submode is accepted. A complete catalog can consolidate independently
+accepted reruns, preserving explicitly accepted newer scenario versions.
 
 ## Artifacts and timing policy
 

@@ -59,4 +59,9 @@ ctest --preset windows-release
 
 Initial baseline acceptance, CPU/GPU selection and persistent history are documented in [tests/README.md](tests/README.md). Every objectively testable new behavior requires tests in the same change.
 
+The `check-smoke`, `check-regression`, `check-performance` and `check-all` build
+targets build their required executables and run the selected checks. Local
+validation evidence and remaining platform limitations are recorded in
+[tests/VALIDATION.md](tests/VALIDATION.md).
+
 Fixed and upstream adaptive integration are documented in [INTEGRATION.md](INTEGRATION.md).

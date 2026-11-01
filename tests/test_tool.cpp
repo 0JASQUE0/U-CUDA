@@ -200,7 +200,7 @@ int main(int argc, char** argv) {
         const fs::path basePath = opt.count("--baseline") ? fs::path(opt.at("--baseline")) : baselineRoot / "active.json";
         if (command == "compare") {
             const auto runPath = run_directory(opt.at("--run"), opt);
-            const Json result = compare(read_json(runPath / "run.json"), read_json(basePath), config);
+            const Json result = compare(read_json(runPath / "run.json"), read_baseline(basePath), config);
             std::cout << std::setw(2) << result << '\n';
             return passed(result) ? 0 : 1;
         }
@@ -214,7 +214,7 @@ int main(int argc, char** argv) {
             if (candidate.at("schema") != 1) throw std::runtime_error("Unsupported artifact schema");
             if (!candidate.at("checks_passed").get<bool>()) throw std::runtime_error("Independent checks did not pass");
             if (candidate.at("cases").empty()) throw std::runtime_error("No results to accept");
-            Json base = fs::exists(basePath) ? read_json(basePath) : Json{{"schema", 1}, {"cases", Json::object()}};
+            Json base = fs::exists(basePath) ? read_baseline(basePath) : Json{{"schema", 1}, {"cases", Json::object()}};
             if (opt.count("--cases") && opt.count("--cases-file")) throw std::runtime_error("Choose --cases or --cases-file");
             const auto selected = opt.count("--cases-file") ? read_json(fs::u8path(opt.at("--cases-file"))).get<std::set<std::string>>()
                 : selection(opt.count("--cases") ? opt.at("--cases") : "");
@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
             for (const auto& id : selected) if (!candidate.at("cases").contains(id)) throw std::runtime_error("Unknown case " + id);
             if (!base.at("cases").empty() && base.at("environment") != candidate.at("environment"))
                 throw std::runtime_error("Use a separate --baseline file for a different environment");
-            if (!base.at("cases").empty()) std::cout << std::setw(2) << compare(candidate, base, config) << '\n';
+            std::cout << std::setw(2) << compare(candidate, base, config) << '\n';
             for (auto it = candidate.at("cases").begin(); it != candidate.at("cases").end(); ++it) {
                 if (!selected.empty() && !selected.count(it.key())) continue;
                 if (!it.value().value("passed", false)) throw std::runtime_error("Case did not pass its independent checks");
@@ -249,6 +249,7 @@ int main(int argc, char** argv) {
                         throw std::runtime_error("Unstable timing cannot be accepted; rerun the selected case");
                 }
                 base["cases"][it.key()] = it.value();
+                base["cases"][it.key()]["source"] = {{"run", source.string()}, {"revision", candidate.at("revision")}};
             }
             auto covered = [&](const Json& ids) {
                 for (const auto& id : ids) {
@@ -307,15 +308,17 @@ int main(int argc, char** argv) {
             if (fs::exists(history / (id + ".json"))) throw std::runtime_error("Baseline version already exists");
             if (fs::exists(basePath) && !fs::exists(history / (base.value("previous", "initial") + ".json")))
                 fs::copy_file(basePath, history / (base.value("previous", "initial") + ".json"));
-            write_json(history / (id + ".json"), base);
-            const auto temp = fs::path(basePath.string() + ".tmp"); write_json(temp, base);
+            const auto manifest = baseline_manifest(base, basePath.parent_path() / (basePath.stem().string() + "-data"));
+            write_json(history / (id + ".json"), manifest);
+            const auto temp = fs::path(basePath.string() + ".tmp"); write_json(temp, manifest);
 #ifdef _WIN32
             if (!MoveFileExW(temp.c_str(), basePath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
                 throw std::runtime_error("Cannot replace baseline atomically");
 #else
             fs::rename(temp, basePath);
 #endif
-            std::cout << "Accepted baseline " << id << " with reason: " << reason << '\n'; return 0;
+            std::cout << "Accepted baseline " << id << " (" << (selected.empty() ? candidate.at("cases").size() : selected.size())
+                << " cases) with reason: " << reason << '\n'; return 0;
         }
         if (command != "run") throw std::runtime_error("Unknown command");
         const auto mode = opt.count("--mode") ? opt.at("--mode") : "smoke";
@@ -443,7 +446,7 @@ int main(int argc, char** argv) {
         run["checks_passed"] = run.at("checks_passed").get<bool>() && perfOk;
         run["status"] = run.at("checks_passed").get<bool>() ? unstableMeasurement ? "inconclusive" : "recorded" : check || !perfOk ? "failed" : "incomplete";
         if (fs::exists(basePath) && run.at("checks_passed").get<bool>()) {
-            run["comparison"] = compare(run, read_json(basePath), config);
+            run["comparison"] = compare(run, read_baseline(basePath), config);
             run["status"] = passed(run["comparison"]) ? "pass" : "regression_or_incomplete";
         } else if (!opt.count("--record") && run.at("checks_passed").get<bool>()) run["status"] = "baseline_missing";
         write_json(dir / "run.json", run);

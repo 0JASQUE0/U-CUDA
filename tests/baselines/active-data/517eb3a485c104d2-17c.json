@@ -1,0 +1,1 @@
+{"id":"upstream.spice.5","inputs":{"absolute_tolerance":1e-10,"assertion":"CCVS (H)","execution":{"fma":true,"gpu_block_size":32,"rdc":false},"reference":-1.0},"passed":true,"source":{"revision":"a9adf0d9a58ed421ffe9227c39eae95c504a0b7d\n","run":"E:\\progs\\CUDA\\U-CUDA\\build\\windows\\test-results\\1793543155109894600"},"tests":["upstream_spice"],"values":[-1.0],"version":1}

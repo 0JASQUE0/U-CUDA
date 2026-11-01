@@ -7,6 +7,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -26,6 +28,46 @@ inline void write_json(const fs::path& path, const Json& value) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out || !(out << std::setw(2) << value << '\n'))
         throw std::runtime_error("Cannot write " + path.string());
+}
+// Immutable case files are shared by baseline versions; history manifests stay small.
+inline Json read_baseline(const fs::path& path) {
+    auto value = read_json(path);
+    if (!value.contains("case_directory")) return value; // Original inline format.
+    const fs::path directory = value.at("case_directory").get<std::string>();
+    if (directory.empty() || directory != directory.filename()) throw std::runtime_error("Invalid baseline case directory");
+    auto root = path.parent_path();
+    const auto parentName = root.filename().string();
+    if (parentName.size() >= 8 && parentName.substr(parentName.size() - 8) == "-history") root = root.parent_path();
+    for (auto& c : value.at("cases")) {
+        const std::string file = c.at("artifact");
+        if (file.empty() || file.find_first_not_of("0123456789abcdef-.json") != std::string::npos || fs::path(file) != fs::path(file).filename())
+            throw std::runtime_error("Invalid baseline case filename");
+        c = read_json(root / directory / file);
+    }
+    value.erase("case_directory");
+    return value;
+}
+inline Json baseline_manifest(const Json& baseline, const fs::path& directory) {
+    fs::create_directories(directory);
+    Json manifest = baseline;
+    manifest["case_directory"] = directory.filename().string();
+    for (auto it = baseline.at("cases").begin(); it != baseline.at("cases").end(); ++it) {
+        const auto data = it.value().dump() + '\n';
+        uint64_t hash = 14695981039346656037ull;
+        for (unsigned char byte : data) { hash ^= byte; hash *= 1099511628211ull; }
+        std::ostringstream name; name << std::hex << hash << '-' << data.size() << ".json";
+        const auto path = directory / name.str();
+        if (fs::exists(path)) {
+            std::ifstream in(path, std::ios::binary);
+            const std::string existing{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+            if (existing != data) throw std::runtime_error("Immutable baseline artifact collision or corruption");
+        } else {
+            std::ofstream out(path, std::ios::binary);
+            if (!out || !(out << data)) throw std::runtime_error("Cannot write baseline case artifact");
+        }
+        manifest["cases"][it.key()] = {{"artifact", name.str()}};
+    }
+    return manifest;
 }
 inline double median(std::vector<double> values) {
     if (values.empty()) throw std::runtime_error("No timing samples");

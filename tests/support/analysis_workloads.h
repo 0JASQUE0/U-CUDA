@@ -132,6 +132,13 @@ inline std::vector<double> analysis_workload(ParametricEngine& engine, const std
             throw std::runtime_error("Network shape/divergence/launch count");
         const double network_tolerance = order == 1 ? .003 : order == 2 ? 2e-5 : 1e-7;
         if (verify && std::fabs(values[values.size() - 2] - std::exp(-1.0)) > network_tolerance) throw std::runtime_error("Network analytic solution");
+        if (verify && kernel_seconds) {
+            const auto offset = values.size() - (size_t)q.n_nodes * 2;
+            for (int node = 0; node < q.n_nodes; ++node)
+                if (std::fabs(values[offset + node * 2] - std::exp(-1.0)) > network_tolerance ||
+                    std::fabs(values[offset + node * 2 + 1] - std::exp(-2.0)) > network_tolerance)
+                    throw std::runtime_error("Network batched analytic solution");
+        }
         if (kernel_seconds) *kernel_seconds = r.gpu_ms / 1000;
     } else if (name == "order" || name == "performance" || name == "stability") {
         const bool stability = name == "stability";

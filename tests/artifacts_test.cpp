@@ -76,22 +76,27 @@ TEST(ArtifactPolicyCpu, BaselineAcceptanceIsExplicitVersionedAndSelective) {
     const std::string initialReason = "Проверенный исходный эталон";
     ASSERT_EQ(command({"baseline", "accept", "--run", first.string(), "--reason", initialReason}), 0)
         << text_file(root / "command.log");
-    const auto initial = read_json(baseline);
+    const auto initial = read_baseline(baseline);
+    const auto initialManifest = read_json(baseline);
+    EXPECT_EQ(initialManifest.at("case_directory"), "active-data");
+    EXPECT_TRUE(initialManifest.at("cases").at("case").contains("artifact"));
     EXPECT_EQ(initial.at("reason"), initialReason);
     EXPECT_EQ(command({"compare", "--run", first.string()}), 0);
-    EXPECT_EQ(read_json(baseline), initial) << "Ordinary comparisons must not change baselines";
+    EXPECT_EQ(read_baseline(baseline), initial) << "Ordinary comparisons must not change baselines";
     run["cases"]["case"]["values"][0] = 1.1;
     run["cases"]["other"]["values"][0] = 99.;
     write_json(second / "run.json", run);
     EXPECT_NE(command({"compare", "--run", second.string()}), 0);
-    EXPECT_EQ(read_json(baseline), initial);
+    EXPECT_EQ(read_baseline(baseline), initial);
     const auto selectedFile = root / "selected.json"; write_json(selectedFile, Json::array({"case"}));
     ASSERT_EQ(command({"baseline", "accept", "--run", second.string(), "--cases-file", selectedFile.string(), "--reason", "Intentional fixture result change"}), 0)
         << text_file(root / "command.log");
-    const auto updated = read_json(baseline);
-    EXPECT_EQ(updated.at("cases").at("other"), other) << "Selective acceptance changed an unselected case";
+    const auto updated = read_baseline(baseline);
+    EXPECT_EQ(updated.at("cases").at("other"), initial.at("cases").at("other")) << "Selective acceptance changed an unselected case";
+    EXPECT_EQ(read_json(baseline).at("cases").at("other"), initialManifest.at("cases").at("other"))
+        << "Unchanged cases must share the same immutable artifact across versions";
     EXPECT_EQ(updated.at("previous"), initial.at("id"));
-    EXPECT_EQ(read_json(baseline.parent_path() / "active-history" / (initial.at("id").get<std::string>() + ".json")), initial);
+    EXPECT_EQ(read_baseline(baseline.parent_path() / "active-history" / (initial.at("id").get<std::string>() + ".json")), initial);
     run["cases"]["other"] = other; write_json(second / "run.json", run);
     EXPECT_EQ(command({"compare", "--run", second.string()}), 0);
     auto subset = run; subset["cases"].erase("other"); subset["tests"] = {"fixture"};
@@ -108,25 +113,25 @@ TEST(ArtifactPolicyCpu, BaselineAcceptanceIsExplicitVersionedAndSelective) {
     auto noisy = run; noisy["cases"]["other"]["series"][1] = std::vector<double>(9, 20.);
     write_json(filtered / "run.json", noisy);
     EXPECT_NE(command({"baseline", "accept", "--run", filtered.string(), "--cases", "other", "--reason", "Unstable timing fixture"}), 0);
-    EXPECT_EQ(read_json(baseline), updated);
+    EXPECT_EQ(read_baseline(baseline), updated);
     auto changedInputs = run; changedInputs["cases"]["case"]["inputs"]["h"] = .02;
     write_json(filtered / "run.json", changedInputs);
     EXPECT_NE(command({"baseline", "accept", "--run", filtered.string(), "--cases", "case", "--reason", "Missing scenario version"}), 0);
-    EXPECT_EQ(read_json(baseline), updated);
+    EXPECT_EQ(read_baseline(baseline), updated);
     run["checks_passed"] = false; write_json(second / "run.json", run);
     EXPECT_NE(command({"compare", "--run", second.string()}), 0);
     EXPECT_NE(command({"baseline", "accept", "--run", second.string(), "--reason", "Invalid run"}), 0);
-    EXPECT_EQ(read_json(baseline), updated);
+    EXPECT_EQ(read_baseline(baseline), updated);
     run["checks_passed"] = true; run["cases"] = Json::object(); write_json(second / "run.json", run);
     EXPECT_NE(command({"compare", "--run", second.string()}), 0) << "Missing results must not pass";
     run["cases"]["case"] = sample(); run["environment"]["machine"] = "different";
     write_json(second / "run.json", run);
     EXPECT_NE(command({"baseline", "accept", "--run", second.string(), "--reason", "Wrong environment"}), 0);
-    EXPECT_EQ(read_json(baseline), updated);
+    EXPECT_EQ(read_baseline(baseline), updated);
     changedInputs["cases"]["case"]["version"] = 2; write_json(filtered / "run.json", changedInputs);
     EXPECT_EQ(command({"baseline", "accept", "--run", filtered.string(), "--cases", "case", "--reason", "Versioned input change"}), 0)
         << text_file(root / "command.log");
-    EXPECT_EQ(read_json(baseline).at("cases").at("case").at("version"), 2);
+    EXPECT_EQ(read_baseline(baseline).at("cases").at("case").at("version"), 2);
 
     // Partial acceptance must expose complete correctness profiles while noisy
     // performance cases stay unavailable. A newer accepted workload remains covered.
@@ -145,7 +150,7 @@ TEST(ArtifactPolicyCpu, BaselineAcceptanceIsExplicitVersionedAndSelective) {
         return process(args, root / "command.log");
     };
     ASSERT_EQ(profileCommand({"--run", complete.string(), "--cases", "case"}), 0) << text_file(root / "command.log");
-    auto partial = read_json(profiles);
+    auto partial = read_baseline(profiles);
     EXPECT_TRUE(partial.at("profiles").contains("regression|all||"));
     EXPECT_TRUE(partial.at("profiles").contains("smoke|cpu||"));
     EXPECT_FALSE(partial.at("profiles").contains("performance|all||"));
@@ -158,7 +163,7 @@ TEST(ArtifactPolicyCpu, BaselineAcceptanceIsExplicitVersionedAndSelective) {
     const auto replacement = root / "replacement"; write_json(replacement / "run.json", newer);
     ASSERT_EQ(profileCommand({"--run", replacement.string()}), 0) << text_file(root / "command.log");
     ASSERT_EQ(profileCommand({"--run", complete.string(), "--cases", "case"}), 0) << text_file(root / "command.log");
-    partial = read_json(profiles);
+    partial = read_baseline(profiles);
     EXPECT_TRUE(partial.at("profiles").contains("performance|all||"));
     EXPECT_TRUE(partial.at("profiles").contains("all|all||"));
     EXPECT_EQ(partial.at("cases").at("perf.cpu_fixture").at("version"), 2);
