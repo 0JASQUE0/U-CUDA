@@ -119,11 +119,17 @@ inline std::vector<double> analysis_workload(ParametricEngine& engine, const std
         const auto r = engine.run_fastsync(q); valid_result(r); values = r.sync_error;
     } else if (name == "network") {
         NetworkRequest q; q.krs_body = body; q.amountOfX = 2; q.n_nodes = 16; q.amountOfValues = (int)a.size();
-        q.edge_start.resize(17, 0); q.h = .01; q.t_max = 1; q.transient = 0; q.pre_scaller = 10;
+        q.h = .01; q.t_max = 1; q.transient = 0; q.pre_scaller = 10;
+        if (kernel_seconds) {
+            // One substantial launch makes event timing insensitive to tiny-kernel overhead.
+            q.n_nodes = 256; q.h = .0001; q.pre_scaller = 1000; q.steps_per_launch = 10000;
+        }
+        q.edge_start.resize(q.n_nodes + 1, 0);
         q.measure_gpu_time = kernel_seconds != nullptr;
         for (int i = 0; i < q.n_nodes; ++i) { q.values.insert(q.values.end(), a.begin(), a.end()); q.initial_conditions.insert(q.initial_conditions.end(), {1, 1}); }
         const auto r = engine.run_network(q); valid_result(r); values = r.data;
-        if (verify && (r.n_diverged || r.n_points < 2 || r.n_nodes != 16)) throw std::runtime_error("Network shape/divergence");
+        if (verify && (r.n_diverged || r.n_points < 2 || r.n_nodes != q.n_nodes || (kernel_seconds && r.launch_count != 1)))
+            throw std::runtime_error("Network shape/divergence/launch count");
         const double network_tolerance = order == 1 ? .003 : order == 2 ? 2e-5 : 1e-7;
         if (verify && std::fabs(values[values.size() - 2] - std::exp(-1.0)) > network_tolerance) throw std::runtime_error("Network analytic solution");
         if (kernel_seconds) *kernel_seconds = r.gpu_ms / 1000;

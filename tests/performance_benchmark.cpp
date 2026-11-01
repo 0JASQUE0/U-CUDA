@@ -132,14 +132,18 @@ int main(int argc, char** argv) {
     if (backend != "cpu") benchmark::RegisterBenchmark("gpu_network_kernel", [](benchmark::State& state) {
         try {
             auto& engine = warm_workload<ParametricEngine>("network.kernel", [] { return std::make_shared<ParametricEngine>(); });
-            regression::analysis_workload(engine, "network", true);
+            double warm_seconds = 0;
+            regression::analysis_workload(engine, "network", true, &warm_seconds);
             for (auto _ : state) {
                 double seconds = 0;
                 regression::analysis_workload(engine, "network", true, &seconds, false);
                 if (!(seconds > 0)) throw std::runtime_error("Missing CUDA event measurement");
                 state.SetIterationTime(seconds);
             }
-            state.counters["input_workload_version"] = 1;
+            regression::analysis_workload(engine, "network", true, &warm_seconds);
+            state.counters["input_workload_version"] = 2;
+            state.counters["input_nodes"] = 256;
+            state.counters["input_steps"] = 10000;
         } catch (const std::exception& e) { state.SkipWithError(e.what()); }
     })->UseManualTime()->Unit(benchmark::kMicrosecond);
     for (bool gpu : {false, true}) {

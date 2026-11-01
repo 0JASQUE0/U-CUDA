@@ -127,5 +127,40 @@ TEST(ArtifactPolicyCpu, BaselineAcceptanceIsExplicitVersionedAndSelective) {
     EXPECT_EQ(command({"baseline", "accept", "--run", filtered.string(), "--cases", "case", "--reason", "Versioned input change"}), 0)
         << text_file(root / "command.log");
     EXPECT_EQ(read_json(baseline).at("cases").at("case").at("version"), 2);
+
+    // Partial acceptance must expose complete correctness profiles while noisy
+    // performance cases stay unavailable. A newer accepted workload remains covered.
+    const auto profiles = root / "profiles.json", complete = root / "complete";
+    Json full = {{"schema", 1}, {"checks_passed", true}, {"environment", {{"machine", "synthetic"}}},
+        {"configuration", config()}, {"revision", "profile-policy-fixture"},
+        {"profile", "all|all||"}, {"mode", "all"}, {"backend", "all"},
+        {"tests", {"fixture"}}, {"test_labels", {{"fixture", {"smoke", "regression", "cpu"}}}},
+        {"cases", {{"case", sample()}, {"perf.cpu_fixture", other}}}};
+    full["cases"]["case"]["tests"] = {"fixture"};
+    full["cases"]["perf.cpu_fixture"]["id"] = "perf.cpu_fixture";
+    write_json(complete / "run.json", full);
+    auto profileCommand = [&](std::vector<std::string> args) {
+        args.insert(args.begin(), {UCUDA_TEST_TOOL, "baseline", "accept"});
+        args.insert(args.end(), {"--config", cfg.string(), "--baseline", profiles.string(), "--reason", "Partial profile policy fixture"});
+        return process(args, root / "command.log");
+    };
+    ASSERT_EQ(profileCommand({"--run", complete.string(), "--cases", "case"}), 0) << text_file(root / "command.log");
+    auto partial = read_json(profiles);
+    EXPECT_TRUE(partial.at("profiles").contains("regression|all||"));
+    EXPECT_TRUE(partial.at("profiles").contains("smoke|cpu||"));
+    EXPECT_FALSE(partial.at("profiles").contains("performance|all||"));
+    EXPECT_FALSE(partial.at("profiles").contains("all|all||"));
+    auto newer = full;
+    newer["profile"] = "performance|cpu|filtered";
+    newer["cases"].erase("case");
+    newer["cases"]["perf.cpu_fixture"]["version"] = 2;
+    newer["cases"]["perf.cpu_fixture"]["inputs"]["h"] = .005;
+    const auto replacement = root / "replacement"; write_json(replacement / "run.json", newer);
+    ASSERT_EQ(profileCommand({"--run", replacement.string()}), 0) << text_file(root / "command.log");
+    ASSERT_EQ(profileCommand({"--run", complete.string(), "--cases", "case"}), 0) << text_file(root / "command.log");
+    partial = read_json(profiles);
+    EXPECT_TRUE(partial.at("profiles").contains("performance|all||"));
+    EXPECT_TRUE(partial.at("profiles").contains("all|all||"));
+    EXPECT_EQ(partial.at("cases").at("perf.cpu_fixture").at("version"), 2);
 }
 }

@@ -250,43 +250,49 @@ int main(int argc, char** argv) {
                 }
                 base["cases"][it.key()] = it.value();
             }
-            bool coverageReady = true;
-            for (auto c = candidate.at("cases").begin(); c != candidate.at("cases").end(); ++c)
-                coverageReady &= base.at("cases").contains(c.key()) && base.at("cases").at(c.key()).at("version") == c.value().at("version")
-                    && base.at("cases").at(c.key()).at("inputs") == c.value().at("inputs");
-            if (coverageReady) {
-                Json ids = Json::array();
-                for (auto it = candidate.at("cases").begin(); it != candidate.at("cases").end(); ++it) ids.push_back(it.key());
+            auto covered = [&](const Json& ids) {
+                for (const auto& id : ids) {
+                    if (!base.at("cases").contains(id.get<std::string>())) return false;
+                    const auto& accepted = base.at("cases").at(id.get<std::string>());
+                    const auto& sourceCase = candidate.at("cases").at(id.get<std::string>());
+                    // Explicitly accepted newer scenario versions retain their coverage.
+                    if (accepted.at("version") < sourceCase.at("version") ||
+                        (accepted.at("version") == sourceCase.at("version") && accepted.at("inputs") != sourceCase.at("inputs"))) return false;
+                }
+                return !ids.empty();
+            };
+            Json ids = Json::array();
+            for (auto it = candidate.at("cases").begin(); it != candidate.at("cases").end(); ++it) ids.push_back(it.key());
+            if (covered(ids))
                 base["profiles"][candidate.at("profile").get<std::string>()] = {{"tests", candidate.at("tests")}, {"cases", ids}};
-                // A complete run supplies references for its standard sub-modes/backends.
-                if (candidate.contains("test_labels") && candidate.at("profile").get<std::string>() ==
-                    candidate.at("mode").get<std::string>() + "|" + candidate.at("backend").get<std::string>() + "||") {
-                    const auto sourceMode = candidate.at("mode").get<std::string>();
-                    const auto sourceBackend = candidate.at("backend").get<std::string>();
-                    for (const std::string mode : {"smoke", "regression", "performance", "all"}) {
-                        if (sourceMode != "all" && mode != sourceMode && !(mode == "smoke" && sourceMode != "smoke")) continue;
-                        for (const std::string backend : {"all", "cpu", "gpu"}) {
-                            if (sourceBackend != "all" && backend != sourceBackend) continue;
-                            Json tests = Json::array(), cases = Json::array();
-                            const auto wanted = mode == "smoke" || mode == "performance" ? "smoke" : "regression";
-                            for (auto test = candidate.at("test_labels").begin(); test != candidate.at("test_labels").end(); ++test) {
-                                const auto& labels = test.value();
-                                if (std::find(labels.begin(), labels.end(), wanted) == labels.end()) continue;
-                                const auto exclude = backend == "cpu" ? "gpu" : backend == "gpu" ? "cpu" : "";
-                                if (*exclude && std::find(labels.begin(), labels.end(), exclude) != labels.end()) continue;
-                                tests.push_back(test.key());
-                            }
-                            for (auto c = candidate.at("cases").begin(); c != candidate.at("cases").end(); ++c) {
-                                if (c.key().rfind("perf.", 0) == 0) {
-                                    if (mode != "all" && mode != "performance") continue;
-                                    if (backend != "all" && c.key().rfind("perf." + backend + "_", 0) != 0) continue;
-                                    cases.push_back(c.key()); continue;
-                                }
-                                for (const auto& test : c.value().value("tests", Json::array()))
-                                    if (std::find(tests.begin(), tests.end(), test) != tests.end()) { cases.push_back(c.key()); break; }
-                            }
-                            if (!tests.empty()) base["profiles"][mode + "|" + backend + "||"] = {{"tests", tests}, {"cases", cases}};
+            // Each sub-mode becomes available only when all of its cases are accepted.
+            if (candidate.contains("test_labels") && candidate.at("profile").get<std::string>() ==
+                candidate.at("mode").get<std::string>() + "|" + candidate.at("backend").get<std::string>() + "||") {
+                const auto sourceMode = candidate.at("mode").get<std::string>();
+                const auto sourceBackend = candidate.at("backend").get<std::string>();
+                for (const std::string mode : {"smoke", "regression", "performance", "all"}) {
+                    if (sourceMode != "all" && mode != sourceMode && !(mode == "smoke" && sourceMode != "smoke")) continue;
+                    for (const std::string backend : {"all", "cpu", "gpu"}) {
+                        if (sourceBackend != "all" && backend != sourceBackend) continue;
+                        Json tests = Json::array(), cases = Json::array();
+                        const auto wanted = mode == "smoke" || mode == "performance" ? "smoke" : "regression";
+                        for (auto test = candidate.at("test_labels").begin(); test != candidate.at("test_labels").end(); ++test) {
+                            const auto& labels = test.value();
+                            if (std::find(labels.begin(), labels.end(), wanted) == labels.end()) continue;
+                            const auto exclude = backend == "cpu" ? "gpu" : backend == "gpu" ? "cpu" : "";
+                            if (*exclude && std::find(labels.begin(), labels.end(), exclude) != labels.end()) continue;
+                            tests.push_back(test.key());
                         }
+                        for (auto c = candidate.at("cases").begin(); c != candidate.at("cases").end(); ++c) {
+                            if (c.key().rfind("perf.", 0) == 0) {
+                                if (mode != "all" && mode != "performance") continue;
+                                if (backend != "all" && c.key().rfind("perf." + backend + "_", 0) != 0) continue;
+                                cases.push_back(c.key()); continue;
+                            }
+                            for (const auto& test : c.value().value("tests", Json::array()))
+                                if (std::find(tests.begin(), tests.end(), test) != tests.end()) { cases.push_back(c.key()); break; }
+                        }
+                        if (!tests.empty() && covered(cases)) base["profiles"][mode + "|" + backend + "||"] = {{"tests", tests}, {"cases", cases}};
                     }
                 }
             }
