@@ -25,6 +25,7 @@
 #include "ucuda/cuda/nvrtc_engine.h"
 #include "ucuda/cuda/parametric_engine.h"
 #include <cuda.h>
+#include <cstdlib>
 #include <map>
 
 namespace {
@@ -43,6 +44,13 @@ System pend(const char* text, const char* index) {
 const std::vector<double> kPendX0 = { std::sin(1.0), -std::cos(1.0), 0.0, 0.0, 9.81 * std::cos(1.0) };
 std::vector<double> tail(std::vector<double> a) { a.insert(a.end(), { 4, 1e-12, 25, 1 }); return a; }
 const std::vector<double> kPendA = tail({ 0.5, 1.0, 9.81 });
+
+// UCUDA_TEST_SKIP_GGL=1 — без методов «+ GGL» (BDF1 + GGL, Radau IIA + GGL): их тела собираются
+// дольше всех, для частых прогонов. По умолчанию проверки те же.
+bool skip_ggl() {
+    const char* v = std::getenv("UCUDA_TEST_SKIP_GGL");
+    return v && *v && std::string(v) != "0";
+}
 
 // Тело шага на CPU (DLL через cl.exe); кэш по тексту тела.
 struct Cpu {
@@ -104,7 +112,8 @@ void cpu_tests() {
     // 2. порядки
     const System p2 = pend(kPend2, "lam=2"), p3 = pend(kPend3, "u=2, v=2, lam=3");
     order_at_least(p2, DaeScheme::Radau5, kPendX0, kPendA, 2.0, 0.04, 4.5, 2.7, "Radau IIA, index 2");
-    order_at_least(p3, DaeScheme::Radau5GGL, kPendX0, kPendA, 2.0, 0.04, 4.5, 2.7, "Radau IIA + GGL, index 3");
+    if (!skip_ggl())
+        order_at_least(p3, DaeScheme::Radau5GGL, kPendX0, kPendA, 2.0, 0.04, 4.5, 2.7, "Radau IIA + GGL, index 3");
     const System k1 = parse_dae("x' = -y + z*x\ny' = x\n0 = z^3 + z - 0.2*x*y - 0.1", "x, y", "z", "", "").as_codegen_system();
     std::vector<double> k1x = { 1.0, 0.0, 0.0 };
     std::string why;
@@ -118,7 +127,8 @@ void cpu_tests() {
         std::vector<double> as = kPendA;
         as.back() = 0;   // newton_full
         order_at_least(p2, DaeScheme::Radau5, kPendX0, as, 2.0, 0.04, 4.5, 2.7, "Radau IIA simplified Newton, index 2");
-        order_at_least(p3, DaeScheme::Radau5GGL, kPendX0, as, 2.0, 0.04, 4.5, 2.7, "Radau IIA + GGL simplified Newton, index 3");
+        if (!skip_ggl())
+            order_at_least(p3, DaeScheme::Radau5GGL, kPendX0, as, 2.0, 0.04, 4.5, 2.7, "Radau IIA + GGL simplified Newton, index 3");
         order_at_least(k1, DaeScheme::Radau5, k1x, std::vector<double>{ 0.5, 4, 1e-12, 25, 0 }, 1.0, 0.05, 4.5, 4.5,
                        "Radau IIA simplified Newton, index 1");
         const std::string b = codegen_dae_scheme(p2, DaeScheme::Radau5);
@@ -190,6 +200,7 @@ void cpu_tests() {
                                       0, 0, 0, 0, -3.31943268985202, -1.4565381219914928 };
     const std::vector<double> dpa = tail({ 0.5, 1, 1, 1, 1, 9.81 });
     for (DaeScheme m : { DaeScheme::BDF1, DaeScheme::Radau5GGL }) {
+        if (m == DaeScheme::Radau5GGL && skip_ggl()) continue;
         const std::string b = codegen_dae_scheme(dp, m);
         ut::require(b.find("sparse LU:") != std::string::npos, "double pendulum body without the sparse LU");
         const auto y = cpu.run(b, dpx, dpa, 1e-3, 5.0);
@@ -258,7 +269,7 @@ void gpu_tests() {
         }
     }
     // 10. Metrics двойного маятника на Radau + GGL (разреженная LU): GPU = CPU
-    {
+    if (!skip_ggl()) {
         const System dp = parse_dae(kDouble, "x1, y1, x2, y2, u1, v1, u2, v2", "l1, l2", "m1, m2, L1, L2, g",
                                     "u1=2, v1=2, u2=2, v2=2, l1=3, l2=3").as_codegen_system();
         SignalMetricsResult R[2];
@@ -539,8 +550,10 @@ void bdf_tests() {
         }
         // индекс 3 — через GGL (сведение к индексу 2, mu в выход не идут) против Radau IIA + GGL
         const System s3 = pend(kPend3, "");
-        const auto ref3 = cpu.run(codegen_dae_scheme(s3, DaeScheme::Radau5GGL), kPendX0, kPendA, 1e-3, 1.0);
+        const auto ref3 = skip_ggl() ? std::vector<double>{}
+                                     : cpu.run(codegen_dae_scheme(s3, DaeScheme::Radau5GGL), kPendX0, kPendA, 1e-3, 1.0);
         for (double tol : { 1e-7, 1e-9 }) {
+            if (skip_ggl()) break;
             BdfSettings bs;
             bs.rtol = tol; bs.atol = { tol };
             BdfStats st;
