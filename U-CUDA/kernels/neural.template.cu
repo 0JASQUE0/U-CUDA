@@ -80,7 +80,7 @@ struct NeuralStepArgs {
     const int*  edgeLaw;
     const int*  inChannel;    // nullptr = без внешнего входа
     const numb* inGain;
-    const numb* inSample;     // текущая строка отсчётов, удержание на весь шаг
+    const numb* inSample;     // строка отсчётов этого запуска: на шаг или на стадию, выбирает хост
     int*  badFlag;
     int*  status;
     numb  h;

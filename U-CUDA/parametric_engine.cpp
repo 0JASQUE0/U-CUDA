@@ -11849,7 +11849,8 @@ struct ParametricEngine::Impl {
         const NeuralInput& in = req.input;
         if (in.channels > 0) {
             if (in.hold_steps < 1 || in.var < 0 || in.var >= nx) return fail("bad input settings");
-            if (in.samples.empty() || in.samples.size() % (size_t)in.channels != 0) return fail("input samples are not whole rows");
+            if (in.stage_rows != 1 && (in.stage_rows != 3 || req.schedule != NeuralSchedule::Stage || in.hold_steps != 1)) return fail("stage_rows = 3 needs the stage schedule and hold_steps = 1");
+            if (in.samples.empty() || in.samples.size() % ((size_t)in.channels * in.stage_rows) != 0) return fail("input samples are not whole rows");
             if (in.node_channel.size() != (size_t)N || in.node_gain.size() != (size_t)N) return fail("input maps need one entry per node");
             for (int c : in.node_channel) if (c >= in.channels) return fail("input channel out of range");
         }
@@ -11992,7 +11993,7 @@ struct ParametricEngine::Impl {
         long long nInRows = 0;
         if (in.channels > 0) {
             inRows = to_numb(in.samples);
-            nInRows = (long long)(in.samples.size() / (size_t)in.channels);
+            nInRows = (long long)(in.samples.size() / ((size_t)in.channels * in.stage_rows));
             const std::vector<numb> gain = to_numb(in.node_gain);
             if (!dev(d_inRows, inRows.size() * sizeof(numb), "inSamples")) return fail(err);
             if (!dev(d_inCh, (size_t)Nt * sizeof(int), "inChannel")) return fail(err);
@@ -12250,14 +12251,15 @@ struct ParametricEngine::Impl {
                 sa.s1 = d_buf[stage ? 1 : 1 - odd].as<numb>();
                 sa.s2 = (stage || heun) ? d_buf[2].as<numb>() : nullptr;
                 sa.s3 = stage ? d_buf[3].as<numb>() : nullptr;
-                if (in.channels > 0) {
-                    const long long row = std::min<long long>(done / in.hold_steps, nInRows - 1);
-                    sa.inSample = d_inRows.as<numb>() + (size_t)row * in.channels;
-                }
+                const long long inRow = in.channels > 0 ? std::min<long long>(done / in.hold_steps, nInRows - 1) : 0;
                 sa.step = (int)(std::min<long long>)(done + 1, (std::numeric_limits<int>::max)());
                 void* args[] = { &sa };
                 for (int ph = 0; ph < phases; ++ph) {
                     sa.phase = ph;
+                    if (in.channels > 0) {
+                        const int sub = in.stage_rows == 3 ? (ph == 0 ? 0 : ph == 3 ? 2 : 1) : 0;
+                        sa.inSample = d_inRows.as<numb>() + ((size_t)inRow * in.stage_rows + sub) * in.channels;
+                    }
                     CUresult r = cuLaunchKernel(cached_neural.step, blocks, 1, 1, block, 1, 1, 0, nullptr, args, nullptr);
                     if (r != CUDA_SUCCESS) return fail("cuLaunchKernel(neural): " + cu_err(r));
                     ++res.launches;

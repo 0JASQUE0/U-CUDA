@@ -64,20 +64,26 @@ struct SourceSeries {
     const NeuralSource* src = nullptr;
     int index = 0;
     uint64_t seed = 0;
-    double a = 1.0, f = 0.0, phase = 0.0, offset = 0.0;
+    double a = 1.0, f = 0.0, phase = 0.0, offset = 0.0, h = 0.0;
+    long long half_steps = 0, shift = 0;   // меандр: фронты через half_steps шагов, 0 = без фронтов
     std::vector<double> series;    // система: по одному значению на активный отсчёт
-    double value(double tau, long long sample, size_t active) const {
+    // tau в шагах, sub = 0, 1, 2 это t, t + h/2, t + h, при отсчёте на шаг всегда 0. Ступенчатые источники от sub не зависят.
+    double value(long long tau, int sub, bool three, long long sample, size_t active) const {
         const double two_pi = 6.283185307179586476925286766559;
         switch (src->kind) {
         case NeuralSourceKind::Constant: return offset + a;
-        case NeuralSourceKind::Sine:     return offset + a * std::sin(two_pi * f * tau + phase);
-        case NeuralSourceKind::Square:   return offset + (std::sin(two_pi * f * tau + phase) >= 0.0 ? a : -a);
+        case NeuralSourceKind::Sine:     return offset + a * std::sin(two_pi * f * ((double)tau + 0.5 * sub) * h + phase);
+        case NeuralSourceKind::Square: {
+            if (half_steps == 0) return offset + (std::sin(phase) >= 0.0 ? a : -a);
+            const long long k = tau + shift, q = (k >= 0 ? k : k - half_steps + 1) / half_steps;
+            return offset + (q % 2 == 0 ? a : -a);
+        }
         case NeuralSourceKind::Noise: {
             Stream g(seed ^ 0x4E4F4953ULL, (uint64_t)index, (uint64_t)sample);
             const double u = 1.0 - g.uni(), v = g.uni();
             return offset + a * std::sqrt(-2.0 * std::log(u)) * std::cos(two_pi * v);
         }
-        case NeuralSourceKind::System:   return offset + a * series[active];
+        case NeuralSourceKind::System:   return offset + a * series[three ? 2 * active + (size_t)sub : active];
         }
         return 0.0;
     }
@@ -158,9 +164,12 @@ void fill_input(const NeuralConfig& c, const NeuralGraph& g, uint64_t seed, Neur
     const double hold_t = num_or(c.input_hold_text, 0.0);
     in.hold_steps = hold_t > 0.0 ? (std::max)(1LL, steps_of(hold_t, r.h, "the input sample time")) : 1;
     in.channels = (int)c.sources.size();
+    // Отсчёт на шаг и связь в стадиях: гладкий источник видит время своей стадии, иначе порядок по нему первый.
+    const bool three = c.schedule == NeuralSchedule::Stage && in.hold_steps == 1;
+    in.stage_rows = three ? 3 : 1;
     const long long rows = total / in.hold_steps + 1;
-    if ((double)rows * in.channels * sizeof(double) > 4.0e9) throw std::runtime_error("the input needs too many samples: raise the sample time");
-    in.samples.assign((size_t)rows * in.channels, 0.0);
+    if ((double)rows * in.stage_rows * in.channels * sizeof(double) > 4.0e9) throw std::runtime_error("the input needs too many samples: raise the sample time");
+    in.samples.assign((size_t)rows * in.stage_rows * in.channels, 0.0);
 
     // Активен ли отсчёт и сколько времени идёт его стимул. Граница отсчёта лежит на шаге, поэтому всё в шагах.
     const auto active_at = [&](long long row, long long& tau, long long& trial) {
@@ -182,13 +191,29 @@ void fill_input(const NeuralConfig& c, const NeuralGraph& g, uint64_t seed, Neur
         v.src = &s; v.index = q; v.seed = seed;
         v.a = num_or(s.amplitude_text, 1.0); v.f = num_or(s.frequency_text, 0.0);
         v.phase = num_or(s.phase_text, 0.0); v.offset = num_or(s.offset_text, 0.0);
-        if (s.kind == NeuralSourceKind::System)
-            v.series = source_system_series(s, n_active, (double)in.hold_steps * r.h * num_or(s.time_scale_text, 1.0));
+        v.h = r.h;
+        if (s.kind == NeuralSourceKind::Square && v.f != 0.0) {
+            // Фронт только на границе шага: внутри шага RK4 должен видеть константу, а знак sin около нуля решает округление.
+            const double half = 0.5 / (v.f * r.h), sh = v.phase / (6.283185307179586476925286766559 * v.f * r.h);
+            v.half_steps = std::llround(half);
+            v.shift = std::llround(sh);
+            if (v.half_steps < 1 || std::fabs(half - (double)v.half_steps) > 1e-9 * half)
+                throw std::runtime_error("input source '" + s.name + "': half a period is not a multiple of h");
+            if (std::fabs(sh - (double)v.shift) > 1e-6)
+                throw std::runtime_error("input source '" + s.name + "': the phase puts the edges between steps");
+            if (v.half_steps % in.hold_steps != 0 || v.shift % in.hold_steps != 0)
+                throw std::runtime_error("input source '" + s.name + "': the edges fall inside an input sample");
+        }
+        if (s.kind == NeuralSourceKind::System) {
+            const double dt = (double)in.hold_steps * r.h * num_or(s.time_scale_text, 1.0);
+            v.series = source_system_series(s, three ? 2 * n_active + 1 : n_active, three ? 0.5 * dt : dt);
+        }
         size_t active = 0;
         for (long long row = 0; row < rows; ++row) {
             long long tau, trial;
             if (!active_at(row, tau, trial)) continue;
-            in.samples[(size_t)row * in.channels + q] = v.value((double)tau * r.h, row, active);
+            for (int j = 0; j < in.stage_rows; ++j)
+                in.samples[((size_t)row * in.stage_rows + j) * in.channels + q] = v.value(tau, j, three, row, active);
             ++active;
         }
     }
@@ -782,14 +807,14 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
         if (r.input.channels <= 0) return;
         const int ch = (int)c.sources.size();
         // Только запись, без transient: окно сравнивается с остальными по одной оси времени.
-        const size_t rows = r.input.samples.size() / (size_t)r.input.channels;
+        const size_t sub = (size_t)r.input.stage_rows, rows = r.input.samples.size() / (size_t)r.input.channels / sub;
         const long long skip = std::llround(r.transient / r.h);
         const size_t first = (std::min)(rows, (size_t)((skip + r.input.hold_steps - 1) / r.input.hold_steps));
         const size_t step = (std::max<size_t>)(1, (rows - first) / 4096);
         plan.input_view_t0 = (double)first * (double)r.input.hold_steps * r.h;
         plan.input_view_dt = (double)step * (double)r.input.hold_steps * r.h;
         for (size_t row = first; row < rows; row += step)
-            for (int q = 0; q < ch; ++q) plan.input_view.push_back(r.input.samples[row * r.input.channels + q]);
+            for (int q = 0; q < ch; ++q) plan.input_view.push_back(r.input.samples[row * sub * r.input.channels + q]);
     };
     if (plan.sweep_values.empty()) {
         const NeuralGraph g = neural_build_graph(c);

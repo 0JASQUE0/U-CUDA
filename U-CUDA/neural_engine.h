@@ -12,11 +12,13 @@ enum class NeuralSchedule { Old = 0, Post = 1, Heun = 2, Stage = 3 };
 
 // Внешнее воздействие: отсчёты держатся hold_steps шагов, после конца держится последний.
 // Вход складывается со связью, поэтому попадает в каждую стадию stage. Границы удержания кратны шагу.
+// stage_rows = 3 (только stage и hold_steps = 1): на шаг три строки t, t + h/2, t + h, стадии берут 0, 1, 1, 2.
 struct NeuralInput {
     int channels = 0;                 // 0 = входа нет
     int var = 0;                      // переменная узла, в правую часть которой идёт вход
     long long hold_steps = 1;
-    std::vector<double> samples;      // [rows * channels]
+    int stage_rows = 1;
+    std::vector<double> samples;      // [rows * stage_rows * channels]
     std::vector<int>    node_channel; // [n_nodes], -1 = узел не подключён
     std::vector<double> node_gain;    // [n_nodes]
 };
