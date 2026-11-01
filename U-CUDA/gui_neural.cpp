@@ -712,6 +712,10 @@ void draw_neural_map_window(AppModel& model, PlotRenderer& renderer, std::map<in
         }
     }
     if (vs.map_kind == 1) { ImGui::SameLine(); ImGui::Checkbox("log10##neural_map", &vs.map_log); }
+    if (vs.instance >= 0 && vs.instance < nInst) {
+        ImGui::SameLine();
+        ImGui::Text("instance %d: %g, %g", vs.instance, c.sweep_values[(size_t)(vs.instance / n2)], c.sweep2_values[(size_t)(vs.instance % n2)]);
+    }
     draw_heatmap_toolbar(hv);
 
     const bool lyap = vs.map_kind == 2, spread = vs.map_kind == 1, log10_spread = spread && vs.map_log;
@@ -742,6 +746,7 @@ void draw_neural_map_window(AppModel& model, PlotRenderer& renderer, std::map<in
     hv.x_axis.log_scale = c.sweep.log && c.sweep_values.front() > 0.0;
     hv.y_axis.log_scale = c.sweep2.log && c.sweep2_values.front() > 0.0;
     hv.value_name = lyap ? "lambda" : log10_spread ? "log10 spread" : spread ? "spread" : "R";
+    hv.left_click_plain = true;
     hv.on_left_click = [&vs, n2](int ix, int iy, double, double) { vs.instance = ix * n2 + iy; };
 
     double x0 = c.sweep_values.front(), x1 = c.sweep_values.back(), y0 = c.sweep2_values.front(), y1 = c.sweep2_values.back();

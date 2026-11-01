@@ -149,6 +149,9 @@ public:
     // at (snap_x, snap_y). With `on_left_drag` also set this fires on release regardless of whether
     // the gesture was a drag; with only on_left_click set, it fires only on release-without-drag.
     std::function<void(int nx_idx, int ny_idx, double snap_x, double snap_y)> on_left_click;
+    // Простой клик ЛКМ без сдвига тоже зовёт on_left_click; без флага ЛКМ только панорамирует.
+    bool left_click_plain = false;
+    ImVec2 left_press_pos{-1e6f, -1e6f};
 
     // Optional live-drag callback for LMB. When set, holding LMB inside the plot no longer pans —
     // every frame while the button is down the callback is invoked with the current cursor's pixel

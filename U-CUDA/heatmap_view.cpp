@@ -1336,6 +1336,15 @@ void HeatmapView::render(PlotRenderer& renderer,
         // MMB release — end of middle-button crosshair drag.
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Middle))
             trigger = true;
+        // Своя точка нажатия: пан каждый кадр сбрасывает MouseClickedPos, по ней сдвиг не виден.
+        if (left_click_plain) {
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) left_press_pos = io.MousePos;
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                const float mx = io.MousePos.x - left_press_pos.x, my = io.MousePos.y - left_press_pos.y;
+                if (mx * mx + my * my < io.MouseDragThreshold * io.MouseDragThreshold) trigger = true;
+                left_press_pos = ImVec2(-1e6f, -1e6f);
+            }
+        }
         if (trigger) {
             double dx, dy; mouse_world(dx, dy);
             int ix = (int)std::floor((dx - vis_param_lo_x) / step_x);
