@@ -10,6 +10,7 @@ flowchart LR
     numerics[numerics]
     exportfmt[internal export format]
     cuda[cuda]
+    cudalegacy[cuda_legacy]
     analysis[analysis]
     storage[storage]
     ocr[ocr]
@@ -44,7 +45,9 @@ flowchart LR
     ui --> plotting
     ui --> storage
     desktop --> ui
-    legacy --> cuda
+    cudalegacy --> cuda
+    cudalegacy --> exportfmt
+    legacy --> cudalegacy
 ```
 
 `ucuda_export_format` is an internal implementation target in storage. It lets compute-time streaming and later GUI export share byte-identical CSV writers without making `ucuda_cuda` depend on the complete `ucuda_storage` library.

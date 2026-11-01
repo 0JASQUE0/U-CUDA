@@ -12,6 +12,8 @@ Main facades are `NvrtcEngine`, `ParametricEngine`, phase portrait APIs, runtime
 
 Target `ucuda::cuda` depends on domain, numerics, platform, CUDA Toolkit libraries, threads, and the internal export-format target. It is consumed by analysis and legacy.
 
+The NVCC-built legacy host library (`hostLibrary.cuh`: `cudaLibrary.cu` and `host_*.cu` except `host_rqa.cu`) is its own target `ucuda::cuda_legacy`, linked only by `U-CUDA-legacy`. The desktop app and the tests run every analysis through NVRTC modules (`cuLaunchKernel`), so they do not link it; the only NVCC kernels they need are RQA (`host_rqa.cu`, in `ucuda::cuda`). `ucuda::cuda_legacy` is built in every configuration so it keeps compiling.
+
 It must not depend on application, storage orchestration, plotting, ImGui, or OpenGL. The internal export-format dependency contains formatting only and does not pull the storage library into compute code.
 
 ## Runtime data flow and ownership
@@ -24,7 +26,7 @@ Use `engine_*` files for modern analysis families, `host_*` files for legacy ent
 
 ## Build and checks
 
-Build with `cmake --build --preset windows-debug --target ucuda_cuda` and repeat for Release and `U-CUDA-legacy`. Run `adaptive_gpu` and `gpu_smoke` on a real GPU with a clean runtime kernel package.
+Build with `cmake --build --preset windows-debug --target ucuda_cuda` (and `ucuda_cuda_legacy` for `host_*` changes) and repeat for Release and `U-CUDA-legacy`. Run `adaptive_gpu` and `gpu_smoke` on a real GPU with a clean runtime kernel package.
 
 ## Compatibility and platforms
 
