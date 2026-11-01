@@ -4,10 +4,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <iterator>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -58,9 +58,8 @@ inline Json baseline_manifest(const Json& baseline, const fs::path& directory) {
         std::ostringstream name; name << std::hex << hash << '-' << data.size() << ".json";
         const auto path = directory / name.str();
         if (fs::exists(path)) {
-            std::ifstream in(path, std::ios::binary);
-            const std::string existing{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-            if (existing != data) throw std::runtime_error("Immutable baseline artifact collision or corruption");
+            // Git checkout may translate line endings; numerical content stays immutable.
+            if (read_json(path) != it.value()) throw std::runtime_error("Immutable baseline artifact collision or corruption");
         } else {
             std::ofstream out(path, std::ios::binary);
             if (!out || !(out << data)) throw std::runtime_error("Cannot write baseline case artifact");

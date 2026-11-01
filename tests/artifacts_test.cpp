@@ -167,5 +167,11 @@ TEST(ArtifactPolicyCpu, BaselineAcceptanceIsExplicitVersionedAndSelective) {
     EXPECT_TRUE(partial.at("profiles").contains("performance|all||"));
     EXPECT_TRUE(partial.at("profiles").contains("all|all||"));
     EXPECT_EQ(partial.at("cases").at("perf.cpu_fixture").at("version"), 2);
+    const auto profileManifest = read_json(profiles);
+    const auto casePath = root / "profiles-data" / profileManifest.at("cases").at("case").at("artifact").get<std::string>();
+    const auto caseData = read_json(casePath).dump();
+    { std::ofstream out(casePath, std::ios::binary); out << caseData << "\r\n"; }
+    EXPECT_EQ(profileCommand({"--run", complete.string(), "--cases", "case"}), 0)
+        << "Windows checkout line endings must not change baseline identity: " << text_file(root / "command.log");
 }
 }
