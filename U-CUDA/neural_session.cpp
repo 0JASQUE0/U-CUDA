@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <numeric>
 #include <sstream>
@@ -576,9 +577,14 @@ std::string neural_graph_recipe(const NeuralConfig& c) {
         o << "|proj:" << p.from << ">" << p.to << ":" << (int)p.rule << ":" << p.p_text << ":" << p.degree_text << ":" << p.k_text
           << ":" << p.width_text << ":" << p.rewire_text << ":" << p.periodic << p.directed << ":" << p.weight_text << ":"
           << p.weight_spread_text << ":" << (int)p.norm << p.norm_expected << ":" << p.law;
-    if (c.sweep.enabled)
-        o << "|sweep:" << (int)c.sweep.kind << ":" << c.sweep.population << ":" << c.sweep.param << ":" << c.sweep.lo_text
-          << ":" << c.sweep.hi_text << ":" << c.sweep.points_text << ":" << c.sweep.log;
+    const auto axis = [&o](const NeuralSweep& s, const char* tag) {
+        o << tag << (int)s.kind << ":" << s.population << ":" << s.param << ":" << s.lo_text
+          << ":" << s.hi_text << ":" << s.points_text << ":" << s.log;
+    };
+    if (c.sweep.enabled) {
+        axis(c.sweep, "|sweep:");
+        if (c.sweep2.enabled) axis(c.sweep2, "|sweep2:");
+    }
     return o.str();
 }
 
@@ -655,6 +661,11 @@ NeuralRequest neural_build_request(const System& sys, const std::vector<CustomSc
     r.pre_scaller = std::max(1, int_or(c.pre_scaller_text, 1));
     r.max_value = parse_num(c.max_value_text, 1.0e6);
     fill_input(c, g, seed, r);
+    r.lyapunov.enabled = c.lyap_on;
+    r.lyapunov.eps = num_or(c.lyap_eps_text, 1.0e-8);
+    r.lyapunov.interval = num_or(c.lyap_interval_text, 1.0);
+    r.lyapunov.settle = num_or(c.lyap_settle_text, 100.0);
+    r.lyapunov.seed = seed;
 
     for (size_t k = 0; k < vars.size(); ++k)
         if (std::find(c.obs_vars_off.begin(), c.obs_vars_off.end(), (int)k) == c.obs_vars_off.end()) r.observe.vars.push_back((int)k);
@@ -678,9 +689,8 @@ double neural_record_time(const NeuralConfig& c) {
     return num_or(c.trials_text, 0.0) * (num_or(c.rest_text, 0.0) + num_or(c.stimulus_text, 0.0));
 }
 
-std::vector<double> neural_sweep_values(const NeuralConfig& c) {
+static std::vector<double> sweep_axis_values(const NeuralConfig& c, const NeuralSweep& s) {
     std::vector<double> out;
-    const NeuralSweep& s = c.sweep;
     if (!s.enabled) return out;
     const int n = int_or(s.points_text, 0);
     if (n < 1) throw std::runtime_error("a sweep needs at least one point");
@@ -701,13 +711,16 @@ std::vector<double> neural_sweep_values(const NeuralConfig& c) {
     return out;
 }
 
-NeuralConfig neural_sweep_instance(const NeuralConfig& c, int index, double value) {
-    NeuralConfig o = c;
-    o.sweep.enabled = false;
-    const NeuralSweep& s = c.sweep;
+std::vector<double> neural_sweep_values(const NeuralConfig& c) { return sweep_axis_values(c, c.sweep); }
+
+std::vector<double> neural_sweep2_values(const NeuralConfig& c) {
+    return c.sweep.enabled ? sweep_axis_values(c, c.sweep2) : std::vector<double>{};
+}
+
+static void sweep_apply(NeuralConfig& o, const NeuralSweep& s, int index, double value) {
     const std::string text = fmt_num_shortest(value);
     if (s.kind == NeuralSweepKind::Coupling) o.coupling_text = text;
-    else if (s.kind == NeuralSweepKind::Replica) o.seed_text = std::to_string(int_or(c.seed_text, 1) + index);
+    else if (s.kind == NeuralSweepKind::Replica) o.seed_text = std::to_string(int_or(o.seed_text, 1) + index);
     else if (s.kind == NeuralSweepKind::InputGain) {
         if (o.links.empty()) throw std::runtime_error("the sweep over the input gain needs an input link");
         for (NeuralLink& l : o.links) l.gain_text = text;
@@ -721,7 +734,40 @@ NeuralConfig neural_sweep_instance(const NeuralConfig& c, int index, double valu
             m[s.param] = text;
         }
     }
+}
+
+NeuralConfig neural_sweep_instance(const NeuralConfig& c, int index, double value) {
+    NeuralConfig o = c;
+    o.sweep.enabled = false;
+    sweep_apply(o, c.sweep, index, value);
     return o;
+}
+
+std::string neural_sweep_csv(const NeuralConfig& c) {
+    std::ostringstream o;
+    if (c.sweep_values.empty() || c.pops_per_instance < 1) return o.str();
+    o.precision(17);
+    const int K = c.pops_per_instance, n2 = (std::max)(1, (int)c.sweep2_values.size()), nInst = (int)c.result.instance_stop.size();
+    const bool two = !c.sweep2_values.empty();
+    o << neural_sweep_name(c.sweep.kind) << (two ? std::string(",") + neural_sweep_name(c.sweep2.kind) : std::string())
+      << ",population,R,spread,lyapunov,stop_step\n";
+    for (int q = 0; q < nInst; ++q) {
+        for (int p = 0; p < K; ++p) {
+            const size_t at = (size_t)q * K + p;
+            const auto cell = [&o](const std::vector<double>& v, size_t i) {
+                o << ",";
+                if (i < v.size() && !std::isnan(v[i])) o << v[i];
+            };
+            o << c.sweep_values[(size_t)(q / n2)];
+            if (two) o << "," << c.sweep2_values[(size_t)(q % n2)];
+            o << "," << c.populations[(size_t)p].name;
+            cell(c.sweep_order, at);
+            cell(c.sweep_spread, at);
+            cell(c.sweep_lyap, (size_t)q);
+            o << "," << c.result.instance_stop[(size_t)q] << "\n";
+        }
+    }
+    return o.str();
 }
 
 NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custom_schemes,
@@ -730,6 +776,7 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
     NeuralPlan plan;
     plan.pops_per_instance = (int)c.populations.size();
     plan.sweep_values = neural_sweep_values(c);
+    plan.sweep2_values = neural_sweep2_values(c);
     // Вход для окна: не больше 4096 точек на канал, каналы первого экземпляра.
     const auto take_view = [&](const NeuralRequest& r) {
         if (r.input.channels <= 0) return;
@@ -759,8 +806,10 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
     long long nodes = 0;
     std::vector<std::vector<double>> input_blocks;   // разные отсчёты у экземпляров: каналы идут подряд
     plan.degree_min = std::numeric_limits<int>::max();
-    for (int i = 0; i < (int)plan.sweep_values.size(); ++i) {
-        const NeuralConfig one = neural_sweep_instance(c, i, plan.sweep_values[(size_t)i]);
+    const int n2 = (std::max)(1, (int)plan.sweep2_values.size()), nTotal = (int)plan.sweep_values.size() * n2;
+    for (int i = 0; i < nTotal; ++i) {
+        NeuralConfig one = neural_sweep_instance(c, i / n2, plan.sweep_values[(size_t)(i / n2)]);
+        if (!plan.sweep2_values.empty()) sweep_apply(one, c.sweep2, i % n2, plan.sweep2_values[(size_t)(i % n2)]);
         const NeuralGraph g = neural_build_graph(one);
         NeuralRequest r = neural_build_request(sys, custom_schemes, vars, params, one, g);
         if (nodes + r.n_nodes > 2000000000LL) throw std::runtime_error("the sweep holds too many nodes");
@@ -770,14 +819,17 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
         for (const char ch : g.hash) f.add((uint64_t)(uint8_t)ch);
         plan.degree_min = (std::min)(plan.degree_min, g.degree_min);
         plan.degree_max = (std::max)(plan.degree_max, g.degree_max);
+        const unsigned long long lyap_seed = r.lyapunov.seed;
         if (i == 0) {
             a = std::move(r);
             a.instance_start = { 0, a.n_nodes };
+            a.lyapunov.instance_seed = { lyap_seed };
             nodes = a.n_nodes;
             take_view(a);
             input_blocks.push_back(a.input.samples);
             continue;
         }
+        a.lyapunov.instance_seed.push_back(lyap_seed);
         if (r.input.channels > 0) {
             a.input.node_gain.insert(a.input.node_gain.end(), r.input.node_gain.begin(), r.input.node_gain.end());
             int shift = -1;
@@ -841,7 +893,8 @@ void NeuralSession::add_config() {
     if (!configs.empty()) {
         c = configs.back();
         c.result = NeuralResult{};
-        c.instance_start.clear(); c.sweep_values.clear(); c.sweep_order.clear(); c.sweep_spread.clear(); c.input_view.clear();
+        c.instance_start.clear(); c.sweep_values.clear(); c.sweep2_values.clear(); c.sweep_order.clear(); c.sweep_spread.clear();
+        c.sweep_lyap.clear(); c.input_view.clear();
         c.last_run_ok = false;
         c.last_error.clear();
         c.data_generation = 0;
@@ -903,6 +956,8 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx) {
             if (out.instance_start.empty()) out.instance_start = { 0, plan.request.n_nodes };
             out.pops_per_instance = plan.pops_per_instance;
             out.sweep_values = std::move(plan.sweep_values);
+            out.sweep2_values = std::move(plan.sweep2_values);
+            out.sweep_lyap = out.result.lyapunov;
             out.input_view = std::move(plan.input_view);
             out.input_view_t0 = plan.input_view_t0;
             out.input_view_dt = plan.input_view_dt;
@@ -948,13 +1003,20 @@ bool NeuralSession::poll() {
             c.result = std::move(out.result);
             c.instance_start = std::move(out.instance_start);
             c.sweep_values = std::move(out.sweep_values);
+            c.sweep2_values = std::move(out.sweep2_values);
             c.sweep_order = std::move(out.sweep_order);
             c.sweep_spread = std::move(out.sweep_spread);
+            c.sweep_lyap = std::move(out.sweep_lyap);
             c.input_view = std::move(out.input_view);
             c.input_view_t0 = out.input_view_t0;
             c.input_view_dt = out.input_view_dt;
             c.pops_per_instance = out.pops_per_instance;
             ++c.data_generation;
+            if (c.csv_save_enabled && !c.csv_output_path.empty() && !c.sweep_values.empty()) {
+                std::ofstream f(c.csv_output_path, std::ios::binary);
+                f << neural_sweep_csv(c);
+                if (!f) c.last_error = "could not write " + c.csv_output_path;
+            }
         }
     }
     last_run_completed_at = std::chrono::steady_clock::now();

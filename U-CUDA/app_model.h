@@ -225,7 +225,12 @@ struct NeuralViewState {
     int series_var = 0;
     int instance = 0;    // экземпляр в окнах от времени
     int sync_kind = 0;   // 0 = R, 1 = разброс по узлам
+    int sweep_kind = 0;  // Neural Sweep: то же, 2 = показатель Ляпунова
     bool spread_log[2] = { true, true };   // окна Synchronisation и Neural Sweep; у R оси всегда линейная
+    int lyap_kind = 0;   // 0 = показатель от значения свипа, 1 = накопленное среднее одной сети
+    int map_kind = 0;    // Neural Map: 0 = R, 1 = разброс, 2 = показатель Ляпунова
+    int map_pop = 0;
+    bool map_log = true; // разброс в log10: он меняется на 7 порядков
 };
 
 struct NetworkViewState {

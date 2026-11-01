@@ -106,6 +106,17 @@ struct NeuralConfig {
     std::vector<int> obs_vars_off;     // не записывать эти переменные
     std::string output_limit_text = "1024";   // МБ на хосте
     NeuralSweep sweep;
+    NeuralSweep sweep2;                // вторая ось, значит только при включённой первой
+
+    // Клон всей сети: память и время расчёта вдвое. Сид клона = seed эксперимента.
+    bool lyap_on = false;
+    std::string lyap_eps_text = "1e-8";       // на координату
+    std::string lyap_interval_text = "1";
+    std::string lyap_settle_text = "100";
+
+    // Сводка свипа пишется в файл после каждого расчёта.
+    bool csv_save_enabled = false;
+    std::string csv_output_path;
 
     std::vector<NeuralSource> sources;
     std::vector<NeuralLink> links;
@@ -126,8 +137,10 @@ struct NeuralConfig {
 
     NeuralResult result;
     std::vector<int>    instance_start;   // последнего расчёта
-    std::vector<double> sweep_values;     // [instances], пусто без свипа
+    std::vector<double> sweep_values;     // значения первой оси, пусто без свипа
+    std::vector<double> sweep2_values;    // значения второй оси, пусто = одна ось; экземпляр = i1 * n2 + i2
     std::vector<double> sweep_order, sweep_spread;  // [instance][pop], среднее по времени, NaN у разлетевшихся
+    std::vector<double> sweep_lyap;       // [instance]
     std::vector<double> input_view;       // [point][source], прореженный вход первого экземпляра
     double input_view_t0 = 0.0, input_view_dt = 0.0;
     int pops_per_instance = 0;
@@ -157,7 +170,7 @@ struct NeuralPlan {
     long long arcs = 0;
     int degree_min = 0, degree_max = 0;
     int pops_per_instance = 0;
-    std::vector<double> sweep_values;
+    std::vector<double> sweep_values, sweep2_values;
     std::vector<double> input_view;
     double input_view_t0 = 0.0, input_view_dt = 0.0;
 };
@@ -165,7 +178,7 @@ struct NeuralPlan {
 struct NeuralOutcome {
     NeuralResult result;
     std::vector<int>    instance_start;
-    std::vector<double> sweep_values, sweep_order, sweep_spread, input_view;
+    std::vector<double> sweep_values, sweep2_values, sweep_order, sweep_spread, sweep_lyap, input_view;
     double input_view_t0 = 0.0, input_view_dt = 0.0;
     int pops_per_instance = 0;
     std::string hash, recipe;
@@ -233,6 +246,10 @@ NeuralRequest neural_build_request(const System& sys, const std::vector<CustomSc
                                    const NeuralConfig& c, const NeuralGraph& g);
 // Значения свипа, пусто = свип выключен. Бросает на неверном диапазоне.
 std::vector<double> neural_sweep_values(const NeuralConfig& c);
+// То же для второй оси: пусто, если она выключена или выключен свип.
+std::vector<double> neural_sweep2_values(const NeuralConfig& c);
+// Сводка свипа строками: значения осей, популяция, R, разброс, показатель, шаг остановки. Пустая при отсутствии свипа.
+std::string neural_sweep_csv(const NeuralConfig& c);
 // Длительность записи с учётом протокола: при попытках это попытки * (пауза + стимул), а не t_max.
 double neural_record_time(const NeuralConfig& c);
 // Конфигурация одного значения: в эксперименте меняется только то, что свипается.

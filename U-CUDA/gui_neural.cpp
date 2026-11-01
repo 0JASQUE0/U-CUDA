@@ -252,14 +252,7 @@ static void draw_neural_protocol(NeuralConfig& c) {
     ImGui::TextDisabled("Recorded time %g replaces t max.", neural_record_time(c));
 }
 
-static void draw_neural_sweep(NeuralSession& s, NeuralConfig& c) {
-    if (!ImGui::CollapsingHeader("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) return;
-    NeuralSweep& w = c.sweep;
-    ImGui::Checkbox("sweep this experiment", &w.enabled);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Every value runs as a separate network in one launch.\n"
-                          "A network that diverges stops alone, the others go on.");
-    if (!w.enabled) return;
+static void draw_neural_sweep_axis(NeuralSession& s, NeuralConfig& c, NeuralSweep& w) {
     ImGui::SetNextItemWidth(kFieldW + 60.0f);
     if (ImGui::BeginCombo("sweep over", neural_sweep_name(w.kind))) {
         for (NeuralSweepKind v : kNeuralSweeps)
@@ -287,6 +280,45 @@ static void draw_neural_sweep(NeuralSession& s, NeuralConfig& c) {
         ImGui::Checkbox("log spacing", &w.log);
     }
     InputNumStr("points", w.points_text, kFieldW);
+}
+
+static void draw_neural_sweep(NeuralSession& s, NeuralConfig& c) {
+    if (!ImGui::CollapsingHeader("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    ImGui::Checkbox("sweep this experiment", &c.sweep.enabled);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Every value runs as a separate network in one launch.\n"
+                          "A network that diverges stops alone, the others go on.");
+    if (!c.sweep.enabled) return;
+    draw_neural_sweep_axis(s, c, c.sweep);
+    ImGui::Checkbox("second axis", &c.sweep2.enabled);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Every pair of values is a network: the number of networks is the product of the points.\n"
+                          "Replicas on this axis give an error bar for each value of the first one.");
+    if (c.sweep2.enabled) {
+        ImGui::PushID("sweep2");
+        draw_neural_sweep_axis(s, c, c.sweep2);
+        ImGui::PopID();
+    }
+    draw_csv_output_block("CSV output##neural_csv", "Save to file", c.csv_save_enabled, "##neural_csv_path", c.csv_output_path,
+                          "One row per network and population. Written after every run.");
+}
+
+static void draw_neural_lyapunov(NeuralConfig& c) {
+    if (!ImGui::CollapsingHeader("Lyapunov exponent")) return;
+    ImGui::Checkbox("largest exponent of the whole network", &c.lyap_on);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("A perturbed copy of every network runs next to it, with the same parameters, input and links.\n"
+                          "Memory and time double from the moment the copy starts.");
+    if (!c.lyap_on) return;
+    if (c.protocol == NeuralProtocol::Trials && c.reset_state) {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Does not work with a restart of each trial.");
+    }
+    InputNumStr("perturbation per coordinate", c.lyap_eps_text, kFieldW);
+    InputNumStr("renormalisation interval", c.lyap_interval_text, kFieldW);
+    InputNumStr("direction settling time", c.lyap_settle_text, kFieldW);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Runs before the record, inside the transient: renormalised, not summed.\n"
+                          "Close exponents turn the direction slowly: slow modes of many nodes need thousands.");
 }
 
 void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
@@ -383,6 +415,7 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
     draw_neural_input(lib, s, c);
     draw_neural_protocol(c);
     draw_neural_sweep(s, c);
+    draw_neural_lyapunov(c);
     draw_neural_populations(s, c);
     draw_neural_projections(c);
     draw_neural_laws(s, c);
@@ -394,6 +427,14 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
                     (double)c.result.device_bytes / (1024.0 * 1024.0));
         ImGui::TextDisabled("graph hash %s", c.graph_hash.c_str());
         const int nInst = (int)c.result.instance_stop.size();
+        if (c.result.lyapunov.size() == 1)
+            ImGui::Text("largest Lyapunov exponent %.6g, %d blocks", c.result.lyapunov[0], c.result.lyap_blocks);
+        else if (!c.result.lyapunov.empty()) {
+            double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+            for (double v : c.result.lyapunov) if (std::isfinite(v)) { lo = (std::min)(lo, v); hi = (std::max)(hi, v); }
+            if (hi >= lo) ImGui::Text("largest Lyapunov exponent %.4g .. %.4g over %d networks", lo, hi, nInst);
+            ImGui::TextDisabled("See the Lyapunov Exponent window.");
+        }
         if (c.result.diverged && nInst > 1) {
             int stopped = 0;
             for (long long v : c.result.instance_stop) stopped += v >= 0;
@@ -422,9 +463,11 @@ static void neural_instance_picker(const NeuralConfig& c, NeuralViewState& vs, c
     ImGui::SameLine();
     ImGui::SetNextItemWidth(140.0f);
     ImGui::SliderInt(id, &vs.instance, 0, nInst - 1);
-    if (vs.instance < (int)c.sweep_values.size()) {
+    const int n2 = (std::max)(1, (int)c.sweep2_values.size());
+    if (vs.instance / n2 < (int)c.sweep_values.size()) {
         ImGui::SameLine();
-        ImGui::Text("value %g", c.sweep_values[(size_t)vs.instance]);
+        if (c.sweep2_values.empty()) ImGui::Text("value %g", c.sweep_values[(size_t)vs.instance]);
+        else ImGui::Text("values %g, %g", c.sweep_values[(size_t)(vs.instance / n2)], c.sweep2_values[(size_t)(vs.instance % n2)]);
     }
     if (vs.instance < (int)c.result.instance_stop.size() && c.result.instance_stop[(size_t)vs.instance] >= 0) {
         ImGui::SameLine();
@@ -452,21 +495,39 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         const int ch = (int)c.sources.size();
         if (ch == 0 || c.input_view.empty()) { ImGui::TextDisabled("No input yet: add a source and a link, then press Run."); return; }
     }
-    const bool sync = what == kNeuralSync, sweep = what == kNeuralSweep, input = what == kNeuralInput;
+    const bool sync = what == kNeuralSync, sweep = what == kNeuralSweep, input = what == kNeuralInput, lyapWindow = what == kNeuralLyap;
     if (sync || sweep) {
-        static const char* const kinds[] = { "Order parameter R", "Spread across nodes" };
+        static const char* const kinds[] = { "Order parameter R", "Spread across nodes", "Lyapunov exponent" };
         ImGui::SetNextItemWidth(170.0f);
-        ImGui::Combo(sweep ? "##neural_sweep_kind" : "##neural_sync_kind", &vs.sync_kind, kinds, IM_ARRAYSIZE(kinds));
+        ImGui::Combo(sweep ? "##neural_sweep_kind" : "##neural_sync_kind", sweep ? &vs.sweep_kind : &vs.sync_kind, kinds, sweep ? 3 : 2);
     }
-    const bool spread = (sync || sweep) && vs.sync_kind == 1;
-    if (!sweep && !input && !s.vars.empty() && (!sync || spread)) {
+    const bool lyap = lyapWindow || (sweep && vs.sweep_kind == 2);
+    if (lyapWindow) {
+        if (r.lyapunov.empty()) {
+            ImGui::TextDisabled("Turn on the Lyapunov exponent in Neural Controls and press Run.");
+            return;
+        }
+        if (r.lyapunov.size() > 1) {
+            static const char* const kinds[] = { "Against the sweep value", "Running mean of one network" };
+            ImGui::SetNextItemWidth(210.0f);
+            ImGui::Combo("##neural_lyap_kind", &vs.lyap_kind, kinds, IM_ARRAYSIZE(kinds));
+            ImGui::SameLine();
+        }
+        ImGui::Text("lambda = %.6g", r.lyapunov[(size_t)(std::min)(vs.instance, (int)r.lyapunov.size() - 1)]);
+        ImGui::SameLine();
+        ImGui::TextDisabled("%d blocks of %g", r.lyap_blocks, r.lyap_dt);
+    }
+    // Показатель от значения свипа рисуется как сводка свипа.
+    const bool byValue = sweep || (lyapWindow && r.lyapunov.size() > 1 && vs.lyap_kind == 0);
+    const bool spread = (sync && vs.sync_kind == 1) || (sweep && vs.sweep_kind == 1);
+    if (!sweep && !input && !lyap && !s.vars.empty() && (!sync || spread)) {
         const std::vector<const char*> items = c_str_list(s.vars);
         if (sync) ImGui::SameLine();
         ImGui::SetNextItemWidth(90.0f);
         ImGui::Combo(what == kNeuralMeans ? "variable##means" : what == kNeuralNodes ? "variable##nodes" : "variable##sync",
                      &vs.series_var, items.data(), (int)items.size());
     }
-    if (!sweep && !input) neural_instance_picker(c, vs, what == kNeuralMeans ? "instance##means" : what == kNeuralNodes ? "instance##nodes" : "instance##sync");
+    if (!byValue && !input) neural_instance_picker(c, vs, what == kNeuralMeans ? "instance##means" : what == kNeuralNodes ? "instance##nodes" : lyap ? "instance##lyap" : "instance##sync");
 
     // Точка p кривой k.
     std::function<double(int)> xof = [&](int p) { return r.t0 + r.dt * (double)p; };
@@ -484,17 +545,37 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         yof = [&c, ch](int k, int p) { return c.input_view[(size_t)p * ch + k]; };
         yname = "input";
     }
-    else if (r.n_points <= 0 || nPops <= 0) empty = none;
-    else if (!sweep && !(sync && !spread) && recorded >= nVars) empty = "This variable is not recorded.";
-    else if (sweep) {
-        const std::vector<double>& d = spread ? c.sweep_spread : c.sweep_order;
+    else if (!lyap && (r.n_points <= 0 || nPops <= 0)) empty = none;
+    else if (!sweep && !lyap && !(sync && !spread) && recorded >= nVars) empty = "This variable is not recorded.";
+    else if (byValue) {
+        // Кривая на значение второй оси; у показателя одно значение на сеть, а не на популяцию.
+        const std::vector<double>& d = lyap ? c.sweep_lyap : spread ? c.sweep_spread : c.sweep_order;
+        const int perNet = lyap ? 1 : K, n2 = (std::max)(1, (int)c.sweep2_values.size());
         if (c.sweep_values.empty()) empty = "Turn on the sweep and press Run.";
-        else if (d.size() != (size_t)nPops) empty = none;
+        else if (lyap && d.empty()) empty = "Turn on the Lyapunov exponent in Neural Controls and press Run.";
+        else if (d.size() != (size_t)nInst * perNet) empty = none;
         else {
-            curves = K; points = nInst;
+            curves = n2 * perNet; points = (int)c.sweep_values.size();
             xof = [&c](int p) { return c.sweep_values[(size_t)p]; };
-            yof = [&d, K](int k, int p) { return d[(size_t)p * K + k]; };
-            yname = spread ? "spread" : "R";
+            yof = [&d, perNet, n2](int k, int p) { return d[((size_t)p * n2 + k / perNet) * perNet + k % perNet]; };
+            yname = lyap ? "lambda" : spread ? "spread" : "R";
+        }
+    }
+    else if (lyap) {
+        if (r.lyap_blocks < 1) empty = "The record holds no whole block.";
+        else {
+            // Накопленное среднее: видно, сошлась ли оценка на этой длине записи.
+            static std::vector<double> running;
+            running.assign((size_t)r.lyap_blocks, 0.0);
+            double sum = 0.0;
+            for (int b = 0; b < r.lyap_blocks; ++b) {
+                sum += r.lyap_log[(size_t)b * nInst + vs.instance];
+                running[(size_t)b] = sum / ((double)(b + 1) * r.lyap_dt);
+            }
+            curves = 1; points = r.lyap_blocks;
+            xof = [&r](int p) { return r.t0 + r.lyap_dt * (double)(p + 1); };
+            yof = [](int, int p) { return running[(size_t)p]; };
+            yname = "lambda";
         }
     }
     else if (what == kNeuralMeans || (sync && spread)) {
@@ -533,7 +614,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     static std::vector<std::vector<double>> buffers[kNeuralWindowCount];
     static int filled[kNeuralWindowCount] = {};
     std::vector<std::vector<double>>& bufs = buffers[what];
-    const int gen = ((((c.data_generation * 131 + vs.series_var) * 131 + s.active_config_index) * 131 + vs.instance) * 131 + vs.sync_kind) * 131 + curves;
+    const int gen = (((((c.data_generation * 131 + vs.series_var) * 131 + s.active_config_index) * 131 + vs.instance) * 131 + vs.sync_kind * 3 + vs.sweep_kind) * 131 + curves) * 131 + vs.lyap_kind;
     const bool fresh = (int)bufs.size() != curves || filled[what] != gen + 1;
     if (fresh) {
         bufs.assign((size_t)curves, {});
@@ -561,10 +642,17 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         const float t = curves > 1 ? (float)k / (float)(curves - 1) : 0.0f;
         si.color = ImGui::ColorConvertU32ToFloat4(cmap_sample_id(t, model.heatmap_colormap));
         si.label = what == kNeuralNodes ? std::to_string(r.observed[(size_t)nodes[(size_t)k]])
-                 : input ? c.sources[(size_t)k].name : c.populations[(size_t)k].name;
+                 : input ? c.sources[(size_t)k].name
+                 : lyap ? std::string("lambda") : c.populations[(size_t)(k % K)].name;
+        if (byValue && !c.sweep2_values.empty()) {
+            const int perNet = lyap ? 1 : K;
+            char v[32];
+            std::snprintf(v, sizeof v, " %g", c.sweep2_values[(size_t)(k / perNet)]);
+            si.label += v;
+        }
         series.push_back(si);
     }
-    view.x_axis.name = sweep ? neural_sweep_name(c.sweep.kind) : "t";
+    view.x_axis.name = byValue ? neural_sweep_name(c.sweep.kind) : "t";
     view.y_axis.name = yname;
     if (longest == 0) {
         ImGui::TextDisabled(sync || sweep ? "No finite values. R needs two threshold crossings of every node: run longer."
@@ -575,16 +663,16 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     view.pad_x = longest <= 1;
     // Ось времени по записи, а не по данным: у R края могут быть пустыми, окна должны совпадать по t.
     const double t_end = r.t0 + r.dt * (double)(r.n_points - 1);
-    view.x_fit_use_explicit = !sweep && t_end > r.t0;
+    view.x_fit_use_explicit = !byValue && t_end > r.t0;
     view.x_fit_min = r.t0;
     view.x_fit_max = t_end;
     view.pad_y = true;
     view.show_zero_x = view.show_zero_y = false;
-    view.point_markers = sweep;
+    view.point_markers = byValue;
     // Вид один на R и разброс: log10(R) на линейной оси дал бы отрицательные значения.
     bool* spread_log = sync ? &vs.spread_log[0] : sweep ? &vs.spread_log[1] : nullptr;
     if (spread_log) view.y_axis.display_log = spread && *spread_log;
-    if ((sync || sweep) && !spread) {
+    if ((sync || sweep) && !spread && !lyap) {
         view.y_axis.view_min = -0.05; view.y_axis.view_max = 1.05;
         view.y_axis.lock = true;
     }
@@ -593,4 +681,77 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     view.render(renderer, origin, avail, 0xBE7101 + what, gen, series, vis, vis, fresh);
     if (spread_log && spread) *spread_log = view.y_axis.display_log;
+}
+
+void draw_neural_map_window(AppModel& model, PlotRenderer& renderer, std::map<int, std::unique_ptr<HeatmapView>>& maps) {
+    NeuralSession& s = model.neural_session;
+    if (s.configs.empty() || s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size()) {
+        ImGui::TextDisabled("No system loaded.");
+        return;
+    }
+    const int idx = s.active_config_index;
+    NeuralConfig& c = s.configs[(size_t)idx];
+    NeuralViewState& vs = model.neural_view;
+    const int n1 = (int)c.sweep_values.size(), n2 = (int)c.sweep2_values.size(), K = c.pops_per_instance, nInst = n1 * n2;
+    if (n2 == 0 || K < 1) {
+        ImGui::TextDisabled("Turn on a sweep with a second axis and press Run.");
+        return;
+    }
+    HeatmapView& hv = get_or_create_heatmap(maps, idx, -1, model.heatmap_colormap);
+    static const char* const kinds[] = { "Order parameter R", "Spread across nodes", "Lyapunov exponent" };
+    ImGui::SetNextItemWidth(170.0f);
+    ImGui::Combo("##neural_map_kind", &vs.map_kind, kinds, IM_ARRAYSIZE(kinds));
+    if (vs.map_pop >= K) vs.map_pop = 0;
+    if (K > 1 && vs.map_kind != 2) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120.0f);
+        if (ImGui::BeginCombo("##neural_map_pop", c.populations[(size_t)vs.map_pop].name.c_str())) {
+            for (int p = 0; p < K; ++p)
+                if (ImGui::Selectable(c.populations[(size_t)p].name.c_str(), p == vs.map_pop)) vs.map_pop = p;
+            ImGui::EndCombo();
+        }
+    }
+    if (vs.map_kind == 1) { ImGui::SameLine(); ImGui::Checkbox("log10##neural_map", &vs.map_log); }
+    draw_heatmap_toolbar(hv);
+
+    const bool lyap = vs.map_kind == 2, spread = vs.map_kind == 1, log10_spread = spread && vs.map_log;
+    const std::vector<double>& d = lyap ? c.sweep_lyap : spread ? c.sweep_spread : c.sweep_order;
+    const int perNet = lyap ? 1 : K, pop = lyap ? 0 : vs.map_pop;
+    if (d.size() != (size_t)nInst * perNet) {
+        ImGui::TextDisabled(lyap ? "Turn on the Lyapunov exponent in Neural Controls and press Run." : "No data yet - press Run on the Neural tab.");
+        return;
+    }
+    // Вид читает значения каждый кадр ради шкалы цвета, поэтому буфер живёт между кадрами.
+    static std::vector<double> cells;
+    cells.assign((size_t)nInst, kSentinelNoData);
+    double vmin = std::numeric_limits<double>::infinity(), vmax = -vmin;
+    for (int i1 = 0; i1 < n1; ++i1)
+        for (int i2 = 0; i2 < n2; ++i2) {
+            double v = d[(size_t)(i1 * n2 + i2) * perNet + pop];
+            if (log10_spread) v = v > 0.0 ? std::log10(v) : std::numeric_limits<double>::quiet_NaN();
+            if (!std::isfinite(v)) continue;
+            cells[(size_t)i2 * n1 + i1] = v;
+            vmin = (std::min)(vmin, v);
+            vmax = (std::max)(vmax, v);
+        }
+    if (!std::isfinite(vmin)) { ImGui::TextDisabled("No finite values."); return; }
+    if (!lyap && !spread) { vmin = 0.0; vmax = 1.0; }
+
+    hv.x_axis.name = neural_sweep_name(c.sweep.kind);
+    hv.y_axis.name = neural_sweep_name(c.sweep2.kind);
+    hv.x_axis.log_scale = c.sweep.log && c.sweep_values.front() > 0.0;
+    hv.y_axis.log_scale = c.sweep2.log && c.sweep2_values.front() > 0.0;
+    hv.value_name = lyap ? "lambda" : log10_spread ? "log10 spread" : spread ? "spread" : "R";
+    hv.on_left_click = [&vs, n2](int ix, int iy, double, double) { vs.instance = ix * n2 + iy; };
+
+    double x0 = c.sweep_values.front(), x1 = c.sweep_values.back(), y0 = c.sweep2_values.front(), y1 = c.sweep2_values.back();
+    if (x1 <= x0) x1 = x0 + 1.0;
+    if (y1 <= y0) y1 = y0 + 1.0;
+    const int gen = (((c.data_generation * 131 + idx) * 131 + vs.map_kind) * 131 + pop) * 131 + (log10_spread ? 1 : 0);
+    static int shown = -1;
+    const bool fit = shown != c.data_generation * 131 + idx;
+    shown = c.data_generation * 131 + idx;
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    hv.render(renderer, origin, avail, 0xBE71A000 + idx, gen, n1, n2, cells.data(), x0, x1, y0, y1, vmin, vmax, fit);
 }

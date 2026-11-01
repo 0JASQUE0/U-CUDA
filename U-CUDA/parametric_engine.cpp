@@ -215,6 +215,20 @@ constexpr int    kNeuralMeanGroup    = 256;
 constexpr double kNeuralWorkPerSync  = 2.0e8;
 constexpr size_t kNeuralFlushBytes   = 64u * 1024u * 1024u;
 
+// Возмущение клона: число от номера узла внутри экземпляра, поэтому значение свипа = отдельный запуск.
+double neural_lyap_normal(uint64_t seed, uint64_t node, uint64_t var) {
+    const auto mix = [](uint64_t z) {
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        return z ^ (z >> 31);
+    };
+    uint64_t s = mix(mix(seed + 0x9E3779B97F4A7C15ULL) ^ (node + 1) * 0xC2B2AE3D27D4EB4FULL);
+    s = mix(s ^ (var + 1) * 0x165667B19E3779F9ULL);
+    const double u1 = ((double)(mix(s + 0x9E3779B97F4A7C15ULL) >> 11) + 0.5) / 9007199254740992.0;
+    const double u2 = ((double)(mix(s + 0x3C6EF372FE94F82AULL) >> 11) + 0.5) / 9007199254740992.0;
+    return std::sqrt(-2.0 * std::log(u1)) * std::cos(6.283185307179586 * u2);
+}
+
 // R(t) по спискам пересечений порога: times[start[i]..start[i + 1]) у узла i по возрастанию. Фаза линейна между
 // соседними пересечениями, косинус и синус идут поворотом, а не sincos на точку.
 void neural_order_from_crossings(const std::vector<size_t>& start, const std::vector<double>& times,
@@ -2544,6 +2558,7 @@ struct ParametricEngine::Impl {
         CUfunction  step = nullptr;          // neuralStepKernel
         CUfunction  observe = nullptr;       // neuralObserveKernel
         CUfunction  mean = nullptr;          // neuralMeanKernel
+        CUfunction  lyap = nullptr;          // neuralLyapKernel
     };
     CachedNeuralModule cached_neural;
 
@@ -11779,7 +11794,8 @@ struct ParametricEngine::Impl {
             if (!module_fn(mod, "neuralStepKernel", fresh.step, err)
                 || !module_fn(mod, "neuralObserveKernel", fresh.observe, err)
                 || !module_fn(mod, "neuralMeanKernel", fresh.mean, err)
-                || !module_fn(mod, "neuralOrderKernel", fresh.order, err)) { cuModuleUnload(mod); return false; }
+                || !module_fn(mod, "neuralOrderKernel", fresh.order, err)
+                || !module_fn(mod, "neuralLyapKernel", fresh.lyap, err)) { cuModuleUnload(mod); return false; }
             return true;
         }, err);
     }
@@ -11792,8 +11808,9 @@ struct ParametricEngine::Impl {
             const int* inChannel; const numb* inGain; const numb* inSample;
             int* badFlag; int* status;
             numb h; numb maxValue;
-            int nNodes; int phase; int inVar; int step;
+            int nNodes; int phase; int inVar; int step; int nRun; int pad;
         };
+        struct LyapArgs { numb* state; const int* groupStart; numb* dist; const numb* scale; int nNodes, nGroups; };
         struct ObserveArgs { const numb* state; const int* nodes; const int* vars; numb* out; int nNodes, nSel, nVars, pad; };
         struct MeanArgs { const numb* state; const int* groupStart; const int* groupPop; const int* vars; numb* out; numb* out2; int nNodes, nGroups, nVars, pad; };
         struct OrderArgs {
@@ -11874,6 +11891,27 @@ struct ParametricEngine::Impl {
         const long long totalSteps = skipSteps + workSteps;
         if (totalSteps <= 0) return fail("t_max / h gives no steps");
 
+        // Клоны лежат после основной сети, Nt = шаг столбца SoA. Без показателя Nt = N и всё как было.
+        const NeuralLyapunov& ly = req.lyapunov;
+        const bool lyap = ly.enabled;
+        if (lyap && (long long)N * 2 > (std::numeric_limits<int>::max)() / 2) return fail("too many nodes for the Lyapunov clone");
+        if (lyap && (long long)n_arcs * 2 > (std::numeric_limits<int>::max)()) return fail("too many arcs for the Lyapunov clone");
+        const int Nt = lyap ? 2 * N : N, arcsT = lyap ? 2 * n_arcs : n_arcs;
+        const size_t nStatesT = (size_t)Nt * (size_t)nx;
+        long long lyM = 0, lyNext = 0, lyRows = 0;
+        if (lyap) {
+            if (!(ly.eps > 0.0) || !(ly.interval > 0.0) || ly.settle < 0.0) return fail("bad Lyapunov settings");
+            if (!req.reset_at.empty()) return fail("the Lyapunov exponent does not work across state resets");
+            if (!ly.instance_seed.empty() && (int)ly.instance_seed.size() != nInst) return fail("instance_seed needs one seed per instance");
+            lyM = std::llround(ly.interval / req.h);
+            if (lyM < 1 || std::fabs((double)lyM * req.h - ly.interval) > 1e-9 * ly.interval)
+                return fail("the Lyapunov interval must be a multiple of h");
+            lyRows = workSteps / lyM;
+            if (lyRows < 1) return fail("the record is shorter than the Lyapunov interval");
+            // Перенормировка всегда попадает в начало записи.
+            lyNext = skipSteps - (std::min)(std::llround(ly.settle / ((double)lyM * req.h)), skipSteps / lyM) * lyM;
+        }
+
         const int nVars = (int)ob.vars.size(), nSel = nVars ? (int)ob.nodes.size() : 0, nMean = nVars ? nPops : 0;
         const int nOrder = ob.order_var >= 0 ? nPops : 0;
         const bool wantSpread = ob.spread && nMean > 0;
@@ -11897,7 +11935,8 @@ struct ParametricEngine::Impl {
         const int flushRows = nPoints > 0 ? (int)std::min<long long>(nPoints, std::max<long long>(1, (long long)(kNeuralFlushBytes / std::max<size_t>(1, rowElems * sizeof(numb))))) : 0;
 
         OrderDevBuf d_values, d_buf[4], d_eStart, d_eSrc, d_eW, d_eLaw, d_inCh, d_inGain, d_inRows, d_bad, d_status,
-                    d_sel, d_vars, d_gStart, d_gPop, d_out, d_prev, d_crossCount, d_crossNode, d_crossTime;
+                    d_sel, d_vars, d_gStart, d_gPop, d_out, d_prev, d_crossCount, d_crossNode, d_crossTime,
+                    d_lyStart, d_lyDist, d_lyScale;
         auto dev = [&](OrderDevBuf& b, size_t bytes, const char* what) {
             res.device_bytes += bytes;
             return b.alloc(std::max<size_t>(bytes, sizeof(numb)), what, err);
@@ -11907,30 +11946,46 @@ struct ParametricEngine::Impl {
             if (cudaMemcpy(b.p, src, bytes, cudaMemcpyHostToDevice) == cudaSuccess) return true;
             err = std::string("memcpy ") + what; return false;
         };
-        const size_t stateBytes = nStates * sizeof(numb);
+        const size_t stateBytes = nStatesT * sizeof(numb);
         const int buffers = stage ? 4 : heun ? 3 : 2;
-        if (!dev(d_values, req.values.size() * sizeof(numb), "values")) return fail(err);
+        if (!dev(d_values, (size_t)Nt * req.amountOfValues * sizeof(numb), "values")) return fail(err);
         for (int k = 0; k < buffers; ++k) if (!dev(d_buf[k], stateBytes, "state")) return fail(err);
-        if (!dev(d_eStart, req.edge_start.size() * sizeof(int), "edgeStart")) return fail(err);
-        if (!dev(d_eSrc, (size_t)n_arcs * sizeof(int), "edgeSrc")) return fail(err);
-        if (!dev(d_eW, (size_t)n_arcs * sizeof(numb), "edgeW")) return fail(err);
-        if (req.n_laws > 1 && !dev(d_eLaw, (size_t)n_arcs * sizeof(int), "edgeLaw")) return fail(err);
+        if (!dev(d_eStart, ((size_t)Nt + 1) * sizeof(int), "edgeStart")) return fail(err);
+        if (!dev(d_eSrc, (size_t)arcsT * sizeof(int), "edgeSrc")) return fail(err);
+        if (!dev(d_eW, (size_t)arcsT * sizeof(numb), "edgeW")) return fail(err);
+        if (req.n_laws > 1 && !dev(d_eLaw, (size_t)arcsT * sizeof(int), "edgeLaw")) return fail(err);
         if (!dev(d_bad, sizeof(int), "badFlag")) return fail(err);
-        if (!dev(d_status, (size_t)N * sizeof(int), "status")) return fail(err);
+        if (!dev(d_status, (size_t)Nt * sizeof(int), "status")) return fail(err);
 
-        std::vector<numb> soa(nStates);
+        // Вторая половина массива: у клона те же значения и связи, соседи сдвинуты на N.
+        const auto up_to = [&](void* dst, const void* src, size_t bytes, const char* what) {
+            if (bytes == 0 || cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice) == cudaSuccess) return true;
+            err = std::string("memcpy ") + what; return false;
+        };
+        std::vector<numb> soa(nStatesT);
         {
             const std::vector<numb> hv = to_numb(req.values), hw = to_numb(req.edge_w);
             for (int i = 0; i < N; ++i) for (int k = 0; k < nx; ++k)
-                soa[(size_t)k * N + i] = (numb)req.initial_conditions[(size_t)i * nx + k];
+                soa[(size_t)k * Nt + i] = (numb)req.initial_conditions[(size_t)i * nx + k];
             if (!up(d_values, hv.data(), hv.size() * sizeof(numb), "values")) return fail(err);
             for (int k = 0; k < 2; ++k) if (!up(d_buf[k], soa.data(), stateBytes, "state")) return fail(err);
             if (!up(d_eStart, req.edge_start.data(), req.edge_start.size() * sizeof(int), "edgeStart")) return fail(err);
             if (!up(d_eSrc, req.edge_src.data(), (size_t)n_arcs * sizeof(int), "edgeSrc")) return fail(err);
             if (!up(d_eW, hw.data(), (size_t)n_arcs * sizeof(numb), "edgeW")) return fail(err);
             if (req.n_laws > 1 && !up(d_eLaw, req.edge_law.data(), (size_t)n_arcs * sizeof(int), "edgeLaw")) return fail(err);
+            if (lyap) {
+                std::vector<int> es((size_t)N), src((size_t)n_arcs);
+                for (int i = 0; i < N; ++i) es[(size_t)i] = req.edge_start[(size_t)i + 1] + n_arcs;
+                for (int e = 0; e < n_arcs; ++e) src[(size_t)e] = req.edge_src[(size_t)e] + N;
+                if (!up_to(d_values.as<numb>() + (size_t)N * req.amountOfValues, hv.data(), hv.size() * sizeof(numb), "values")
+                    || !up_to(d_eStart.as<int>() + (size_t)N + 1, es.data(), (size_t)N * sizeof(int), "edgeStart")
+                    || !up_to(d_eSrc.as<int>() + n_arcs, src.data(), (size_t)n_arcs * sizeof(int), "edgeSrc")
+                    || !up_to(d_eW.as<numb>() + n_arcs, hw.data(), (size_t)n_arcs * sizeof(numb), "edgeW")
+                    || (req.n_laws > 1 && !up_to(d_eLaw.as<int>() + n_arcs, req.edge_law.data(), (size_t)n_arcs * sizeof(int), "edgeLaw")))
+                    return fail(err);
+            }
         }
-        if (cudaMemset(d_status.p, 0, (size_t)N * sizeof(int)) != cudaSuccess || cudaMemset(d_bad.p, 0, sizeof(int)) != cudaSuccess)
+        if (cudaMemset(d_status.p, 0, (size_t)Nt * sizeof(int)) != cudaSuccess || cudaMemset(d_bad.p, 0, sizeof(int)) != cudaSuccess)
             return fail("memset status");
 
         std::vector<numb> inRows;
@@ -11940,11 +11995,23 @@ struct ParametricEngine::Impl {
             nInRows = (long long)(in.samples.size() / (size_t)in.channels);
             const std::vector<numb> gain = to_numb(in.node_gain);
             if (!dev(d_inRows, inRows.size() * sizeof(numb), "inSamples")) return fail(err);
-            if (!dev(d_inCh, (size_t)N * sizeof(int), "inChannel")) return fail(err);
-            if (!dev(d_inGain, (size_t)N * sizeof(numb), "inGain")) return fail(err);
+            if (!dev(d_inCh, (size_t)Nt * sizeof(int), "inChannel")) return fail(err);
+            if (!dev(d_inGain, (size_t)Nt * sizeof(numb), "inGain")) return fail(err);
             if (!up(d_inRows, inRows.data(), inRows.size() * sizeof(numb), "inSamples")) return fail(err);
             if (!up(d_inCh, in.node_channel.data(), (size_t)N * sizeof(int), "inChannel")) return fail(err);
             if (!up(d_inGain, gain.data(), (size_t)N * sizeof(numb), "inGain")) return fail(err);
+            if (lyap && (!up_to(d_inCh.as<int>() + N, in.node_channel.data(), (size_t)N * sizeof(int), "inChannel")
+                         || !up_to(d_inGain.as<numb>() + N, gain.data(), (size_t)N * sizeof(numb), "inGain"))) return fail(err);
+        }
+
+        std::vector<int> lyStart, lyInst;
+        if (lyap) {
+            for (int q = 0; q < nInst; ++q)
+                for (int i = instStart[(size_t)q]; i < instStart[(size_t)q + 1]; i += kNeuralMeanGroup) { lyStart.push_back(i); lyInst.push_back(q); }
+            lyStart.push_back(N);
+            if (!dev(d_lyStart, lyStart.size() * sizeof(int), "lyapStart") || !dev(d_lyDist, lyInst.size() * sizeof(numb), "lyapDist")
+                || !dev(d_lyScale, lyInst.size() * sizeof(numb), "lyapScale")) return fail(err);
+            if (!up(d_lyStart, lyStart.data(), lyStart.size() * sizeof(int), "lyapStart")) return fail(err);
         }
 
         // Популяции режутся на группы, чтобы atomicAdd шёл один на группу.
@@ -12029,8 +12096,8 @@ struct ParametricEngine::Impl {
         };
 
         const int block = req.block_size > 0 ? req.block_size : kNeuralDefaultBlock;
-        const unsigned blocks = (unsigned)(((long long)N + block - 1) / block);
-        const double workPerStep = ((double)N + (double)n_arcs) * phases;
+        unsigned blocks = (unsigned)(((long long)N + block - 1) / block);
+        const double workPerStep = ((double)Nt + (double)arcsT) * phases;
         long long syncEvery = (long long)(kNeuralWorkPerSync / workPerStep);
         if (syncEvery < 1) syncEvery = 1;
         if (req.steps_per_sync > 0 && req.steps_per_sync < syncEvery) syncEvery = req.steps_per_sync;
@@ -12045,7 +12112,71 @@ struct ParametricEngine::Impl {
         sa.inGain = in.channels > 0 ? d_inGain.as<numb>() : nullptr;
         sa.badFlag = d_bad.as<int>(); sa.status = d_status.as<int>();
         sa.h = (numb)req.h; sa.maxValue = (numb)req.max_value;
-        sa.nNodes = N; sa.inVar = in.var;
+        sa.nNodes = Nt; sa.nRun = N; sa.inVar = in.var;
+
+        std::vector<long long> instStop((size_t)nInst, -1);
+
+        // Посев и перенормировка идут на границе чанка, поэтому от его длины не зависят.
+        bool lySeeded = false;
+        std::vector<double> lyLog;
+        const auto lyap_seed = [&](numb* state) -> bool {
+            std::vector<numb> host(nStatesT);
+            if (cudaMemcpy(host.data(), state, stateBytes, cudaMemcpyDeviceToHost) != cudaSuccess) { err = "memcpy D2H state"; return false; }
+            for (int q = 0; q < nInst; ++q) {
+                const int i0 = instStart[(size_t)q], i1 = instStart[(size_t)q + 1];
+                std::vector<double> dir((size_t)(i1 - i0) * nx);
+                double norm = 0.0;
+                const uint64_t seed = ly.instance_seed.empty() ? ly.seed : ly.instance_seed[(size_t)q];
+                for (int i = i0; i < i1; ++i) for (int k = 0; k < nx; ++k) {
+                    const double v = neural_lyap_normal(seed, (uint64_t)(i - i0), (uint64_t)k);
+                    dir[(size_t)(i - i0) * nx + k] = v;
+                    norm += v * v;
+                }
+                const double c = ly.eps * std::sqrt((double)(i1 - i0) * nx / norm);
+                for (int i = i0; i < i1; ++i) for (int k = 0; k < nx; ++k)
+                    host[(size_t)k * Nt + N + i] = host[(size_t)k * Nt + i] + (numb)(c * dir[(size_t)(i - i0) * nx + k]);
+            }
+            return up_to(state, host.data(), stateBytes, "state");
+        };
+        const auto lyap_renorm = [&](numb* state, bool counted) -> bool {
+            const int nGroups = (int)lyInst.size();
+            const unsigned b = (unsigned)((nGroups + kNeuralObserveBlock - 1) / kNeuralObserveBlock);
+            LyapArgs la{ state, d_lyStart.as<int>(), d_lyDist.as<numb>(), nullptr, N, nGroups };
+            void* args[] = { &la };
+            CUresult r = cuLaunchKernel(cached_neural.lyap, b, 1, 1, kNeuralObserveBlock, 1, 1, 0, nullptr, args, nullptr);
+            if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(neural lyap): " + cu_err(r); return false; }
+            std::vector<numb> dist((size_t)nGroups), scale((size_t)nGroups, (numb)1);
+            cudaDeviceSynchronize();
+            if (cudaMemcpy(dist.data(), d_lyDist.p, dist.size() * sizeof(numb), cudaMemcpyDeviceToHost) != cudaSuccess) { err = "memcpy D2H lyap"; return false; }
+            std::vector<double> sum((size_t)nInst, 0.0), factor((size_t)nInst, 1.0);
+            for (int g = 0; g < nGroups; ++g) sum[(size_t)lyInst[(size_t)g]] += (double)dist[(size_t)g];
+            for (int q = 0; q < nInst; ++q) {
+                double lg = std::numeric_limits<double>::quiet_NaN();
+                if (instStop[(size_t)q] < 0 && std::isfinite(sum[(size_t)q])) {
+                    const double d0 = ly.eps * std::sqrt((double)(instStart[(size_t)q + 1] - instStart[(size_t)q]) * nx), d = std::sqrt(sum[(size_t)q]);
+                    lg = d > 0.0 ? std::log(d / d0) : -std::numeric_limits<double>::infinity();
+                    factor[(size_t)q] = d > 0.0 ? d0 / d : 0.0;
+                }
+                if (counted) lyLog.push_back(lg);
+            }
+            for (int g = 0; g < nGroups; ++g) scale[(size_t)g] = (numb)factor[(size_t)lyInst[(size_t)g]];
+            if (!up_to(d_lyScale.p, scale.data(), scale.size() * sizeof(numb), "lyapScale")) return false;
+            la.scale = d_lyScale.as<numb>();
+            r = cuLaunchKernel(cached_neural.lyap, b, 1, 1, kNeuralObserveBlock, 1, 1, 0, nullptr, args, nullptr);
+            if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(neural lyap): " + cu_err(r); return false; }
+            return true;
+        };
+        // Первое событие сеет клонов, остальные перенормируют. В записи считается блок, закончившийся после её начала.
+        const auto lyap_event = [&](long long step, numb* state) -> bool {
+            if (!lySeeded) {
+                if (!lyap_seed(state)) return false;
+                lySeeded = true;
+                sa.nRun = Nt;
+                blocks = (unsigned)(((long long)Nt + block - 1) / block);
+            } else if (!lyap_renorm(state, step > skipSteps)) return false;
+            lyNext += lyM;
+            return true;
+        };
 
         bool trackFirst = true;
         const auto track = [&](const numb* state, double t) -> bool {
@@ -12055,7 +12186,7 @@ struct ParametricEngine::Impl {
                 if (!flush_cross()) { err = "memcpy crossings"; return false; }
                 if (crossNode.size() >= crossLimit) { crossFull = true; crossEnd = t; return true; }
             }
-            OrderArgs oa{ state + (size_t)ob.order_var * N, d_prev.as<numb>(), d_crossCount.as<int>(), d_crossNode.as<int>(), d_crossTime.as<numb>(),
+            OrderArgs oa{ state + (size_t)ob.order_var * Nt, d_prev.as<numb>(), d_crossCount.as<int>(), d_crossNode.as<int>(), d_crossTime.as<numb>(),
                           (numb)ob.order_threshold, (numb)t, (numb)((double)req.pre_scaller * req.h), N, trackFirst ? 1 : 0, crossCap, 0 };
             void* args[] = { &oa };
             const unsigned b = (unsigned)((N + kNeuralObserveBlock - 1) / kNeuralObserveBlock);
@@ -12069,7 +12200,7 @@ struct ParametricEngine::Impl {
         const auto record = [&](const numb* state) -> bool {
             numb* row = d_out.as<numb>() + (size_t)rowsOnDevice * rowElems;
             if (nSel > 0) {
-                ObserveArgs oa{ state, d_sel.as<int>(), d_vars.as<int>(), row, N, nSel, nVars, 0 };
+                ObserveArgs oa{ state, d_sel.as<int>(), d_vars.as<int>(), row, Nt, nSel, nVars, 0 };
                 void* args[] = { &oa };
                 const unsigned b = (unsigned)((nSel + kNeuralObserveBlock - 1) / kNeuralObserveBlock);
                 CUresult r = cuLaunchKernel(cached_neural.observe, b, 1, 1, kNeuralObserveBlock, 1, 1, 0, nullptr, args, nullptr);
@@ -12080,7 +12211,7 @@ struct ParametricEngine::Impl {
                 numb* sums = row + (size_t)nSel * nVars;
                 numb* squares = wantSpread ? sums + (size_t)nMean * nVars : nullptr;
                 if (cudaMemsetAsync(sums, 0, (size_t)nMean * nVars * (wantSpread ? 2 : 1) * sizeof(numb), 0) != cudaSuccess) { err = "memset means"; return false; }
-                MeanArgs ma{ state, d_gStart.as<int>(), d_gPop.as<int>(), d_vars.as<int>(), sums, squares, N, (int)gPop.size(), nVars, 0 };
+                MeanArgs ma{ state, d_gStart.as<int>(), d_gPop.as<int>(), d_vars.as<int>(), sums, squares, Nt, (int)gPop.size(), nVars, 0 };
                 void* args[] = { &ma };
                 const unsigned b = (unsigned)((gPop.size() + kNeuralObserveBlock - 1) / kNeuralObserveBlock);
                 CUresult r = cuLaunchKernel(cached_neural.mean, b, 1, 1, kNeuralObserveBlock, 1, 1, 0, nullptr, args, nullptr);
@@ -12099,7 +12230,6 @@ struct ParametricEngine::Impl {
         // Интервал, на который попадает начало записи, начался раньше: пересечения считаются и в transient.
         if (skipSteps > 0 && nOrder > 0 && skipSteps % req.pre_scaller == 0 && !track(d_buf[0].as<numb>(), 0.0)) return fail(err);
 
-        std::vector<long long> instStop((size_t)nInst, -1);
         long long done = 0;
         size_t nextReset = 0;
         bool stopped = false;
@@ -12109,8 +12239,10 @@ struct ParametricEngine::Impl {
                 if (cudaMemcpy(d_buf[stage ? 0 : (int)(done & 1)].p, soa.data(), stateBytes, cudaMemcpyHostToDevice) != cudaSuccess)
                     return fail("memcpy reset");
             }
+            if (lyap && lyNext == done && !lyap_event(done, d_buf[stage ? 0 : (int)(done & 1)].as<numb>())) return fail(err);
             long long left = totalSteps - done;
             if (nextReset < req.reset_at.size()) left = (std::min)(left, req.reset_at[nextReset] - done);
+            if (lyap) left = (std::min)(left, lyNext - done);
             const long long count = (std::min)(syncEvery, left);
             for (long long c = 0; c < count; ++c) {
                 const int odd = stage ? 0 : (int)(done & 1);
@@ -12156,31 +12288,53 @@ struct ParametricEngine::Impl {
             res.diverged = true;
             if (nInst == 1) { instStop[0] = done; stopped = true; continue; }
             // Шаг разлёта экземпляра = минимум по его узлам, от длины чанка он не зависит.
-            std::vector<int> st((size_t)N);
-            if (cudaMemcpy(st.data(), d_status.p, (size_t)N * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return fail("memcpy D2H status");
+            std::vector<int> st((size_t)Nt);
+            if (cudaMemcpy(st.data(), d_status.p, (size_t)Nt * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return fail("memcpy D2H status");
             int running = 0;
             for (int q = 0; q < nInst; ++q) {
                 if (instStop[(size_t)q] >= 0) continue;
                 const int i0 = instStart[(size_t)q], i1 = instStart[(size_t)q + 1];
                 int first = 0;
-                for (int i = i0; i < i1; ++i)
-                    if (st[(size_t)i] > 0 && (first == 0 || st[(size_t)i] < first)) first = st[(size_t)i];
+                for (int shift = 0; shift < Nt; shift += N)
+                    for (int i = i0 + shift; i < i1 + shift; ++i)
+                        if (st[(size_t)i] > 0 && (first == 0 || st[(size_t)i] < first)) first = st[(size_t)i];
                 if (first == 0) { ++running; continue; }
                 instStop[(size_t)q] = first;
-                for (int i = i0; i < i1; ++i) if (st[(size_t)i] == 0) st[(size_t)i] = -1;
+                for (int shift = 0; shift < Nt; shift += N)
+                    for (int i = i0 + shift; i < i1 + shift; ++i) if (st[(size_t)i] == 0) st[(size_t)i] = -1;
             }
             int zero = 0;
-            if (cudaMemcpy(d_status.p, st.data(), (size_t)N * sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess
+            if (cudaMemcpy(d_status.p, st.data(), (size_t)Nt * sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess
                 || cudaMemcpy(d_bad.p, &zero, sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) return fail("memcpy H2D status");
             if (running == 0) stopped = true;
         }
         res.steps_done = done;
 
-        res.status.assign((size_t)N, 0);
-        if (cudaMemcpy(res.status.data(), d_status.p, (size_t)N * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess)
+        if (lyap && !stopped && !res.cancelled && lyNext == done) {
+            if (!lyap_event(done, d_buf[stage ? 0 : (int)(done & 1)].as<numb>())) return fail(err);
+            cudaDeviceSynchronize();
+        }
+
+        res.status.assign((size_t)Nt, 0);
+        if (cudaMemcpy(res.status.data(), d_status.p, (size_t)Nt * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess)
             return fail("memcpy D2H status");
-        for (int& v : res.status) v = v > 0 ? 1 : 0;
+        for (int i = 0; i < N; ++i) res.status[(size_t)i] = (res.status[(size_t)i] > 0 || res.status[(size_t)(Nt - N + i)] > 0) ? 1 : 0;
+        res.status.resize((size_t)N);
         for (int v : res.status) res.n_diverged += v;
+
+        if (lyap) {
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+            res.lyap_dt = (double)lyM * req.h;
+            res.lyap_blocks = (int)(lyLog.size() / (size_t)nInst);
+            res.lyapunov.assign((size_t)nInst, nan);
+            for (int q = 0; q < nInst && res.lyap_blocks > 0; ++q) {
+                if (instStop[(size_t)q] >= 0) continue;
+                double sum = 0.0;
+                for (int b = 0; b < res.lyap_blocks; ++b) sum += lyLog[(size_t)b * nInst + q];
+                res.lyapunov[(size_t)q] = sum / ((double)res.lyap_blocks * res.lyap_dt);
+            }
+            res.lyap_log = std::move(lyLog);
+        }
 
         if (nOrder > 0) {
             cudaDeviceSynchronize();
@@ -12219,12 +12373,12 @@ struct ParametricEngine::Impl {
         }
 
         if (req.keep_final_state) {
-            std::vector<numb> soa(nStates);
+            std::vector<numb> soa(nStatesT);
             if (cudaMemcpy(soa.data(), d_buf[stage ? 0 : (int)(done & 1)].p, stateBytes, cudaMemcpyDeviceToHost) != cudaSuccess)
                 return fail("memcpy D2H state");
             res.final_state.resize(nStates);
             for (int i = 0; i < N; ++i) for (int k = 0; k < nx; ++k)
-                res.final_state[(size_t)i * nx + k] = (double)soa[(size_t)k * N + i];
+                res.final_state[(size_t)i * nx + k] = (double)soa[(size_t)k * Nt + i];
         }
         res.observed = ob.nodes;
         res.observed_vars = ob.vars;

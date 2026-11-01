@@ -1146,20 +1146,28 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     else if (model.app_mode == AppModel::AppMode::Neural) {
         static std::unique_ptr<PlotRenderer> neural_rnd[kNeuralWindowCount];
         static Plot2DView neural_views[kNeuralWindowCount];
+        static std::unique_ptr<PlotRenderer> neural_map_rnd;
+        static std::map<int, std::unique_ptr<HeatmapView>> neural_maps;
         static int seen_epoch = 0;
-        if (session_reloaded(model, AppModel::AppMode::Neural, seen_epoch))
+        if (session_reloaded(model, AppModel::AppMode::Neural, seen_epoch)) {
             for (Plot2DView& v : neural_views) invalidate_view(v);
+            invalidate_views(neural_maps);
+        }
         for (auto& r : neural_rnd) if (!r) r = std::make_unique<PlotRenderer>();
+        if (!neural_map_rnd) neural_map_rnd = std::make_unique<PlotRenderer>();
         if (ImGui::Begin("Neural Controls")) {
             draw_neural_controls(model, lib);
         }
         ImGui::End();
-        static const char* const neural_titles[kNeuralWindowCount] = { "Population Means", "Observed Nodes", "Synchronisation", "Neural Sweep", "Neural Input" };
+        static const char* const neural_titles[kNeuralWindowCount] = { "Population Means", "Observed Nodes", "Synchronisation", "Neural Sweep", "Neural Input", "Lyapunov Exponent" };
         for (int w = 0; w < kNeuralWindowCount; ++w) {
             if (ImGui::Begin(neural_titles[w]))
                 draw_neural_series_window(model, *neural_rnd[w], neural_views[w], w);
             ImGui::End();
         }
+        if (ImGui::Begin("Neural Map"))
+            draw_neural_map_window(model, *neural_map_rnd, neural_maps);
+        ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Custom) {
         // Custom mode: split-region layout (Controls | Workspace) drawn into

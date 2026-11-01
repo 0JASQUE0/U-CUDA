@@ -37,6 +37,19 @@ struct NeuralObservation {
     double order_threshold = 0.0;
 };
 
+// Старший показатель Ляпунова (Бенеттин): клон узла i лежит в узле N + i, с теми же параметрами, входом и связями.
+// Каждый экземпляр нормируется сам: начальная и восстанавливаемая норма eps*sqrt(узлы * переменные), то есть eps на
+// координату. Клон на основную сеть не влияет. Клона, разошедшегося до разлёта, основная сеть разделяет: экземпляр
+// останавливается целиком.
+struct NeuralLyapunov {
+    bool   enabled = false;
+    double eps = 1.0e-8;
+    double interval = 1.0;     // время между перенормировками, кратно h
+    double settle = 100.0;     // столько времени до записи направление выстраивается, сумма не копится
+    unsigned long long seed = 1;
+    std::vector<unsigned long long> instance_seed;   // [instances], пусто = seed у всех
+};
+
 struct NeuralRequest {
     NeuralSchedule schedule = NeuralSchedule::Stage;
     std::string krs_body;             // шаг узла; stage его не зовёт, но шаблону он нужен
@@ -70,6 +83,7 @@ struct NeuralRequest {
 
     NeuralInput       input;
     NeuralObservation observe;
+    NeuralLyapunov    lyapunov;
     size_t max_output_bytes = size_t(1) << 30;   // лимит записанного на хосте
 
     int block_size = 0;                // 0 = kNeuralDefaultBlock
@@ -101,6 +115,11 @@ struct NeuralResult {
     std::vector<int>    status;        // [n_nodes], 1 = разлетелся
     int n_diverged = 0;
     std::vector<long long> instance_stop;  // [instances], шаг остановки, -1 = дошёл до конца
+
+    std::vector<double> lyapunov;      // [instances], NaN у остановленных; -inf = клон слился с сетью до последнего бита
+    std::vector<double> lyap_log;      // [block][instance], log(d / d0) за блок записи
+    double lyap_dt = 0.0;              // длина блока
+    int    lyap_blocks = 0;
 
     long long launches = 0, syncs = 0, steps_done = 0;
     int block_size = 0;

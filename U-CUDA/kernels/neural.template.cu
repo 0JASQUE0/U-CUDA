@@ -89,6 +89,8 @@ struct NeuralStepArgs {
     int   phase;
     int   inVar;
     int   step;       // номер шага с 1
+    int   nRun;       // считаются узлы ниже него: клоны Ляпунова до посева стоят
+    int   pad;
 };
 
 // Сосед читается только по тем переменным, что есть в законе связи: Xj[k] как у codegen_coupling.
@@ -141,7 +143,7 @@ __device__ __forceinline__ void neuralCheck(const NeuralStepArgs& A, const int n
 
 extern "C" __global__ void neuralStepKernel(const NeuralStepArgs A) {
     const int node = blockIdx.x * blockDim.x + threadIdx.x;
-    if (node >= A.nNodes) return;
+    if (node >= A.nRun) return;
     const int N = A.nNodes;
     const numb h = A.h;
     const numb* ai = A.values + (size_t)node * AMOUNTOFVALUES;
@@ -273,6 +275,32 @@ struct NeuralOrderArgs {
     int   capacity;
     int   pad;
 };
+
+struct NeuralLyapArgs {
+    numb* state;
+    const int*  groupStart;   // [nGroups + 1], группы подряд идущих узлов одного экземпляра
+    numb* dist;               // замер: сумма квадратов по группе
+    const numb* scale;        // перенормировка: множитель группы, nullptr = только замер
+    int nNodes, nGroups;      // nNodes = узлы основной сети, клон узла i лежит в N + i
+};
+
+// Запись в свой элемент, без atomicAdd: порядок сложения на GPU плавает, а d входит в состояние клона.
+extern "C" __global__ void neuralLyapKernel(const NeuralLyapArgs A) {
+    const int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= A.nGroups) return;
+    const int i0 = A.groupStart[g], i1 = A.groupStart[g + 1], N = A.nNodes;
+    numb sum = (numb)0;
+    for (int k = 0; k < AMOUNTOFX; ++k) {
+        numb* col = A.state + (size_t)k * 2 * N;
+        if (A.scale == nullptr) {
+            for (int i = i0; i < i1; ++i) { const numb d = col[N + i] - col[i]; sum += d * d; }
+        } else {
+            const numb c = A.scale[g];
+            for (int i = i0; i < i1; ++i) col[N + i] = col[i] + c * (col[N + i] - col[i]);
+        }
+    }
+    if (A.scale == nullptr) A.dist[g] = sum;
+}
 
 // Только пересечения порога снизу вверх на сетке записи: фазу между ними считает хост, ему нужно и следующее.
 extern "C" __global__ void neuralOrderKernel(const NeuralOrderArgs A) {

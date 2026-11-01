@@ -1856,6 +1856,20 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
     o << ",\"sweep_hi\":"; jstr(o, c.sweep.hi_text);
     o << ",\"sweep_points\":"; jstr(o, c.sweep.points_text);
     o << ",\"sweep_log\":" << (c.sweep.log ? "true" : "false");
+    o << ",\"sweep2_on\":" << (c.sweep2.enabled ? "true" : "false");
+    o << ",\"sweep2_kind\":" << (int)c.sweep2.kind;
+    o << ",\"sweep2_pop\":" << c.sweep2.population;
+    o << ",\"sweep2_param\":"; jstr(o, c.sweep2.param);
+    o << ",\"sweep2_lo\":"; jstr(o, c.sweep2.lo_text);
+    o << ",\"sweep2_hi\":"; jstr(o, c.sweep2.hi_text);
+    o << ",\"sweep2_points\":"; jstr(o, c.sweep2.points_text);
+    o << ",\"sweep2_log\":" << (c.sweep2.log ? "true" : "false");
+    o << ",\"lyap_on\":" << (c.lyap_on ? "true" : "false");
+    o << ",\"lyap_eps\":"; jstr(o, c.lyap_eps_text);
+    o << ",\"lyap_interval\":"; jstr(o, c.lyap_interval_text);
+    o << ",\"lyap_settle\":"; jstr(o, c.lyap_settle_text);
+    o << ",\"csv_save\":" << (c.csv_save_enabled ? "true" : "false");
+    o << ",\"csv_path\":"; jstr(o, c.csv_output_path);
     o << ",\"obs_vars_off\":[";
     for (size_t i = 0; i < c.obs_vars_off.size(); ++i) o << (i ? "," : "") << c.obs_vars_off[i];
     o << "],\"output_limit\":"; jstr(o, c.output_limit_text);
@@ -1999,6 +2013,20 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
     else if (key == "sweep_hi")         c.sweep.hi_text = p.str();
     else if (key == "sweep_points")     c.sweep.points_text = p.str();
     else if (key == "sweep_log")        c.sweep.log = p.boolean();
+    else if (key == "sweep2_on")        c.sweep2.enabled = p.boolean();
+    else if (key == "sweep2_kind")      c.sweep2.kind = (NeuralSweepKind)std::stoi(p.str_or_num());
+    else if (key == "sweep2_pop")       c.sweep2.population = std::stoi(p.str_or_num());
+    else if (key == "sweep2_param")     c.sweep2.param = p.str();
+    else if (key == "sweep2_lo")        c.sweep2.lo_text = p.str();
+    else if (key == "sweep2_hi")        c.sweep2.hi_text = p.str();
+    else if (key == "sweep2_points")    c.sweep2.points_text = p.str();
+    else if (key == "sweep2_log")       c.sweep2.log = p.boolean();
+    else if (key == "lyap_on")          c.lyap_on = p.boolean();
+    else if (key == "lyap_eps")         c.lyap_eps_text = p.str();
+    else if (key == "lyap_interval")    c.lyap_interval_text = p.str();
+    else if (key == "lyap_settle")      c.lyap_settle_text = p.str();
+    else if (key == "csv_save")         c.csv_save_enabled = p.boolean();
+    else if (key == "csv_path")         c.csv_output_path = p.str();
     else if (key == "obs_vars_off") {
         p.expect('[');
         if (!p.opt(']')) while (true) { c.obs_vars_off.push_back(std::stoi(p.str_or_num())); if (p.opt(',')) continue; p.expect(']'); break; }

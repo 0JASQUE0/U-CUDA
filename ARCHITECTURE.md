@@ -60,7 +60,7 @@ the plot draws from (`apply_*_result`).
 | FastSync | `gui_fastsync.cpp` | `FastSyncAnalysisSession` | `run_fastsync` | `fastsync_attr/grid.template.cu` → `fillFSMasterTrajectory`, `calculateDiscreteModelforFastSynchroCUDA` | — |
 | Order | `gui_order.cpp` | `OrderAnalysisSession` (`order_session.cpp`) | `run_order`, `run_performance`, `run_stability` | `order.template.cu` → `orderEstimateKernel`, `perfIntegrateKernel`, `stabilityRegionKernel`; adaptive Performance: `endpoint_kernel_ad` (NvrtcEngine) | dd/qd branches via `krs_cpu` |
 | Network | `gui_network.cpp` | `NetworkSession` (`network_session.cpp`) | `run_network` | `network.template.cu` → `networkIntegrateKernel` (`{{COUPLING_BODY}}` from `codegen_coupling`) | — |
-| Neural | `gui_neural.cpp` | `NeuralSession` (`neural_session.cpp`) | `run_neural` | `neural.template.cu` → `neuralStepKernel`, `neuralObserveKernel`, `neuralMeanKernel`, `neuralOrderKernel` | — |
+| Neural | `gui_neural.cpp` | `NeuralSession` (`neural_session.cpp`) | `run_neural` | `neural.template.cu` → `neuralStepKernel`, `neuralObserveKernel`, `neuralMeanKernel`, `neuralOrderKernel`, `neuralLyapKernel` | — |
 | Custom | `gui_custom.cpp` | `CustomSession`: owns its own Bif/LLE/LS/phase/basins sub-sessions (2D level, 1D slices, level 3) | same entries as above | same | same |
 | Settings | `gui_widgets.cpp` / `gui.cpp` | `AppConfig` (`app_config.*`) | `set_nvrtc_rdc/fmad`, `set_peak_config`, `set_gpu_block_size` | — | — |
 
