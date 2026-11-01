@@ -297,7 +297,7 @@ NetworkRequest build_network_request(const NetworkSession& s, const NetworkConfi
     req.coupling_body = net_coupling_body(s.sys, c.laws);   // бросает при ошибке разбора
     req.amountOfX     = (int)s.vars.size();
     req.n_nodes       = (int)c.nodes.size();
-    req.amountOfValues = (int)s.params.size() + 1;          // a[0] = symmetry s
+    req.amountOfValues = (int)s.params.size() + 1 + kSchemeTailSlots;   // [s, p_1..p_M, n, Newton]
 
     const double spread = parse_d(c.ic_spread_text, 0.0);
     const unsigned long long ic_seed = (unsigned long long)std::max(0, parse_i(c.ic_seed_text, 1));
@@ -308,6 +308,8 @@ NetworkRequest build_network_request(const NetworkSession& s, const NetworkConfi
         const NetNode& nd = c.nodes[(size_t)i];
         req.values[(size_t)i * req.amountOfValues] =
             parse_d(nd.symmetry_s.empty() ? c.symmetry_s : nd.symmetry_s, 0.5);
+        scheme_fill_tail(req.values.data() + (size_t)i * req.amountOfValues + s.params.size() + 1,
+                         c.cd_fp_iters, c.newton);   // a[M+1..M+4]: CD FP n, Newton
         for (size_t j = 0; j < s.params.size(); ++j) {
             const std::string v = node_value(nd.param_values, c.param_values, s.params[j]);
             req.values[(size_t)i * req.amountOfValues + j + 1] = parse_d(v, 0.0);
@@ -353,6 +355,8 @@ void NetworkSession::load_from_record(const SystemRecord& r,
     c.h_text     = default_h_from_record(r);
     c.scheme     = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);

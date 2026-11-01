@@ -1,4 +1,56 @@
 ﻿#include "session_internal.h"
+using namespace ucuda::analysis_detail;
+
+
+void BifurcationAnalysisSession::load_from_record(const SystemRecord& r,
+    const std::vector<std::string>& vars_,
+    const std::vector<std::string>& params_) {
+    vars = vars_;
+    params = params_;
+    custom_schemes = r.custom_schemes;
+    enabled_builtin_schemes = enabled_builtins_from_record(r);
+
+    // Сбрасываем список БД и создаём один дефолтный с настройками из record.
+    diagrams.clear();
+    BifurcationDiagramConfig bd;
+    bd.label = "BD 1";
+    bd.label_is_manual = false;   // fresh diagram → auto-label
+    bd.h_text = default_h_from_record(r);
+    bd.scheme = default_scheme_from_record(r, bd.scheme);
+    bd.plot_all_iterates = default_all_iterates_from_record(r);
+    bd.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    bd.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    bd.newton = newton_from_record(r);
+
+    for (const auto& p : params) {
+        auto it = r.param_values.find(p);
+        bd.param_values[p] = (it != r.param_values.end()) ? it->second : "";
+    }
+    for (const auto& v : vars) {
+        auto it = r.init_conditions.find(v);
+        bd.initial_conditions[v] = (it != r.init_conditions.end()) ? it->second : "";
+    }
+    if (!params.empty()) {
+        bd.param_index = 0;
+    }
+    diagrams.push_back(std::move(bd));
+
+    active_diagram_index = 0;
+    running_diagram_index = -1;
+}
+
+
+void BifurcationAnalysisSession::remove_diagram(int i) {
+    if (i < 0 || i >= (int)diagrams.size()) return;
+    // Запрещаем удалять БД, чей расчёт сейчас идёт — иначе worker положит
+    // результат в несуществующий слот при poll().
+    if (in_flight && running_diagram_index == i) return;
+    diagrams.erase(diagrams.begin() + i);
+    if (in_flight && running_diagram_index > i) running_diagram_index--;
+    if (active_diagram_index >= (int)diagrams.size())
+        active_diagram_index = (int)diagrams.size() - 1;
+    if (active_diagram_index < 0) active_diagram_index = 0;
+}
 
 namespace ucuda::analysis_detail {
 
@@ -10,7 +62,7 @@ namespace ucuda::analysis_detail {
 Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession& s,
                                                 const BifurcationDiagramConfig& bd) {
     Bifurcation1DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, bd.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, bd.scheme, bd.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -21,8 +73,9 @@ Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession& s,
 
     // Конвенция codegen: a[0] зарезервирован, реальные параметры — с a[1].
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.base_values[0] = parse_d(bd.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    scheme_fill_tail(req.base_values.data() + nparams + 1, bd.cd_fp_iters, bd.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = bd.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != bd.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -51,9 +104,13 @@ Bifurcation1DRequest build_bif1d_request(const BifurcationAnalysisSession& s,
     req.emit_all_samples = bd.plot_all_iterates;
     req.csv_output_path = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, bd.scheme, bd.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, bd.ad_axis, 0, req.adaptive);
+                          req.transient_time + req.t_max, bd.ad_axis, 0, req.adaptive, req.h);
+    sweep_extend_state(req);
     return req;
 }
+}
+
+namespace ucuda::analysis_detail {
 
 
 // Применить только что готовый Bifurcation1DResult к конкретной БД.
@@ -64,12 +121,15 @@ void apply_bif1d_result(BifurcationDiagramConfig& bd, Bifurcation1DResult&& r) {
     bd.data_generation++;
     bd.fit_request = true;
 }
+}
+
+namespace ucuda::analysis_detail {
 
 
 Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession& s,
                                                 const BifurcationDiagramConfig& bd) {
     Bifurcation2DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, bd.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, bd.scheme, bd.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -79,8 +139,9 @@ Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.base_values[0] = parse_d(bd.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    scheme_fill_tail(req.base_values.data() + nparams + 1, bd.cd_fp_iters, bd.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = bd.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != bd.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -124,9 +185,13 @@ Bifurcation2DRequest build_bif2d_request(const BifurcationAnalysisSession& s,
     req.mult_interval      = parse_d(bd.mult_interval_text, (double)::mult_interval);
     req.csv_output_path    = bd.csv_save_enabled ? bd.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, bd.scheme, bd.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, bd.ad_axis, bd.ad_axis_2, req.adaptive);
+                          req.transient_time + req.t_max, bd.ad_axis, bd.ad_axis_2, req.adaptive, req.h);
+    sweep_extend_state(req);
     return req;
 }
+}
+
+namespace ucuda::analysis_detail {
 
 
 void apply_bif2d_result(BifurcationDiagramConfig& bd, Bifurcation2DResult&& r) {
@@ -136,58 +201,6 @@ void apply_bif2d_result(BifurcationDiagramConfig& bd, Bifurcation2DResult&& r) {
     bd.data_generation_2d++;
     bd.fit_request_2d = true;
 }
-}
-using namespace ucuda::analysis_detail;
-
-
-void BifurcationAnalysisSession::load_from_record(const SystemRecord& r,
-    const std::vector<std::string>& vars_,
-    const std::vector<std::string>& params_) {
-    vars = vars_;
-    params = params_;
-    custom_schemes = r.custom_schemes;
-    enabled_builtin_schemes = enabled_builtins_from_record(r);
-
-    // Сбрасываем список БД и создаём один дефолтный с настройками из record.
-    diagrams.clear();
-    BifurcationDiagramConfig bd;
-    bd.label = "BD 1";
-    bd.label_is_manual = false;   // fresh diagram → auto-label
-    bd.h_text = default_h_from_record(r);
-    bd.scheme = default_scheme_from_record(r, bd.scheme);
-    bd.plot_all_iterates = default_all_iterates_from_record(r);
-    bd.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
-
-    for (const auto& p : params) {
-        auto it = r.param_values.find(p);
-        bd.param_values[p] = (it != r.param_values.end()) ? it->second : "";
-    }
-    for (const auto& v : vars) {
-        auto it = r.init_conditions.find(v);
-        bd.initial_conditions[v] = (it != r.init_conditions.end()) ? it->second : "";
-    }
-    if (!params.empty()) {
-        bd.param_index = 0;
-    }
-    diagrams.push_back(std::move(bd));
-
-    active_diagram_index = 0;
-    running_diagram_index = -1;
-}
-
-
-
-
-void BifurcationAnalysisSession::remove_diagram(int i) {
-    if (i < 0 || i >= (int)diagrams.size()) return;
-    // Запрещаем удалять БД, чей расчёт сейчас идёт — иначе worker положит
-    // результат в несуществующий слот при poll().
-    if (in_flight && running_diagram_index == i) return;
-    diagrams.erase(diagrams.begin() + i);
-    if (in_flight && running_diagram_index > i) running_diagram_index--;
-    if (active_diagram_index >= (int)diagrams.size())
-        active_diagram_index = (int)diagrams.size() - 1;
-    if (active_diagram_index < 0) active_diagram_index = 0;
 }
 
 
@@ -283,6 +296,7 @@ void BifurcationAnalysisSession::request_cancel() {
 bool BifurcationAnalysisSession::poll() {
     if (!in_flight) return false;
     bool cancelled = false;
+    std::string stop_note;
     std::string label;
     int idx = running_diagram_index;
     if (idx >= 0 && idx < (int)diagrams.size()) label = diagrams[idx].label;
@@ -291,7 +305,8 @@ bool BifurcationAnalysisSession::poll() {
         if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         Bifurcation2DResult r = run_future_2d.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)diagrams.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)diagrams.size()) {
             apply_bif2d_result(diagrams[idx], std::move(r));
         }
     } else {
@@ -299,13 +314,15 @@ bool BifurcationAnalysisSession::poll() {
         if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         Bifurcation1DResult r = run_future.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)diagrams.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)diagrams.size()) {
             apply_bif1d_result(diagrams[idx], std::move(r));
         }
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("bifurcation") : label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;

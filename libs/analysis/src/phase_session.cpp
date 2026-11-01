@@ -1,4 +1,66 @@
 ﻿#include "session_internal.h"
+using namespace ucuda::analysis_detail;
+
+
+void PhaseAnalysisSession::add_ic() {
+    InitialConditionSet ic;
+    ic.label = "IC " + std::to_string(ic_sets.size() + 1);
+    for (const auto& v : vars) ic.values[v] = "";
+    ic_sets.push_back(ic);
+}
+
+
+void PhaseAnalysisSession::remove_ic(int i) {
+    if (i >= 0 && i < (int)ic_sets.size()) ic_sets.erase(ic_sets.begin() + i);
+}
+
+
+void PhaseAnalysisSession::remove_projection(int i) {
+    if (i >= 0 && i < (int)projections.size()) {
+        projections.erase(projections.begin() + i);
+    }
+}
+
+
+void PhaseAnalysisSession::load_from_record(const SystemRecord& r,
+    const std::vector<std::string>& vars_,
+    const std::vector<std::string>& params_) {
+    vars = vars_;
+    params = params_;
+    custom_schemes = r.custom_schemes;
+    enabled_builtin_schemes = enabled_builtins_from_record(r);
+    step_h = default_h_from_record(r);
+    scheme = default_scheme_from_record(r, scheme);
+    symmetry_s = r.symmetry_s.empty() ? "0.5" : r.symmetry_s;
+    cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    newton = newton_from_record(r);
+    sim_time = "50";
+    skip_time = "10";
+
+    param_values.clear();
+    for (const auto& p : params) {
+        auto it = r.param_values.find(p);
+        param_values[p] = (it != r.param_values.end()) ? it->second : "";
+    }
+
+    ic_sets.clear();
+    InitialConditionSet ic;
+    ic.label = "IC 1";
+    for (const auto& v : vars) {
+        auto it = r.init_conditions.find(v);
+        ic.values[v] = (it != r.init_conditions.end()) ? it->second : "";
+    }
+    ic_sets.push_back(ic);
+
+    // одна проекция по умолчанию
+    projections.clear();
+    add_projection();
+    // add_projection() reads sys.is_map, but sys is only assigned after this
+    // call (see AppModel::start_phase_analysis) — take it from the record here.
+    for (auto& p : projections) p.draw_points = r.is_map;
+
+    result = AnalysisResult{};
+}
 
 namespace ucuda::analysis_detail {
 
@@ -17,6 +79,120 @@ bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
     if (!adaptive_scheme_name_ok(in.scheme)) {
         result.error = adaptive_scheme_hint();
         return false;
+    }
+    // Многошаговый BDF 1-5 — свой драйвер (multistep_bdf.h), CPU, тот же вывод, что у адаптивных схем.
+    if (scheme_is_multistep(in.scheme)) {
+        const bool dae = in.sys.dae_nx >= 0;
+        if (dae != (in.scheme == kBdfSchemeDae)) {
+            result.error = dae ? "a DAE needs DAE BDF 1-5" : "DAE BDF 1-5 needs a DAE system";
+            return false;
+        }
+        BdfSettings bs;
+        bs.rtol = parse_val(in.adaptive.rtol, 1e-6);
+        bs.atol.clear();
+        {
+            std::string cur;
+            for (char c : in.adaptive.atol + ",") {
+                if (c == ',' || c == ';') { if (!cur.empty()) bs.atol.push_back(parse_val(cur, 1e-8)); cur.clear(); }
+                else if (c != ' ') cur += c;
+            }
+            if (bs.atol.empty()) bs.atol.push_back(1e-8);
+        }
+        bs.h0 = parse_val(in.adaptive.h0, 0.0);
+        if (!in.adaptive.hmax.empty()) bs.hmax = parse_val(in.adaptive.hmax, bs.hmax);
+        if (!in.adaptive.hmin.empty()) bs.hmin = parse_val(in.adaptive.hmin, 0.0);
+        if (!in.adaptive.enabled) bs.hfix = h;   // переключатель Fixed step: шаг h без регулятора
+        {   // Ньютон — хвост a[] вкладки (scheme_fill_tail): [n, tol, max_iters, full] после p_M
+            const size_t ns = (size_t)newton_slot(in.sys);
+            if (ns + 2 < a.size()) {
+                bs.newton_tol = a[ns]; bs.newton_max = (int)a[ns + 1]; bs.newton_full = a[ns + 2] != 0;
+            }
+        }
+        const double t_skip = in.skip_transient ? tskip : 0.0;
+        const bool rawm = in.adaptive.raw_nodes && in.adaptive.enabled;   // постоянный шаг — сетка через h
+        int max_pts = parse_num_int(in.adaptive.max_points, 1000000);
+        max_pts = std::max(2, std::min(max_pts, 50000000));
+        result.adaptive  = true;
+        result.raw_nodes = rawm;
+        result.step_log.assign((size_t)N, {});
+        result.step_stats.assign((size_t)N, AdaptiveStats());
+        raw.assign((size_t)N, {});
+        times.assign((size_t)N, {});
+        if (in.use_gpu) {
+            // GPU: тот же алгоритм (kernels/ucuda_bdf.cuh), тела F и J — кодоген над системой после GGL
+            System sp;
+            std::string e;
+            if (!bdf_prepare_system(in.sys, sp, &e)) { result.error = e; return false; }
+            BdfGpuRequest rq;
+            try { codegen_bdf_bodies(sp, rq.res, rq.jac); }
+            catch (const std::exception& ex) { result.error = std::string("BDF codegen: ") + ex.what(); return false; }
+            const int ng = (int)sp.vars.size();
+            rq.amountOfX = ng;
+            rq.nx = sp.dae_nx < 0 ? ng : sp.dae_nx;
+            rq.kidx.assign((size_t)ng, 1);
+            for (int i = 0; i < ng && i < (int)sp.dae_index.size(); ++i) rq.kidx[(size_t)i] = std::max(1, sp.dae_index[(size_t)i]);
+            for (int i = 0; i < ng; ++i) rq.atol.push_back(bs.atol[(size_t)std::min(i, (int)bs.atol.size() - 1)]);
+            rq.rtol = bs.rtol; rq.h0 = bs.h0; rq.hmax = std::isfinite(bs.hmax) ? bs.hmax : 0.0; rq.maxk = bs.max_order;
+            rq.hmin = bs.hmin; rq.hfix = bs.hfix;
+            rq.newton_max = bs.newton_max; rq.newton_full = bs.newton_full; rq.newton_tol = bs.newton_tol;
+            rq.N = N;
+            rq.ic_flat.assign((size_t)N * ng, 0.0);   // mu системы GGL — с нуля
+            for (int k = 0; k < N; ++k)
+                for (int i = 0; i < dim; ++i) rq.ic_flat[(size_t)k * ng + i] = ic_flat[(size_t)k * dim + i];
+            rq.values = a;
+            rq.raw = rawm; rq.t_skip = t_skip; rq.t_rec = tsim; rq.dt = h; rq.total = total; rq.max_pts = max_pts;
+            rq.log_cap = kAdaptLogCap;   // журнал попыток — проекция "Step size"
+            rq.cancel = in.cancel;
+            PhaseAdaptiveResult out;
+            if (!computePhasePortraitsBdfNVRTC(rq, out, &e)) {
+                if (e == kNvrtcCancelled) { result.cancelled = true; result.error = e; }
+                else result.error = "GPU: " + e;
+                return false;
+            }
+            for (int k = 0; k < N; ++k) {
+                raw[(size_t)k] = std::move(out.traj[(size_t)k]);
+                for (auto& row : raw[(size_t)k]) row.resize((size_t)dim);   // без mu
+                if (rawm) times[(size_t)k] = std::move(out.times[(size_t)k]);
+                result.step_log[(size_t)k] = std::move(out.log[(size_t)k]);
+                result.step_stats[(size_t)k] = out.stats[(size_t)k];
+                if (out.hmin_fail[(size_t)k]) {
+                    result.error = bs.hfix > 0 ? "BDF (fixed step): Newton does not converge - lower h or raise Newton max iters"
+                                 : bs.hmin > 0 ? "BDF: Newton does not converge at h_min - lower h_min"
+                                               : "BDF: step size below h_min";
+                    return false;
+                }
+            }
+        } else
+        for (int k = 0; k < N; ++k) {
+            BdfStats bst;
+            std::string e;
+            if (!bdf_integrate(in.sys, a.data(), (int)a.size(), &ic_flat[(size_t)k * dim], bs, t_skip, tsim, h, total,
+                               rawm, max_pts, raw[(size_t)k], times[(size_t)k], bst, &e, in.cancel.get(),
+                               &result.step_log[(size_t)k], kAdaptLogCap)) {
+                result.error = e;
+                return false;
+            }
+            AdaptiveStats& as = result.step_stats[(size_t)k];
+            as.nacc = (double)bst.nacc; as.nrej = (double)bst.nrej; as.nforced = (double)bst.nforced;
+            as.nrhs = (double)bst.nrhs;
+            as.hmin = bst.hmin; as.hmax = bst.hmax; as.hmean = bst.nacc ? bst.hsum / (double)bst.nacc : 0.0;
+            as.diverged = bst.diverged; as.truncated = bst.truncated;
+            if (in.cancel && in.cancel->load(std::memory_order_relaxed)) break;
+        }
+        if (in.cancel && in.cancel->load(std::memory_order_relaxed)) {
+            result.cancelled = true;
+            result.error = kNvrtcCancelled;
+            return false;
+        }
+        for (int k = 0; k < N; ++k) {
+            const AdaptiveStats& st = result.step_stats[(size_t)k];
+            if (st.diverged) { calc_ok = false; calc_err = "trajectory '" + in.ic_sets[(size_t)k].label + "' diverged (nan/inf)"; }
+            else if (st.truncated) {
+                calc_ok = false;
+                calc_err = "trajectory '" + in.ic_sets[(size_t)k].label + "' reached max points before the end of the interval";
+            }
+        }
+        return true;
     }
     AdaptiveCode code;
     try { code = adaptive_code_for_scheme(in.custom_schemes, in.sys, in.scheme); }
@@ -61,11 +237,13 @@ bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
         result.step_log   = std::move(out.log);
         result.step_stats = out.stats;
     }
-    else if (!scheme_supports_adaptive(scheme_from_name(in.scheme))) {
+    else if (in.sys.dae_nx >= 0 || !scheme_supports_adaptive(scheme_from_name(in.scheme)) || system_uses_time(in.sys)
+             || !in.sys.out_exprs.empty() || !in.sys.zb_g.empty()) {   // z (Solve as ODE) — тоже: вычислитель их не знает
         // Экстраполятор (Extr, GBS): CPU-драйвер exe считает по таблицам Бутчера и тело базы в
         // стадиях не выразит. Те же тела, что у GPU, собирает cl.exe в DLL адаптивного модуля
         // (AdaptiveCpuModule, кэш на диске), траектория — ucuda_cpu_ad_phase, копия phase_kernel_ad;
-        // регулятор (и пользовательский) вкомпилирован туда же.
+        // регулятор (и пользовательский) вкомпилирован туда же. Явное t — тоже сюда: exe-драйвер
+        // (вычислитель правых частей) времени не знает, а тела модуля его получают от драйвера.
         AdaptiveCpuModule mod;
         std::vector<KrsCpuDiag> diags;
         if (!mod.compile(code.rhs, code.emb, code.dprep, code.deval, ctrl_body, dim, "", diags) || !mod.phase()) {
@@ -163,8 +341,12 @@ bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
                      + "' reached max points before the end of the interval";
         }
     }
+    trim_step_log_to_record(result, t_skip);
     return true;
 }
+}
+
+namespace ucuda::analysis_detail {
 
 
 AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
@@ -183,8 +365,9 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
 
     // параметры: a[0] зарезервирован под CD-коэф. симметрии, a[1..] = params
     int nparams = (int)in.params.size();
-    std::vector<double> a(nparams + 1, 0.0);
+    std::vector<double> a(nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     a[0] = parse_val(in.symmetry_s, 0.5);
+    scheme_fill_tail(a.data() + nparams + 1, in.cd_fp_iters, in.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int j = 0; j < nparams; ++j) {
         auto it = in.param_values.find(in.params[j]);
         a[1 + j] = parse_val(it != in.param_values.end() ? it->second : "", 0.0);
@@ -214,6 +397,25 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         }
     }
 
+    // ДАУ: согласованные НУ — z из g(x0, z, 0) = 0 при заданных x0 (индекс 1). Поля НУ не
+    // меняются: заданное z — лишь старт Ньютона. Продолжение (ic_override) несёт состояние,
+    // уже согласованное шагом, — его не трогаем.
+    if (in.sys.dae_nx >= 0 && in.sys.dae_nx < dim && !use_override) {
+        int solved = 0;
+        std::string why, done;   // done — что сделано при индексе >= 2 (скрытые связи), пусто при индексе 1
+        for (int k = 0; k < N; ++k) {
+            std::string w;
+            if (dae_consistent_z(in.sys, a.data(), (int)a.size(), 0.0, &ic_flat[(size_t)k * dim], &w)) {
+                ++solved;
+                if (done.empty()) done = w;
+            }
+            else if (why.empty()) why = w;
+        }
+        result.dae_status = solved == N
+            ? (done.empty() ? std::string("initial z made consistent: g(x0, z) = 0") : "initial values: " + done)
+            : "initial z: " + why;
+    }
+
     std::vector<std::vector<std::vector<double>>> raw;
     bool calc_ok = true;
     std::string calc_err;
@@ -221,7 +423,10 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     // Адаптивный шаг — своя ветка расчёта; признаки, RQA и прореживание ниже общие.
     // У отображения шага нет, и переключатель для него игнорируется.
     std::vector<std::vector<double>> ad_times;
-    if (in.adaptive.enabled && !in.sys.is_map) {
+    // Явное время t на CPU: фиксированный шаг — через krs_cpu (номер шага ведёт DLL, см.
+    // KrsCpuStep::step_index), адаптивный — через DLL адаптивного модуля (run_adaptive_phase).
+    const bool timed = system_uses_time(in.sys);
+    if ((in.adaptive.enabled || scheme_is_multistep(in.scheme)) && !in.sys.is_map) {
         if (!run_adaptive_phase(in, dim, N, ic_flat, a, h, tsim, tskip, total, raw, ad_times,
                                 result, calc_ok, calc_err))
             return result;
@@ -239,7 +444,10 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
             return result;
         }
     }
-    else if (in.krs_is_custom) {
+    // ДАУ на CPU: тело DAE-метода — обычный шаг над [x; z], его собирает в нативную функцию
+    // krs_cpu, как пользовательскую КРС (вычислитель правых частей ДАУ не считает).
+    // Явное время и z-выходы (Solve as ODE) — тоже здесь: вычислитель правых частей их не знает.
+    else if (in.krs_is_custom || in.sys.dae_nx >= 0 || timed || !in.sys.out_exprs.empty() || !in.sys.zb_g.empty()) {
         // Custom КРС: тело — сырой C с объявлениями, циклами и локальными
         // массивами. SystemEvaluator интерпретирует только ВЫРАЖЕНИЯ правых
         // частей, поэтому тело компилируется в нативную функцию шага
@@ -264,6 +472,7 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         }
         raw.resize(N);
         for (int k = 0; k < N; ++k) {
+            step.step_index(0);   // явное t: каждая траектория с t = 0
             bool ok = computePhasePortraitCPU_custom(step.fn(),
                 &ic_flat[(size_t)k * dim], dim, a.data(), (int)a.size(),
                 h, total, skip, raw[k]);
@@ -303,6 +512,37 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
                 &ic_flat[(size_t)k * dim], dim, a.data(), (int)a.size(),
                 h, total, skip, raw[k]);
             if (!ok) { calc_ok = false; calc_err = "trajectory '" + in.ic_sets[k].label + "' diverged (nan/inf)"; }
+        }
+    }
+
+    // Наблюдаемые вне состояния (ДАУ, сведённая к ОДУ): z(x) в каждой точке, дописанные
+    // после координат состояния. Тем же вычислителем правых частей: выражения — как rhs над
+    // x и a[] (списки выровнены нулями/фиктивными переменными до одной длины).
+    if (!in.obs_exprs.empty()) {
+        System os;
+        os.vars = in.sys.vars;
+        os.params = in.sys.params;
+        os.latex = in.sys.latex;
+        os.rhs = in.obs_exprs;
+        const size_t nz = in.obs_exprs.size(), L = std::max(os.vars.size(), nz);
+        for (size_t j = os.vars.size(); j < L; ++j) os.vars.push_back("ucuda_obs_pad" + std::to_string(j));
+        while (os.rhs.size() < L) os.rhs.push_back("0");
+        if (system_uses_time(os)) {
+            result.dae_status = "z observables use explicit time t: not computed yet";
+        } else {
+            try {
+                SystemEvaluator ev(os);
+                std::vector<double> xin(L, 0.0), zout(L, 0.0);
+                for (auto& traj : raw)
+                    for (auto& pt : traj) {
+                        for (int i = 0; i < dim && i < (int)pt.size(); ++i) xin[(size_t)i] = pt[(size_t)i];
+                        ev.eval(xin.data(), a.data(), zout.data());
+                        pt.resize((size_t)dim);
+                        for (size_t j = 0; j < nz; ++j) pt.push_back(zout[j]);
+                    }
+            } catch (const std::exception& e) {
+                result.dae_status = std::string("z observables: ") + e.what();
+            }
         }
     }
 
@@ -487,6 +727,9 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
 
     return result;
 }
+}
+
+namespace ucuda::analysis_detail {
 
 
 // Снапшот текущей session в PhaseRunInputs. Делается на главном потоке.
@@ -504,9 +747,12 @@ PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
     in.skip_time    = s.skip_time;
     in.scheme       = s.scheme;
     in.symmetry_s   = s.symmetry_s;
+    in.cd_fp_iters  = s.cd_fp_iters;
+    in.newton  = s.newton;
     in.decimation   = s.decimation;
     in.adaptive     = s.adaptive;
     in.use_gpu      = s.use_gpu;
+    in.obs_exprs    = s.obs_exprs;
     in.sys          = s.sys;
     in.krs_code     = s.krs_code;
     in.krs_error    = s.krs_error;
@@ -557,69 +803,6 @@ PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
     }
     return in;
 }
-}
-using namespace ucuda::analysis_detail;
-
-
-void PhaseAnalysisSession::add_ic() {
-    InitialConditionSet ic;
-    ic.label = "IC " + std::to_string(ic_sets.size() + 1);
-    for (const auto& v : vars) ic.values[v] = "";
-    ic_sets.push_back(ic);
-}
-
-
-void PhaseAnalysisSession::remove_ic(int i) {
-    if (i >= 0 && i < (int)ic_sets.size()) ic_sets.erase(ic_sets.begin() + i);
-}
-
-
-
-
-
-void PhaseAnalysisSession::remove_projection(int i) {
-    if (i >= 0 && i < (int)projections.size()) {
-        projections.erase(projections.begin() + i);
-    }
-}
-
-
-void PhaseAnalysisSession::load_from_record(const SystemRecord& r,
-    const std::vector<std::string>& vars_,
-    const std::vector<std::string>& params_) {
-    vars = vars_;
-    params = params_;
-    custom_schemes = r.custom_schemes;
-    enabled_builtin_schemes = enabled_builtins_from_record(r);
-    step_h = default_h_from_record(r);
-    scheme = default_scheme_from_record(r, scheme);
-    symmetry_s = r.symmetry_s.empty() ? "0.5" : r.symmetry_s;
-    sim_time = "50";
-    skip_time = "10";
-
-    param_values.clear();
-    for (const auto& p : params) {
-        auto it = r.param_values.find(p);
-        param_values[p] = (it != r.param_values.end()) ? it->second : "";
-    }
-
-    ic_sets.clear();
-    InitialConditionSet ic;
-    ic.label = "IC 1";
-    for (const auto& v : vars) {
-        auto it = r.init_conditions.find(v);
-        ic.values[v] = (it != r.init_conditions.end()) ? it->second : "";
-    }
-    ic_sets.push_back(ic);
-
-    // одна проекция по умолчанию
-    projections.clear();
-    add_projection();
-    // add_projection() reads sys.is_map, but sys is only assigned after this
-    // call (see AppModel::start_phase_analysis) — take it from the record here.
-    for (auto& p : projections) p.draw_points = r.is_map;
-
-    result = AnalysisResult{};
 }
 
 

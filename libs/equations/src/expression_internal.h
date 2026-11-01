@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include "ucuda/equations/codegen.hpp"
+#include "ucuda/domain/sparse_lu.h"
 #include <map>
 #include <set>
 #include <memory>
@@ -15,26 +16,10 @@
 #include <cstring>
 #include <vector>
 #include <algorithm>
-
+#include <functional>
+#include <complex>
+#include <array>
 namespace ucuda::equations_detail {
-// Реализация парсера (обычный синтаксис + LaTeX) и кодгена схем.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
  // внутренняя линковка: всё ниже не видно из других .cpp/.cu
 
     // Мини-AST
@@ -59,6 +44,7 @@ namespace ucuda::equations_detail {
     // Парсер
     struct Parser {
         std::string s; size_t i = 0; bool latex;
+        const std::vector<std::string>* extra_funcs = nullptr;   // только превью LaTeX: вызовы функций пользователя
         Parser(std::string src, bool lx = false) :s(std::move(src)), latex(lx) {}
         void ws() { while (i < s.size() && std::isspace((unsigned char)s[i])) ++i; }
         char peek() { ws(); return i < s.size() ? s[i] : '\0'; }
@@ -232,8 +218,11 @@ namespace ucuda::equations_detail {
                 size_t j = i; while (j < s.size() && (std::isalnum((unsigned char)s[j]) || s[j] == '_'))++j;
                 std::string id = s.substr(i, j - i); i = j;
                 if (peek() == '(') {
-                    if (!known_funcs().count(id)) throw std::runtime_error("unknown function: " + id);
-                    eat('('); auto n = mk(Node::Call); n->name = id;
+                    if (!known_funcs().count(id)
+                        && !(extra_funcs && std::find(extra_funcs->begin(), extra_funcs->end(), id) != extra_funcs->end()))
+                        throw std::runtime_error("unknown function: " + id);
+                    eat('('); auto n = mk(Node::Call);
+                    n->name = id == "min" ? std::string("fmin") : id == "max" ? std::string("fmax") : id;
                     if (peek() != ')') {
                         n->args.push_back(expr());
                         while (peek() == ',') { eat(','); n->args.push_back(expr()); }
@@ -261,6 +250,14 @@ namespace ucuda::equations_detail {
 
     std::string fmtnum(double v) ;
 
+    // "u / c" с числовым c печатается как "u * ((numb)1 / c)": обратная сворачивается
+    // компилятором в литерал (double/float), а деление в FP64 — это ~10 инструкций на
+    // конвейере, который у ядер и так узкое место. На dd/qd-ветке (numb = dd/qd)
+    // (numb)1 / c считается в рантайме в полной точности — литерал 1/c в double срезал
+    // бы её. Расхождение с честным делением — 1 ulp. "c1 / c2" не трогаем: это и так
+    // константа, а правильно округлённое c1/c2 точнее c1 * (1/c2). Байткод CPU делает то же.
+    bool div_by_reciprocal(const PN& n) ;
+
     void emit(const PN& n, const NameMap& nm, std::ostream& o);
 
     void emit_child(const PN& n, const NameMap& nm, std::ostream& o, int pp) ;
@@ -272,9 +269,14 @@ namespace ucuda::equations_detail {
     // не идут в a[]. Определяются в шапке ядра отдельно (напр. const double pi = M_PI;).
     const std::set<std::string>& math_constants() ;
 
-    NameMap build_namemap(const System& s, const std::string& st) ;
+    // tname — во что печатать явное время t (время стадии: "ucuda_t", "ucuda_ts",
+    // "(ucuda_t + (numb)0.5 * h)"). Пусто — t не определено, как раньше: схема,
+    // которая не печатает время стадий, на t упадёт с "unknown symbol", а не
+    // молча посчитает все стадии в один момент. Переменную или параметр с именем
+    // t не перекрывает.
+    NameMap build_namemap(const System& s, const std::string& st, const std::string& tname = {}) ;
 
-    std::vector<std::string> rhs_over(const System& s, const std::string& st) ;
+    std::vector<std::string> rhs_over(const System& s, const std::string& st, const std::string& tname = {}) ;
 
 
     // CD helpers (AST-based).
@@ -293,6 +295,12 @@ namespace ucuda::equations_detail {
     // Number of simple iterations used in the fallback path. Must stay in sync
     // with integrator.cpp::step_cd so that CPU and GPU trajectories match.
     constexpr int CD_ITERS = 4;
+
+    // "CD FP": число итераций из System (UI), не меньше одной. Сверху
+    // ограничено, чтобы опечатка не развернула тело на мегабайты.
+    // Само число итераций приходит в рантайме слотом a[M+1] (cd_fp_slot); это
+    // значение — только оценка цены шага для scheme_rhs_per_step.
+    int cd_fp_iters_of(const System& s) ;
 
 
     // Complex CD: imaginary part of the half-step coefficients, sqrt(3)/6.
@@ -370,7 +378,9 @@ namespace ucuda::equations_detail {
     // deliberately provides no ucmplx overload for them. Catch them here, at
     // codegen time, so the user gets the reason instead of an NVRTC template
     // error from the middle of a generated kernel.
-    const std::string* cd_find_complex_unsafe(const PN& n);
+    // The rule itself lives in cd_find_complex_unsafe: SystemEvaluator asks the same
+    // question for the CPU path, which never goes through codegen.
+    const std::string* cd_find_complex_unsafe(const PN& n) ;
 
     void cd_check_complex_safe(const PN& n) ;
 
@@ -416,7 +426,7 @@ namespace ucuda::equations_detail {
 
     // Jacobian entries as C strings, row-major: out[i*N + j] = d f_i / d vars[j],
     // emitted over state array st. Counterpart of rhs_over above.
-    std::vector<std::string> jac_over(const System& s, const std::string& st) ;
+    std::vector<std::string> jac_over(const System& s, const std::string& st, const std::string& tname = {}) ;
 
 
     // Схемы
@@ -424,15 +434,22 @@ namespace ucuda::equations_detail {
     // The temp buffer is required - updating in place would be Gauss-Seidel.
     std::string scheme_map(const System& s) ;
 
+    // Явное время (этап 2): у неавтономной системы шаг получает t_n аргументом
+    // kStepTimeArg, а схема печатает время каждой стадии. У автономной tname
+    // пуст, и текст тела прежний до байта.
+    std::string time_name(const System& s, const char* stage_expr = nullptr) ;
+
     std::string scheme_euler(const System& s) ;
 
+    // Эйлер-Кромер обновляет X по месту, все уравнения — в момент t_n.
     std::string scheme_euler_cromer(const System& s) ;
 
     std::string scheme_midpoint(const System& s) ;
 
     std::string scheme_rk4(const System& s) ;
 
-    // Dormand-Prince 8(7), 13-стадийный. Матрицы M[13][12] и B[2][13] — // const, компилятор положит в constant memory. Считаем y (8-й, b[0]) и z
+    // Dormand-Prince 8(7), 13-стадийный. Матрицы M[13][12] и B[2][13] — static
+    // const, компилятор положит в constant memory. Считаем y (8-й, b[0]) и z
     // (7-й, b[1]) — z пока не используется, но оставлен под будущий адаптивный
     // шаг по |y - z|. На каждый step X := y.
     //
@@ -441,10 +458,23 @@ namespace ucuda::equations_detail {
     // складывается точно (two_sum) и несёт 32/62 знака коэффициента.
     std::string md_literal(const MultiDoubleCoef& r) ;
 
-    // "const numb <decl> = {...};" — rows x cols из таблицы с шагом
+    // Квалификатор таблиц коэффициентов. При numb = float хвосты ~1e-51 ниже денормалей float,
+    // NVRTC перестаёт считать инициализатор константным, а static __device__ с динамической
+    // инициализацией запрещён — поэтому там таблица обычная локальная. Хвосты остаются: их
+    // складывают dd/qd CPU-ветки вкладки Order. При double текст прежний.
+    const char* md_table_qual() ;
+
+    // "static const numb <decl> = {...};" — rows x cols из таблицы с шагом
     // строки ld (ld > cols — берётся левый верхний угол).
     void md_table(std::ostringstream& o, const char* decl, const MultiDoubleCoef* v,
                   int rows, int cols, int ld) ;
+
+
+    // Узлы c_i = sum_j a_ij явного РК (S стадий, строка i с шагом ld) — таблица Cs[S]
+    // для времени стадии ucuda_ts = ucuda_t + Cs[i]*h. Печатается только у
+    // неавтономной системы. Сумма — в long double по всем частям коэффициента:
+    // узлы у этих таблиц — простые дроби, и ulp-ошибка суммы на порядок не влияет.
+    void stage_time_table(std::ostringstream& o, const MultiDoubleCoef* A, int S, int ld) ;
 
 
     std::string scheme_dopri78(const System& s, bool legacy = false) ;
@@ -453,7 +483,7 @@ namespace ucuda::equations_detail {
     // Явный РК с постоянным шагом по таблице Бутчера: RK45 (S = 6) и DOP853
     // (S = 12). A — строки стадий 0..S-1 с шагом ld (строка 0 нулевая,
     // печатаются столбцы 0..S-2), b — S весов старшего решения. Форма кода
-    // та же, что у DOPRI78: стадии в цикле, таблицы const. Оценщики и
+    // та же, что у DOPRI78: стадии в цикле, таблицы static const. Оценщики и
     // стадия FSAL здесь не нужны — их считает адаптивный вариант.
     std::string scheme_erk(const System& s, const MultiDoubleCoef* A, int ld,
                            const MultiDoubleCoef* b, int S) ;
@@ -520,7 +550,8 @@ namespace ucuda::equations_detail {
     // what makes the two methods A-stable and worth their cost on stiff problems.
     //
     // Newton starts from an explicit-Euler predictor, which lands within O(h^2) of
-    // the root, so 2-3 iterations are typical. System::newton_full picks the variant:
+    // the root, so 2-3 iterations are typical. The "full" setting (a[M+4], see
+    // NewtonSettings in codegen.hpp) picks the variant:
     //   false -- Jacobian and LU built once per step at the predictor and REUSED
     //            while the correction keeps shrinking; rebuilt as soon as it does
     //            not (modified Newton with a refresh). The refresh is not a
@@ -530,16 +561,17 @@ namespace ucuda::equations_detail {
     //            answer with it, at about half the Jacobian evaluations.
     //   true  -- rebuilt every iteration (full Newton): quadratic convergence and
     //            the most robust at large h, at roughly k times the cost.
-    // Iteration stops on ||dX||^2 < tol^2 or after newton_max_iters passes. tol and
-    // the iteration cap are printed as literals, so they land in krs_body and thus in
-    // the NVRTC cache key by themselves -- no extra placeholder, no manual eviction.
+    // Iteration stops on ||dX||^2 < tol^2 (in float also at the precision floor, see
+    // below) or after max_iters passes. tol, max_iters and full are read from a[M+2..M+4]
+    // at run time, like s and the CD FP n: changing them does not rebuild the module,
+    // and the step body reads them every call.
     //
     // The Gauss/LU solver is printed INTO the body instead of being shared from a
     // header, on purpose: the phase-portrait path hand-assembles its NVRTC source in
     // nvrtc_engine.cpp and pulls in configCUDA.h only when the body mentions ucmplx,
     // so a header helper would simply not be found there. DOPRI78 inlines its Butcher
-    // tables for the same reason. Cost: numb Am[N*N] in local memory per thread --
-    // 72 bytes at the usual N = 3, growing as N^2.
+    // tables for the same reason. LU and solve are printed unrolled, so numb Am[N*N]
+    // lives in registers (N^2 of them per thread).
     // ImplicitKind::ComplexEuler — Complex Implicit Euler (см. комментарий к
     // Scheme в codegen.hpp): тот же ньютоновский блок, но прогоняется ДВАЖДЫ,
     // с tau1 = h*(a[0] + i*CIE_IMAG) и tau2 = h*(1 - a[0] - i*CIE_IMAG), и вся
@@ -554,7 +586,168 @@ namespace ucuda::equations_detail {
     constexpr double CIE_IMAG = 0.5;
 
 
-    std::string scheme_implicit_common(const System& s, ImplicitKind kind) ;
+    // ДАУ (этап 4 плана DAE): dae_nx >= 0 — система в форме DaeSystem::as_codegen_system,
+    // X = [x (dae_nx штук); z], rhs = [f; g]. Тот же Ньютон по всему X_{n+1}, но строки
+    // связей — g(X_{n+1}, t_{n+1}) = 0 (в Am — dg/dX), а не X - X_n - hc*f. Предиктор:
+    // X_n целиком (x и z). Явный Эйлер по x на жёсткой ДАУ уводил старт Ньютона далеко от
+    // корня: PUT-нейрон (library/DAE-1 PUT burst neuron) при h = 5e-4 на фронте спайка
+    // получал Vn ~ 1.4 В, токи ~e^40, и 25 итераций полного Ньютона не сходились; с X_n
+    // тот же шаг сходится. ImplicitKind::Euler — BDF1 (неявный Эйлер на ДАУ),
+    // dae_trap — трапеции: hc = h/2 и к невязке строк x добавлено -hc*f(X_n, t_n).
+    // Время стадий: f(X_n) в ucuda_t, невязка и якобиан в ucuda_t + h. Без dae_nx текст
+    // прежний до байта.
+    // dae_hc — своё выражение для hc (стадия BDF2 у TR-BDF2), иначе h или h/2.
+    // ---------- Этап 6: разреженная LU по структуре (план — sparse_lu.h) ----------
+    // Матрица — массив Asp[nnz] с постоянными индексами (клетки портрета после fill-in), без перестановок
+    // во время счёта: ведущие элементы выбраны планом по структуре. Множители L ложатся на место
+    // A[r][pc] (их уже никто не перезапишет: столбец pc после шага закрыт).
+    // Гибрид (так у ДАУ): по плану исключаются только строки diag_first по своим диагоналям (x-строки
+    // I - h J, диагональ ~1); остаток — блок Rb x Cb (дополнение Шура по z) — плотная LU с выбором
+    // главного во время счёта. Статический выбор в блоке связей промахивался: строки индекса 3 после
+    // исключения x масштабированы как h^2 (Andrews squeezer: порог не проходил ни разу). Блок лежит в
+    // Asp[0 .. nb*nb) по строкам, остальные клетки — после.
+    struct SparseLu {
+        EliminationPlan plan;
+        std::map<std::pair<int, int>, int> id;
+        std::set<std::pair<int, int>> orig;
+        int nnz = 0, n1 = 0, nb = 0;
+        double ops1 = 0;   // умножений-сложений первой фазы
+        std::vector<int> Rb, Cb;
+        std::string at(int r, int c) const { return "Asp[" + std::to_string(id.at({ r, c })) + "]"; }
+    };
+
+    bool sparse_lu_build(const std::vector<MatEntry>& pat, int n, const std::vector<char>& df, SparseLu& S) ;
+
+    // Факторизация. Первая фаза (x-диагонали по плану) проверяет порог: |ведущий| >= 1e-3 * max|столбца|
+    // среди исключаемых строк и >= 1e-30; не прошёл — fallback = 1 (вызывающий решает всю матрицу плотной
+    // LU). Затем блок — плотная LU с выбором главного (перестановки только от столбца k, как везде) в
+    // ucuda_pv; вырожденный — sing = 1. Нужны int ik, ir, ic, ip и numb mx, av, dgn, mlt.
+    void sparse_lu_factor(std::ostream& o, const SparseLu& S, const char* ind, const char* fallback) ;
+
+    // Объявления гибрида: Asp, перестановки блока, номера строк блока.
+    void sparse_lu_decl(std::ostream& o, const SparseLu& S, int nsol) ;
+
+    // Решение: правая часть rhs[] по строкам (портится), ответ sol[] по столбцам.
+    void sparse_lu_solve(std::ostream& o, const SparseLu& S, const std::string& rhs, const std::string& sol, const char* ind) ;
+
+
+    // Множитель h^(k-1) переменной i индекса k >= 2 в норме поправки Ньютона ДАУ (как в RADAU5);
+    // "" — индекс 0/1 (тогда текст тела прежний до байта).
+    std::string dae_norm_w(const System& s, int i) ;
+
+
+    std::string scheme_implicit_common(const System& s, ImplicitKind kind, int dae_nx = -1,
+                                       bool dae_trap = false, const char* dae_hc = nullptr) ;
+
+    // Методы, решающие z из связи (явные со связью, CD), — только индекс 1. Связь, в которой
+    // символьно нет ни одной z (dg/dz — нулевая строка), z не определяет: Ньютон дал бы NaN.
+    void dae_require_index1(const std::vector<std::string>& J, int N, int nx, const char* what) ;
+
+
+    // ---------- ДАУ: TR-BDF2 и явные схемы с решением связи на стадиях ----------
+    //
+    // TR-BDF2 (Bank et al., gamma = 2 - sqrt 2): трапеции до t + gamma*h, затем стадия BDF2
+    //   x+ - c1*x_g + c2*x_n - c3*h*f(x+) = 0,  0 = g(x+, z+),
+    //   c1 = 1/(g(2-g)), c2 = (1-g)^2/(g(2-g)), c3 = (1-g)/(2-g).
+    // L-устойчив, второй порядок. Оба прохода — тот же Ньютон (scheme_implicit_common), каждый в
+    // своём блоке; у первого h затенён на gamma*h (время стадии t + gamma*h выходит само),
+    // второй решает как неявный Эйлер от комбинации c1*x_g - c2*x_n с hc = c3*h.
+    std::string dae_tr_bdf2(const System& s) ;
+
+
+    // SDIRK2 Александера (gamma = 1 - 1/sqrt 2, L-устойчив, жёстко точен, порядок 2):
+    //   Y1 = x_n + gamma h f(Y1),  Y2 = x_n + (1 - gamma) h f(Y1) + gamma h f(Y2),  x_{n+1} = Y2;
+    //   связи g(Y_i) = 0 на обеих стадиях. Обе стадии — неявный Эйлер с hc = gamma*h (тот же Ньютон):
+    //   первая — от x_n (h затенён на gamma*h, время стадии t + gamma*h), вторая — от
+    //   x_n + (1 - gamma)/gamma (Y1 - x_n), т.е. x_n + (1 - gamma) h f(Y1), время t + h.
+    std::string dae_sdirk2(const System& s) ;
+
+
+    // Radau IIA, 3 стадии, порядок 5 (жёстко точен, L-устойчив; индексы 1-3, Hairer-Wanner IV.8, VII.4).
+    // Неизвестные W = [Y1; Y2; Y3] (по N), x_{n+1} = Y3. Строки x стадии i:
+    //   Y_i - x_n - h sum_j a_ij f(Y_j, t + c_j h) = 0,  строки связей: g(Y_i, t + c_i h) = 0
+    // (у ДАУ M y' = F с A невырожденной это то же, что sum_j a_ij g(Y_j) = 0). Полный Ньютон по 3N
+    // неизвестным: якобианы f и g в каждой стадии, LU 3N x 3N с выбором главного (цикл). Норма поправки —
+    // с множителями h^(k-1) по индексу переменной, как у scheme_implicit_common. Предиктор: x — явный
+    // Эйлер до t + c_i h, z — прежние. Упрощённый Ньютон RADAU5 (одна J, разложение A^-1) — потом.
+    std::string dae_radau5(const System& s) ;
+
+
+    // Явный РК (Бутчер A, b, c; S стадий) с решением связи на каждой стадии: x стадии — как
+    // у явной схемы, z стадии — Ньютон по z на g(x_s, z, t_s) = 0 (старт — z прошлой стадии),
+    // k_s = f(x_s, z_s, t_s). В конце z_{n+1} из g(x_{n+1}, z) = 0. Индекс 1 (dg/dz невырожден).
+    // Euler, Midpoint (полуявный РК2 отчёта CD-ДАУ), RK4.
+    std::string dae_explicit_rk(const System& s, int S, const double* A, const double* b, const double* c) ;
+
+
+    // Rosenbrock ROS2 (Verwer, Spee, Blom, Hundsdorfer 1999), gamma = 1 + 1/sqrt 2, для M y' = F(y),
+    // M = diag(I_x, 0_z):
+    //   (M - gamma*h*J) k1 = h F(y_n),
+    //   (M - gamma*h*J) k2 = h F(y_n + k1) - 2 M k1,
+    //   y_{n+1} = y_n + 3/2 k1 + 1/2 k2.
+    // Линейно-неявный: одно LU на шаг, без итераций Ньютона. L-устойчив, порядок 2. Якобиан —
+    // в y_n. Неавтономные системы требуют dF/dt в стадиях — пока отказ.
+    // Явное время (Verwer et al.): к правым частям стадий добавляется +-gamma*h^2*F_t(t_n, y_n),
+    //   k1: h F(t_n, y_n) + gamma h^2 F_t,   k2: h F(t_n + h, y_n + k1) - 2 M k1 - gamma h^2 F_t.
+    // F_t — символьная производная по t (pn_diff), как якобиан.
+    std::string dae_ros2(const System& s) ;
+
+
+    // Rosenbrock для M y' = F(t, y), M = diag(I_x, 0_z), в форме Hairer-Wanner (rodas.f) — без
+    // умножений на J в правых частях стадий:
+    //   (M/(gamma h) - J) u_i = F(t_n + alpha_i h, y_n + sum_{j<i} a_ij u_j) + M sum_{j<i} (c_ij/h) u_j
+    //                           + gt_i h F_t,
+    //   y_{n+1} = y_n + sum m_i u_i.
+    // J и F_t — в (t_n, y_n): одно LU на шаг, без Ньютона. Коэффициенты: RosTab ниже.
+    struct RosTab {
+        const char* title;
+        int S;
+        double gamma;
+        std::vector<double> alpha, gt, m;
+        std::vector<std::vector<double>> a, c;   // строго нижнетреугольные, a[i][j], j < i
+        // Вложенная пара (адаптивный шаг): E = sum (m - mhat) u; пусто — оценки нет.
+        // Плотный выход rodas.f: y(th) = (1-th) y0 + th (y1 + (1-th) (d2.u + th d3.u)).
+        std::vector<double> mhat, d2, d3;
+        int q = 0;                               // порядок оценщика
+    };
+
+    // ROS3P (Lang, Verwer 2001): порядок 3 и по x, и по z индекса 1, A-устойчив, gamma = 1/2 + sqrt(3)/6.
+    const RosTab& ros3p_tab() ;
+
+    // Rodas4 (Hairer, Wanner; rodas.f, METH = 1): порядок 4, жёстко точный (последние две стадии
+    // в t_n + h), L-устойчив. y_{n+1} = вход 6-й стадии + u_6.
+    const RosTab& rodas4_tab() ;
+
+    // emb = true — тело попытки адаптивного шага (ucuda_krs_emb): X константный вход, пишутся
+    // Y, E = sum (m - mhat) u, стадии для плотного выхода в W и F1 = f(t + h, Y).
+    std::string dae_rosenbrock(const System& s, const RosTab& T, bool emb = false) ;
+
+
+    // Плотный выход Rosenbrock (rodas.f, CONTRO): D = [y0, y1, d2.u, d3.u].
+    std::string ros_dprep_body(const System& s, const RosTab& T) ;
+
+    std::string ros_deval_body(const System& s) ;
+
+
+    // CD для ДАУ индекса 1 (уровень B, отчёт CD-ДАУ): связь решается всякий раз, когда меняется x.
+    //   D  (шаг h1 = a[0]*h, прямой порядок x): x_i += h1 f_i(x, z, t_n), затем z из g(x, z) = 0;
+    //   D* (шаг h2 = h - h1, обратный порядок): x_i - x_i^old - h2 f_i(x, z, t_{n+1}) = 0 и
+    //       g(x, z, t_{n+1}) = 0 — одним Ньютоном по (x_i, z).
+    // Замороженная z дала бы первый порядок (правило отчёта). yoshida — композиция трёх CD-шагов
+    // (gamma1, gamma2, gamma1), порядок 4 при a[0] = 0.5; каждый шаг — в своём блоке с затенённым h
+    // (и ucuda_t, если система неавтономна).
+    std::string dae_cd(const System& s, bool yoshida) ;
+
+
+    // CD для индекса 2 (отчёт CD-ДАУ, «как SHAKE»): на каждом полушаге z постоянна и подбирается так,
+    // чтобы связь выполнялась в КОНЦЕ полушага: g(x(h1; z1), z1) = 0 после D, g(x(h; z2), z2) = 0 после D*.
+    //   D  (h1 = a[0] h, прямой порядок): x_i += h1 f_i(x, z1, t_n);
+    //   D* (h2 = h - h1, обратный порядок): x_i - x_i^old - h2 f_i(x, z2, t_{n+1}) = 0 скалярным Ньютоном.
+    // z полушага — Ньютон с разностным якобианом (nz + 1 проходов на итерацию; «секущие» отчёта). В X
+    // пишется (z1 + z2)/2 — z середины шага (сравнивать с точным решением при t - h/2). Работает и на
+    // индексе 1 (g с z), но там обычный DAE CD точнее (z после каждого x_i).
+    std::string dae_cd2(const System& s) ;
+
 
     std::string scheme_implicit_euler(const System& s)    ;
 
@@ -593,10 +786,57 @@ namespace ucuda::equations_detail {
 
     // saved — имя временной под X_saved в итерационной ветке: у Complex CD4 два
     // прохода живут в одной области видимости, поэтому имя приходит снаружи.
+    // Предрасчёт ("CD fast"): константа шага — имя и выражение над a[] и h.
+    using PrepList = std::vector<std::pair<std::string, std::string>>;
+
+    bool pn_free_of_vars(const PN& n, const std::vector<std::string>& vars) ;
+
+
+    // prep != nullptr -- вариант "CD fast": если коэффициент при своей
+    // переменной не зависит ни от одной переменной состояния (state_vars),
+    // обратный знаменатель 1/(1 - hs*coef) уходит в prep под именем prep_name,
+    // а шаг умножает на него вместо деления.
     void emit_diag_implicit_eq(std::ostringstream& o, const PN& rhs_ast,
                                const std::string& v, const std::string& x,
                                const NameMap& nm, const char* hs, const char* sty,
-                               const std::string& saved) ;
+                               const std::string& saved,
+                               PrepList* prep = nullptr,
+                               const std::vector<std::string>* state_vars = nullptr,
+                               const std::string& prep_name = std::string()) ;
+
+
+    // --- "CD FP" / "CD fast FP": неявная половина простыми итерациями ---------
+    // Слагаемые верхней суммы f_i, не содержащие своей переменной v, за время
+    // итераций не меняются (остальные X[] и a[] итерации не трогают), поэтому
+    // идут в начальное значение один раз:
+    //   x_fp = X[i] + hs * (r);          r -- слагаемые без v
+    //   for (k < cdfp_n) X[i] = x_fp + hs * (g);   g -- слагаемые с v
+    // Если f_i линейна по v (coef*v + rem), итерация -- X[i] = x_fp + c*X[i]
+    // с c = hs * coef, посчитанным тоже один раз. Первое приближение то же,
+    // что у CD: X[i] до полушага. Число итераций n -- рантайм-значение, как s:
+    // a[] = [s, p_1..p_M, n], тело читает его в cdfp_n (kCdFpIterDecl).
+    void fp_collect_terms(const PN& n, bool neg, std::vector<std::pair<bool, PN>>& out) ;
+
+    PN fp_sum_terms(const std::vector<std::pair<bool, PN>>& t) ;
+
+    // f = r + g по слагаемым верхней суммы; r == nullptr, если все слагаемые с v.
+    void fp_split_terms(const PN& f, const std::string& v, PN& r, PN& g) ;
+
+    // Множитель после "hs * ": скобки всегда, кроме атомов. CPU-зеркало
+    // (SystemEvaluator::solve_diag_fp) считает hs * eval(e) -- та же группировка.
+    std::string fp_factor(const PN& e, const NameMap& nm) ;
+
+
+    // Одно уравнение неявной половины "CD FP" / "CD fast FP". fast -- линейные
+    // уравнения решаются как в CD fast (предрасчитанный 1/d или деление),
+    // итерации только у нелинейных; иначе итерации у всех, кроме coef == 0
+    // (там одна явная формула и есть точное решение).
+    void emit_fp_implicit_eq(std::ostringstream& o, const PN& rhs_ast,
+                             const std::string& v, const std::string& x,
+                             const NameMap& nm, const char* hs,
+                             const std::string& sfx, bool fast, PrepList* prep,
+                             const std::vector<std::string>* state_vars,
+                             const std::string& prep_name) ;
 
 
     // CD: Composition D-method (diagonally-implicit symplectic composition).
@@ -727,7 +967,8 @@ namespace ucuda::equations_detail {
     // меняются. Замерено (Лоренц, Рёсслер): CD и Complex CD -- 2, Complex CD4,
     // o4s3, o4s4 -- 4; у CD4-семейства {1-0} точнее {0-1} в 1.5-4 раза.
     std::string scheme_cd_common(const System& s, CdKind kind, bool core_only = false,
-                                 bool flip_halves = false) ;
+                                 bool flip_halves = false, bool fast = false,
+                                 bool fp = false) ;
 
 
     std::string scheme_cd(const System& s)          ;
@@ -821,9 +1062,9 @@ namespace ucuda::equations_detail {
         F_SIN, F_COS, F_TAN, F_ASIN, F_ACOS, F_ATAN,
         F_SINH, F_COSH, F_TANH, F_EXP, F_LOG, F_LOG2, F_LOG10,
         F_SQRT, F_CBRT, F_FABS, F_FLOOR, F_CEIL,
-        // F_COPYSIGN is emitted only by pn_diff (derivative of fabs); the user-facing
-        // parser does not accept it, so it is absent from known_funcs().
-        F_POW = 100, F_ATAN2, F_FMOD, F_COPYSIGN
+        // F_COPYSIGN is emitted by pn_diff (derivative of fabs); known_funcs() accepts it
+        // so that pn_print text (z outputs: dz/dt, sys_augmented) parses back.
+        F_POW = 100, F_ATAN2, F_FMOD, F_COPYSIGN, F_FMIN, F_FMAX
     };
 
     struct Instr { int op; int idx; double val; };
@@ -854,7 +1095,12 @@ namespace ucuda::equations_detail {
             case Node::Add: compile(n->a); compile(n->b); out.push_back({ OP_ADD,0,0 }); break;
             case Node::Sub: compile(n->a); compile(n->b); out.push_back({ OP_SUB,0,0 }); break;
             case Node::Mul: compile(n->a); compile(n->b); out.push_back({ OP_MUL,0,0 }); break;
-            case Node::Div: compile(n->a); compile(n->b); out.push_back({ OP_DIV,0,0 }); break;
+            case Node::Div:
+                // Как emit: u / c -> u * (1 / c), чтобы CPU совпадал с ядром.
+                compile(n->a);
+                if (div_by_reciprocal(n)) { out.push_back({ OP_PUSH_CONST, 0, 1.0 / n->b->num }); out.push_back({ OP_MUL,0,0 }); }
+                else                      { compile(n->b); out.push_back({ OP_DIV,0,0 }); }
+                break;
             case Node::Pow: compile(n->a); compile(n->b); out.push_back({ OP_POW,0,0 }); break;
             case Node::Neg: compile(n->a); out.push_back({ OP_NEG,0,0 }); break;
             case Node::Call: {
@@ -883,10 +1129,16 @@ namespace ucuda::equations_detail {
     // Комплексные версии — те же id, те же формулы, что и в device-коде: обе
     // ветки зовут функции из configCUDA.h, поэтому CPU-траектория Complex CD
     // повторяет GPU-шную операция в операцию (в пределах разной группировки FMA).
-    // atan2/fmod комплексного смысла не имеют и до сюда не доходят: система с
-    // ними отсекается в cd_check_complex_safe ещё на кодгене.
+    // atan2/fmod комплексного смысла не имеют и до сюда не доходят: на GPU систему
+    // с ними отсекает cd_check_complex_safe на кодгене, а CPU-путь кодген не
+    // зовёт и спрашивает complex_unsafe_function() перед комплексной схемой.
+    // floor/ceil кусочно-постоянны, и их продолжение — константа floor(Re z)
+    // (см. configCUDA.h).
     ucmplx apply_func1(int fid, ucmplx x) ;
 
+    // F_COPYSIGN приходит только из якобиана (производная fabs) и всегда с
+    // литералом 1 первым аргументом — поэтому a.re. atan2/fmod сюда не доходят:
+    // CPU-путь отказывает им заранее (SystemEvaluator::complex_unsafe_function).
     ucmplx apply_func2(int fid, ucmplx a, ucmplx b) ;
 
 
@@ -923,6 +1175,310 @@ namespace ucuda::equations_detail {
         }
         return stack[0];
     }
-}
+ std::string scheme_gbs(const System& s, int K);
 
-namespace ucuda::equations_detail { std::string scheme_gbs(const System& s, int K); }
+
+// Публичная функция
+static const char* kDaeNeedsDaeScheme =
+    "this is a DAE system: pick a DAE method (or tick 'Solve as ODE' in Library -> DAE)";
+
+
+std::string dae_scheme_body(const System& s, DaeScheme sch) ;
+
+    // AST -> текст правой части, который снова прочтёт Parser (с явными скобками и
+    // операциями; степень — ^{..} в LaTeX-режиме, ^(..) в обычном).
+    std::string pn_print(const PN& n, bool latex) ;
+
+    // Копия дерева с заменой символов из m.
+    PN pn_subst(const PN& n, const std::map<std::string, PN>& m) ;
+
+
+    // ---------- Этап 5: массив производных связей (скрытые связи индекса 2-3) ----------
+    // Полная производная выражения c вдоль x' = f: sum_i dc/dx_i f_i + dc/dt. Берётся только от
+    // выражений без z (z тогда входят лишь через f).
+    PN pn_total_dt(const PN& c, const System& s, const std::vector<PN>& f) ;
+
+    // Для связи k: lv[k] = { g_k, d/dt g_k, ... } до первого выражения с z (оно последнее). Длина — индекс
+    // связи: 1 — z прямо в g, 2 — скорость (маятник индекса 2), 3 — позиция (маятник в декартовых).
+    // Больше трёх производных — отказ (why).
+    bool dae_deriv_array(const System& s, std::vector<std::vector<PN>>& lv, std::string* why) ;
+
+    // Плотная система A x = b (n x n, по строкам) Гауссом с выбором главного; false — вырождена.
+    bool dense_solve(std::vector<double> A, std::vector<double>& b, int n) ;
+
+
+// Индекс >= 2 (этап 5): скрытые связи из массива производных. Связи без z (сама g и её производные до
+// предпоследней) ограничивают x: x0 проецируется на них Гаусс-Ньютоном с минимальной нормой сдвига
+// (x <- x - C^T (C C^T)^-1 c(x), C = dc/dx); последние элементы (с z) решаются Ньютоном по z при этом x.
+// Маятник индекса 3: позиция на окружность, скорость по касательной, lambda из второй производной.
+bool dae_consistent_hidden(const System& s, const std::vector<std::vector<PN>>& lv, const double* a, int na,
+                                  double t0, double* X, std::string* why) ;
+
+    // ОДУ по x: z сняты (их строк в rhs и нет). Уровень B: имена z переезжают в zb_names — f ссылается
+    // на них, а build_namemap отдаёт их решению Ньютона.
+    System sys_core(const System& s) ;
+
+
+    // --- Уровень B: z из g(x, z, t) = 0 Ньютоном (System::zb_g) ---
+    // Только схемы, у которых каждое вычисление f идёт через rhs_over (там z решается перед f):
+    // прочие (CD, SEMP/SIMP/D, неявные, комплексные) печатают f своим путём и увидели бы старую z.
+    bool zb_scheme_ok(Scheme sch) ;
+
+    const char* const kZbSchemeMsg =
+        "Solve as ODE with a nonlinear constraint (z by Newton): explicit RK / DOPRI / GBS and Extr/Comp over "
+        "them only - CD, SEMP/SIMP/D, implicit and complex schemes print f their own way; use a DAE method";
+
+    // Преамбула тела: лямбда ucuda_zb(xs, t) — Ньютон по z (полный, якобиан dg/dz символьный, LU с
+    // выбором главного; допуск и предел итераций — Ньютоновские слоты a[]). Тёплый старт — z входа
+    // X[nx + k]; повторный вызов с тем же x и t — без пересчёта.
+    std::string zb_prelude(const System& c, int nx) ;
+
+    // После шага: z нового состояния st (момент tname) — в st[nx + k].
+    std::string zb_tail(const System& c, const char* st, const std::string& tname, int nx) ;
+
+    // Адаптивный шаг: строки z с dz_k/dt = -(sum_i dg_k/dx_i f_i + dg_k/dt) / (dg_k/dz_k) — если каждая
+    // связь содержит только свою z (dg/dz диагонален), иначе отказ. Выражения ссылаются на z,
+    // rhs_over подставит решение Ньютона в том же x.
+    System sys_augmented_b(const System& s) ;
+
+    void zb_adaptive_finish(AdaptiveCode& c, const System& s) ;
+
+    // st[nx + j] = phi_j(st[0..nx-1]) — пересчёт выходов по новому состоянию (время — tname).
+    std::string outputs_tail(const System& s, const char* st, const std::string& tname) ;
+
+    // Для адаптивного шага z — строки ОДУ с производной вдоль потока dz/dt = sum dphi/dx_i f_i
+    // + dphi/dt: так у них есть F для плотного выхода (Эрмит, стадии схемы). Значение z в узле
+    // всё равно перезаписывается phi(Y), а оценка ошибки по z — нулём (adaptive_outputs_tail).
+    System sys_augmented(const System& s) ;
+
+    // Хвост emb: z в Y — phi(Y) (точно на связи), ошибка по z — 0 (регулятор ведёт по x).
+    void adaptive_outputs_tail(AdaptiveCode& c, const System& s) ;
+
+    const char* const kOutputsNoComplex =
+        "z outputs (Solve as ODE): ExtrZ (complex extrapolation core) is not available - pick another scheme";
+
+// Порядок строк = порядок в таблице схем UI (kBuiltinSchemes в gui.cpp): по
+// нему sort_wrapper_schemes ставит опорники обёрток, и список обёрток
+// читается теми же блоками, что и список встроенных.
+struct SchemeRow { const char* name; int order; bool symmetric; };
+
+const SchemeRow kSchemeRows[] = {
+    { "Euler",                  1, false },
+    { "Euler-Cromer",           1, false },
+    { "D",                      1, false },
+    { "Implicit Euler",         1, false },
+    { "Explicit Midpoint",      2, false },
+    { "Implicit Midpoint",      2, true  },  // Phi* ∘ Phi, самосопряжённая
+    { "CD",                     2, true  },  // самосопряжённая при a[0] = 1/2
+    // {1-0}: неявная половина первой; порядок и симметрия как у исходных.
+    { "CD_{1-0}",               2, true  },
+    { "CD fast",                2, true  },  // CD с предрасчётом констант шага
+    // Неявная половина простыми итерациями: самосопряжённость лишь до
+    // невязки итераций (O(h^(n+1)) при n итерациях), поэтому false.
+    // Порядок 2 -- при n >= 2.
+    { "CD FP",                  2, false },
+    { "CD fast FP",             2, false },
+    { "Complex CD",             2, false },
+    { "Complex CD_{1-0}",       2, false },
+    { "Complex Implicit Euler", 2, false },
+    { "SEMP",                   2, false },  // предиктор-корректор, не Phi* ∘ Phi
+    { "SIMP",                   2, false },
+    { "RK4",                    4, false },
+    { "Complex CD4",            4, false },
+    { "Complex CD4_{1-0}",      4, false },
+    { "CCD4 (o4s3)",            4, true  },  // палиндром (a, 1-2a, a)
+    { "CCD4 (o4s3)_{1-0}",      4, true  },
+    { "CCD4 (o4s4)",            4, true  },  // палиндром (g/2, gc/2, gc/2, g/2)
+    { "CCD4 (o4s4)_{1-0}",      4, true  },
+    { "CCD4 (s-split)_{0-1}",   4, false },  // самосопряжена до Re, после Re дефект O(h^6)
+    { "CCD4 (s-split)_{1-0}",   4, false },  // то же над сопряжённым базовым методом
+    { "RK45",                   5, false },  // Dormand-Prince 5(4), шаг решением 5-го порядка
+    { "DOPRI78",                8, false },
+    { "DOPRI78 (legacy)",       8, false },  // дроби статьи без уточнения
+    { "DOP853",                 8, false },
+    // ГБШ: опорная GBS (n=2) не самосопряжена как одношаговый метод
+    // (дефект O(h^6)), поэтому Extr над ней на трёх стадиях даёт 5, а не 6.
+    // Экстраполяторы — не база для дальнейших обёрток.
+    { "GBS (n=2)",              2, false },
+    { "GBS 2-4",                4, false },
+    { "GBS 2-4-6",              6, false },
+    { "GBS 2-4-6-8",            8, false },
+    { "GBS 2-4-6-8-10",        10, false },
+    { "GBS 2-4-6-8-10-12",     12, false },
+};
+
+
+// Номер строки паспорта, -1 — не встроенная схема.
+int builtin_scheme_rank(const std::string& name) ;
+
+
+    std::string wrap_trim(const std::string& s) ;
+
+
+    // Голова имени — то, что стоит до ПОСЛЕДНЕЙ '|', то есть до коэффициентов.
+    // Метка, если она есть, идёт первой: "s17o8|Short CD". Режем по ПЕРВОЙ
+    // черте, тогда как база берётся по последней, — старое имя без метки
+    // ("Short CD") головы с чертой не имеет и разбирается ровно как раньше.
+    bool wrap_split_head(const std::string& head, std::string* label,
+                         std::string* base, std::string* err) ;
+
+
+// --- Экстраполяция Ричардсона ----------------------------------------------
+
+static const char* const kExtrPrefix  = "Extr(";
+
+static const char* const kExtrZPrefix = "ExtrZ(";
+   // Re только на выходе
+
+bool starts_with(const std::string& s, const char* pref) ;
+
+
+// "12" -> 12. Отказывает на пустой строке, нецифрах и выходе за диапазон,
+// чтобы кривое имя из старого JSON не превратилось молча в рабочую схему.
+bool extr_parse_substeps(const std::string& s, int* out) ;
+
+
+struct ExRat { long long n, d; };
+
+
+long long ex_gcd(long long a, long long b) ;
+
+
+// false — переполнение; вызывающий откатывается на печать литералом.
+bool ex_mul(long long a, long long b, long long& r) ;
+
+
+bool ex_norm(ExRat& x) ;
+
+
+bool ex_mul_rat(ExRat a, ExRat b, ExRat& out) ;
+
+
+bool ex_add_rat(ExRat a, ExRat b, ExRat& out) ;
+
+
+bool ex_pow(long long base, int e, long long& out) ;
+
+
+// Те же alpha, что в extrapolation_weights, но без единого округления.
+// Подстановка u_k = 1/n_k^q в alpha_k ~ n_k^p * prod 1/(u_k - u_m) даёт
+// gamma_k = n_k^(p + q(K-2)) / prod_{m!=k} (n_m^q - n_k^q); общий множитель
+// сокращается нормировкой суммы в единицу.
+bool extrapolation_weights_rational(const std::vector<int>& n, int p, bool symmetric,
+                                    std::vector<ExRat>& out) ;
+
+
+std::string ex_rat_expr(const ExRat& r) ;
+
+std::string scheme_gbs(const System& s, int K) ;
+
+
+// --- Подстановка тела базы в обёртки ------------------------------------------
+//
+// Обёртки (Extr, ExtrZ, Comp) печатают тело базы прямо в каждую стадию, блоком
+// с собственным "const numb h = <подшаг>": внутренний h затеняет макрошаг, и
+// тело по-прежнему не правится ни в одном символе. Раньше тело уходило один раз
+// в локальную лямбду step_ex(h), и это решал компилятор: NVRTC её встраивал
+// всегда, а MSVC на CPU-пути — не всегда. У ExtrZ(Complex CD4|1,2,3) он оставил
+// шесть настоящих вызовов на шаг, и шаг выходил на треть медленнее (354 против
+// 268 нс, побитово тот же результат). Текст растёт в K раз, но ровно столько
+// копий NVRTC делал и сам.
+//
+// Лямбда остаётся запасным путём для тела с return или goto: return внутри
+// подставленного тела вышел бы из всего calculateDiscreteModel, а метка,
+// размноженная по стадиям, не скомпилировалась бы (метки видны во всей функции).
+bool wrapper_can_inline(const std::string& body) ;
+
+
+// Тело построчно с дополнительным отступом: панель KRS показывает текст как есть.
+void emit_indented(std::ostringstream& o, const std::string& body, const char* indent) ;
+
+
+// Веса alpha (по всем K стадиям) и разности alpha - beta литералами: alpha — точными
+// дробями, когда сходятся (как у постоянного шага), разности — double: это только оценка.
+struct ExtrAdWeights {
+    std::vector<std::string> alpha, diff;
+};
+
+
+ExtrAdWeights extr_ad_weights(const std::vector<int>& n, int p, bool symmetric) ;
+
+
+// Общая часть AdaptiveCode экстраполятора: правая часть, плотный выход, порядки.
+AdaptiveCode extr_ad_code(const System& s, int p, int q, int emb_rhs) ;
+
+
+// Хвост emb: Y, E и F1 = f(Y).
+void extr_ad_finish(std::ostringstream& o, const System& s, const char* ac, const char* ec) ;
+
+
+// Неявный полушаг CD (и стадия SIMP, и шаг D): по компоненте — одно вычисление f_i, если она
+// линейна по своей переменной (аналитика), иначе CD_ITERS простых итераций; в единицах полной f.
+// iters -- число итераций нелинейной компоненты (у "CD FP" -- cd_fp_iters; линейная
+// у FP тоже одно вычисление: rem и coef считаются один раз).
+double cd_implicit_sweep_rhs(const System& s, int iters = CD_ITERS) ;
+
+
+// --- Композиция -------------------------------------------------------------
+
+static const char* const kCompPrefix = "Comp(";
+
+
+    std::string comp_trim(const std::string& s) ;
+
+
+    // Режем только по запятым ВЕРХНЕГО уровня: коэффициент — выражение, и
+    // запятая внутри pow(g,2) не должна заканчивать токен.
+    bool comp_split(const std::string& tail, std::vector<std::string>& out) ;
+
+
+    // Сворачивает коэффициент в число. false на любом символе — тогда значение
+    // известно только в рантайме, и звать нас незачем.
+    bool comp_fold(const PN& n, double* v) ;
+
+
+    // Чистый числовой литерал: знак, цифры, точка, экспонента — и ничего
+    // больше. Нужен ровно одному месту: решить, был ли первый столбец строки
+    // нумерующим. Поэтому и такая строгость — "- 2*g1" числом не считается,
+    // и "1 - 2*g1" не теряет свою единицу.
+    bool comp_is_plain_number(const std::string& s) ;
+
+
+    // Срезает нумерующий первый столбец: "3<tab>-0.3825" -> "-0.3825".
+    // Разделителем считаются пробелы/табы и ')' ';' ':' — но НЕ точка (иначе
+    // "1.35" распалось бы на индекс 1 и коэффициент 35) и НЕ запятая (её
+    // разбирает разделение строки на коэффициенты).
+    std::string comp_strip_index(const std::string& line) ;
+
+
+    // comp_fold с окружением: Sym берётся из env, Call считается для функций,
+    // которые в коэффициенте шага вообще осмысленны (sqrt(2), cbrt(2) в
+    // классических композициях). Неизвестное имя — честный false, а не ноль:
+    // подставить ноль значило бы показать пользователю число, которого схема
+    // считать не будет.
+    bool comp_fold_env(const PN& n, const std::map<std::string, double>& env, double* v) ;
+
+
+    // Округляет КАЖДЫЙ числовой литерал в строке, не трогая имена и операторы.
+    // Работает и на цельном числе, и на выражении: "-1.2599210498948732*g1"
+    // укорачивается так же, как "1.3512071919596578".
+    std::string comp_round_literals(const std::string& s, int digits) ;
+
+
+// Ключ сортировки обёртки. Метку не содержит: переименование строку не двигает.
+struct WrapperKey {
+    int              kind = 3;      // 0 Extr, 1 ExtrZ, 2 Comp, 3 не разобралось
+    int              base_rank = 0; // строка паспорта; кастомные — после всех встроенных
+    std::string      base;          // для кастомных опорников — алфавит
+    int              stages = 0;
+    std::vector<int> n;             // подшаги Extr
+    std::string      canon;         // имя без метки — последний разделитель
+};
+
+
+WrapperKey wrapper_key(const std::string& name) ;
+
+
+bool wrapper_key_less(const WrapperKey& x, const WrapperKey& y) ;
+
+}

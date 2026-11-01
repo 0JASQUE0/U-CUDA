@@ -1,4 +1,81 @@
 ﻿#include "session_internal.h"
+using namespace ucuda::analysis_detail;
+
+
+// FastSyncAnalysisSession — зеркалит BasinsAnalysisSession (multi-config,
+// async worker, futures + cancel/progress). build_request читает text-fields
+// и собирает FastSyncRequest. По умолчанию k_forward/k_backward/ic_slave
+// заполняются нулями — пользователь видит сразу все vars в UI.
+void FastSyncAnalysisSession::load_from_record(const SystemRecord& r,
+    const std::vector<std::string>& vars_,
+    const std::vector<std::string>& params_) {
+    vars = vars_;
+    params = params_;
+    custom_schemes = r.custom_schemes;
+    enabled_builtin_schemes = enabled_builtins_from_record(r);
+
+    FastSyncConfig c;
+    c.label = "FastSync 1";
+    c.h_text = default_h_from_record(r);
+    c.scheme = default_scheme_from_record(r, c.scheme);
+    c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
+
+    // Параметры — из record, остальные секции инициализируем нулями.
+    for (const auto& p : params) {
+        auto it = r.param_values.find(p);
+        c.param_values[p] = (it != r.param_values.end()) ? it->second : std::string("0");
+    }
+    for (const auto& v : vars) {
+        auto it = r.init_conditions.find(v);
+        // ic_master из record (если есть), остальные три — нули.
+        c.ic_master[v]  = (it != r.init_conditions.end()) ? it->second : std::string("0");
+        c.ic_slave[v]   = "0";
+        c.k_forward[v]  = "0";
+        c.k_backward[v] = "0";
+    }
+    c.axis_x_var = 0;
+    c.axis_y_var = (vars.size() > 1) ? 1 : 0;
+
+    configs.clear();
+    configs.push_back(std::move(c));
+    active_config_index = 0;
+    running_config_index = -1;
+}
+
+
+void FastSyncAnalysisSession::add_config() {
+    FastSyncConfig c;
+    if (!configs.empty()) {
+        c = configs.back();
+        c.result = FastSyncResult{};
+        c.last_run_ok = false;
+        c.last_error.clear();
+        c.data_generation = 0;
+        c.fit_request = false;
+    } else {
+        for (const auto& v : vars) {
+            c.ic_master[v] = "0"; c.ic_slave[v] = "0";
+            c.k_forward[v] = "0"; c.k_backward[v] = "0";
+        }
+        for (const auto& p : params) c.param_values[p] = "0";
+    }
+    c.label = "FastSync " + std::to_string(configs.size() + 1);
+    configs.push_back(std::move(c));
+    active_config_index = (int)configs.size() - 1;
+}
+
+
+void FastSyncAnalysisSession::remove_config(int i) {
+    if (i < 0 || i >= (int)configs.size()) return;
+    if (in_flight && running_config_index == i) return;
+    configs.erase(configs.begin() + i);
+    if (in_flight && running_config_index > i) running_config_index--;
+    if (active_config_index >= (int)configs.size())
+        active_config_index = (int)configs.size() - 1;
+    if (active_config_index < 0) active_config_index = 0;
+}
 
 namespace ucuda::analysis_detail {
 
@@ -11,8 +88,9 @@ FastSyncRequest build_fastsync_request(const FastSyncAnalysisSession& s,
 
     // values[0] = a[0] (symmetry для CD), затем по параметрам.
     int nparams = (int)s.params.size();
-    req.values.assign((size_t)nparams + 1, 0.0);
+    req.values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.values[0] = parse_d(c.symmetry_s, 0.5);
+    scheme_fill_tail(req.values.data() + nparams + 1, c.cd_fp_iters, c.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -78,6 +156,9 @@ FastSyncRequest build_fastsync_request(const FastSyncAnalysisSession& s,
 
     return req;
 }
+}
+
+namespace ucuda::analysis_detail {
 
 
 void apply_fastsync_result(FastSyncConfig& c, FastSyncResult&& r) {
@@ -87,81 +168,6 @@ void apply_fastsync_result(FastSyncConfig& c, FastSyncResult&& r) {
     c.data_generation++;
     c.fit_request = true;
 }
-}
-using namespace ucuda::analysis_detail;
-
-
-// FastSyncAnalysisSession — зеркалит BasinsAnalysisSession (multi-config,
-// async worker, futures + cancel/progress). build_request читает text-fields
-// и собирает FastSyncRequest. По умолчанию k_forward/k_backward/ic_slave
-// заполняются нулями — пользователь видит сразу все vars в UI.
-void FastSyncAnalysisSession::load_from_record(const SystemRecord& r,
-    const std::vector<std::string>& vars_,
-    const std::vector<std::string>& params_) {
-    vars = vars_;
-    params = params_;
-    custom_schemes = r.custom_schemes;
-    enabled_builtin_schemes = enabled_builtins_from_record(r);
-
-    FastSyncConfig c;
-    c.label = "FastSync 1";
-    c.h_text = default_h_from_record(r);
-    c.scheme = default_scheme_from_record(r, c.scheme);
-    c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
-
-    // Параметры — из record, остальные секции инициализируем нулями.
-    for (const auto& p : params) {
-        auto it = r.param_values.find(p);
-        c.param_values[p] = (it != r.param_values.end()) ? it->second : std::string("0");
-    }
-    for (const auto& v : vars) {
-        auto it = r.init_conditions.find(v);
-        // ic_master из record (если есть), остальные три — нули.
-        c.ic_master[v]  = (it != r.init_conditions.end()) ? it->second : std::string("0");
-        c.ic_slave[v]   = "0";
-        c.k_forward[v]  = "0";
-        c.k_backward[v] = "0";
-    }
-    c.axis_x_var = 0;
-    c.axis_y_var = (vars.size() > 1) ? 1 : 0;
-
-    configs.clear();
-    configs.push_back(std::move(c));
-    active_config_index = 0;
-    running_config_index = -1;
-}
-
-
-void FastSyncAnalysisSession::add_config() {
-    FastSyncConfig c;
-    if (!configs.empty()) {
-        c = configs.back();
-        c.result = FastSyncResult{};
-        c.last_run_ok = false;
-        c.last_error.clear();
-        c.data_generation = 0;
-        c.fit_request = false;
-    } else {
-        for (const auto& v : vars) {
-            c.ic_master[v] = "0"; c.ic_slave[v] = "0";
-            c.k_forward[v] = "0"; c.k_backward[v] = "0";
-        }
-        for (const auto& p : params) c.param_values[p] = "0";
-    }
-    c.label = "FastSync " + std::to_string(configs.size() + 1);
-    configs.push_back(std::move(c));
-    active_config_index = (int)configs.size() - 1;
-}
-
-
-void FastSyncAnalysisSession::remove_config(int i) {
-    if (i < 0 || i >= (int)configs.size()) return;
-    if (in_flight && running_config_index == i) return;
-    configs.erase(configs.begin() + i);
-    if (in_flight && running_config_index > i) running_config_index--;
-    if (active_config_index >= (int)configs.size())
-        active_config_index = (int)configs.size() - 1;
-    if (active_config_index < 0) active_config_index = 0;
 }
 
 

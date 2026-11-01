@@ -12,6 +12,10 @@ std::string session_to_json(const PhaseAnalysisSession& s) {
     o << "  \"skip_time\":"; jstr(o, s.skip_time); o << ",\n";
     o << "  \"scheme\":"; jstr(o, s.scheme); o << ",\n";
     o << "  \"symmetry_s\":"; jstr(o, s.symmetry_s); o << ",\n";
+    o << "  \"cd_fp_iters\":"; jstr(o, s.cd_fp_iters); o << ",\n";
+    o << "  \"newton_tol\":"; jstr(o, s.newton.tol); o << ",\n";
+    o << "  \"newton_max_iters\":"; jstr(o, s.newton.max_iters); o << ",\n";
+    o << "  \"newton_full\":" << (s.newton.full ? "true" : "false") << ",\n";
     o << "  \"decimation\":"; jstr(o, s.decimation); o << ",\n";
     write_adaptive(o, s.adaptive, "  ", ",\n");
     o << "  \"auto_recompute\":" << (s.auto_recompute ? "true" : "false") << ",\n";
@@ -69,6 +73,10 @@ bool session_from_json(const std::string& json, PhaseAnalysisSession& s) {
             else if (key == "skip_time")  s.skip_time = p.str();
             else if (key == "scheme")     s.scheme = p.str();
             else if (key == "symmetry_s") s.symmetry_s = p.str();
+            else if (key == "cd_fp_iters") s.cd_fp_iters = p.str();
+            else if (key == "newton_tol")          s.newton.tol       = p.str();
+            else if (key == "newton_max_iters")    s.newton.max_iters = p.str();
+            else if (key == "newton_full")         s.newton.full      = p.boolean();
             else if (key == "decimation") s.decimation = p.str();
             else if (key == "adaptive")   read_adaptive(p, s.adaptive);
             else if (key == "auto_recompute") s.auto_recompute = p.boolean();

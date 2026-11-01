@@ -6,6 +6,8 @@ ucuda_library(numerics
     src/circuit_synth.cpp
     src/integrator.cpp
     src/krs_cpu.cpp
+    src/spice_parse.cpp
+    src/kicad_import.cpp
 )
 target_link_libraries(ucuda_numerics PUBLIC ucuda::equations PRIVATE ucuda::platform ${CMAKE_DL_LIBS} Threads::Threads)
 # ucuda_hp.h (double-double/quad-double) — общий для NVRTC-ядер и CPU-сборки КРС;

@@ -275,6 +275,7 @@ void take_arg(const char*& p, const char* e, const char*& ab, const char*& ae) {
 }
 
 float typeset(MathLayout& L, const char* b, const char* e, float size, Style st);
+MathExtent layout_extent(const MathLayout& L, float width, float size);   // ниже; нужен \frac
 
 // Габарит «чернил» набранного фрагмента относительно его начала и базовой
 // линии: по метрикам самих глифов, а не по advance и ascent шрифта.
@@ -547,8 +548,12 @@ float typeset(MathLayout& L, const char* b, const char* e, float size, Style st)
                 const float wd = typeset(den, db, de, fs, st);
                 const float w  = std::max(wn, wd) + size * 0.20f;
                 const float axis = -size * 0.28f;   // высота дробной черты над базовой линией
-                append_layout(L, num, x + (w - wn) * 0.5f, axis - fs * 0.45f);
-                append_layout(L, den, x + (w - wd) * 0.5f, axis + fs * 0.78f);
+                // Числитель и знаменатель — от их фактического габарита: вложенная дробь или индекс
+                // иначе налезают на черту и на соседний этаж (дробь в знаменателе дроби).
+                const MathExtent en = layout_extent(num, wn, fs), ed = layout_extent(den, wd, fs);
+                const float gap = size * 0.10f;
+                append_layout(L, num, x + (w - wn) * 0.5f, std::min(axis - fs * 0.45f, axis - gap - en.descent));
+                append_layout(L, den, x + (w - wd) * 0.5f, std::max(axis + fs * 0.78f, axis + gap + ed.ascent));
                 L.marks.push_back({ x + size * 0.05f, x + w - size * 0.05f, axis, 0.0f });
                 x += w;
                 continue;
@@ -598,7 +603,8 @@ float typeset(MathLayout& L, const char* b, const char* e, float size, Style st)
             if (st.italic)  it = true;
             ImFont* wf = it ? math_italic() : math_roman();
             emit(L, x, g ? font_with_glyph(wf, g) : wf, size, g ? g : w);
-            if (g || w.size() == 1) emit_trailing_digits(L, x, p, e, size);
+            // Внутри индекса цифры остаются в строке: vc_{c1} — это «c1», а не c с индексом 1.
+            if ((g || w.size() == 1) && !st.script) emit_trailing_digits(L, x, p, e, size);
             if (fn && !st.script && func_arg_follows(p, e)) x += size * 0.17f;
             continue;
         }
@@ -777,7 +783,13 @@ float plot_y_axis_margin(const AxisInfo& y, const char* y_name) {
     if (std::abs(vry) >= 1e-30) {
         const double lo = std::min(emin, emax);
         const double hi = std::max(emin, emax);
-        if (y.log_scale) {
+        if (y.display_log && lo > 0.0) {
+            // Лог-отображение: подписи — главные тики log_axis_ticks, как в draw_axis_y_grid.
+            // Высоты плота здесь нет (марджин нужен до layout'а) — берём с запасом: на высоком
+            // плоте подписей больше, а ширину задаёт самая длинная из них.
+            for (const LogAxisTick& t : log_axis_ticks(lo, hi, 2000.0f, false))
+                if (t.major) max_w = std::max(max_w, plot_text_size(fmt_tick(t.value).c_str()).x);
+        } else if (y.log_scale) {
             // Лог-ось подписывает только границы диапазона — см. draw_axis_y_grid.
             max_w = std::max(plot_text_size(fmt_tick(lo).c_str()).x,
                              plot_text_size(fmt_tick(hi).c_str()).x);
@@ -1021,7 +1033,7 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     // поэтому и позиция тика считается через log10 — линейная формула ниже
     // верна только на концах диапазона. Guard lo > 0 повторяет guard самого
     // Plot2DView: чекбокс можно включить до Run, и тогда ось остаётся линейной.
-    if (x.log_scale && lo > 0.0) {
+    if ((x.log_scale || x.display_log) && lo > 0.0) {
         const double le0 = std::log10(emin), le1 = std::log10(emax);
         const double lvr = le1 - le0;
         const ImU32 col_minor = dim_grid_col(col_grid);
@@ -1111,9 +1123,26 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     double lo = std::min(emin, emax);
     double hi = std::max(emin, emax);
 
-    // Декадной сетки тут нет намеренно: отображение по Y у Plot2DView линейное
-    // (лог-оси по Y не бывает, см. AxisInfo::log_scale) — тики 10^k встали бы
-    // не там, где данные. Остаются границы диапазона.
+    // Лог-отображение Y (AxisInfo::display_log, YS/YW в Plot2DView): декадная сетка, позиция
+    // тика через log10 — зеркало ветки лог-оси в draw_axis_x_grid.
+    if (y.display_log && lo > 0.0) {
+        const double le0 = std::log10(emin), le1 = std::log10(emax);
+        const double lvr = le1 - le0;
+        const ImU32 col_minor = dim_grid_col(col_grid);
+        for (const LogAxisTick& t : log_axis_ticks(lo, hi, plot_h, false)) {
+            float py = axis_px(pos.y + (float)((le1 - std::log10(t.value)) / lvr) * plot_h,
+                               pos.y, plot_h);
+            fill_row_px(dl, py, pos.x, pos.x + plot_w, t.major ? col_grid : col_minor);
+            if (!t.major) continue;
+            std::string lbl = fmt_tick(t.value);
+            ImVec2 ts = plot_text_size(lbl.c_str());
+            plot_text(dl, ImVec2(pos.x - ts.x - 4, px_center(py) - ts.y * 0.5f), col_text, lbl.c_str());
+        }
+        return;
+    }
+
+    // Без display_log декадной сетки тут нет намеренно: log_scale по Y — свойство данных, а
+    // отображение тогда линейное — тики 10^k встали бы не там, где данные. Остаются границы.
     if (y.log_scale) {
         auto draw_edge = [&](double yv) {
             float py = axis_px(pos.y + (float)((emax - yv) / vry) * plot_h, pos.y, plot_h);

@@ -26,3 +26,106 @@ if(UNIX)
     target_compile_definitions(platform_test PRIVATE U_CUDA_TEST_SOURCE="$<TARGET_FILE_DIR:platform_test>/kernels")
     add_test(NAME platform COMMAND platform_test)
 endif()
+
+include(TestDependencies.cmake)
+include(GoogleTest)
+find_package(Git REQUIRED)
+find_program(ucuda_nvidia_smi nvidia-smi)
+if(NOT ucuda_nvidia_smi)
+    set(ucuda_nvidia_smi "")
+endif()
+add_executable(ucuda_regression regression_main.cpp regression_test.cpp artifacts_test.cpp)
+target_link_libraries(ucuda_regression PRIVATE GTest::gtest nlohmann_json::nlohmann_json
+    ucuda::analysis ucuda::storage ucuda::numerics ucuda::platform CUDA::cuda_driver)
+ucuda_runtime(ucuda_regression)
+target_compile_definitions(ucuda_regression PRIVATE UCUDA_TEST_SOURCE="${PROJECT_SOURCE_DIR}")
+gtest_discover_tests(ucuda_regression TEST_PREFIX "numerical." TEST_LIST UC_REGRESSION_TESTS
+    DISCOVERY_MODE PRE_TEST NO_PRETTY_VALUES)
+add_executable(ucuda_dae_tests regression_main.cpp dae_gtest.cpp)
+target_link_libraries(ucuda_dae_tests PRIVATE GTest::gtest nlohmann_json::nlohmann_json ucuda::analysis ucuda::storage ucuda::numerics ucuda::platform CUDA::cuda_driver)
+target_compile_definitions(ucuda_dae_tests PRIVATE UCUDA_TEST_ARTIFACTS UCUDA_TEST_GTEST UCUDA_TEST_SUITE="dae")
+ucuda_runtime(ucuda_dae_tests)
+gtest_discover_tests(ucuda_dae_tests TEST_PREFIX "numerical." TEST_LIST UC_DAE_TESTS DISCOVERY_MODE PRE_TEST)
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/LabelTests.cmake")
+
+set(upstream_targets)
+foreach(test krs_cpu adaptive architecture sessions tabs network library spice prune)
+    add_executable(upstream_${test} u-cuda/${test}_test.cpp)
+    target_link_libraries(upstream_${test} PRIVATE nlohmann_json::nlohmann_json ucuda::application ucuda::storage ucuda::numerics ucuda::platform CUDA::cuda_driver CUDA::nvrtc)
+    ucuda_runtime(upstream_${test})
+    target_compile_definitions(upstream_${test} PRIVATE UCUDA_TEST_SOURCE="${PROJECT_SOURCE_DIR}" UCUDA_TEST_ARTIFACTS UCUDA_TEST_SUITE="${test}")
+    if(test STREQUAL network)
+        target_compile_definitions(upstream_${test} PRIVATE UCUDA_NETWORK_DIAGNOSTICS)
+    endif()
+    add_test(NAME upstream_${test} COMMAND upstream_${test})
+    if(test MATCHES "^(krs_cpu|architecture|sessions|spice)$")
+        set(backend cpu)
+    else()
+        set(backend gpu)
+    endif()
+    set_tests_properties(upstream_${test} PROPERTIES LABELS "regression;${backend}" RUN_SERIAL TRUE TIMEOUT 3600 SKIP_RETURN_CODE 77)
+    list(APPEND upstream_targets upstream_${test})
+endforeach()
+if(WIN32)
+    add_executable(upstream_kicad u-cuda/kicad_test.cpp)
+    target_link_libraries(upstream_kicad PRIVATE ucuda::analysis ucuda::numerics ucuda::platform CUDA::cuda_driver)
+    ucuda_runtime(upstream_kicad)
+    add_test(NAME upstream_kicad COMMAND upstream_kicad)
+    set_tests_properties(upstream_kicad PROPERTIES LABELS "regression;cpu;external" TIMEOUT 1800 SKIP_RETURN_CODE 77)
+    list(APPEND upstream_targets upstream_kicad)
+endif()
+
+add_executable(ucuda_benchmark performance_benchmark.cpp)
+target_link_libraries(ucuda_benchmark PRIVATE benchmark::benchmark ucuda::analysis ucuda::numerics ucuda::platform CUDA::cuda_driver)
+ucuda_runtime(ucuda_benchmark)
+
+add_executable(ucuda_test_tool test_tool.cpp)
+target_link_libraries(ucuda_test_tool PRIVATE nlohmann_json::nlohmann_json ucuda::cuda ucuda::platform CUDA::nvrtc CUDA::cuda_driver)
+ucuda_runtime(ucuda_test_tool)
+string(SHA256 ucuda_test_flags "${CMAKE_CXX_FLAGS}|${CMAKE_CXX_FLAGS_RELEASE}|${CMAKE_CUDA_FLAGS}|${CMAKE_CUDA_FLAGS_RELEASE}|${CMAKE_CUDA_ARCHITECTURES}")
+target_compile_definitions(ucuda_test_tool PRIVATE
+    UCUDA_TEST_SOURCE="${PROJECT_SOURCE_DIR}"
+    UCUDA_TEST_BUILD="${CMAKE_BINARY_DIR}"
+    UCUDA_TEST_CTEST="${CMAKE_CTEST_COMMAND}"
+    UCUDA_TEST_GIT="${GIT_EXECUTABLE}"
+    UCUDA_TEST_COMPILER="${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}"
+    UCUDA_TEST_CUDA_COMPILER="${CMAKE_CUDA_COMPILER_VERSION}"
+    UCUDA_TEST_SYSTEM="${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_VERSION}"
+    UCUDA_TEST_NVIDIA_SMI="${ucuda_nvidia_smi}"
+    UCUDA_TEST_CONFIGURATION="$<CONFIG>"
+    UCUDA_TEST_BUILD_FLAGS="${ucuda_test_flags}"
+    UCUDA_BENCHMARK_NAME="$<TARGET_FILE_NAME:ucuda_benchmark>")
+target_compile_definitions(ucuda_regression PRIVATE UCUDA_TEST_TOOL="$<TARGET_FILE:ucuda_test_tool>")
+add_dependencies(ucuda_regression ucuda_test_tool)
+set_tests_properties(adaptive_cpu architecture PROPERTIES LABELS "regression;cpu")
+set_tests_properties(adaptive_gpu PROPERTIES LABELS "regression;gpu")
+set_tests_properties(gpu_smoke PROPERTIES LABELS "smoke;regression;gpu")
+if(UNIX)
+    set_tests_properties(platform PROPERTIES LABELS "regression;cpu")
+endif()
+set(U_CUDA_TEST_BACKEND "all" CACHE STRING "Test backend: all, cpu, gpu")
+if(WIN32)
+    # Keep CRT argv, filesystem paths and JSON reasons UTF-8 on Windows too.
+    foreach(test_target adaptive_test architecture_test gpu_smoke ucuda_regression ucuda_dae_tests
+            ucuda_benchmark ucuda_test_tool ${upstream_targets})
+        target_sources(${test_target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/utf8.manifest")
+    endforeach()
+endif()
+set_property(CACHE U_CUDA_TEST_BACKEND PROPERTY STRINGS all cpu gpu)
+set(U_CUDA_TEST_CASES "" CACHE STRING "Optional CTest name regular expression")
+set(U_CUDA_TEST_BENCHMARKS "" CACHE STRING "Optional Google Benchmark name regular expression")
+set(U_CUDA_TEST_BASELINE "${PROJECT_SOURCE_DIR}/tests/baselines/active.json" CACHE FILEPATH "Accepted baseline")
+foreach(mode smoke regression performance all)
+    set(check_targets ucuda_test_tool ucuda_regression gpu_smoke)
+    if(mode STREQUAL regression OR mode STREQUAL all)
+        list(APPEND check_targets ucuda_dae_tests adaptive_test architecture_test ${upstream_targets})
+    endif()
+    if(mode STREQUAL performance OR mode STREQUAL all)
+        list(APPEND check_targets ucuda_benchmark)
+    endif()
+    add_custom_target(check-${mode}
+        COMMAND $<TARGET_FILE:ucuda_test_tool> run --mode ${mode} --backend "${U_CUDA_TEST_BACKEND}"
+            --baseline "${U_CUDA_TEST_BASELINE}" --cases "${U_CUDA_TEST_CASES}" --benchmarks "${U_CUDA_TEST_BENCHMARKS}"
+        DEPENDS ${check_targets}
+        USES_TERMINAL VERBATIM)
+endforeach()

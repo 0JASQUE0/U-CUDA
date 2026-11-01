@@ -1,8 +1,7 @@
 ﻿#include "engine_impl.h"
+using namespace ucuda::cuda_detail;
 
-
-
-    LLE1DResult ParametricEngine::Impl::run_lle1d_ad_seq(const LLE1DRequest& req) {
+LLE1DResult ParametricEngine::Impl::run_lle1d_ad_seq(const LLE1DRequest& req) {
         LLE1DResult res;
         std::vector<double> out, st;
         bool cancelled = false;
@@ -13,23 +12,25 @@
         res.continuation_reverse = req.continuation && req.continuation_reverse;
         res.lyapunov = out;
         res.flags.assign((size_t)req.n_pts, 0);
-        for (int j = 0; j < req.n_pts; ++j)
-            res.flags[(size_t)j] = std::isfinite(out[(size_t)j]) ? REGIME_OSCILLATION : REGIME_UNBOUND;
+        for (int j = 0; j < req.n_pts; ++j) {
+            double& v = res.lyapunov[(size_t)j];
+            if (v == (double)UCUDA_CANCELLED_VALUE) {   // Stop
+                v = std::numeric_limits<double>::quiet_NaN();
+                res.flags[(size_t)j] = REGIME_CANCELLED;
+            } else {
+                res.flags[(size_t)j] = std::isfinite(v) ? REGIME_OSCILLATION : REGIME_UNBOUND;
+            }
+        }
         res.ad_stats = st;
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         fill_curve1d_snapshot(res.snapshot, req, req.continuation, req.use_cpu);
         write_curve1d_csv(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancelled;
         return res;
     }
 
-
-    // run_lle_1d — порт NonLinAnal::LLE1D из hostLibrary.cu, той же diff-friendly стратегией, что
-    // run_bif1d (оригинальные имена слева, req-имена справа). [ADAPT] — отличия от NonLinAnal:
-    // <<<>>> → cuLaunchKernel (NVRTC-модуль); gpuErrorCheck → локальный LLE_CHECK с cleanup'ом,
-    // без exit(); OUT_FILE_PATH — req.csv_output_path (пусто = без файла); результат пишется в
-    // LLE1DResult (память + опц. CSV).
-    LLE1DResult ParametricEngine::Impl::run_lle_1d(const LLE1DRequest& req) {
+LLE1DResult ParametricEngine::Impl::run_lle_1d(const LLE1DRequest& req) {
         LLE1DResult res;
         auto fail = [&](const std::string& msg) -> LLE1DResult& { res.error = msg; return res; };
 
@@ -44,6 +45,7 @@
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else if (!(req.adaptive.enabled && req.adaptive.axis_kind[0] != kAdAxisSystem)) {
             // Ось настройки шага (rtol, atol, ...) параметр системы не трогает — как в run_bif1d.
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
@@ -234,12 +236,14 @@
         res.n_pts    = nPts;
         res.param_lo = ranges[0];
         res.param_hi = ranges[1];
-        res.lyapunov.assign(nPts, 0.0);
-        res.flags.assign(nPts, 0);
+        // Чанки, до которых не дошёл Stop, остаются пустыми.
+        res.lyapunov.assign(nPts, std::numeric_limits<double>::quiet_NaN());
+        res.flags.assign(nPts, REGIME_CANCELLED);
         if (ad) res.ad_stats.assign((size_t)nPts * 4, 0.0);
 
         // Главный цикл (порт NonLinAnal LLE1D:2403-2496)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             LLE_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -352,22 +356,19 @@
                 size_t global_idx = originalNPtsLimiter * iter + k;
                 double param_val  = req.log_scale ? getValueByIdx_log_local(global_idx, nPts, ranges[0], ranges[1])
                                                    : getValueByIdx_local(global_idx, nPts, ranges[0], ranges[1]);
-                double v          = h_lleResult[k];
-
-                // 999 / -999 — спец-флаги из kernel'а (нет аттрактора / разошлось). Наружу отдаём
-                // NaN, а не сырой sentinel: 999 — легитимное по типу значение λ, поэтому любой
-                // потребитель, забывший сверить flags[], молча рисовал выброс на 999. NaN
-                // отсекается через !isfinite (и в GUI, и в min/max), т.е. безопасен по умолчанию;
-                // flags[] остаётся источником истины о ПРИЧИНЕ отсутствия точки.
-                const bool diverged = (v == 999.0 || v == -999.0);
-                if (diverged) v = std::numeric_limits<double>::quiet_NaN();
+                // 999 / -999 — спец-флаги из kernel'а (нет аттрактора / разошлось), 998 — точку
+                // прервал Stop. Наружу отдаём NaN, а не сырой sentinel: 999 — легитимное по типу
+                // значение λ, поэтому любой потребитель, забывший сверить flags[], молча рисовал
+                // выброс на 999. NaN отсекается через !isfinite (и в GUI, и в min/max), т.е.
+                // безопасен по умолчанию; flags[] остаётся источником истины о ПРИЧИНЕ отсутствия
+                // точки. LLE не детектирует fixed point (ветка в LLEKernelCUDA выключена).
+                int flag = REGIME_OSCILLATION;
+                const double v = lyap_value_from_kernel((double)h_lleResult[k], flag);
 
                 res.lyapunov[global_idx] = v;
-                // LLE не детектирует fixed point (ветка в LLEKernelCUDA выключена),
-                // поэтому единственный «плохой» код — REGIME_UNBOUND.
-                res.flags[global_idx] = diverged ? REGIME_UNBOUND : REGIME_OSCILLATION;
+                res.flags[global_idx] = flag;
 
-                if (out.is_open()) data_export::write_lle1d_row(out, param_val, v);
+                if (out.is_open() && flag != REGIME_CANCELLED) data_export::write_lle1d_row(out, param_val, v);
             }
             if (out.is_open()) out.close();
         }
@@ -376,17 +377,11 @@
         #undef LLE_CHECK
         #undef LLE_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
-
-    // run_lle_2d — λ(p1, p2) на квадратной сетке, порт NonLinAnal::LLE2D на NVRTC-engine.
-    // Отличия от LLE1D: ranges[4], indicesOfMutVars[2], dimension=2, chunking по ячейкам
-    // (n_pts × n_pts может не влезть в память за раз), результат — плоский row-major массив.
-    // par_or_var (compile-time): mixed_mode=true → 2; иначе оба свипа одного типа — 1 если обе оси
-    // param, 0 если обе IC. Смешанные комбинации без mixed_mode не поддержаны (validator
-    // отказывает — kernel-ветки под это нет).
-    LLE2DResult ParametricEngine::Impl::run_lle_2d(const LLE2DRequest& req) {
+LLE2DResult ParametricEngine::Impl::run_lle_2d(const LLE2DRequest& req) {
         LLE2DResult res;
         auto fail = [&](const std::string& msg) -> LLE2DResult& { res.error = msg; return res; };
 
@@ -410,6 +405,8 @@
         auto check_var = [&](int v0based) -> bool {
             return v0based >= 0 && v0based < req.amountOfX;
         };
+        if ((req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) ||
+            (req.sweep_over_var_2 && dae_z_axis(req.krs_body, req.var_sweep_index_2))) return fail(kDaeZAxisMsg);
 
         int par_or_var;
         int  idx_axis_x, idx_axis_y;   // что передаём в indicesOfMutVars[0/1]
@@ -655,8 +652,9 @@
         res.param_hi   = req.param_hi;
         res.param_lo_2 = req.param_lo_2;
         res.param_hi_2 = req.param_hi_2;
-        res.values.assign(total_cells, 0.0);
-        res.flags.assign(total_cells, 0);
+        // Ячейки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.values.assign(total_cells, std::numeric_limits<double>::quiet_NaN());
+        res.flags.assign(total_cells, REGIME_CANCELLED);
         if (ad) res.ad_stats.assign(total_cells * 4, 0.0);
 
         // Snapshot of CSV-relevant fields in USER ordering — engine + GUI
@@ -688,6 +686,7 @@
         }
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             LLE2_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -804,8 +803,10 @@
                 } else {
                     out_idx = kernel_idx;
                 }
+                // 999/-999 — kernel-sentinel расходимости; FP LLE не различает. Прерванную
+                // Stop ячейку (UCUDA_CANCELLED_VALUE) оставляем пустой.
+                if (v == (double)UCUDA_CANCELLED_VALUE) continue;
                 res.values[out_idx] = v;
-                // 999/-999 — kernel-sentinel расходимости; FP LLE не различает.
                 res.flags[out_idx]  = (v == 999.0 || v == -999.0) ? REGIME_UNBOUND
                                                                   : REGIME_OSCILLATION;
             }
@@ -844,15 +845,11 @@
         #undef LLE2_CHECK
         #undef LLE2_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
-
-    // run_lle1d_continuation_gpu / run_ls1d_continuation_gpu — GPU-двойники
-    // CPU-веток (см. run_lle1d_cpu / run_ls1d_cpu). Тот же «костыль», что у
-    // Bifurcation1D: single-thread kernel, потому что continuation — цепочка.
-    // Медленнее CPU, нужны для сверки и как привычный способ считать на GPU.
-    LLE1DResult ParametricEngine::Impl::run_lle1d_continuation_gpu(const LLE1DRequest& req) {
+LLE1DResult ParametricEngine::Impl::run_lle1d_continuation_gpu(const LLE1DRequest& req) {
         LLE1DResult res;
         auto fail = [&](const std::string& msg) -> LLE1DResult& { res.error = msg; return res; };
 
@@ -919,9 +916,7 @@
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         LC_CHECK(cudaDeviceSynchronize(), "sync after lle cont");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост UCUDA_CANCELLED_VALUE, начало цело.
 
         std::vector<numb> host((size_t)nPts);
         LC_CHECK(cudaMemcpy(host.data(), d_result, (size_t)nPts * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result");
@@ -935,17 +930,25 @@
         res.continuation_reverse = req.continuation_reverse;
         res.lyapunov.assign(host.begin(), host.end());   // numb -> double
         res.flags.assign(nPts, 0);
-        // NaN у continuation-ядра означает расходимость (FP оно не различает).
-        for (int j = 0; j < nPts; ++j)
+        // NaN у continuation-ядра означает расходимость (FP оно не различает),
+        // UCUDA_CANCELLED_VALUE — хвост, до которого не дошёл Stop.
+        for (int j = 0; j < nPts; ++j) {
+            if (res.lyapunov[j] == (double)UCUDA_CANCELLED_VALUE) {
+                res.lyapunov[j] = std::numeric_limits<double>::quiet_NaN();
+                res.flags[j] = REGIME_CANCELLED;
+                continue;
+            }
             res.flags[j] = std::isfinite(res.lyapunov[j]) ? REGIME_OSCILLATION : REGIME_UNBOUND;
+        }
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         fill_curve1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
         write_curve1d_csv(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
-    void ParametricEngine::Impl::prewarm_lle1d(const LLE1DRequest& req) {
+void ParametricEngine::Impl::prewarm_lle1d(const LLE1DRequest& req) {
         if (req.adaptive.enabled && req.use_cpu) { prewarm_ad_cpu(req.adaptive, req.amountOfX); return; }
         std::string err;
         if (!ensure_init(err)) return;
@@ -956,7 +959,7 @@
         else compile_lle_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
     }
 
-    void ParametricEngine::Impl::prewarm_lle2d(const LLE2DRequest& req) {
+void ParametricEngine::Impl::prewarm_lle2d(const LLE2DRequest& req) {
         std::string err;
         if (!ensure_init(err)) return;
         cuCtxSetCurrent(context);

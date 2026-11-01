@@ -1,20 +1,25 @@
 ﻿#include "expression_internal.h"
+using namespace ucuda::equations_detail;
 
 namespace ucuda::equations_detail {
+PN mk(Node::Kind k) { auto n = std::make_shared<Node>(); n->kind = k; return n; }
+}
 
-    PN mk(Node::Kind k) { auto n = std::make_shared<Node>(); n->kind = k; return n; }
-
-
-    const std::set<std::string>& known_funcs() {
+namespace ucuda::equations_detail {
+const std::set<std::string>& known_funcs() {
         static const std::set<std::string> f = {
             "sin","cos","tan","asin","acos","atan","sinh","cosh","tanh",
             "exp","log","log2","log10","sqrt","cbrt","fabs","abs",
-            "pow","atan2","fmod","floor","ceil"
+            "pow","atan2","fmod","floor","ceil",
+            "copysign",  // производная fabs (pn_diff): её печатает pn_print, и текст читается обратно
+            "fmin", "fmax", "min", "max"   // min/max разбираются в fmin/fmax (так их печатает emit)
         };
         return f;
     }
+}
 
-    const std::map<std::string, std::string>& latex_funcs() {
+namespace ucuda::equations_detail {
+const std::map<std::string, std::string>& latex_funcs() {
         static const std::map<std::string, std::string> m = {
             {"sin","sin"},{"cos","cos"},{"tan","tan"},{"arcsin","asin"},
             {"arccos","acos"},{"arctan","atan"},{"sinh","sinh"},{"cosh","cosh"},
@@ -22,8 +27,10 @@ namespace ucuda::equations_detail {
         };
         return m;
     }
+}
 
-    const std::map<std::string, std::string>& latex_symbols() {
+namespace ucuda::equations_detail {
+const std::map<std::string, std::string>& latex_symbols() {
         static const std::map<std::string, std::string> m = {
             {"alpha","alpha"},{"beta","beta"},{"gamma","gamma"},{"delta","delta"},
             {"epsilon","epsilon"},{"varepsilon","epsilon"},{"zeta","zeta"},{"eta","eta"},
@@ -36,17 +43,20 @@ namespace ucuda::equations_detail {
         };
         return m;
     }
+}
 
-
-    int prec(Node::Kind k) {
+namespace ucuda::equations_detail {
+int prec(Node::Kind k) {
         switch (k) {
         case Node::Add: case Node::Sub: return 1;
         case Node::Mul: case Node::Div: return 2;
         case Node::Neg: return 3; case Node::Pow: return 4; default: return 5;
         }
     }
+}
 
-    std::string fmtnum(double v) {
+namespace ucuda::equations_detail {
+std::string fmtnum(double v) {
         // целые числа в разумном диапазоне печатаем как "N.0", без научной формы
         // (иначе 10 -> "1e+01"). Большие/дробные -> кратчайший round-trip.
         if (v == (double)(long long)v) {
@@ -65,10 +75,26 @@ namespace ucuda::equations_detail {
             && s.find("inf") == std::string::npos && s.find("nan") == std::string::npos) s += ".0";
         return s;
     }
+}
 
-    void emit(const PN& n, const NameMap& nm, std::ostream& o) {
+namespace ucuda::equations_detail {
+bool div_by_reciprocal(const PN& n) {
+        if (n->kind != Node::Div || n->b->kind != Node::Num || n->a->kind == Node::Num) return false;
+        const double c = std::fabs(n->b->num);
+        return std::isfinite(c) && c >= 1e-30 && c <= 1e30;
+    }
+}
+
+namespace ucuda::equations_detail {
+void emit(const PN& n, const NameMap& nm, std::ostream& o) {
         switch (n->kind) {
-        case Node::Num:o << fmtnum(n->num); break;
+        // Литерал всегда через (numb): голый "0.5" — double, и при numb = float всё
+        // выражение уходило в FP64 (F2F + DFMA). Отрицательный — в скобках, чтобы
+        // остаться атомом. Текст "(numb)0.0" сравнивается в jac_emit (Am = I - hc*J).
+        case Node::Num:
+            if (std::signbit(n->num)) o << "((numb)" << fmtnum(n->num) << ")";
+            else                      o << "(numb)" << fmtnum(n->num);
+            break;
         case Node::Sym:o << nm.resolve(n->name); break;
         case Node::Neg:
             o << "-";
@@ -82,7 +108,11 @@ namespace ucuda::equations_detail {
         case Node::Add:emit_child(n->a, nm, o, 1); o << " + "; emit_child(n->b, nm, o, 1); break;
         case Node::Sub:emit_child(n->a, nm, o, 1); o << " - "; emit_child(n->b, nm, o, 2); break;
         case Node::Mul:emit_child(n->a, nm, o, 2); o << " * "; emit_child(n->b, nm, o, 2); break;
-        case Node::Div:emit_child(n->a, nm, o, 2); o << " / "; emit_child(n->b, nm, o, 3); break;
+        case Node::Div:
+            emit_child(n->a, nm, o, 2);
+            if (div_by_reciprocal(n)) { o << " * ((numb)1 / "; emit_child(n->b, nm, o, 3); o << ")"; }
+            else                      { o << " / ";            emit_child(n->b, nm, o, 3); }
+            break;
         case Node::Pow: {
             if (n->b->kind == Node::Num) {
                 double e = n->b->num; int ie = (int)e;
@@ -93,36 +123,55 @@ namespace ucuda::equations_detail {
         case Node::Call:o << n->name << "("; for (size_t k = 0; k < n->args.size(); ++k) { if (k)o << ", "; emit(n->args[k], nm, o); }o << ")"; break;
         }
     }
+}
 
-
-    // Зарезервированные математические константы: остаются именем в коде,
-    // не идут в a[]. Определяются в шапке ядра отдельно (напр. const double pi = M_PI;).
-    const std::set<std::string>& math_constants() {
+namespace ucuda::equations_detail {
+const std::set<std::string>& math_constants() {
         static const std::set<std::string> c = { "pi" };
         return c;
     }
+}
 
-    NameMap build_namemap(const System& s, const std::string& st) {
+namespace ucuda::equations_detail {
+NameMap build_namemap(const System& s, const std::string& st, const std::string& tname ) {
         NameMap nm;
         for (size_t i = 0; i < s.vars.size(); ++i) nm.m[s.vars[i]] = st + "[" + std::to_string(i) + "]";
         for (size_t j = 0; j < s.params.size(); ++j) nm.m[s.params[j]] = "a[" + std::to_string(1 + (int)j) + "]";
         // константы маппятся сами на себя
         for (const auto& c : math_constants()) nm.m[c] = c;
+        if (!tname.empty() && !nm.m.count("t")) nm.m["t"] = tname;
+        // Уровень B: z — решение Ньютона текущего вычисления f (ucuda_zb_v), не элемент массива стадии.
+        for (size_t k = 0; k < s.zb_names.size(); ++k) nm.m[s.zb_names[k]] = "ucuda_zb_v[" + std::to_string(k) + "]";
         return nm;
     }
+}
 
-    std::vector<std::string> rhs_over(const System& s, const std::string& st) {
+namespace ucuda::equations_detail {
+std::vector<std::string> rhs_over(const System& s, const std::string& st, const std::string& tname ) {
         if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
-        NameMap nm = build_namemap(s, st); std::vector<std::string> out;
+        NameMap nm = build_namemap(s, st, tname); std::vector<std::string> out;
         for (size_t i = 0; i < s.rhs.size(); ++i) {
             Parser p(s.rhs[i], s.latex); PN ast = p.parse();
-            std::ostringstream o; emit(ast, nm, o); out.push_back(o.str());
+            std::ostringstream o;
+            // Уровень B: f над массивом стадии st — сначала z = phi(st) (ucuda_zb, запятая задаёт порядок;
+            // повтор с тем же x и t берёт кэш), потом само выражение.
+            if (!s.zb_g.empty()) o << "(ucuda_zb(" << st << ", " << (tname.empty() ? "(numb)0" : tname) << "), (";
+            emit(ast, nm, o);
+            if (!s.zb_g.empty()) o << "))";
+            out.push_back(o.str());
         }
         return out;
     }
+}
 
+namespace ucuda::equations_detail {
+int cd_fp_iters_of(const System& s) {
+        return s.cd_fp_iters < 1 ? 1 : s.cd_fp_iters;
+    }
+}
 
-    bool pn_contains_var(const PN& n, const std::string& v) {
+namespace ucuda::equations_detail {
+bool pn_contains_var(const PN& n, const std::string& v) {
         if (!n) return false;
         switch (n->kind) {
         case Node::Sym:  return n->name == v;
@@ -138,39 +187,47 @@ namespace ucuda::equations_detail {
         }
         return false;
     }
+}
 
+namespace ucuda::equations_detail {
+PN pn_num(double v) { auto n = mk(Node::Num); n->num = v; return n; }
+}
 
-    PN pn_num(double v) { auto n = mk(Node::Num); n->num = v; return n; }
+namespace ucuda::equations_detail {
+bool pn_is_zero(const PN& n) { return n && n->kind == Node::Num && n->num == 0.0; }
+}
 
-    bool pn_is_zero(const PN& n) { return n && n->kind == Node::Num && n->num == 0.0; }
+namespace ucuda::equations_detail {
+bool pn_is_one (const PN& n) { return n && n->kind == Node::Num && n->num == 1.0; }
+}
 
-    bool pn_is_one (const PN& n) { return n && n->kind == Node::Num && n->num == 1.0; }
-
-
-    // Peephole constructors: fold trivial identities so the generated C code
-    // stays readable. Only algebraic no-ops (x*1, 1*x, x*0, 0*x, --x, -(Num)),
-    // never re-associates. Correctness is unchanged.
-    PN pn_neg(PN a) {
+namespace ucuda::equations_detail {
+PN pn_neg(PN a) {
         if (a && a->kind == Node::Neg) return a->a;                       // -(-x) -> x
         if (a && a->kind == Node::Num) return pn_num(-a->num);            // -(c)  -> (-c)
         auto n = mk(Node::Neg); n->a = std::move(a); return n;
     }
+}
 
-    PN pn_add(PN a, PN b) { auto n = mk(Node::Add); n->a = std::move(a); n->b = std::move(b); return n; }
+namespace ucuda::equations_detail {
+PN pn_add(PN a, PN b) { auto n = mk(Node::Add); n->a = std::move(a); n->b = std::move(b); return n; }
+}
 
-    PN pn_sub(PN a, PN b) { auto n = mk(Node::Sub); n->a = std::move(a); n->b = std::move(b); return n; }
+namespace ucuda::equations_detail {
+PN pn_sub(PN a, PN b) { auto n = mk(Node::Sub); n->a = std::move(a); n->b = std::move(b); return n; }
+}
 
-    // Parser emits literal -1 as Neg(Num(1)) rather than Num(-1), so catch
-    // both shapes here (my own pn_neg fold produces Num(-1), the parser does
-    // not).
-    bool pn_is_neg_one(const PN& n) {
+namespace ucuda::equations_detail {
+bool pn_is_neg_one(const PN& n) {
         if (!n) return false;
         if (n->kind == Node::Num && n->num == -1.0) return true;
         if (n->kind == Node::Neg && pn_is_one(n->a)) return true;
         return false;
     }
+}
 
-    PN pn_mul(PN a, PN b) {
+namespace ucuda::equations_detail {
+PN pn_mul(PN a, PN b) {
         if (pn_is_zero(a) || pn_is_zero(b)) return pn_num(0);
         if (pn_is_one(a)) return b;
         if (pn_is_one(b)) return a;
@@ -178,15 +235,14 @@ namespace ucuda::equations_detail {
         if (pn_is_neg_one(b)) return pn_neg(std::move(a));                // x*(-1) -> -x
         auto n = mk(Node::Mul); n->a = std::move(a); n->b = std::move(b); return n;
     }
+}
 
-    PN pn_div(PN a, PN b) { auto n = mk(Node::Div); n->a = std::move(a); n->b = std::move(b); return n; }
+namespace ucuda::equations_detail {
+PN pn_div(PN a, PN b) { auto n = mk(Node::Div); n->a = std::move(a); n->b = std::move(b); return n; }
+}
 
-
-    // Try to split n = coef*v + rem with coef, rem both free of v.
-    // Returns false when v enters non-linearly and the analytic solve is
-    // unsafe: product v*v, division by an expression that contains v, or v
-    // appearing inside a pow-exponent or function call.
-    bool cd_try_extract_linear(const PN& n, const std::string& v, PN& coef, PN& rem) {
+namespace ucuda::equations_detail {
+bool cd_try_extract_linear(const PN& n, const std::string& v, PN& coef, PN& rem) {
         if (!n) { coef = pn_num(0); rem = pn_num(0); return true; }
         switch (n->kind) {
         case Node::Num:
@@ -248,40 +304,44 @@ namespace ucuda::equations_detail {
         }
         return false;
     }
+}
 
-
-    // Complex CD only: fmod and atan2 have no complex counterpart (both are
-    // defined through the sign/magnitude of REAL arguments), so configCUDA.h
-    // deliberately provides no ucmplx overload for them. Catch them here, at
-    // codegen time, so the user gets the reason instead of an NVRTC template
-    // error from the middle of a generated kernel.
-    const std::string* cd_find_complex_unsafe(const PN& n) {
+namespace ucuda::equations_detail {
+const std::string* cd_find_complex_unsafe(const PN& n) {
         if (!n) return nullptr;
-        if (n->kind == Node::Call && (n->name == "fmod" || n->name == "atan2")) return &n->name;
+        if (n->kind == Node::Call && (n->name == "fmod" || n->name == "atan2" || n->name == "fmin" || n->name == "fmax"))
+            return &n->name;
         if (const std::string* f = cd_find_complex_unsafe(n->a)) return f;
         if (const std::string* f = cd_find_complex_unsafe(n->b)) return f;
         for (const auto& c : n->args)
             if (const std::string* f = cd_find_complex_unsafe(c)) return f;
         return nullptr;
     }
+}
 
-    void cd_check_complex_safe(const PN& n) {
+namespace ucuda::equations_detail {
+void cd_check_complex_safe(const PN& n) {
         if (const std::string* f = cd_find_complex_unsafe(n))
             throw std::runtime_error("Complex CD: function " + *f +
                 " is not defined in complex arithmetic - pick another scheme");
     }
+}
 
-
-    PN pn_call1(const char* f, PN u) {
+namespace ucuda::equations_detail {
+PN pn_call1(const char* f, PN u) {
         auto n = mk(Node::Call); n->name = f; n->args.push_back(std::move(u)); return n;
     }
+}
 
-    PN pn_call2(const char* f, PN u, PN w) {
+namespace ucuda::equations_detail {
+PN pn_call2(const char* f, PN u, PN w) {
         auto n = mk(Node::Call); n->name = f;
         n->args.push_back(std::move(u)); n->args.push_back(std::move(w)); return n;
     }
+}
 
-    PN pn_pow(PN a, PN b) {
+namespace ucuda::equations_detail {
+PN pn_pow(PN a, PN b) {
         // a^0 -> 1 and a^1 -> a, so the power rule never leaves pow(x, 1.0) behind
         if (b && b->kind == Node::Num) {
             if (b->num == 0.0) return pn_num(1);
@@ -289,26 +349,51 @@ namespace ucuda::equations_detail {
         }
         auto n = mk(Node::Pow); n->a = std::move(a); n->b = std::move(b); return n;
     }
+}
 
-    PN jd_add(PN a, PN b) {
+namespace ucuda::equations_detail {
+PN jd_add(PN a, PN b) {
         if (pn_is_zero(a)) return b;
         if (pn_is_zero(b)) return a;
         return pn_add(std::move(a), std::move(b));
     }
+}
 
-    PN jd_sub(PN a, PN b) {
+namespace ucuda::equations_detail {
+PN jd_sub(PN a, PN b) {
         if (pn_is_zero(b)) return a;
         if (pn_is_zero(a)) return pn_neg(std::move(b));
         return pn_sub(std::move(a), std::move(b));
     }
+}
 
-
-    PN pn_diff_call(const PN& n, const std::string& v) {
+namespace ucuda::equations_detail {
+PN pn_diff_call(const PN& n, const std::string& v) {
         const std::string& f = n->name;
         // pow / atan2 / fmod are the only binary calls the parser produces
         if (f == "pow") {
             if (n->args.size() != 2) throw std::runtime_error("jacobian: pow needs 2 args");
             return pn_diff(pn_pow(n->args[0], n->args[1]), v);
+        }
+        if (f == "fmin" || f == "fmax") {
+            // ветвь выбирает знак u - w: s = copysign(1, u - w); fmin = u при s < 0
+            if (n->args.size() != 2) throw std::runtime_error("jacobian: " + f + " needs 2 args");
+            const PN& u = n->args[0]; const PN& w = n->args[1];
+            const PN du = pn_diff(u, v), dw = pn_diff(w, v);
+            if (pn_is_zero(du) && pn_is_zero(dw)) return pn_num(0);
+            const PN s = pn_call2("copysign", pn_num(1), pn_sub(u, w));
+            const PN pu = pn_mul(pn_num(0.5), f == "fmin" ? pn_sub(pn_num(1), s) : pn_add(pn_num(1), s));
+            const PN pw = pn_mul(pn_num(0.5), f == "fmin" ? pn_add(pn_num(1), s) : pn_sub(pn_num(1), s));
+            if (pn_is_zero(dw)) return pn_mul(pu, du);
+            if (pn_is_zero(du)) return pn_mul(pw, dw);
+            return pn_add(pn_mul(pu, du), pn_mul(pw, dw));
+        }
+        if (f == "copysign") {
+            // |a| sgn(b): по a — sgn(a) sgn(b), по b — 0 почти всюду (ступеньки условий импорта схем)
+            if (n->args.size() != 2) throw std::runtime_error("jacobian: copysign needs 2 args");
+            const PN da = pn_diff(n->args[0], v);
+            if (pn_is_zero(da)) return pn_num(0);
+            return pn_mul(pn_mul(pn_call2("copysign", pn_num(1), n->args[0]), pn_call2("copysign", pn_num(1), n->args[1])), da);
         }
         if (f == "atan2") {
             if (n->args.size() != 2) throw std::runtime_error("jacobian: atan2 needs 2 args");
@@ -348,9 +433,10 @@ namespace ucuda::equations_detail {
 
         return pn_mul(g, du);
     }
+}
 
-
-    PN pn_diff(const PN& n, const std::string& v) {
+namespace ucuda::equations_detail {
+PN pn_diff(const PN& n, const std::string& v) {
         if (!n) return pn_num(0);
         switch (n->kind) {
         case Node::Num: return pn_num(0);
@@ -392,12 +478,10 @@ namespace ucuda::equations_detail {
         }
         return pn_num(0);
     }
+}
 
-
-    // Same role as cd_check_complex_safe: refuse at codegen time, with a readable
-    // reason, instead of letting NVRTC fail inside a generated kernel. These three
-    // parse fine but have no usable derivative (0 almost everywhere / undefined).
-    void jac_check_differentiable(const PN& n) {
+namespace ucuda::equations_detail {
+void jac_check_differentiable(const PN& n) {
         if (!n) return;
         if (n->kind == Node::Call &&
             (n->name == "fmod" || n->name == "floor" || n->name == "ceil"))
@@ -407,14 +491,13 @@ namespace ucuda::equations_detail {
         jac_check_differentiable(n->b);
         for (const auto& c : n->args) jac_check_differentiable(c);
     }
+}
 
-
-    // Jacobian entries as C strings, row-major: out[i*N + j] = d f_i / d vars[j],
-    // emitted over state array st. Counterpart of rhs_over above.
-    std::vector<std::string> jac_over(const System& s, const std::string& st) {
+namespace ucuda::equations_detail {
+std::vector<std::string> jac_over(const System& s, const std::string& st, const std::string& tname ) {
         if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
         const int N = (int)s.vars.size();
-        NameMap nm = build_namemap(s, st);
+        NameMap nm = build_namemap(s, st, tname);
         std::vector<std::string> out((size_t)N * N);
         for (int i = 0; i < N; ++i) {
             Parser p(s.rhs[i], s.latex);
@@ -425,15 +508,10 @@ namespace ucuda::equations_detail {
         }
         return out;
     }
+}
 
-    // Dormand-Prince 8(7), 13-стадийный. Матрицы M[13][12] и B[2][13] — // const, компилятор положит в constant memory. Считаем y (8-й, b[0]) и z
-    // (7-й, b[1]) — z пока не используется, но оставлен под будущий адаптивный
-    // шаг по |y - z|. На каждый step X := y.
-    //
-    // Коэффициент печатается суммой "(numb)(c0) + (numb)(c1) + ...": в double
-    // она сворачивается при компиляции в c0, в dd/qd CPU-ветки вкладки Order
-    // складывается точно (two_sum) и несёт 32/62 знака коэффициента.
-    std::string md_literal(const MultiDoubleCoef& r) {
+namespace ucuda::equations_detail {
+std::string md_literal(const MultiDoubleCoef& r) {
         if (r.c[0] == 0.0) return "0";
         std::string t;
         for (int m = 0; m < 4 && r.c[m] != 0.0; ++m) {
@@ -443,12 +521,18 @@ namespace ucuda::equations_detail {
         }
         return t;
     }
+}
 
-    // "const numb <decl> = {...};" — rows x cols из таблицы с шагом
-    // строки ld (ld > cols — берётся левый верхний угол).
-    void md_table(std::ostringstream& o, const char* decl, const MultiDoubleCoef* v,
+namespace ucuda::equations_detail {
+const char* md_table_qual() {
+        return sizeof(numb) < sizeof(double) ? "    const numb " : "    static const numb ";
+    }
+}
+
+namespace ucuda::equations_detail {
+void md_table(std::ostringstream& o, const char* decl, const MultiDoubleCoef* v,
                   int rows, int cols, int ld) {
-        o << "    static const numb " << decl << " = {\n";
+        o << md_table_qual() << decl << " = {\n";
         for (int i = 0; i < rows; ++i) {
             o << "        {";
             for (int j = 0; j < cols; ++j) o << (j ? ", " : "") << md_literal(v[i * ld + j]);
@@ -456,15 +540,34 @@ namespace ucuda::equations_detail {
         }
         o << "    };\n";
     }
+}
 
+namespace ucuda::equations_detail {
+void stage_time_table(std::ostringstream& o, const MultiDoubleCoef* A, int S, int ld) {
+        o << md_table_qual() << "Cs[" << S << "] = { ";
+        for (int i = 0; i < S; ++i) {
+            long double c = 0;
+            for (int j = 0; j < i && j < ld; ++j)
+                for (int m = 0; m < 4; ++m) c += (long double)A[i * ld + j].c[m];
+            char buf[40];
+            std::snprintf(buf, sizeof(buf), "%.17g", (double)c);
+            o << (i ? ", " : "") << "(numb)(" << buf << ")";
+        }
+        o << " };\n";
+    }
+}
 
-    std::string adaptive_emb_body(const System& s, const EmbSpec& e) {
+namespace ucuda::equations_detail {
+std::string adaptive_emb_body(const System& s, const EmbSpec& e) {
         const int N = (int)s.vars.size(), S = e.S;
-        const auto kx = rhs_over(s, "X1"), ky = rhs_over(s, "Y");
+        // Явное время: стадия i — в момент ucuda_t + Cs[i]*h, f(Y) — в ucuda_t + h.
+        const std::string tn = time_name(s, "ucuda_ts");
+        const auto kx = rhs_over(s, "X1", tn), ky = rhs_over(s, "Y", time_name(s, "(ucuda_t + h)"));
         std::ostringstream o;
         md_table(o, ("M[" + std::to_string(S) + "][" + std::to_string(S - 1) + "]").c_str(), e.A, S, S - 1, e.ld);
         md_table(o, ("B[1][" + std::to_string(S) + "]").c_str(), e.b, 1, S, S);
-        o << "    static const numb L[" << e.nlo << "][" << e.lc << "] = {\n";
+        if (!tn.empty()) stage_time_table(o, e.A, S, e.ld);
+        o << md_table_qual() << "L[" << e.nlo << "][" << e.lc << "] = {\n";
         for (int m = 0; m < e.nlo; ++m) {
             o << "        {";
             for (int i = 0; i < e.lc; ++i) o << (i ? ", " : "") << md_literal(e.lo[m][i]);
@@ -476,6 +579,7 @@ namespace ucuda::equations_detail {
         o << "    numb X2[" << N << "];\n";
         o << "    int N = " << N << ";\n";
         o << "    int l;\n";
+        if (!tn.empty()) o << "    numb ucuda_ts;\n";
         o << "    for (l = 0; l < N; ++l) W[l] = F0[l];\n";
         for (int i = 1; i < S; ++i) {
             o << "    for (l = 0; l < N; ++l) {\n";
@@ -485,6 +589,7 @@ namespace ucuda::equations_detail {
                     o << "        X2[l] += M[" << i << "][" << j << "] * W[" << j << " * N + l];\n";
             o << "        X1[l] = X[l] + h * X2[l];\n";
             o << "    }\n";
+            if (!tn.empty()) o << "    ucuda_ts = ucuda_t + Cs[" << i << "] * h;\n";
             for (int v = 0; v < N; ++v)
                 o << "    W[" << i << " * N + " << v << "] = (" << kx[v] << ");\n";
         }
@@ -507,19 +612,19 @@ namespace ucuda::equations_detail {
         }
         return o.str();
     }
+}
 
-
-    std::string adaptive_rhs_body(const System& s) {
-        const auto k = rhs_over(s, "X");
+namespace ucuda::equations_detail {
+std::string adaptive_rhs_body(const System& s) {
+        const auto k = rhs_over(s, "X", time_name(s));   // f в момент аргумента ucuda_t
         std::ostringstream o;
         for (size_t v = 0; v < k.size(); ++v) o << "    F[" << v << "] = (" << k[v] << ");\n";
         return o.str();
     }
+}
 
-
-    // Плотный выход RK45 — полином Шампайна 4-й степени, форма scipy:
-    // y(th) = X + h * sum_j Q_j th^(j+1), Q = K^T P. D = [X, hQ_0..hQ_3].
-    std::string rk45_dprep_body(const System& s) {
+namespace ucuda::equations_detail {
+std::string rk45_dprep_body(const System& s) {
         const int N = (int)s.vars.size();
         std::ostringstream o;
         md_table(o, "P[7][4]", &kRK45P[0][0], 7, 4, 4);
@@ -535,24 +640,39 @@ namespace ucuda::equations_detail {
         o << "        }\n";
         return o.str();
     }
+}
 
-    std::string rk45_deval_body(const System& s) {
+namespace ucuda::equations_detail {
+std::string rk45_deval_body(const System& s) {
         std::ostringstream o;
         o << "    int N = " << s.vars.size() << ";\n";
         o << "    for (int l = 0; l < N; ++l)\n";
         o << "        Yo[l] = D[l] + th * (D[N + l] + th * (D[2 * N + l] + th * (D[3 * N + l] + th * D[4 * N + l])));\n";
         return o.str();
     }
+}
 
-
-    // Плотный выход DOP853 — полином 7-й степени Хайрера, форма scipy
-    // (Dop853DenseOutput): три доп. стадии 13..15, затем D = [X, F0..F6].
-    std::string dop853_dprep_body(const System& s) {
+namespace ucuda::equations_detail {
+std::string dop853_dprep_body(const System& s) {
         const int N = (int)s.vars.size();
-        const auto kx = rhs_over(s, "X1");
+        const std::string tn = time_name(s, "ucuda_ts");
+        const auto kx = rhs_over(s, "X1", tn);
         std::ostringstream o;
         md_table(o, "AE[3][15]", &kDop853AExt[0][0], 3, 15, 15);
         md_table(o, "DD[4][16]", &kDop853D[0][0], 4, 16, 16);
+        if (!tn.empty()) {
+            // Узлы доп. стадий 13..15 — суммы строк AE (у стадии 13 + i — первые 13 + i).
+            o << md_table_qual() << "CE[3] = { ";
+            for (int i = 0; i < 3; ++i) {
+                long double c = 0;
+                for (int j = 0; j < 13 + i; ++j)
+                    for (int m = 0; m < 4; ++m) c += (long double)kDop853AExt[i][j].c[m];
+                char buf[40];
+                std::snprintf(buf, sizeof(buf), "%.17g", (double)c);
+                o << (i ? ", " : "") << "(numb)(" << buf << ")";
+            }
+            o << " };\n";
+        }
         o << "    numb X1[" << N << "];\n";
         o << "    numb X2[" << N << "];\n";
         o << "    int N = " << N << ";\n";
@@ -564,6 +684,7 @@ namespace ucuda::equations_detail {
         o << "                X2[l] += AE[i][j] * W[j * N + l];\n";
         o << "        for (l = 0; l < N; ++l)\n";
         o << "            X1[l] = X[l] + h * X2[l];\n";
+        if (!tn.empty()) o << "        const numb ucuda_ts = ucuda_t + CE[i] * h;\n";
         for (int v = 0; v < N; ++v)
             o << "        W[(13 + i) * N + " << v << "] = (" << kx[v] << ");\n";
         o << "    }\n";
@@ -582,8 +703,10 @@ namespace ucuda::equations_detail {
         o << "        }\n";
         return o.str();
     }
+}
 
-    std::string dop853_deval_body(const System& s) {
+namespace ucuda::equations_detail {
+std::string dop853_deval_body(const System& s) {
         std::ostringstream o;
         o << "    int N = " << s.vars.size() << ";\n";
         o << "    numb u = 1 - th;\n";
@@ -599,11 +722,10 @@ namespace ucuda::equations_detail {
         o << "    }\n";
         return o.str();
     }
+}
 
-
-    // Кубический Эрмит по концам шага (DOPRI78): D = [X, Y, hF0, hF1],
-    // y(th) = X + th*hF0 + th^2*(3d - 2hF0 - hF1) + th^3*(hF0 + hF1 - 2d), d = Y - X.
-    std::string hermite_dprep_body(const System& s) {
+namespace ucuda::equations_detail {
+std::string hermite_dprep_body(const System& s) {
         std::ostringstream o;
         o << "    int N = " << s.vars.size() << ";\n";
         o << "    (void)a; (void)W;\n";
@@ -615,8 +737,10 @@ namespace ucuda::equations_detail {
         o << "    }\n";
         return o.str();
     }
+}
 
-    std::string hermite_deval_body(const System& s) {
+namespace ucuda::equations_detail {
+std::string hermite_deval_body(const System& s) {
         std::ostringstream o;
         o << "    int N = " << s.vars.size() << ";\n";
         o << "    for (int l = 0; l < N; ++l) {\n";
@@ -625,57 +749,171 @@ namespace ucuda::equations_detail {
         o << "    }\n";
         return o.str();
     }
+}
 
+namespace ucuda::equations_detail {
+bool sparse_lu_build(const std::vector<MatEntry>& pat, int n, const std::vector<char>& df, SparseLu& S) {
+        // UCUDA_DAE_DENSE_LU=1 — плотная LU, как до этапа 6 (сравнение скорости и результатов).
+        static const bool dense_forced = [] { const char* e = std::getenv("UCUDA_DAE_DENSE_LU"); return e && *e == '1'; }();
+        if (dense_forced) return false;
+        S = SparseLu{};
+        for (const MatEntry& e : pat) S.orig.insert({ e.row, e.col });
+        for (int i = 0; i < n; ++i) {
+            if (df[(size_t)i]) ++S.n1;
+            else { S.Rb.push_back(i); S.Cb.push_back(i); }
+        }
+        S.nb = (int)S.Rb.size();
+        std::vector<MatEntry> full = pat;
+        for (int r : S.Rb) for (int c : S.Cb) if (!S.orig.count({ r, c })) full.push_back(MatEntry{ r, c });
+        std::string err;
+        if (!plan_elimination(full, n, S.plan, &err, &df)) return false;
+        for (int k = 0; k < S.n1; ++k)   // первая фаза — ровно диагонали строк df
+            if (S.plan.steps[(size_t)k].pivot_row != S.plan.steps[(size_t)k].pivot_col || !df[(size_t)S.plan.steps[(size_t)k].pivot_row])
+                return false;
+        // Модель стоимости: умножения-сложения первой фазы (по плану) + nb^3/3 блока против n^3/3 плотной;
+        // разреженная — только при выигрыше хотя бы вдвое. И первая фаза не длиннее 4000 операций: это
+        // прямолинейный код, и его объём стоит дороже арифметики. Andrews, Radau + GGL: 7884 операции первой
+        // фазы + блок 57 x 57 — по модели в 4.6 раза дешевле плотной 99 x 99, на деле в 1.4 раза медленнее
+        // (CPU, cl /O2); Radau без GGL (909 операций, блок 39) — в 3.9 раза быстрее.
+        {
+            for (int k = 0; k < S.n1; ++k)
+                S.ops1 += (double)S.plan.steps[(size_t)k].rows.size() * (double)S.plan.steps[(size_t)k].cols.size();
+            if (S.ops1 > 4000.0) return false;
+            if (2.0 * (S.ops1 + (double)S.nb * S.nb * S.nb / 3.0) > (double)n * n * n / 3.0) return false;
+        }
+        for (int a = 0; a < S.nb; ++a)
+            for (int b = 0; b < S.nb; ++b) S.id[{ S.Rb[(size_t)a], S.Cb[(size_t)b] }] = a * S.nb + b;
+        for (const MatEntry& e : S.plan.filled)
+            if (!S.id.count({ e.row, e.col })) S.id[{ e.row, e.col }] = (int)S.id.size();
+        S.nnz = (int)S.id.size();
+        return true;
+    }
+}
 
-    // Общий кирпич диагонально-неявного полушага: одно уравнение
-    // X[i] = X_saved + hs * f_i(X), решённое относительно своей переменной.
-    // Им пользуются Phi* в CD (hs = h2, обратный порядок) и стадия SIMP
-    // (hs = h1, прямой порядок) — сам способ решения у них общий.
-    //
-    // Wrap a subterm in parentheses only when its top-level operator binds
-    // less tightly than '*'/'/' (i.e. Add or Sub); otherwise emit it raw so
-    // that `h2 * X[0] * X[1]` stays a left-associative multiplication chain
-    // instead of turning into `h2 * (X[0] * X[1])`. Under FMA both forms
-    // are algebraically equal but not bit-identical, and a chaotic system
-    // (Lorenz, Rossler, ...) amplifies that ULP-level split over ~10^3-10^4
-    // steps into visibly different trajectories.
-    bool needs_paren_after_mul(const PN& n) {
+namespace ucuda::equations_detail {
+void sparse_lu_factor(std::ostream& o, const SparseLu& S, const char* ind, const char* fallback) {
+        for (int k = 0; k < S.n1; ++k) {
+            const EliminationStep& st = S.plan.steps[(size_t)k];
+            o << ind << "if (!" << fallback << ") { dgn = " << S.at(st.pivot_row, st.pivot_col) << "; mx = fabs(dgn) * (numb)1e3;";
+            for (int r : st.rows) o << " av = fabs(" << S.at(r, st.pivot_col) << "); if (av > mx) mx = av;";
+            o << " if (fabs(dgn) < (numb)1e-30 || fabs(dgn) * (numb)1e3 < mx) " << fallback << " = 1;";
+            if (!st.rows.empty()) {
+                o << " else {\n";
+                for (int r : st.rows) {
+                    o << ind << "    mlt = " << S.at(r, st.pivot_col) << " / dgn; " << S.at(r, st.pivot_col) << " = mlt;";
+                    for (int c : st.cols) o << " " << S.at(r, c) << " -= mlt * " << S.at(st.pivot_row, c) << ";";
+                    o << "\n";
+                }
+                o << ind << "} }\n";
+            } else o << " }\n";
+        }
+        if (S.nb == 0) return;
+        const std::string nb = std::to_string(S.nb);
+        o << ind << "if (!" << fallback << ") {   /* dense block " << nb << " x " << nb << ", partial pivoting */\n";
+        o << ind << "    for (ik = 0; ik < " << nb << "; ik++) {\n";
+        o << ind << "        ip = ik; mx = fabs(Asp[ik * " << nb << " + ik]);\n";
+        o << ind << "        for (ir = ik + 1; ir < " << nb << "; ir++) { av = fabs(Asp[ir * " << nb << " + ik]); if (av > mx) { mx = av; ip = ir; } }\n";
+        o << ind << "        ucuda_pv[ik] = ip;\n";
+        o << ind << "        if (ip != ik) for (ic = ik; ic < " << nb << "; ic++) { mlt = Asp[ik * " << nb << " + ic]; Asp[ik * " << nb
+          << " + ic] = Asp[ip * " << nb << " + ic]; Asp[ip * " << nb << " + ic] = mlt; }\n";
+        o << ind << "        dgn = Asp[ik * " << nb << " + ik];\n";
+        o << ind << "        if (fabs(dgn) < (numb)1e-30) { sing = 1; break; }\n";
+        o << ind << "        for (ir = ik + 1; ir < " << nb << "; ir++) {\n";
+        o << ind << "            mlt = Asp[ir * " << nb << " + ik] / dgn; Asp[ir * " << nb << " + ik] = mlt;\n";
+        o << ind << "            for (ic = ik + 1; ic < " << nb << "; ic++) Asp[ir * " << nb << " + ic] -= mlt * Asp[ik * " << nb << " + ic];\n";
+        o << ind << "        }\n";
+        o << ind << "    }\n";
+        o << ind << "}\n";
+    }
+}
+
+namespace ucuda::equations_detail {
+void sparse_lu_decl(std::ostream& o, const SparseLu& S, int nsol) {
+        o << "    numb Asp[" << S.nnz << "], Dv[" << nsol << "];   /* sparse LU: " << S.n1 << " pivots by plan ("
+          << (long long)S.ops1 << " multiply-adds), dense block " << S.nb << " x " << S.nb << "; dense fallback */\n";
+        o << "    int  ucuda_dn = 0, ucuda_pv[" << (S.nb > 0 ? S.nb : 1) << "];\n";
+        o << "    const int ucuda_rb[" << (S.nb > 0 ? S.nb : 1) << "] = { ";
+        for (int a = 0; a < S.nb; ++a) o << (a ? ", " : "") << S.Rb[(size_t)a];
+        if (S.nb == 0) o << "0";
+        o << " };\n";
+    }
+}
+
+namespace ucuda::equations_detail {
+void sparse_lu_solve(std::ostream& o, const SparseLu& S, const std::string& rhs, const std::string& sol, const char* ind) {
+        for (int k = 0; k < S.n1; ++k) {
+            const EliminationStep& st = S.plan.steps[(size_t)k];
+            for (int r : st.rows)
+                o << ind << rhs << "[" << r << "] -= " << S.at(r, st.pivot_col) << " * " << rhs << "[" << st.pivot_row << "];\n";
+        }
+        if (S.nb > 0) {
+            const std::string nb = std::to_string(S.nb);
+            o << ind << "for (ik = 0; ik < " << nb << "; ik++) {\n";
+            o << ind << "    ip = ucuda_pv[ik]; if (ip != ik) { mlt = " << rhs << "[ucuda_rb[ik]]; " << rhs << "[ucuda_rb[ik]] = " << rhs
+              << "[ucuda_rb[ip]]; " << rhs << "[ucuda_rb[ip]] = mlt; }\n";
+            o << ind << "    for (ir = ik + 1; ir < " << nb << "; ir++) " << rhs << "[ucuda_rb[ir]] -= Asp[ir * " << nb << " + ik] * "
+              << rhs << "[ucuda_rb[ik]];\n";
+            o << ind << "}\n";
+            o << ind << "for (ik = " << S.nb - 1 << "; ik >= 0; ik--) {\n";
+            o << ind << "    mlt = " << rhs << "[ucuda_rb[ik]];\n";
+            o << ind << "    for (ic = ik + 1; ic < " << nb << "; ic++) mlt -= Asp[ik * " << nb << " + ic] * " << sol << "[ucuda_rb[ic]];\n";
+            o << ind << "    " << sol << "[ucuda_rb[ik]] = mlt / Asp[ik * " << nb << " + ik];\n";
+            o << ind << "}\n";
+        }
+        for (int k = S.n1 - 1; k >= 0; --k) {
+            const EliminationStep& st = S.plan.steps[(size_t)k];
+            o << ind << sol << "[" << st.pivot_col << "] = (" << rhs << "[" << st.pivot_row << "]";
+            for (int c : st.cols) o << " - " << S.at(st.pivot_row, c) << " * " << sol << "[" << c << "]";
+            o << ") / " << S.at(st.pivot_row, st.pivot_col) << ";\n";
+        }
+    }
+}
+
+namespace ucuda::equations_detail {
+std::string dae_norm_w(const System& s, int i) {
+        const int k = i < (int)s.dae_index.size() ? s.dae_index[(size_t)i] : 1;
+        std::string w;
+        for (int p = 1; p < k; ++p) w += "h * ";
+        return w;
+    }
+}
+
+namespace ucuda::equations_detail {
+bool needs_paren_after_mul(const PN& n) {
         return n && (n->kind == Node::Add || n->kind == Node::Sub);
     }
+}
 
-    std::string wrap_paren(const std::string& s, bool w) {
+namespace ucuda::equations_detail {
+std::string wrap_paren(const std::string& s, bool w) {
         return w ? "(" + s + ")" : s;
     }
+}
 
-    // Absorb a leading minus of a rem/coef into the operator sign: peel one
-    // Neg or a negative Num off the node, so that `- h2 * -a[1]` and
-    // `+ h2 * -a[1]` come out as `+ h2 * a[1]` and `- h2 * a[1]` -- the
-    // shape a person would write by hand, and one less negation for the
-    // compiler to chase. Returns the sign character to emit before "h2 * ".
-    char peel_sign(PN& n, char pos, char neg) {
+namespace ucuda::equations_detail {
+char peel_sign(PN& n, char pos, char neg) {
         if (!n) return pos;
         if (n->kind == Node::Neg) { n = n->a; return neg; }
         if (n->kind == Node::Num && n->num < 0.0) { n = pn_num(-n->num); return neg; }
         return pos;
     }
+}
 
-    // "h2 * factor" -> "h2" when factor == 1 (post-peel-sign), same reason
-    // as the pn_mul(x, Num(1)) fold: the multiplication reads like noise
-    // both to a human and to the peephole compiler expects.
-    std::string mul_step(const PN& factor, const std::string& factor_c, const char* hs) {
+namespace ucuda::equations_detail {
+std::string mul_step(const PN& factor, const std::string& factor_c, const char* hs) {
         return pn_is_one(factor) ? std::string(hs) : hs + (" * " + factor_c);
     }
+}
 
+namespace ucuda::equations_detail {
+bool pn_free_of_vars(const PN& n, const std::vector<std::string>& vars) {
+        for (const std::string& v : vars) if (pn_contains_var(n, v)) return false;
+        return true;
+    }
+}
 
-    // Собирает выражение "hs * expr" в ТОЙ ЖЕ группировке, в какой его получит
-    // компилятор из текста, который печатает emit_diag_implicit_eq. mul_step
-    // выводит "hs * " + текст множителя, а скобки вокруг множителя ставятся
-    // только при Add/Sub сверху (needs_paren_after_mul), поэтому "hs * a * b"
-    // разбирается как ((hs*a)*b): множитель шага заходит в САМЫЙ ЛЕВЫЙ конец
-    // цепочки умножений и делений. Интерпретатор, посчитав hs*(a*b), разошёлся
-    // бы с GPU на последний бит — в хаотической системе это видно уже через
-    // тысячу шагов, ровно как с --fmad.
-    PN pn_mul_step(const PN& e) {
+namespace ucuda::equations_detail {
+PN pn_mul_step(const PN& e) {
         if (e && (e->kind == Node::Mul || e->kind == Node::Div)) {
             PN n = mk(e->kind);
             n->a = pn_mul_step(e->a);
@@ -685,9 +923,10 @@ namespace ucuda::equations_detail {
         PN step = mk(Node::Sym); step->name = kStepSym;
         return pn_mul(std::move(step), e);
     }
+}
 
-
-    int func_id(const std::string& nm) {
+namespace ucuda::equations_detail {
+int func_id(const std::string& nm) {
         if (nm == "sin")return F_SIN; if (nm == "cos")return F_COS; if (nm == "tan")return F_TAN;
         if (nm == "asin")return F_ASIN; if (nm == "acos")return F_ACOS; if (nm == "atan")return F_ATAN;
         if (nm == "sinh")return F_SINH; if (nm == "cosh")return F_COSH; if (nm == "tanh")return F_TANH;
@@ -696,12 +935,13 @@ namespace ucuda::equations_detail {
         if (nm == "fabs" || nm == "abs")return F_FABS;
         if (nm == "floor")return F_FLOOR; if (nm == "ceil")return F_CEIL;
         if (nm == "pow")return F_POW; if (nm == "atan2")return F_ATAN2; if (nm == "fmod")return F_FMOD;
-        if (nm == "copysign")return F_COPYSIGN;
+        if (nm == "copysign")return F_COPYSIGN; if (nm == "fmin")return F_FMIN; if (nm == "fmax")return F_FMAX;
         throw std::runtime_error("eval: unknown function " + nm);
     }
+}
 
-
-    double apply_func1(int fid, double x) {
+namespace ucuda::equations_detail {
+double apply_func1(int fid, double x) {
         switch (fid) {
         case F_SIN:return std::sin(x); case F_COS:return std::cos(x); case F_TAN:return std::tan(x);
         case F_ASIN:return std::asin(x); case F_ACOS:return std::acos(x); case F_ATAN:return std::atan(x);
@@ -712,22 +952,21 @@ namespace ucuda::equations_detail {
         case F_FLOOR:return std::floor(x); case F_CEIL:return std::ceil(x);
         } return 0;
     }
-    double apply_func2(int fid, double a, double b) {
+}
+
+namespace ucuda::equations_detail {
+double apply_func2(int fid, double a, double b) {
         switch (fid) {
         case F_POW:return std::pow(a, b); case F_ATAN2:return std::atan2(a, b); case F_FMOD:return std::fmod(a, b);
         case F_COPYSIGN:return std::copysign(a, b);
+        case F_FMIN:    return std::fmin(a, b);
+        case F_FMAX:    return std::fmax(a, b);
         } return 0;
     }
+}
 
-    // Комплексные версии — те же id, те же формулы, что и в device-коде: обе
-    // ветки зовут функции из configCUDA.h, поэтому CPU-траектория Complex CD
-    // повторяет GPU-шную операция в операцию (в пределах разной группировки FMA).
-    // atan2/fmod комплексного смысла не имеют и до сюда не доходят: на GPU систему
-    // с ними отсекает cd_check_complex_safe на кодгене, а CPU-путь кодген не
-    // зовёт и спрашивает complex_unsafe_function() перед комплексной схемой.
-    // floor/ceil кусочно-постоянны, и их продолжение — константа floor(Re z)
-    // (см. configCUDA.h).
-    ucmplx apply_func1(int fid, ucmplx x) {
+namespace ucuda::equations_detail {
+ucmplx apply_func1(int fid, ucmplx x) {
         switch (fid) {
         case F_SIN:return sin(x); case F_COS:return cos(x); case F_TAN:return tan(x);
         case F_ASIN:return asin(x); case F_ACOS:return acos(x); case F_ATAN:return atan(x);
@@ -738,21 +977,21 @@ namespace ucuda::equations_detail {
         case F_FLOOR:return floor(x); case F_CEIL:return ceil(x);
         } return ucmplx(0, 0);
     }
-    // F_COPYSIGN приходит только из якобиана (производная fabs) и всегда с
-    // литералом 1 первым аргументом — поэтому a.re. atan2/fmod сюда не доходят:
-    // CPU-путь отказывает им заранее (SystemEvaluator::complex_unsafe_function).
-    ucmplx apply_func2(int fid, ucmplx a, ucmplx b) {
+}
+
+namespace ucuda::equations_detail {
+ucmplx apply_func2(int fid, ucmplx a, ucmplx b) {
         switch (fid) {
         case F_POW:return pow(a, b);
         case F_COPYSIGN:return copysign(a.re, b);
         } return ucmplx(0, 0);
     }
+}
 
+namespace ucuda::equations_detail {
+double  op_pow(double a, double b) { return std::pow(a, b); }
+}
 
-    // Степень отдельной функцией: у double это std::pow, у ucmplx — перегрузка
-    // из configCUDA.h (со спрямлением целых показателей). Нужна, чтобы
-    // run_program остался одним шаблоном на оба типа состояния.
-    double  op_pow(double a, double b) { return std::pow(a, b); }
-
-    ucmplx  op_pow(ucmplx a, ucmplx b) { return pow(a, b); }
+namespace ucuda::equations_detail {
+ucmplx  op_pow(ucmplx a, ucmplx b) { return pow(a, b); }
 }

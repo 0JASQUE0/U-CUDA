@@ -55,12 +55,17 @@ OrderAxis to_engine_axis(int target, const std::string& lo, const std::string& h
 //
 // Итераций Ньютон требует немногим больше: сходимость квадратичная, каждый шаг
 // удваивает разряды, и с типовых 1e-3 до 1e-58 хватает шести.
-System order_newton_system(const System& sys, int prec) {
+// Допуск и предел итераций — рантайм-слоты a[] (NewtonSettings), поэтому поправка
+// идёт по настройкам вкладки, а КРС от неё не зависит.
+static NewtonSettings order_newton_settings(const NewtonSettings& n, int prec) {
     const double tol = order_newton_tol_for_precision(prec);
-    if (!(tol > 0.0)) return sys;
-    System out = sys;
-    if (!(out.newton_tol > 0.0) || out.newton_tol > tol) out.newton_tol = tol;
-    if (out.newton_max_iters < 12) out.newton_max_iters = 12;
+    if (!(tol > 0.0)) return n;
+    NewtonSettings out = n;
+    if (newton_tol_from_text(out.tol) > tol) {
+        char b[32]; std::snprintf(b, sizeof(b), "%.17g", tol);
+        out.tol = b;
+    }
+    if (newton_iters_from_text(out.max_iters) < 12) out.max_iters = "12";
     return out;
 }
 
@@ -71,7 +76,7 @@ OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfi
     // другой. Поэтому UI гасит селектор при GPU, а здесь режим снимается.
     req.cpu_prec  = c.use_gpu ? kOrderPrecDouble : c.cpu_precision;
     req.krs_body  = compute_krs_for_scheme(s.custom_schemes,
-                                           order_newton_system(s.sys, req.cpu_prec),
+                                           s.sys,
                                            c.scheme);
     req.amountOfX = (int)s.vars.size();
 
@@ -84,8 +89,10 @@ OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfi
     // a[0] — коэффициент симметрии s, a[1..M] — параметры системы. Ровно та же
     // раскладка, что во всех остальных вкладках (см. build_basins_request).
     const int nparams = (int)s.params.size();
-    req.values.assign((size_t)nparams + 1, 0.0);
+    req.values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.values[0] = parse_d(c.symmetry_s, 0.5);
+    scheme_fill_tail(req.values.data() + nparams + 1, c.cd_fp_iters,
+                     order_newton_settings(c.newton, req.cpu_prec)); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[(size_t)i]);
         req.values[(size_t)i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -110,7 +117,8 @@ OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfi
 // Счёт — scheme_rhs_per_step (codegen): явные схемы, CD-семейство, SEMP/SIMP, GBS, Extr и Comp
 // над ними; неявный полушаг CD — по компонентам, поэтому дробный. Не считаются неявные схемы
 // с Ньютоном (число итераций своё на каждом шаге) и кастомные КРС (тело непрозрачно).
-static double perf_rhs_per_step(const OrderAnalysisSession& s, const std::string& scheme) {
+static double perf_rhs_per_step(const OrderAnalysisSession& s, const std::string& scheme,
+                                 int cd_fp_iters) {
     for (const auto& cs : s.custom_schemes) if (cs.name == scheme) return 0.0;
     ExtrapolationSpec es;
     CompositionSpec   cs;
@@ -118,14 +126,16 @@ static double perf_rhs_per_step(const OrderAnalysisSession& s, const std::string
                            : parse_composition_name(scheme, &cs)   ? cs.base : std::string();
     if (!base.empty())
         for (const auto& c : s.custom_schemes) if (c.name == base) return 0.0;
-    return scheme_rhs_per_step(s.sys, scheme);
+    System sys = s.sys;   // CD FP: цена шага по n этого конфига
+    sys.cd_fp_iters = cd_fp_iters;
+    return scheme_rhs_per_step(sys, scheme);
 }
 
-// Причина пустой КРС для сообщения пользователю — по той же системе (допуск Ньютона
-// под точность), что и у build_order_request; Performance и Stability берут КРС оттуда же.
+// Причина пустой КРС для сообщения пользователю — по той же системе, что
+// и у build_order_request; Performance и Stability берут КРС оттуда же.
 static std::string order_krs_empty_error(const OrderAnalysisSession& s, const OrderConfig& c) {
     return krs_empty_error(s.custom_schemes,
-                           order_newton_system(s.sys, c.use_gpu ? kOrderPrecDouble : c.cpu_precision),
+                           s.sys,
                            c.scheme);
 }
 
@@ -152,7 +162,7 @@ PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig&
     // иначе неявный эталон упёрся бы в 1e-10 и E_ref мерил бы его решатель.
     if (req.ref_substeps > 0 && !c.perf_ref_scheme.empty())
         req.ref_krs_body   = compute_krs_for_scheme(s.custom_schemes,
-                                                    order_newton_system(s.sys, req.cpu_prec),
+                                                    s.sys,
                                                     c.perf_ref_scheme);
     req.repeats            = std::max(1, parse_i(c.perf_repeats_text, 20));
     req.warmup             = std::max(0, parse_i(c.perf_warmup_text, 2));
@@ -163,7 +173,7 @@ PerfRequest build_perf_request(const OrderAnalysisSession& s, const OrderConfig&
     // выбору: с ним E(T) считается против того же y*(T), и кривые обоих ложатся на одну
     // диаграмму; без него E(T) постоянного шага — Eref в t_max (run_performance_any).
     req.end_ref_prec = (c.perf_end_ref == 1 || c.perf_end_ref == 2) ? c.perf_end_ref : 0;
-    req.rhs_per_step = perf_rhs_per_step(s, c.scheme);
+    req.rhs_per_step = perf_rhs_per_step(s, c.scheme, cd_fp_iters_from_text(c.cd_fp_iters));
     if (c.adaptive.enabled && !s.sys.is_map) {
         req.adaptive = true;
         const AdaptiveSettings& a = c.adaptive;
@@ -279,6 +289,8 @@ void OrderAnalysisSession::load_from_record(const SystemRecord& r,
     c.h_text     = default_h_from_record(r);
     c.scheme     = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -582,15 +594,22 @@ static OrderResult run_order_cpu_t(const OrderRequest& req) {
 
             bool cancelled_here = false;
             for (long long k = 0; k < N; ++k) {
+                // Явное t: DLL берёт t = n*h своего номера шага, а три копии идут разными h —
+                // номер ставится каждой: Xc с k (t = k*h1), Xm с 2k (h2 = h1/2), Xf с 4k.
+                step_main.step_index(k);
                 Tr::call(fmain, Xc.data(), a.data(), h1);
+                step_main.step_index(2 * k);
                 Tr::call(fmain, Xm.data(), a.data(), h2);
                 Tr::call(fmain, Xm.data(), a.data(), h2);
+                step_main.step_index(4 * k);
                 Tr::call(fmain, Xf.data(), a.data(), h4);
                 Tr::call(fmain, Xf.data(), a.data(), h4);
                 Tr::call(fmain, Xf.data(), a.data(), h4);
                 Tr::call(fmain, Xf.data(), a.data(), h4);
-                if (fref)
+                if (fref) {
+                    step_ref.step_index(k * (long long)refM);
                     for (int q = 0; q < refM; ++q) Tr::call(fref, Xr.data(), a.data(), hRef);
+                }
 
                 const bool last = (k == N - 1);
                 if (!req.endpoint_only || last) {
@@ -793,6 +812,7 @@ static PerfResult run_performance_cpu_t(const PerfRequest& req) {
 
         auto one_run = [&]() {
             for (int k = 0; k < n; ++k) X[(size_t)k] = S(req.initial_conditions[(size_t)k]);
+            step.step_index(0);   // явное t: прогон с t = 0
             const S hh = S(h_node);
             for (long long k = 0; k < N; ++k) Tr::call(fstep, X.data(), a.data(), hh);
             double acc = 0.0;
@@ -873,6 +893,7 @@ static bool perf_end_reference_t(const PerfRequest& req, std::vector<double>& y,
     auto run = [&](long long N, std::vector<S>& X) -> bool {
         X.assign((size_t)n, S(0));
         for (int k = 0; k < n; ++k) X[(size_t)k] = S(req.initial_conditions[(size_t)k]);
+        step.step_index(0);   // явное t: эталон с t = 0
         const S h = T / S((double)N);
         for (long long i = 0; i < N; ++i) {
             Tr::call(f, X.data(), a.data(), h);

@@ -1,26 +1,42 @@
 ﻿#include "gui_internal.h"
+using namespace ucuda::ui_detail;
 
 namespace ucuda::ui_detail {
-
-
-// Единый счётчик режимов для статусных строк всех панелей. Раньше каждая панель считала
-// "diverged" по flags[k] < 0, и подпись значила разное: у Bif1D/Bif2D отрицательный флаг —
-// это fixed point, а у LLE/LS — расходимость. Теперь коды канонические (REGIME_* в
-// configCUDA.h) и категории раскладываются одинаково везде.
-void count_regimes(const std::vector<int>& flags, int& fp, int& unb, int& osc) {
+void count_regimes(const std::vector<int>& flags, int& fp, int& unb, int& osc, int* stopped ) {
     fp = unb = osc = 0;
+    if (stopped) *stopped = 0;
     for (int f : flags) {
-        if      (regime_is_fixed_point(f)) ++fp;
+        if      (regime_is_cancelled(f))   { if (stopped) ++*stopped; }
+        else if (regime_is_fixed_point(f)) ++fp;
         else if (regime_is_unbound(f))     ++unb;
         else                               ++osc;
     }
 }
+}
 
+namespace ucuda::ui_detail {
+std::function<const char*(int, int)> regime_cell_label(const std::vector<int>& flags,
+                                                              int row_stride,
+                                                              bool with_oscillation) {
+    return [&flags, row_stride, with_oscillation](int ix, int iy) -> const char* {
+        const size_t k = (size_t)iy * (size_t)row_stride + (size_t)ix;
+        if (k >= flags.size()) return nullptr;
+        if (!with_oscillation && regime_is_oscillation(flags[k])) return nullptr;
+        return regime_label(flags[k]);
+    };
+}
+}
 
-// Подпись под "OK: ..." — печатается только если есть что показать кроме
-// колебательного режима (иначе строка была бы шумом на каждом успешном run'е).
-// Сводка адаптивного шага по свипу: st — по 4 числа на точку (принятые, отвергнутые,
-// вынужденные шаги, средний h), пусто при постоянном шаге.
+namespace ucuda::ui_detail {
+std::function<bool(int, int)> cancelled_cell_mask(const std::vector<int>& flags, int row_stride) {
+    return [&flags, row_stride](int ix, int iy) -> bool {
+        const size_t k = (size_t)iy * (size_t)row_stride + (size_t)ix;
+        return k < flags.size() && regime_is_cancelled(flags[k]);
+    };
+}
+}
+
+namespace ucuda::ui_detail {
 void draw_adaptive_stats(const std::vector<double>& st) {
     if (st.size() < 4) return;
     double acc = 0, rej = 0, frc = 0, hsum = 0, hmin = 0, hmax = 0;
@@ -40,35 +56,33 @@ void draw_adaptive_stats(const std::vector<double>& st) {
                         n ? hsum / (double)n : 0.0, hmin, hmax, acc, rej,
                         att > 0 ? 100.0 * rej / att : 0.0, frc);
 }
-
-
-std::function<const char*(int, int)> regime_cell_label(const std::vector<int>& flags,
-                                                              int row_stride,
-                                                              bool with_oscillation) {
-    return [&flags, row_stride, with_oscillation](int ix, int iy) -> const char* {
-        const size_t k = (size_t)iy * (size_t)row_stride + (size_t)ix;
-        if (k >= flags.size()) return nullptr;
-        if (!with_oscillation && regime_is_oscillation(flags[k])) return nullptr;
-        return regime_label(flags[k]);
-    };
 }
 
-void draw_regime_summary(const std::vector<int>& flags) {
-    int fp = 0, unb = 0, osc = 0;
-    count_regimes(flags, fp, unb, osc);
+namespace ucuda::ui_detail {
+void draw_regime_summary(const std::vector<int>& flags, RegimeCounts* cache, int gen) {
+    int fp = 0, unb = 0, osc = 0, stopped = 0;
+    if (!cache) {
+        count_regimes(flags, fp, unb, osc, &stopped);
+    } else {
+        if (cache->gen != gen || cache->data != (const void*)flags.data() || cache->size != flags.size()) {
+            count_regimes(flags, cache->fp, cache->unb, cache->osc, &cache->stopped);
+            cache->gen = gen; cache->data = flags.data(); cache->size = flags.size();
+        }
+        fp = cache->fp; unb = cache->unb; osc = cache->osc; stopped = cache->stopped;
+    }
+    if (stopped > 0)
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                           "Stopped: %d of %d points computed, the rest are grey / blank",
+                           (int)flags.size() - stopped, (int)flags.size());
     if (fp == 0 && unb == 0) return;
     ImGui::TextDisabled("regimes: %d %s / %d %s / %d %s",
                         fp,  regime_label(REGIME_FIXED_POINT),
                         unb, regime_label(REGIME_UNBOUND),
                         osc, regime_label(REGIME_OSCILLATION));
 }
+}
 
-
-// Подпись НУ для легенды (галка "Legend shows initial conditions"). Берём ЧИСЛА, реально
-// ушедшие в расчёт (result.snapshot.ic_flat), и форматируем через fmt_tick, т.е. с Tick
-// precision из Settings: так сгенерированные НУ (узлы сетки бассейнов пишутся с %.17g) не
-// разносят легенду на пол-экрана, а смена точности применяется сразу, без пересчёта.
-// Fallback на сохранённый result.ic_text — если снапшота нет.
+namespace ucuda::ui_detail {
 [[nodiscard]] std::string ic_legend_text(const AnalysisResult& res, size_t k) {
     if (k < res.snapshot.ic_flat.size() && !res.snapshot.ic_flat[k].empty()) {
         const std::vector<double>& v = res.snapshot.ic_flat[k];
@@ -82,15 +96,16 @@ void draw_regime_summary(const std::vector<int>& flags) {
     }
     return (k < res.ic_text.size()) ? res.ic_text[k] : std::string();
 }
+}
 
-
+namespace ucuda::ui_detail {
 void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
-                                    const ProjHookFn& before_begin ,
-                                    const ProjHookFn& after_begin  ,
-                                    const std::string& title_suffix ,
-                                    int owner_id_delta ,
-                                    const PhaseStyleFn& style_fn ,
-                                    const FeatureClusterParams& clust ) {
+                                    const ProjHookFn& before_begin,
+                                    const ProjHookFn& after_begin,
+                                    const std::string& title_suffix,
+                                    int owner_id_delta,
+                                    const PhaseStyleFn& style_fn,
+                                    const FeatureClusterParams& clust) {
     const AnalysisResult& res = s.result;
     // Lambda installed on every projection view that has data — right-click "Export data..."
     // writes the full double-precision trajectory set (all coords for all ICs) + a _config.csv
@@ -172,8 +187,8 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     if (!projection_views(pr).view2d) projection_views(pr).view2d = std::make_unique<Plot2DView>();
 
                     // обновить имена осей
-                    projection_views(pr).view2d->x_axis.name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
-                    projection_views(pr).view2d->y_axis.name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
+                    projection_views(pr).view2d->x_axis.name = s.vars.empty() ? "x" : plot_var_name(phase_axis_name(s, ax));
+                    projection_views(pr).view2d->y_axis.name = s.vars.empty() ? "y" : plot_var_name(phase_axis_name(s, ay));
                     // No zero-axis on phase 2D — x=0 / y=0 have no meaning
                     // for a state-space trajectory.
                     projection_views(pr).view2d->show_zero_x = false;
@@ -287,7 +302,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     std::string ax_name;
                     if (s.vars.empty())                     ax_name = "x";
                     else if (nv_ax >= 2 && av == nv_ax)     ax_name = combo_var_label(s.vars);
-                    else                                    ax_name = s.vars[av < nv_ax ? av : 0];
+                    else                                    ax_name = plot_var_name(s.vars[av < nv_ax ? av : 0]);
 
                     projection_views(pr).view2d->x_axis.name = "peak " + ax_name + mult_suffix(mp);
                     projection_views(pr).view2d->y_axis.name = "IPI" + mult_suffix(mi);   // interpeak interval
@@ -473,7 +488,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
 
                             std::string base = (k < res.labels.size()) ? res.labels[k] : ("IC" + std::to_string(k + 1));
                             std::string who = s.legend_show_ic ? ic_legend_text(res, k) : base;
-                            std::string lab = (is_combo ? combo_var_label(s.vars) : s.vars[vi])
+                            std::string lab = (is_combo ? combo_var_label(s.vars) : plot_var_name(s.vars[vi]))
                                             + " [" + who + "]";
 
                             // Оттенок комбинации берём из расширенной палитры
@@ -572,11 +587,12 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     if (pr.rqa_source == rqa::Source::Embedding) {
                         const int nv = (int)s.vars.size();
                         ImGui::SetNextItemWidth(180);
-                        if (ImGui::BeginCombo("variable", s.vars.empty() ? "-" : s.vars[pr.rqa_var < nv ? pr.rqa_var : 0].c_str())) {
+                        if (var_combo_begin("variable", s.vars.empty() ? "-" : s.vars[pr.rqa_var < nv ? pr.rqa_var : 0], !s.vars.empty())) {
                             for (int k = 0; k < nv; ++k)
-                                if (ImGui::Selectable(s.vars[k].c_str(), pr.rqa_var == k)) { pr.rqa_var = k; ch = true; }
+                                if (var_selectable(s.vars[k], pr.rqa_var == k)) { pr.rqa_var = k; ch = true; }
                             ImGui::EndCombo();
                         }
+                        var_combo_preview();
                         ch |= InputNumStr("m (dimension)", pr.rqa_m_text, 100.0f);
                         ch |= InputNumStr("tau (samples)", pr.rqa_tau_text, 100.0f);
                     }
@@ -817,9 +833,9 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     projection_views(pr).view3d->points_with_lines = pr.draw_points && pr.custom_line_style;
                     projection_views(pr).view3d->point_size_px     = pr.point_size;
 
-                    projection_views(pr).view3d->x_name = s.vars.empty() ? "x" : s.vars[ax < (int)s.vars.size() ? ax : 0];
-                    projection_views(pr).view3d->y_name = s.vars.empty() ? "y" : s.vars[ay < (int)s.vars.size() ? ay : 0];
-                    projection_views(pr).view3d->z_name = s.vars.empty() ? "z" : s.vars[az < (int)s.vars.size() ? az : 0];
+                    projection_views(pr).view3d->x_name = s.vars.empty() ? "x" : plot_var_name(phase_axis_name(s, ax));
+                    projection_views(pr).view3d->y_name = s.vars.empty() ? "y" : plot_var_name(phase_axis_name(s, ay));
+                    projection_views(pr).view3d->z_name = s.vars.empty() ? "z" : plot_var_name(phase_axis_name(s, az));
 
                     // Локальный буфер — см. ветку Phase2D выше.
                     std::vector<std::vector<float>> series_data(res.trajectories.size());
@@ -879,7 +895,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     std::string ax_name;
                     if (s.vars.empty())                     ax_name = "x";
                     else if (nv_ax >= 2 && av == nv_ax)     ax_name = combo_var_label(s.vars);
-                    else                                    ax_name = s.vars[av < nv_ax ? av : 0];
+                    else                                    ax_name = plot_var_name(s.vars[av < nv_ax ? av : 0]);
 
                     projection_views(pr).view2d->x_axis.name = s.sys.is_map ? "n" : "t, s";
                     projection_views(pr).view2d->y_axis.name = "peak " + ax_name;
@@ -1113,12 +1129,9 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
     }
     if (pr_to_remove >= 0) s.remove_projection(pr_to_remove);
 }
+}
 
-
-// Combo "Writable var": переменные + (через разделитель) комбинация
-// x[0] + pi*x[1] + euler*x[2] (при |vars|=2 без e*x[2], при |vars|=1 — сама переменная).
-// Sentinel в hostside int: -1 = комбинация. Используется в Bifurcation и Basins, где
-// kernel пишет data[i] через loopCalculateDiscreteModel_int — он умеет оба режима.
+namespace ucuda::ui_detail {
 void draw_writable_var_combo(const std::vector<std::string>& vars,
                                     int& writable_var,
                                     const char* combo_id) {

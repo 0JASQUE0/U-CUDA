@@ -6,6 +6,8 @@ void write_metrics_config(std::ostringstream& o, const SignalMetricsConfig& c) {
     o << ",\"label_is_manual\":"  << (c.label_is_manual ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
     o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
+    o << ",\"cd_fp_iters\":";      jstr(o, c.cd_fp_iters);
+    o << ",\"newton_tol\":"; jstr(o, c.newton.tol); o << ",\"newton_max_iters\":"; jstr(o, c.newton.max_iters); o << ",\"newton_full\":" << (c.newton.full ? "true" : "false");
     o << ",\"param_index\":"      << c.param_index;
     o << ",\"sweep_over_var\":"   << (c.sweep_over_var ? "true" : "false");
     o << ",\"sweep_over_h\":"     << (c.sweep_over_h ? "true" : "false");
@@ -51,6 +53,10 @@ bool read_metrics_config_field(JP& p, SignalMetricsConfig& c, const std::string&
     else if (key == "label_is_manual")    c.label_is_manual   = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
+    else if (key == "cd_fp_iters")         c.cd_fp_iters        = p.str();
+    else if (key == "newton_tol")          c.newton.tol       = p.str();
+    else if (key == "newton_max_iters")    c.newton.max_iters = p.str();
+    else if (key == "newton_full")         c.newton.full      = p.boolean();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     c.sweep_over_var    = p.boolean();
     else if (key == "sweep_over_h")       c.sweep_over_h      = p.boolean();

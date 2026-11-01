@@ -28,15 +28,15 @@
 // компилируется ещё и отдельной внешней копией.
 
 #define UCUDA_AD_KRS_FUNCS
-__device__ __host__ __forceinline__ void ucuda_krs_rhs(const numb* X, const numb* a, numb* F) {
+__device__ __host__ __forceinline__ void ucuda_krs_rhs(const numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, numb* F) {
 {{KRS_RHS_BODY}}
 }
-__device__ __host__ __forceinline__ void ucuda_krs_emb(const numb* X, const numb* F0, const numb* a,
+__device__ __host__ __forceinline__ void ucuda_krs_emb(const numb* X, const numb* F0, UCUDA_TP(const numb ucuda_t) const numb* a,
     const numb h, numb* Y, numb* E, numb* F1, numb* W) {
 {{KRS_EMB_BODY}}
 }
 __device__ __host__ __forceinline__ void ucuda_krs_dprep(const numb* X, const numb* Y, const numb* F0,
-    const numb* F1, const numb* a, const numb h, numb* W, numb* D) {
+    const numb* F1, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h, numb* W, numb* D) {
 {{KRS_DPREP_BODY}}
 }
 __device__ __host__ __forceinline__ void ucuda_krs_deval(const numb* D, const numb th, numb* Yo) {
@@ -128,7 +128,10 @@ __device__ __forceinline__ void ucudaSetupSweepPointAd(
 	for (int i = 0; i < amountOfValues; ++i) localValues[i] = values[i];
 	for (int i = 0; i < dimension; ++i) {
 		const bool isLog = (logAxisMask >> i) & 1;
-		const numb v = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
+		// ±log (бит UCUDA_SYMLOG_SHIFT + i) ставят только бассейны, как у ucudaSetupSweepPoint.
+		const bool isSym = (logAxisMask >> (UCUDA_SYMLOG_SHIFT + i)) & 1;
+		const numb v = isSym ? getValueByIdx_symlog(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
+		             : isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
 		                     : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
 		const int kind = axisKind[i];
 		if (kind == UCUDA_AXIS_SYSTEM) {
@@ -322,7 +325,7 @@ __device__ __forceinline__ int ucudaAdUniformPoint(UcudaAdaptState& S, const Ucu
 			if (++cnt == CHECK_INTERVAL) {
 				cnt = 0;
 				if (ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;
-				if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
+				if (UCUDA_AD_CANCELLED(cancelFlag)) return REGIME_CANCELLED;
 			}
 		}
 		if (S.diverged) return REGIME_UNBOUND;
@@ -374,7 +377,7 @@ __device__ __forceinline__ int ucudaAdNodesPointT(UcudaAdaptState& S, const Ucud
 		if (++nst == CHECK_INTERVAL) {
 			nst = 0;
 			if (ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;
-			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
+			if (UCUDA_AD_CANCELLED(cancelFlag)) return REGIME_CANCELLED;
 		}
 	}
 	if (ucudaAdOut(S.X, maxValue)) return REGIME_UNBOUND;   // хвост короче CHECK_INTERVAL
@@ -541,7 +544,7 @@ __device__ __forceinline__ void ucudaAdBasinFeatures(const int flag, const int a
 	const int feature1, const int feature2, const numb mult1, const numb mult2,
 	numb& out1, numb& out2)
 {
-	if (flag == REGIME_UNBOUND) { out1 = 999; out2 = 999; return; }
+	if (flag == REGIME_UNBOUND || flag == REGIME_CANCELLED) { out1 = 999; out2 = 999; return; }
 	if (flag == REGIME_FIXED_POINT) { out1 = last; out2 = -1.0; return; }
 	if (amountOfPeaks <= 0) { out1 = -999; out2 = -1.0; return; }
 	const numb inv_n  = (numb)1.0 / (numb)amountOfPeaks;
@@ -592,7 +595,8 @@ __global__ void calculateDiscreteModelAvgPeaksAdCUDA(
 	int*			progressCounter,
 	const int		progressStride,
 	const size_t	progressUnits,
-	numb*			adStats)
+	numb*			adStats,
+	const int		logAxisMask)		// только ±log-биты осей НУ (UCUDA_SYMLOG_SHIFT + i)
 {
 	extern __shared__ numb s[];
 	const int sharedStride = ucuda_shared_stride(amountOfInitialConditions, amountOfValues);
@@ -605,7 +609,7 @@ __global__ void calculateDiscreteModelAvgPeaksAdCUDA(
 
 	UCUDA_AD_P_LOCAL
 	ucudaSetupSweepPointAd(nPts, amountOfCalculatedPoints, idx, dimension, ranges, indicesOfMutVars,
-		initialConditions, values, amountOfValues, 0, axisKind, tolRatio, localX, localValues, P);
+		initialConditions, values, amountOfValues, logAxisMask, axisKind, tolRatio, localX, localValues, P);
 
 	const UcudaKrsFns K{};
 	UcudaAdaptState S;
@@ -686,7 +690,12 @@ __global__ void calculateDiscreteModelPeaksAdContCUDA(
 	UcudaAdaptState S;
 
 	for (int j = 0; j < nPts; ++j) {
-		if (cancelFlag != nullptr && *cancelFlag != 0) return;
+		// Stop: недосчитанный хвост цепочки помечаем — хост покажет посчитанное.
+		if (cancelFlag != nullptr && *cancelFlag != 0) {
+			if (maxValueCheckerArray != nullptr)
+				for (int r = j; r < nPts; ++r) maxValueCheckerArray[r] = REGIME_CANCELLED;
+			return;
+		}
 		if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
 		const numb v = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, reverse != 0);
 		if (kind == UCUDA_AXIS_SYSTEM) a[mutParamIdx] = v;

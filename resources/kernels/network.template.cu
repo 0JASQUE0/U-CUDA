@@ -70,7 +70,7 @@ __device__ __forceinline__ float curand_uniform(curandState_t* s) {
 #include "cudaLibrary.cuh"
 
 __device__ __host__ __forceinline__
-void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
+void calculateDiscreteModel(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h) {
 {{KRS_BODY}}
 }
 
@@ -179,6 +179,8 @@ extern "C" __global__ void networkIntegrateKernel(
         for (int k = 0; k < AMOUNTOFX; ++k) dst[k] = sh[(size_t)node * AMOUNTOFX + k];
     }
 
+    UcudaKrsPre krsPre;
+    ucudaKrsPrep(krsPre, ai, h);
     for (long long s = 0; s < stepsThisLaunch && !shStop; ++s) {
         if (live)
             networkCoupling(sh, values, edgeStart, edgeSrc, edgeW, edgeLaw, node, C);
@@ -186,7 +188,7 @@ extern "C" __global__ void networkIntegrateKernel(
 
         if (live) {
             for (int k = 0; k < AMOUNTOFX; ++k) X[k] = sh[(size_t)node * AMOUNTOFX + k];
-            calculateDiscreteModel(X, ai, h);
+            calculateDiscreteModelP(X, ai, h, krsPre);
             for (int k = 0; k < AMOUNTOFX; ++k) X[k] += h * C[k];
             if (networkNodeBad(X, maxValue)) {
                 statusOut[node] = NET_DIVERGED;

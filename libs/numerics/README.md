@@ -1,5 +1,10 @@
 # Numerics module
 
+The module also owns `multistep_bdf.h` (CPU BDF using the common runtime driver),
+SPICE parsing and KiCad import. KiCad CLI invocation uses native Windows process
+support or the POSIX platform process API; imports never require GUI. Numerical
+regression and benchmark workloads cover fixed/adaptive/BDF and DAE paths.
+
 ## Purpose
 
 Provides CPU integration and native compilation of generated KRS code. It is the CPU execution counterpart to the CUDA module and supports CPU fallbacks and comparisons.

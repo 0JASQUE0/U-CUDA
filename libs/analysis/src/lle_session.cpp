@@ -1,4 +1,55 @@
 ﻿#include "session_internal.h"
+using namespace ucuda::analysis_detail;
+
+
+// LLEAnalysisSession — структурно зеркалит BifurcationAnalysisSession.
+// Та же async-машинерия, та же per-curve конфигурация, тот же compute_krs_for_scheme.
+
+void LLEAnalysisSession::load_from_record(const SystemRecord& r,
+    const std::vector<std::string>& vars_,
+    const std::vector<std::string>& params_) {
+    vars = vars_;
+    params = params_;
+    custom_schemes = r.custom_schemes;
+    enabled_builtin_schemes = enabled_builtins_from_record(r);
+
+    curves.clear();
+    LLECurveConfig c;
+    c.label = "LLE 1";
+    c.label_is_manual = false;   // fresh curve → auto-label
+    c.h_text = default_h_from_record(r);
+    c.scheme = default_scheme_from_record(r, c.scheme);
+    c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
+
+    for (const auto& p : params) {
+        auto it = r.param_values.find(p);
+        c.param_values[p] = (it != r.param_values.end()) ? it->second : "";
+    }
+    for (const auto& v : vars) {
+        auto it = r.init_conditions.find(v);
+        c.initial_conditions[v] = (it != r.init_conditions.end()) ? it->second : "";
+    }
+    if (!params.empty()) {
+        c.param_index = 0;
+    }
+    curves.push_back(std::move(c));
+
+    active_curve_index = 0;
+    running_curve_index = -1;
+}
+
+
+void LLEAnalysisSession::remove_curve(int i) {
+    if (i < 0 || i >= (int)curves.size()) return;
+    if (in_flight && running_curve_index == i) return;
+    curves.erase(curves.begin() + i);
+    if (in_flight && running_curve_index > i) running_curve_index--;
+    if (active_curve_index >= (int)curves.size())
+        active_curve_index = (int)curves.size() - 1;
+    if (active_curve_index < 0) active_curve_index = 0;
+}
 
 namespace ucuda::analysis_detail {
 
@@ -9,7 +60,7 @@ LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     req.continuation         = c.continuation;
     req.continuation_reverse = c.continuation_reverse;
     req.use_cpu              = !c.use_gpu;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -19,8 +70,9 @@ LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    scheme_fill_tail(req.base_values.data() + nparams + 1, c.cd_fp_iters, c.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -45,9 +97,13 @@ LLE1DRequest build_lle1d_request(const LLEAnalysisSession& s,
     req.vector_transient = parse_d(c.vtr_text, 0.0);
     req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive);
+                          req.transient_time + req.t_max, c.ad_axis, 0, req.adaptive, req.h);
+    sweep_extend_state(req);
     return req;
 }
+}
+
+namespace ucuda::analysis_detail {
 
 
 void apply_lle1d_result(LLECurveConfig& c, LLE1DResult&& r) {
@@ -57,6 +113,9 @@ void apply_lle1d_result(LLECurveConfig& c, LLE1DResult&& r) {
     c.data_generation++;
     c.fit_request = true;
 }
+}
+
+namespace ucuda::analysis_detail {
 
 
 // Снапшот для 2D-режима. Те же общие поля, что у 1D, + поля второй оси и
@@ -65,7 +124,7 @@ void apply_lle1d_result(LLECurveConfig& c, LLE1DResult&& r) {
 LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
                                         const LLECurveConfig& c) {
     LLE2DRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
     req.amountOfX = (int)s.vars.size();
 
     req.initial_conditions.resize(req.amountOfX);
@@ -75,8 +134,9 @@ LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
     }
 
     int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
     req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    scheme_fill_tail(req.base_values.data() + nparams + 1, c.cd_fp_iters, c.newton); // a[M+1..M+4]: CD FP n, Newton
     for (int i = 0; i < nparams; ++i) {
         auto it = c.param_values.find(s.params[i]);
         req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
@@ -111,9 +171,13 @@ LLE2DRequest build_lle2d_request(const LLEAnalysisSession& s,
     req.vector_transient   = parse_d(c.vtr_text, 0.0);
     req.csv_output_path    = c.csv_save_enabled ? c.csv_output_path : std::string{};
     fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive);
+                          req.transient_time + req.t_max, c.ad_axis, c.ad_axis_2, req.adaptive, req.h);
+    sweep_extend_state(req);
     return req;
 }
+}
+
+namespace ucuda::analysis_detail {
 
 
 void apply_lle2d_result(LLECurveConfig& c, LLE2DResult&& r) {
@@ -123,57 +187,6 @@ void apply_lle2d_result(LLECurveConfig& c, LLE2DResult&& r) {
     c.data_generation_2d++;
     c.fit_request_2d = true;
 }
-}
-using namespace ucuda::analysis_detail;
-
-
-// LLEAnalysisSession — структурно зеркалит BifurcationAnalysisSession.
-// Та же async-машинерия, та же per-curve конфигурация, тот же compute_krs_for_scheme.
-
-void LLEAnalysisSession::load_from_record(const SystemRecord& r,
-    const std::vector<std::string>& vars_,
-    const std::vector<std::string>& params_) {
-    vars = vars_;
-    params = params_;
-    custom_schemes = r.custom_schemes;
-    enabled_builtin_schemes = enabled_builtins_from_record(r);
-
-    curves.clear();
-    LLECurveConfig c;
-    c.label = "LLE 1";
-    c.label_is_manual = false;   // fresh curve → auto-label
-    c.h_text = default_h_from_record(r);
-    c.scheme = default_scheme_from_record(r, c.scheme);
-    c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
-
-    for (const auto& p : params) {
-        auto it = r.param_values.find(p);
-        c.param_values[p] = (it != r.param_values.end()) ? it->second : "";
-    }
-    for (const auto& v : vars) {
-        auto it = r.init_conditions.find(v);
-        c.initial_conditions[v] = (it != r.init_conditions.end()) ? it->second : "";
-    }
-    if (!params.empty()) {
-        c.param_index = 0;
-    }
-    curves.push_back(std::move(c));
-
-    active_curve_index = 0;
-    running_curve_index = -1;
-}
-
-
-
-
-void LLEAnalysisSession::remove_curve(int i) {
-    if (i < 0 || i >= (int)curves.size()) return;
-    if (in_flight && running_curve_index == i) return;
-    curves.erase(curves.begin() + i);
-    if (in_flight && running_curve_index > i) running_curve_index--;
-    if (active_curve_index >= (int)curves.size())
-        active_curve_index = (int)curves.size() - 1;
-    if (active_curve_index < 0) active_curve_index = 0;
 }
 
 
@@ -267,6 +280,7 @@ void LLEAnalysisSession::request_cancel() {
 bool LLEAnalysisSession::poll() {
     if (!in_flight) return false;
     bool cancelled = false;
+    std::string stop_note;
     std::string label;
     int idx = running_curve_index;
     if (idx >= 0 && idx < (int)curves.size()) label = curves[idx].label;
@@ -275,7 +289,8 @@ bool LLEAnalysisSession::poll() {
         if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LLE2DResult r = run_future_2d.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)curves.size()) {
             apply_lle2d_result(curves[idx], std::move(r));
         }
     } else {
@@ -283,13 +298,15 @@ bool LLEAnalysisSession::poll() {
         if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LLE1DResult r = run_future.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)curves.size()) {
             apply_lle1d_result(curves[idx], std::move(r));
         }
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("LLE") : label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;

@@ -1,6 +1,18 @@
-﻿#include "engine_helpers.h"
-#include "engine_impl.h"
+﻿#include "engine_impl.h"
 using namespace ucuda::cuda_detail;
+
+ParametricEngine::~ParametricEngine() = default;
+
+
+SignalMetricsResult ParametricEngine::run_signal_metrics(const SignalMetricsRequest& req) {
+    return impl_->run_signal_metrics(req);
+}
+
+
+NetworkResult ParametricEngine::run_network(const NetworkRequest& req) {
+    return impl_->run_network(req);
+}
+
 std::string stability_validate(const StabilityRequest& req) {
     if (req.krs_body.empty()) return "krs_body is empty";
     if (req.amountOfX != 2)
@@ -77,14 +89,12 @@ void stability_summarize(StabilityResult& res) {
     }
 }
 
-// Спектральная норма 2x2 в замкнутом виде: sigma_max = hypot(E, H) + hypot(F, G)
-// с E, F — полусуммой и полуразностью диагонали, G, H — то же для
-// недиагонали. В отличие от sqrt((|M|_F^2 + sqrt(|M|_F^4 - 4 det^2)) / 2) здесь
-// нет вычитания близких чисел.
-static double stab_norm2(double m00, double m01, double m10, double m11) {
+namespace ucuda::cuda_detail {
+double stab_norm2(double m00, double m01, double m10, double m11) {
     const double E = 0.5 * (m00 + m11), F = 0.5 * (m00 - m11);
     const double G = 0.5 * (m10 + m01), H = 0.5 * (m10 - m01);
     return std::hypot(E, H) + std::hypot(F, G);
+}
 }
 
 double stability_step_error(double sigma, double omega, double k, double r, double h,
@@ -123,12 +133,4 @@ double stability_step_error(double sigma, double omega, double k, double r, doub
     const double nd = stab_norm2(E00 - R00, E01 - R01, E10 - R10, E11 - R11);
     if (!std::isfinite(nd)) return std::numeric_limits<double>::infinity();
     return nd / ne;
-}
-
-SignalMetricsResult ParametricEngine::run_signal_metrics(const SignalMetricsRequest& req) {
-    return impl_->run_signal_metrics(req);
-}
-
-NetworkResult ParametricEngine::run_network(const NetworkRequest& req) {
-    return impl_->run_network(req);
 }

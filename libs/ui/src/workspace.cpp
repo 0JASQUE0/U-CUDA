@@ -1,8 +1,35 @@
 ﻿#include "gui_internal.h"
+using namespace ucuda::ui_detail;
+
+void gui_process_deferred(AppModel& model, const GuiCallbacks& cb) {
+    if (!model.pending_netlist_export) return;
+    model.pending_netlist_export = false;
+    if (!cb.pick_save_file_netlist) return;
+
+    PhaseAnalysisSession& s = model.phase_session;
+    if (!s.result.circuit_valid) return;
+
+    const std::string path = cb.pick_save_file_netlist();
+    if (path.empty()) return;
+
+    NetlistOptions no;
+    no.title      = "U-CUDA synthesized circuit";
+    no.var_names  = s.vars;
+    no.rhs_text   = s.sys.rhs;
+    no.scale      = s.result.circuit_scale;
+    no.x0_volts   = s.result.circuit_x0;
+    no.opamp      = s.result.circuit_opamp;
+    no.h_ode      = s.result.circuit_h_ode;
+    no.t_end_ode  = s.result.circuit_t_end_ode;
+    no.dialect    = s.circuit_netlist_poly ? NetlistDialect::Poly : NetlistDialect::Behavioral;
+
+    const std::string text = emit_spice_netlist(s.result.circuit_graph, no);
+    std::ofstream f(path, std::ios::binary);
+    if (f) { f << text; s.result.circuit_status = "netlist written to " + path; }
+    else     s.result.circuit_status = "cannot write " + path;
+}
 
 namespace ucuda::ui_detail {
-
-
 void draw_custom_controls_panel(AppModel& model, SystemLibrary& lib,
                                        ImVec2 pos, ImVec2 size) {
     ImGui::SetNextWindowPos(pos);
@@ -22,8 +49,9 @@ void draw_custom_controls_panel(AppModel& model, SystemLibrary& lib,
     ImGui::End();
     ImGui::PopStyleVar();
 }
+}
 
-
+namespace ucuda::ui_detail {
 void draw_custom_workspace_panel(CustomSession& cs,
                                         const std::string& sys,
                                         ImVec2 pos, ImVec2 size) {
@@ -273,8 +301,9 @@ void draw_custom_workspace_panel(CustomSession& cs,
         g_ws_rename.target_id = 0;
     }
 }
+}
 
-
+namespace ucuda::ui_detail {
 void draw_custom_mode_layout(AppModel& model, SystemLibrary& lib,
                                     const GuiCallbacks& cb,
                                     ImVec2 area_pos, ImVec2 area_size) {
@@ -342,8 +371,9 @@ void draw_custom_mode_layout(AppModel& model, SystemLibrary& lib,
     draw_custom_workspace_panel(model.custom_session, model.loaded_name, ws_pos, ws_size);
     draw_custom_plot_windows(model, lib, cb);
 }
+}
 
-
+namespace ucuda::ui_detail {
 void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     (void)lib; (void)cb;
     auto& cs = model.custom_session;
@@ -665,8 +695,10 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                 double        vmin_use   = (i == 2 && ls_plane) ? ls_vmin  : slots[i].vmin;
                 double        vmax_use   = (i == 2 && ls_plane) ? ls_vmax  : slots[i].vmax;
                 int           gen_use    = (i == 2 && ls_plane) ? ls_gen   : slots[i].data_gen;
-                if (slots[i].flags)
+                if (slots[i].flags) {
                     hv.cell_regime = regime_cell_label(*slots[i].flags, slots[i].n_pts);
+                    hv.cell_not_computed = cancelled_cell_mask(*slots[i].flags, slots[i].n_pts);
+                }
                 if (i == 0) {   // Bif 2D: значение — период, -1 / 0 — коды режима (как в Parametric)
                     hv.value_name = "period";
                     hv.value_is_regime_code = true;
@@ -818,15 +850,13 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
             ImGui::PopID(); ImGui::End(); continue;
         }
 
-        // X range for autofit (independent of point density).
-        view.x_fit_use_explicit = true;
-        view.x_fit_min = std::min(param_lo, param_hi);
-        view.x_fit_max = std::max(param_lo, param_hi);
+        // Autofit по данным, как в Parametric (configure_sweep_x_axis).
+        view.x_fit_use_explicit = false;
         // Лог-ось — как в Parametric; узлы движка лежат лог-равномерно, ось
         // и snap обязаны это повторить. log при lo<=0 невозможен (движок
         // такой Run отклоняет), но проверку держим здесь тоже — конфиг мог
         // прийти из старой сессии.
-        view.x_axis.log_scale = slice_log && view.x_fit_min > 0.0;
+        view.x_axis.log_scale = slice_log && std::min(param_lo, param_hi) > 0.0;
 
         // Sweep-position crosshair — vertical line at fix_x (X-slice)
         // or fix_y (Y-slice), synced with the slider / drag on 2D heatmaps.
@@ -1187,33 +1217,4 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
         ImGui::End();
     }
 }
-}
-
-using namespace ucuda::ui_detail;
-void gui_process_deferred(AppModel& model, const GuiCallbacks& cb) {
-    if (!model.pending_netlist_export) return;
-    model.pending_netlist_export = false;
-    if (!cb.pick_save_file_netlist) return;
-
-    PhaseAnalysisSession& s = model.phase_session;
-    if (!s.result.circuit_valid) return;
-
-    const std::string path = cb.pick_save_file_netlist();
-    if (path.empty()) return;
-
-    NetlistOptions no;
-    no.title      = "U-CUDA synthesized circuit";
-    no.var_names  = s.vars;
-    no.rhs_text   = s.sys.rhs;
-    no.scale      = s.result.circuit_scale;
-    no.x0_volts   = s.result.circuit_x0;
-    no.opamp      = s.result.circuit_opamp;
-    no.h_ode      = s.result.circuit_h_ode;
-    no.t_end_ode  = s.result.circuit_t_end_ode;
-    no.dialect    = s.circuit_netlist_poly ? NetlistDialect::Poly : NetlistDialect::Behavioral;
-
-    const std::string text = emit_spice_netlist(s.result.circuit_graph, no);
-    std::ofstream f(path, std::ios::binary);
-    if (f) { f << text; s.result.circuit_status = "netlist written to " + path; }
-    else     s.result.circuit_status = "cannot write " + path;
 }

@@ -1,0 +1,4 @@
+{
+  "active_config_index": 0,
+  "configs": [{"label": "legacy order", "scheme": "RK4", "axis_x_lo_text": "0.001", "axis_x_hi_text": "0.01", "axis_x_n_text": "6", "h_text": "0.01", "t_max_text": "1", "use_gpu": false}]
+}

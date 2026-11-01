@@ -1,4 +1,5 @@
 ﻿#pragma once
+#include <cctype>
 #include <map>
 #include <string>
 #include <vector>
@@ -90,12 +91,23 @@
 // честное, порядок 2K (замерено 4.1 и 6.1). См. scheme_gbs в codegen.cpp.
 // Map is not an integration scheme but the right-hand side of a discrete map
 // x_{n+1} = f(x_n) itself. The only emitter that never uses h.
+// CDFast — "CD fast": тот же CD, но всё, что не зависит от переменных
+// состояния (h1, h2 и обратные знаменатели 1/(1 - h2*coef) неявного полушага),
+// вынесено в стадию предрасчёта — см. krs_split_prep ниже. Шаг вместо деления
+// умножает на готовую обратную величину, поэтому с CD совпадает лишь до ulp.
+// CDFP — "CD FP": неявная половина CD целиком простыми итерациями
+// (System::cd_fp_iters проходов), слагаемые f_i без своей переменной считаются
+// один раз до итераций; у линейной f_i = coef*x_i + rem итерация
+// x = x_fp + (h2*coef)*x.
+// CDFastFP — "CD fast FP": линейные уравнения как в CD fast (предрасчёт 1/d),
+// итерации с тем же выносом только у нелинейных. См. emit_fp_implicit_eq в
+// codegen.cpp.
 enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, ComplexCD, ComplexCD4,
                     ComplexCD4S3, ComplexCD4S4, ComplexCD4SS01, ComplexCD4SS10,
                     CD10, ComplexCD10, ComplexCD4_10, ComplexCD4S3_10, ComplexCD4S4_10,
                     ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler,
                     GBS, GBS24, GBS246, GBS2468, GBS246810, GBS24681012, DOPRI78Legacy,
-                    RK45, DOP853, Map };
+                    RK45, DOP853, Map, CDFast, CDFP, CDFastFP };
 
 // Число стадий K схемы ГБШ (1 у опорной GBS, 2..6 у экстраполяторов), 0 — не ГБШ.
 int gbs_stage_count(Scheme sch);
@@ -242,6 +254,11 @@ double scheme_rhs_per_step(const System& s, const std::string& name);
 // Схема, у которой есть адаптивный шаг, — по одному имени: RK-пары, GBS 2-4 ..., Extr(база|n)
 // и ExtrZ(база|n) с K >= 2. База проверяется только при сборке кода.
 bool adaptive_scheme_name_supported(const std::string& name);
+// Многошаговые методы со своим драйвером (multistep_bdf.h): "BDF 1-5" (ОДУ), "DAE BDF 1-5" (ДАУ).
+// Тела шага у них нет — только адаптивный шаг в Analysis.
+bool scheme_is_multistep(const std::string& name);
+extern const char* const kBdfSchemeOde;
+extern const char* const kBdfSchemeDae;
 // Порядок оценщика по имени, для значений регулятора по умолчанию (dopri5 / dop853):
 // у Extr с кастомной базой неизвестен — 7.
 int adaptive_scheme_q_guess(const std::string& name);
@@ -256,12 +273,125 @@ int adaptive_scheme_q_guess(const std::string& name);
 // divergence between the two paths.
 std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch);
 
+// Стадия предрасчёта КРС ("CD fast"): маркеры блока констант в начале тела и
+// его разбор для ядер — в krs_prep.h (header-only, его читают и движки).
+#include "ucuda/equations/krs_prep.h"
+
 // Правые части системы в том виде, из которого codegen_scheme собирает шаг
 // ЛЮБОЙ схемы: выражения над X[0..N-1] и a[1..M], по строке на переменную
 // (у отображения — сразу x_{n+1}). Это тот же rhs_over, что внутри схем, а не
 // отдельный путь, — превью в Library показывает ровно то, что уйдёт в ядро.
 // std::runtime_error при ошибке разбора.
 std::vector<std::string> codegen_rhs(const System& s);
+
+// Явное время t (этап 2 плана DAE). Правая часть с символом t, который не
+// переменная и не параметр, делает систему неавтономной: тело шага читает
+// время шага из аргумента kStepTimeArg и печатает время каждой стадии.
+// Сигнатура шага тогда calculateDiscreteModel(X, ucuda_t, a, h) — её ставит
+// шаблон/движок по kStepTimeArg в тексте тела (step_body_uses_time). У
+// автономной системы тело прежнее до байта.
+inline constexpr const char* kStepTimeArg = "ucuda_t";
+inline constexpr const char* kTimeUnsupportedMsg =
+    "explicit time t is not supported by this scheme: complex CD "
+    "and Complex Implicit Euler have complex stage times "
+    "(supported: explicit RK, implicit Euler/Midpoint, SEMP/SIMP/D, CD, CD {1-0}, CD FP, CD fast as CD, GBS, Extr/Comp over them; "
+    "adaptive RK45/DOP853/DOPRI78, GBS, Extr)";
+bool system_uses_time(const System& s);
+// Превью уравнений: выражение (синтаксис кодогена) в LaTeX для math_formula_draw — \frac, ^{},
+// \mathrm{sin}, модуль через \left|; имя с цифровым хвостом — с индексом (x1 -> x_{1}),
+// греческое — со слешем.
+// labels — свои подписи символов (имя -> TeX, подписи полей записи); нет в нём — name_to_latex.
+std::string expr_to_latex(const std::string& expr, bool latex_in, const std::vector<std::string>& user_funcs = {},
+                          const std::map<std::string, std::string>* labels = nullptr);
+std::string name_to_latex(const std::string& name);
+// Схема умеет печатать время стадий (неявные, CD, комплексные, ГБШ — ещё нет).
+bool scheme_supports_time(Scheme sch);
+// ДАУ: схемы этапа 4 плана DAE. Тело шага — как у схем ОДУ (calculateDiscreteModel над
+// X = [x; z], та же раскладка a[] с хвостом Ньютона), поэтому идёт в те же ядра.
+//   BDF1        — неявный Эйлер на ДАУ: x+ = x + h f(x+, z+), 0 = g(x+, z+).
+//   Trapezoidal — трапеции: x+ = x + h/2 (f(x, z) + f(x+, z+)), 0 = g(x+, z+).
+//   TRBDF2      — трапеции до t + gamma*h, затем BDF2 (gamma = 2 - sqrt 2): L-устойчив, порядок 2.
+// Ньютон по всему [x+; z+] с символьным якобианом (тот же, что у Implicit Euler).
+//   ExplicitEuler / ExplicitMidpoint / RK4 — явные схемы с решением связи на каждой стадии
+//   (Ньютон только по z, индекс 1); Midpoint — полуявный РК2 отчёта CD-ДАУ.
+//   ROS2 — Rosenbrock ROS2 (линейно-неявный, L-устойчив, порядок 2).
+//   CD / CDYoshida4 — CD с решением связи при каждом изменении x (уровень B, индекс 1; связь может
+//   быть нелинейной по z), и его композиция Йошиды 4-го порядка (при a[0] = 0.5).
+enum class DaeScheme { BDF1, Trapezoidal, TRBDF2, ExplicitEuler, ExplicitMidpoint, RK4, ROS2, CD, CDYoshida4,
+                       ROS3P, Rodas4, SDIRK2, ImplicitMidpoint, Radau5, BDF1GGL, Radau5GGL, CDIndex2 };
+// Согласованные НУ (индекс 1): при фиксированных x решает g(x, z, t0) = 0 по z Ньютоном
+// (якобиан dg/dz символьный, тот же, что у шага). X — [x; z] на входе и выходе; a — раскладка
+// шага ([s, p_1..p_M, хвост]). Стартует с z из X. false — z не тронут, why — причина:
+// dg/dz вырожден (индекс >= 2: z из g не определяется, нужны скрытые связи) или Ньютон не сошёлся.
+// На CPU (вычислитель правых частей), вызывается один раз до траектории.
+bool dae_consistent_z(const System& s, const double* a, int na, double t0, double* X, std::string* why);
+// Этап 3, уровень A: ДАУ индекса 1, где каждую z можно выразить из связи явно (связь
+// линейна по ней; связи решаются по очереди, решённые z подставляются в следующие),
+// сводится к ОДУ по x: z = -rem/coef подставлено в f на уровне AST, так что якобиан,
+// разбор CD и все вкладки видят честную ОДУ. ode.vars = x, ode.rhs — f(x, z(x)), dae_nx = -1.
+// z_exprs — выражения z(x) (для наблюдаемых). false — причина в why (индекс >= 2 или z
+// входит нелинейно: тогда только методы ДАУ).
+bool dae_reduce_to_ode(const System& s, System& ode, std::vector<std::string>* z_exprs, std::string* why);
+// Структурный индекс 1: в каждой связи 0 = g есть хотя бы одна z (иначе dg/dz вырожден). Уровень B
+// «Solve as ODE» (z Ньютоном) и проверка галочки в редакторе.
+bool dae_index1_structural(const System& s);
+// Этап 5. Массив производных связей: связь дифференцируется вдоль x' = f, пока в ней не появится z;
+// индекс связи — число элементов (1 — z прямо в g). dae_structural_index — максимум по связям
+// (-1 — не ДАУ, 0 — не определяется: связь без z и после 3 производных).
+int dae_structural_index(const System& s);
+// Уровень C «Solve as ODE»: каждая связь индекса m+1 заменяется на (d/dt + alpha)^m g = 0 (её m-я
+// производная плюс младшие с биномиальными весами — стабилизация Баумгарте с кратным корнем), так что
+// получается ДАУ индекса 1 для уровней A/B; дрейф исходной связи гаснет как e^(-alpha t).
+bool dae_stabilized_index1(const System& s, double alpha, System& out, std::string* why);
+// GGL (Gear-Gupta-Leimkuhler): связям уровня позиций (индекс 3) добавляются множители mu
+// (vars "ucuda_ggl_mu<k>"): x' = f - (dg/dx)^T mu, 0 = g, 0 = d/dt g — система индекса 2 с mu = 0
+// на решении. Методы "... + GGL" держат mu внутри шага (состояние X прежнее).
+bool dae_ggl_system(const System& s, System& out, std::string* why);
+// Тело заканчивается меткой dae_nx_tag(s.dae_nx) — см. dae_nx_from_body.
+std::string codegen_dae_scheme(const System& s, DaeScheme sch);
+// Адаптивный шаг на ДАУ (этап 9b): Rodas4 как вложенная пара — Y по 6 стадиям (порядок 4),
+// E = u_6 (оценка порядка 3, rodas.f), плотный выход rodas.f порядка 3 по x и z. Только
+// индекс 1 (норма ошибки драйвера не масштабирует переменные индекса >= 2). Бросает на
+// другом методе / индексе.
+AdaptiveCode codegen_adaptive_dae(const System& s, DaeScheme sch);
+// Прочие одношаговые методы ДАУ — переменный шаг удвоением шага: Y = два шага h/2 тела постоянного
+// шага, E = (Y - шаг h)/(2^p - 1), E переменной индекса k — с множителем h^(k-1); плотный выход —
+// парабола через X, середину и Y. Индекс — какой поддерживает сам метод. name — для комментария.
+AdaptiveCode codegen_adaptive_dae_doubling(const System& s, DaeScheme sch, const std::string& name);
+// Порядок одношагового метода ДАУ (по x); 0 — нет.
+int dae_scheme_order(DaeScheme sch);
+// Тела для BDF 1-5 на GPU (kernels/ucuda_bdf.cuh): res — F[i] = [f; g](X, ucuda_t), jac — полный
+// символьный якобиан J[i*N + j] = d[f; g]_i / dX_j. Система — ОДУ или ДАУ индекса 1-2 (индекс 3
+// сначала сводится GGL, см. bdf_prepare_system).
+// jname — имя массива якобиана: "J" у ядра Analysis, "D" в свипах (тело встаёт в слот dprep
+// адаптивного модуля, где выход называется D).
+void codegen_bdf_bodies(const System& s, std::string& res, std::string& jac, const char* jname = "J");
+// Метка числа x в теле шага метода ДАУ: LLE/LS по ней возмущают клоны только по x
+// (UCUDA_LYAP_NX), z клона решает сам метод. Тело входит в ключ кэша модулей.
+constexpr const char* kDaeNxTag = "// @ucuda-dae-nx ";
+inline std::string dae_nx_tag(int nx) { return std::string("\n") + kDaeNxTag + std::to_string(nx) + "\n"; }
+// Число дифференциальных переменных из метки; -1 — тело не метода ДАУ.
+inline int dae_nx_from_body(const std::string& body) {
+    const size_t p = body.rfind(kDaeNxTag);
+    if (p == std::string::npos) return -1;
+    try { return std::stoi(body.substr(p + std::char_traits<char>::length(kDaeNxTag))); }
+    catch (...) { return -1; }
+}
+// Имена в комбо схем DAE-вкладки и сессиях; false — не схема ДАУ.
+bool dae_scheme_from_name(const std::string& name, DaeScheme* out);
+const std::vector<std::string>& dae_scheme_names();
+
+// Тело шага неавтономное: ссылается на аргумент времени. То же для тел
+// адаптивного шага (rhs / emb / dprep): модуль тогда собирается с
+// #define UCUDA_NONAUTONOMOUS, и функции ucuda_krs_* получают ucuda_t.
+inline bool step_body_uses_time(const std::string& body) {
+    for (size_t p = body.find(kStepTimeArg); p != std::string::npos; p = body.find(kStepTimeArg, p + 1)) {
+        const size_t e = p + 7;   // strlen("ucuda_t")
+        const char c = e < body.size() ? body[e] : ' ';
+        if (!(std::isalnum((unsigned char)c) || c == '_')) return true;
+    }
+    return false;
+}
 
 // Вклад ОДНОГО ребра сети в правую часть узла-приёмника (вкладка Network).
 // exprs — по выражению на переменную системы; пустая строка = в это уравнение
@@ -601,11 +731,12 @@ public:
     // Параметры a[] остаются вещественными.
     void eval_jacobian_complex(const ucmplx* Z, const double* a, ucmplx* J) const;
 
-    // Newton settings carried over from the System this evaluator was built from —
-    // exposed here so computePhasePortraitCPU needs no extra parameters.
-    bool   newton_full() const;
-    double newton_tol() const;
-    int    newton_max_iters() const;
+    // Newton settings of the implicit schemes, read from the tail of a[] exactly as the
+    // generated GPU step reads them (a[M+2..M+4], see NewtonSettings), so the CPU paths
+    // need no extra parameters.
+    bool   newton_full(const double* a) const;
+    double newton_tol(const double* a) const;
+    int    newton_max_iters(const double* a) const;
 
     // Решает i-е уравнение диагонально-неявного полушага относительно своей
     // переменной: X[i] = X[i] + hs * f_i(X), где f_i = coef*x_i + rem и ни coef,
@@ -615,8 +746,14 @@ public:
     // включая порядок умножений и вынос знака.
     // Возвращает false, если f_i нелинейна по своей переменной: тогда шаг
     // обязан откатиться на простые итерации, ровно как это делает GPU.
-    bool solve_diag_implicit(int i, double* X, const double* a, double hs) const;
+    // recip -- "CD fast": где coef не зависит от состояния, умножить на 1/d.
+    bool solve_diag_implicit(int i, double* X, const double* a, double hs,
+                             bool recip = false) const;
     bool solve_diag_implicit_complex(int i, ucmplx* Z, const double* a, ucmplx hs) const;
+    // "CD FP" / "CD fast FP" (fast): i-е уравнение неявного полушага так же,
+    // как его печатает emit_fp_implicit_eq, — a[cd_fp_slot] простых итераций
+    // с вынесенными слагаемыми без x_i, линейные при fast — solve_diag_implicit.
+    void solve_diag_fp(int i, double* X, const double* a, double hs, bool fast) const;
 
     // То же самое и по тому же байткоду, но в комплексной арифметике —
     // для схем с комплексными коэффициентами (Complex CD). Параметры a[]

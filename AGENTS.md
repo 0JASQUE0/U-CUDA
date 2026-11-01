@@ -27,7 +27,9 @@ Use [README.md](README.md) to locate the owning module. Consult [ARCHITECTURE.md
 
 ## Verification
 
-- Add focused regression tests for behavior changes and bug fixes where practical.
+- Каждая новая функция или изменение поведения, результат которого можно объективно проверить, сопровождается автоматическими тестами в том же изменении. Функция считается завершённой после прохождения соответствующих проверок. Исправление ошибки сопровождается регрессионным тестом, воспроизводящим её.
+- Numerical and performance-sensitive changes must add or extend accuracy/convergence checks and benchmarks for every supported CPU/GPU path. Do not weaken tolerances or replace baselines merely to make tests pass.
+- If automated verification is objectively impossible, document the reason and a reproducible manual check in the change description.
 - Build affected targets; build `U-CUDA-legacy` when shared compute signatures change.
 - Run `adaptive_cpu`, `architecture`, and relevant platform tests. CUDA/NVRTC changes also require non-skipped `adaptive_gpu` and `gpu_smoke` runs on a real GPU.
 - Configure once with `U_CUDA_BUILD_GUI=OFF` after dependency-boundary changes.

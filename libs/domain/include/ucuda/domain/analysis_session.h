@@ -6,6 +6,17 @@ class ParametricEngine;
 struct AdaptiveCode;
 #include "ucuda/domain/circuit_solver.h"
 #include "ucuda/domain/adaptive_settings.h"
+#include "ucuda/domain/time_estimate.h"
+
+// Настройки Ньютона новой вкладки — из записи системы (поля Newton solver в редакторе
+// системы задают значения по умолчанию, как symmetry s).
+inline NewtonSettings newton_from_record(const SystemRecord& r) {
+    NewtonSettings n;
+    n.full      = r.newton_full;
+    n.tol       = r.newton_tol.empty()       ? std::string("1e-10") : r.newton_tol;
+    n.max_iters = r.newton_max_iters.empty() ? std::string("8")     : r.newton_max_iters;
+    return n;
+}
 
 // Names of built-in schemes enabled in SystemRecord (order matches kBuiltinSchemeNames).
 // Empty when nothing is ticked; combo callers fall back to "show all built-ins".
@@ -271,6 +282,9 @@ struct AnalysisResult {
     int generation = 0;
     // Диагностика схемного прогона (фаза 4a); пусто, если схема не считалась.
     std::string circuit_status;
+    // ДАУ: что стало с начальными z (согласованы по g или оставлены как заданы и почему);
+    // пусто у ОДУ.
+    std::string dae_status;
     // Сама синтезированная схема — чтобы экспорт netlist'а выдавал РОВНО ТО,
     // что считалось, а не пересобирал её заново по текущим полям UI.
     bool                circuit_valid = false;
@@ -308,6 +322,11 @@ struct PhaseAnalysisSession {
     // система (для расчёта нужны имена переменных/параметров и КРС-движок)
     std::vector<std::string> vars;     // имена переменных (порядок = индексы X[])
     std::vector<std::string> params;   // имена параметров (порядок = a[1..])
+    // Наблюдаемые вне состояния: ДАУ, сведённая к ОДУ ("Solve as ODE"), — z(x) как выражения над
+    // x и a[]. После счёта их значения дописываются к каждой точке траектории (координаты
+    // vars.size() + j), и проекции Phase 2D / 3D выбирают их по этим номерам. Пусто у ОДУ.
+    std::vector<std::string> observables;   // имена
+    std::vector<std::string> obs_exprs;     // выражения (как rhs System), по одному на имя
 
     // Пользовательские КРС из текущей системы (копия из SystemRecord).
     // Доступны в scheme combo вместе с built-in именами.
@@ -325,6 +344,8 @@ struct PhaseAnalysisSession {
     std::string skip_time = "100";      // transient (с)
     std::string scheme = "Euler";      // выбор метода (Euler/EulerCromer/Midpoint/RK4)
     std::string symmetry_s = "0.5";    // коэф. симметрии s для CD (a[0])
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
     std::string decimation = "1";      // выводить каждую N-ю точку
     // Адаптивный шаг. При нём step_h — шаг вывода равномерной сетки (плотный выход); на
     // узлах шага step_h не участвует, а decimator берёт каждый N-й узел.
@@ -478,6 +499,16 @@ struct PhaseAnalysisSession {
     int data_generation = 0;
 };
 
+// Сводка режимов по flags для строки статуса (draw_regime_summary в gui.cpp). Обход flags стоит
+// ~0.2 с на 10000², поэтому он делается раз на данные, а не на каждый кадр. Ключ — generation и
+// сам буфер (data/size): копия конфига или буфер другого режима (1D / 2D) не выдаст чужие числа.
+struct RegimeCounts {
+    int         gen  = -1;
+    const void* data = nullptr;
+    size_t      size = 0;
+    int         fp = 0, unb = 0, osc = 0, stopped = 0;
+};
+
 // Одна бифуркационная диаграмма (БД) на параметрическом графике:
 // независимый свип, свои IC/scheme/range/CSV/peaks-vs-inter-peaks.
 // Несколько БД оверлеятся на один график с легендой (см. BifurcationAnalysisSession).
@@ -493,6 +524,8 @@ struct BifurcationDiagramConfig {
     // session.custom_schemes на момент Run).
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     // Свип: какой параметр, его диапазон, число точек.
     int         param_index    = 0;
@@ -598,6 +631,7 @@ struct BifurcationDiagramConfig {
     Bifurcation2DResult result_2d;
     bool        last_run_2d_ok    = false;
     int         data_generation_2d = 0;
+    RegimeCounts regime_counts_2d;
     bool        fit_request_2d    = false;
     // Persisted heatmap colormap choice for this diagram (-1 = unset, falls
     // back to AppModel::heatmap_colormap on first HeatmapView creation).
@@ -706,6 +740,8 @@ struct BifurcationAnalysisSession {
 
     // Async-Run для конкретной БД. Возвращает false если очередь занята.
     bool run_async(ParametricEngine& engine, int diagram_idx);
+    // Объём работы для оценки времени счёта траекторий (time_estimate.h).
+    TrajWork traj_work(int diagram_idx) const;
 
     // Задача фонового прогрева: копирует запрос НА ВЫЗЫВАЮЩЕМ потоке (сессию читать из фонового
     // нельзя — её правит UI) и компилирует модуль, ничего не считая. Пустая функция, если
@@ -732,6 +768,8 @@ struct LLECurveConfig {
 
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     int         param_index    = 0;
     // IC sweep: если sweep_over_var=true, кривая считается по нач. условию
@@ -809,6 +847,7 @@ struct LLECurveConfig {
     LLE2DResult result_2d;
     bool        last_run_2d_ok = false;
     int         data_generation_2d = 0;
+    RegimeCounts regime_counts_2d;
     bool        fit_request_2d = false;
     // Persisted heatmap colormap choice for this curve (-1 = unset, falls
     // back to AppModel::heatmap_colormap on first HeatmapView creation).
@@ -862,6 +901,8 @@ struct LLEAnalysisSession {
     void remove_curve(int i);
     bool run(ParametricEngine& engine, int curve_idx);
     bool run_async(ParametricEngine& engine, int curve_idx);
+    // Объём работы для оценки времени счёта траекторий (time_estimate.h).
+    TrajWork traj_work(int curve_idx) const;
 
     // Задача фонового прогрева: копирует запрос НА ВЫЗЫВАЮЩЕМ потоке (сессию читать из фонового
     // нельзя — её правит UI) и компилирует модуль, ничего не считая. Пустая функция, если
@@ -882,6 +923,8 @@ struct Dft1DConfig {
 
     std::string scheme     = "Euler";
     std::string symmetry_s = "0.5";       // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     // Свип — см. BifurcationDiagramConfig (то же самое: параметр или НУ,
     // с опциональным continuation). Continuation требует sweep_over_var=false
@@ -1014,6 +1057,8 @@ struct Dft1DAnalysisSession {
 
     bool run(ParametricEngine& engine, int config_idx);
     bool run_async(ParametricEngine& engine, int config_idx);
+    // Объём работы для оценки времени счёта траекторий (time_estimate.h).
+    TrajWork traj_work(int config_idx) const;
     void request_cancel();
     bool poll();
 };
@@ -1038,6 +1083,7 @@ enum class BasinFeature : int {
     LogRMSIntervals     = 9,
     LogStDevPeaks       = 10,
     LogStDevIntervals   = 11,
+    SLogAvgPeaks        = 12,
 };
 
 // Названия признаков, индексируемые кодом BF_* / BasinFeature. ЕДИНСТВЕННЫЙ список на проект:
@@ -1060,6 +1106,7 @@ inline constexpr const char* kBasinFeatureNames[BF_FEATURE_COUNT] = {
     "sign*log10|avg peaks|", "sign*log10|avg intervals|",
     "log10 RMS peaks",       "log10 RMS intervals",
     "log10 StDev peaks",     "log10 StDev intervals",
+    "sign*log10(|avg peaks|/1e-12)",
 };
 
 // Страховка от возврата не-ASCII: подпись обязана пережить чтение файла в любой однобайтовой
@@ -1081,6 +1128,8 @@ struct BasinsConfig {
     std::string label = "Basins";
     std::string scheme = "Euler";
     std::string symmetry_s = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     int axis_x_var = 0;
     int axis_y_var = 1;
@@ -1088,6 +1137,9 @@ struct BasinsConfig {
     std::string axis_x_hi_text = "10";
     std::string axis_y_lo_text = "-10";
     std::string axis_y_hi_text = "10";
+    // ±log-сетка по оси (BasinsRequest::axis_*_symlog): lo/hi тогда — границы |x| (> 0).
+    bool axis_x_symlog = false;
+    bool axis_y_symlog = false;
     std::string n_pts_text = "100";
 
     int writable_var = 0;
@@ -1119,6 +1171,7 @@ struct BasinsConfig {
     bool        last_run_ok = false;
     std::string last_error;
     int         data_generation = 0;
+    RegimeCounts regime_counts;
     bool        fit_request = false;
 
     // Активный внутренний таб плотов (0..4 = Basins/AvgPk/AvgInt/States/Scatter).
@@ -1158,6 +1211,13 @@ struct BasinsConfig {
     bool        pp_use_gpu     = true;
     bool        pp_autorun     = false;
     float       pp_marker_size = 6.0f;   // px, маркер бассейнов-равновесий
+
+    // Стиль точек Scatter (облако признаков, вкладка 4). Выключенный стиль —
+    // прежний вид: сплошной квадратный GL-пойнт 3 px без смешивания.
+    bool        scatter_custom_style = false;
+    int         scatter_marker       = 0;      // PointMarker
+    float       scatter_point_size   = 4.0f;   // px
+    float       scatter_alpha        = 0.6f;
 };
 
 // Фазовые портреты по бассейнам — один слот на BasinsConfig, позиционно синхронный с
@@ -1262,6 +1322,8 @@ struct BasinsAnalysisSession {
 
     bool run(ParametricEngine& engine, int config_idx);
     bool run_async(ParametricEngine& engine, int config_idx);
+    // Объём работы для оценки времени счёта траекторий (time_estimate.h).
+    TrajWork traj_work(int config_idx) const;
 
     // Reclustering: запуск DBSCAN-only прогона поверх уже сохранённых фич
     // configs[config_idx].result.{avg_peaks,avg_intervals,helpful_array}. Использует ту же
@@ -1309,6 +1371,8 @@ struct FastSyncConfig {
     std::string label  = "FastSync 1";
     std::string scheme = "Euler";
     std::string symmetry_s = "0.5"; // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     // Режим:
     int mode = 0;   // 0 = On Attractor, 1 = On Grid
@@ -1458,6 +1522,8 @@ struct LSCurveConfig {
 
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     int         param_index    = 0;
     // IC sweep: если sweep_over_var=true, кривая считается по нач. условию
@@ -1524,6 +1590,7 @@ struct LSCurveConfig {
     LS2DResult result_2d;
     bool        last_run_2d_ok = false;
     int         data_generation_2d = 0;
+    RegimeCounts regime_counts_2d;
     bool        fit_request_2d = false;
 
     // Какую экспоненту показывать в heatmap (0-based, default λ₁); -1 = "sum
@@ -1589,6 +1656,8 @@ struct LyapunovSpectrumAnalysisSession {
     void remove_curve(int i);
     bool run(ParametricEngine& engine, int curve_idx);
     bool run_async(ParametricEngine& engine, int curve_idx);
+    // Объём работы для оценки времени счёта траекторий (time_estimate.h).
+    TrajWork traj_work(int curve_idx) const;
 
     // Задача фонового прогрева: копирует запрос НА ВЫЗЫВАЮЩЕМ потоке (сессию читать из фонового
     // нельзя — её правит UI) и компилирует модуль, ничего не считая. Пустая функция, если
@@ -1610,6 +1679,8 @@ struct SignalMetricsConfig {
 
     std::string scheme         = "Euler";
     std::string symmetry_s     = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
 
     // Свип по X — см. BifurcationDiagramConfig.
     int         param_index     = 0;
@@ -1671,6 +1742,7 @@ struct SignalMetricsConfig {
     SignalMetricsResult result_2d;
     bool        last_run_2d_ok     = false;
     int         data_generation_2d = 0;
+    RegimeCounts regime_counts;   // 1D и 2D различаются по буферу (RegimeCounts::data)
     bool        fit_request_2d     = false;
     int         colormap_idx       = -1;   // -1 = AppModel::heatmap_colormap
 };
@@ -1715,6 +1787,8 @@ struct SignalMetricsAnalysisSession {
     void add_config();
     void remove_config(int i);
     bool run_async(ParametricEngine& engine, int config_idx);
+    // Объём работы для оценки времени счёта траекторий (time_estimate.h).
+    TrajWork traj_work(int config_idx) const;
     std::function<void(ParametricEngine&)> prewarm_task(int config_idx) const;
     void request_cancel();
     bool poll();

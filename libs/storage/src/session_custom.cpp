@@ -44,6 +44,10 @@ bool session_from_json_custom(const std::string& json, CustomSession& s) {
                         else if (k == "level_phase_enabled")     c.level_phase_enabled = q.boolean();
                         else if (k == "scheme")                  c.scheme = q.str();
                         else if (k == "symmetry_s")              c.symmetry_s = q.str();
+                        else if (k == "cd_fp_iters")              c.cd_fp_iters = q.str();
+                        else if (k == "newton_tol")               c.newton.tol = q.str();
+                        else if (k == "newton_max_iters")         c.newton.max_iters = q.str();
+                        else if (k == "newton_full")              c.newton.full = q.boolean();
                         else if (k == "h_text")                  c.h_text = q.str();
                         else if (k == "t_max_text")              c.t_max_text = q.str();
                         else if (k == "transient_text")          c.transient_text = q.str();

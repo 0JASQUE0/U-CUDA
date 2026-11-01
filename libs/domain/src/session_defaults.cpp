@@ -1,5 +1,9 @@
 ﻿#include "ucuda/domain/analysis_session.h"
+#include "ucuda/domain/custom_session.h"
+#include "ucuda/domain/num_parse.h"
 #include <algorithm>
+
+
 void BifurcationAnalysisSession::add_diagram() {
     BifurcationDiagramConfig bd;
     if (!diagrams.empty()) {
@@ -22,6 +26,7 @@ void BifurcationAnalysisSession::add_diagram() {
     active_diagram_index = (int)diagrams.size() - 1;
 }
 
+
 void LLEAnalysisSession::add_curve() {
     LLECurveConfig c;
     if (!curves.empty()) {
@@ -40,6 +45,7 @@ void LLEAnalysisSession::add_curve() {
     curves.push_back(std::move(c));
     active_curve_index = (int)curves.size() - 1;
 }
+
 
 void LyapunovSpectrumAnalysisSession::add_curve() {
     LSCurveConfig c;
@@ -60,6 +66,7 @@ void LyapunovSpectrumAnalysisSession::add_curve() {
     active_curve_index = (int)curves.size() - 1;
 }
 
+
 void BasinsAnalysisSession::ensure_phase_slots() {
     while (phase_slots.size() < configs.size()) {
         auto slot = std::unique_ptr<BasinsPhaseSlot>(new BasinsPhaseSlot());
@@ -75,10 +82,16 @@ void BasinsAnalysisSession::ensure_phase_slots() {
     if (phase_slots.size() > configs.size())
         phase_slots.resize(configs.size());
 }
+
+
+// Сама таблица kBasinFeatureNames и её проверки (длина, только-ASCII) живут в
+// analysis_session.h рядом с enum BasinFeature: static_assert'у нужен constexpr-массив, а
+// constexpr в namespace scope несовместим с extern-объявлением.
 const char* basin_feature_name(int feature_code) {
     if (feature_code < 0 || feature_code >= BF_FEATURE_COUNT) return "unknown";
     return kBasinFeatureNames[feature_code];
 }
+
 
 void PhaseAnalysisSession::add_projection() {
     Projection p;

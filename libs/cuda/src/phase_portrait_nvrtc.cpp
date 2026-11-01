@@ -49,6 +49,13 @@ bool computePhasePortraitsAdaptiveNVRTC(const PhaseAdaptiveRequest& rq, PhaseAda
     return true;
 }
 
+bool computePhasePortraitsBdfNVRTC(const BdfGpuRequest& rq, PhaseAdaptiveResult& out, std::string* err)
+{
+    if (!g_engine.init()) { if (err) *err = g_engine.error(); return false; }
+    if (!g_engine.run_phase_portraits_bdf(rq, out)) { if (err) *err = g_engine.error(); return false; }
+    return true;
+}
+
 bool computeAdaptiveEndpointNVRTC(const AdaptiveEndpointRequest& rq, AdaptiveEndpointResult& out,
                                   std::string* err)
 {

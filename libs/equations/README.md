@@ -8,6 +8,11 @@ Turns user equations into executable numerical source. It parses systems and exp
 
 Public APIs are `sysparse.hpp` and `codegen.hpp`. Private parsing/evaluation helpers are split across `expression_parser.cpp`, `system_evaluator.cpp`, and `expression_internal.h`.
 
+`dae_ir.h` represents differential/algebraic equations and index metadata;
+`dae_devices.h` expands circuit devices. DAE, BDF residual/Jacobian, adaptive
+and fixed generators share the private equations helpers. `krs_prep.h` prepares
+generated steps without depending on the native compiler or CUDA.
+
 ## Dependencies and consumers
 
 Target `ucuda::equations` depends publicly on domain. Numerics and analysis consume it; it must not depend on CUDA, storage, application, or GUI.

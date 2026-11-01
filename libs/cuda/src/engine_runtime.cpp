@@ -1,116 +1,119 @@
 ﻿#include "engine_impl.h"
-#include "engine_helpers.h"
-#include <cstdlib>
-#include <cstring>
+using namespace ucuda::cuda_detail;
 
 namespace ucuda::cuda_detail {
-
-  // namespace
-
-
-
-
-
-  // namespace
-
-
-
-
-
-
-
-// Ширина блока, ужатая под бюджет динамической shared-памяти этого запуска. 48 КБ — потолок
-// на блок без opt-in (cudaFuncAttributeMaxDynamicSharedMemorySize); широкая система (много X
-// и a[]) при 128 потоках в него не влезет, и cuLaunchKernel вернёт CUDA_ERROR_INVALID_VALUE.
-// Делим пополам, а не вычитаем: кратность варпу обязана сохраниться.
-// sharedPerThread == 0 (ядро без динамической shared) — настройка применяется как есть.
 int launch_block_size(size_t sharedPerThread) {
     int b = get_gpu_block_size();
     while (b > kGpuBlockSizeMin && sharedPerThread * (size_t)b > 48u * 1024u)
         b /= 2;
     return b;
 }
-
-
-// Ключи профилирования для nvrtcCompileProgram, из переменных окружения (по умолчанию не заданы,
-// код ядра без них — прежний):
-//   UCUDA_NVRTC_LINEINFO=1  — номера строк исходника в модуле: Nsight Compute (SourceCounters)
-//                             раскладывает счётчики по строкам; код ядра не меняется;
-//   UCUDA_NVRTC_MAXRREG=<n> — потолок регистров на поток, для опытов с занятостью.
-// storage держит строку ключа, на которую указывает opts, до вызова компилятора.
-void add_profiling_nvrtc_opts(std::vector<const char*>& opts, std::string& storage) {
-    const char* v = std::getenv("UCUDA_NVRTC_LINEINFO");
-    if (v && v[0] == '1' && std::strlen(v) < 16) opts.push_back("--generate-line-info");
-    v = std::getenv("UCUDA_NVRTC_MAXRREG");
-    if (v && *v && std::strlen(v) < 16) { storage = std::string("--maxrregcount=") + v; opts.push_back(storage.c_str()); }
 }
 
+namespace ucuda::cuda_detail {
+void add_profiling_nvrtc_opts(std::vector<const char*>& opts, std::string& storage) {
+    char v[16];
+    unsigned long n = env_value("UCUDA_NVRTC_LINEINFO", v, sizeof v);
+    if (n > 0 && n < sizeof v && v[0] == '1') opts.push_back("--generate-line-info");
+    n = env_value("UCUDA_NVRTC_MAXRREG", v, sizeof v);
+    if (n > 0 && n < sizeof v) { storage = std::string("--maxrregcount=") + v; opts.push_back(storage.c_str()); }
+}
+}
 
-// Строка опции для nvrtcCompileProgram. Литералы статические, поэтому указатель
-// живёт дольше вызова.
+namespace ucuda::cuda_detail {
+bool nvrtc_prune_kernels() {
+    char v[8];
+    const unsigned long n = env_value("UCUDA_NVRTC_PRUNE", v, sizeof v);
+    return !(n > 0 && n < sizeof v && v[0] == '0');
+}
+}
+
+namespace ucuda::cuda_detail {
+std::string prune_kernel_defines(const std::vector<const char*>& name_exprs, const std::string& src) {
+    std::string d = "#define UCUDA_PRUNE_KERNELS\n";
+    for (const char* e : name_exprs) { d += "#define UCUDA_KEEP_"; d += e; d += '\n'; }
+    if (src.find("loopCalculateDiscreteModel_int(") != std::string::npos) d += "#define UCUDA_KEEP_LOOP\n";
+    if (src.find("loopCalculateDiscreteModelPeaks_int(") != std::string::npos) d += "#define UCUDA_KEEP_PEAKS_LOOP\n";
+    return d;
+}
+}
+
+namespace ucuda::cuda_detail {
+void dump_module_ptx(const char* src_name, const std::string& src, const std::string& ptx) {
+    char dir[4096];
+    const unsigned long n = env_value("UCUDA_NVRTC_PTX_DIR", dir, 4096);
+    if (n == 0 || n >= 4096) return;
+    static std::atomic<int> seq{0};
+    const std::string base = std::string(dir, n) + "\\" + src_name + "_" + std::to_string(seq++);
+    for (const auto& [ext, text] : { std::pair<const char*, const std::string*>{ ".cu", &src }, { ".ptx", &ptx } }) {
+        FILE* f = nullptr;
+        if (fopen_s(&f, (base + ext).c_str(), "wb") == 0 && f) { std::fwrite(text->data(), 1, text->size(), f); std::fclose(f); }
+    }
+}
+}
+
+namespace ucuda::cuda_detail {
 const char* nvrtc_fmad_opt() {
     return get_nvrtc_fmad() ? "--fmad=true" : "--fmad=false";
 }
+}
 
-
-// gpu_free_budget — свободная память GPU с применённым запасом; общий первый шаг всех расчётов
-// чанкования. Возвращает false, если cudaMemGetInfo недоступен (вызывающие превращают это в
-// свой fail("cudaMemGetInfo failed")).
-//
-// `reserve` — доля свободной памяти, которую анализу разрешено занять; единого значения нет и
-// сведено оно намеренно НЕ было:
-//     0.92  — bifurcation 1D/2D, DFT и h-свипы (сверху ещё SAFETY_FACTOR 0.9 и вычет
-//             memConstants у вызывающего, т.е. фактически ~0.83)
-//     0.9   — basins
-//     0.5   — LLE 1D/2D и fastsync-сетка
-//     1/16  — LS 1D/2D: per-system память там ~N (буферы возмущённых траекторий), но 1/16 всё
-//             равно агрессивнее, чем следует из одной этой оценки.
-// Происхождение 0.5 и 1/16 не восстановлено — это следы отладки проблем с памятью, а не расчёт,
-// поэтому числа сохранены как есть. Менять только после замера на реальных сетках; выигрыш
-// реальный (LS сейчас берёт шестнадцатую часть памяти и делает в разы больше чанков).
+namespace ucuda::cuda_detail {
 bool gpu_free_budget(double reserve, size_t& out_bytes) {
     size_t freeMemory = 0, totalMemory = 0;
     if (cudaMemGetInfo(&freeMemory, &totalMemory) != cudaSuccess) return false;
     out_bytes = (size_t)((double)freeMemory * reserve);
     return true;
 }
+}
 
-  // namespace
-
-
-
-// par_or_var for a 2D sweep: 1 = both axes are parameters, 0 = both are initial conditions,
-// 2 = mixed. Kept as one helper because run_* and prewarm() must derive the same cache key.
+namespace ucuda::cuda_detail {
 int par_or_var_2d(bool sweep_h_x, bool sweep_h_y, bool sweep_var_x, bool sweep_var_y) {
     if (sweep_h_x || sweep_h_y) return (sweep_h_x ? sweep_var_y : sweep_var_x) ? 0 : 1;
     if (sweep_var_x == sweep_var_y) return sweep_var_x ? 0 : 1;
     return 2;
 }
+}
 
-
-// Число шагов интегрирования из времени: transient_time / h, NT / h и т.п.
-//
-// Прямой (int)(t / h) — UB, когда частное не влезает в int: TT=1e5 при h=1e-5 дают 1e10. На
-// практике получался мусор или отрицательное число, т.е. транзиент молча не отрабатывал вовсе —
-// худший вид ошибки, потому что расчёт выглядел успешным.
-//
-// Две версии, и выбор между ними НЕ косметический: он определяется типом приёмника. Значение
-// уходит в ядро через void*[] в cuLaunchKernel, где тип обязан совпадать с параметром БАЙТ В
-// БАЙТ — компилятор там ничего не проверит, рассогласование соберётся молча и развалит буфер
-// аргументов на запуске.
-//   ..._size_t — число ШАГОВ интегрирования; вся цепочка расширена до size_t (параметры ядер
-//                amountOfPointsForSkip, device-функции loopCalculateDiscreteModel / _int со
-//                счётчиками циклов, CPU-порт cpu_loop_model). Потолка нет — рабочая версия.
-//   ..._int    — только под settleBlocks = TT / NT: это число NT-БЛОКОВ, а не шагов, оно живёт в
-//                host-side счётчиках и на порядки меньше. INT_MAX здесь недостижим на осмысленных
-//                входах, но каст всё равно идёт через проверку, а не вслепую.
-// Блоков NT в транзиенте касательных векторов (к ближайшему, как ucuda_steps_per_block в ядре).
+namespace ucuda::cuda_detail {
 int lyap_warm_blocks(double vt, double NT)
 {
     return vt > 0 ? (int)ucuda_steps_per_block((numb)vt, (numb)NT) : 0;
 }
+}
 
+namespace ucuda::cuda_detail {
+bool cancel_requested(const std::shared_ptr<std::atomic<bool>>& c)
+{
+    return c && c->load(std::memory_order_relaxed);
+}
+}
 
+namespace ucuda::cuda_detail {
+void mark_cancelled_tail(std::vector<int>& flags, size_t j)
+{
+    for (size_t k = j; k < flags.size(); ++k) flags[k] = REGIME_CANCELLED;
+}
+}
+
+namespace ucuda::cuda_detail {
+void fill_nan_tail(std::vector<double>& v, size_t from)
+{
+    for (size_t k = from; k < v.size(); ++k) v[k] = std::numeric_limits<double>::quiet_NaN();
+}
+}
+
+namespace ucuda::cuda_detail {
+double lyap_value_from_kernel(double v, int& flag)
+{
+    if (v == (double)UCUDA_CANCELLED_VALUE) { flag = REGIME_CANCELLED; return std::numeric_limits<double>::quiet_NaN(); }
+    if (v == 999.0 || v == -999.0)         { flag = REGIME_UNBOUND;   return std::numeric_limits<double>::quiet_NaN(); }
+    flag = REGIME_OSCILLATION;
+    return v;
+}
+}
+
+namespace ucuda::cuda_detail {
 size_t steps_from_time_size_t(double t, double h)
 {
     if (!(h > 0.0) || !(t > 0.0)) return 0;
@@ -118,8 +121,9 @@ size_t steps_from_time_size_t(double t, double h)
     if (!std::isfinite(s)) return 0;
     return (size_t)s;
 }
+}
 
-
+namespace ucuda::cuda_detail {
 int steps_from_time_int(double t, double h)
 {
     if (!(h > 0.0) || !(t > 0.0)) return 0;
@@ -127,48 +131,35 @@ int steps_from_time_int(double t, double h)
     if (!std::isfinite(s)) return 0;
     return (s >= 2147483647.0) ? 2147483647 : (int)s;
 }
+}
 
+namespace ucuda::cuda_detail {
+bool dae_z_axis(const std::string& body, int var) {
+    const int nx = dae_nx_from_body(body);
+    return nx > 0 && var >= nx;
+}
+}
 
-// Генератор случайных чисел — побайтовая копия stub'а из шаблонов
-// kernels/lle1d.template.cu (splitmix64-инициализация + LCG). Копия, а не
-// повторная реализация: направления начального возмущения обязаны совпадать
-// с GPU-веткой, иначе первые точки λ разошлись бы из-за разного «щупа».
-// Значение свипа в точке j continuation-цепочки. Одна формула на все три
-// анализа (Bif/LLE/LS) и на оба устройства — GPU-ядра считают её же.
-// reverse — идём от hi к lo (гистерезис), log_scale — логарифмическая сетка.
-// Тело — общая с ядрами реализация (ucuda_node_value_cont в configCUDA.h):
-// та же функция, которую после правки зовут kernels/*_cont.template.cu.
-// Раньше здесь стояла копия в double, а ядро считало в numb — в double-режиме
-// одно и то же, при numb = float расходились.
+namespace ucuda::cuda_detail {
+void dae_point_start(const KrsCpuStep& step, const std::string& body, numb* x, const numb* a) {
+    if (dae_nx_from_body(body) > 0) step.fn()(x, a, (numb)0);
+}
+}
+
+namespace ucuda::cuda_detail {
 double cont_sweep_value(int j, int nPts, double lo, double hi,
                                bool reverse, bool log_scale) {
     return (double)ucuda_node_value_cont(j, nPts, (numb)lo, (numb)hi, log_scale, reverse);
 }
+}
 
-
-// Request/Result — публичный интерфейс в double, а ядра работают в numb.
-// Конвертация живёт ровно на границе: перед H2D сужаем, после D2H расширяем.
-// Когда numb == double это no-op копия, поэтому обе конфигурации ведут себя
-// одинаково и без #ifdef.
+namespace ucuda::cuda_detail {
 std::vector<numb> to_numb(const std::vector<double>& v) {
     return std::vector<numb>(v.begin(), v.end());
 }
+}
 
-
-// run_bif1d_continuation_cpu — CPU-двойник run_bif1d_continuation.
-//
-// Зачем: GPU-версия гоняет ВЕСЬ свип в ОДНОМ потоке (gridDim = blockDim = 1, см.
-// bifurcation1d_cont.template.cu) — continuation последователен по построению, каждая точка
-// стартует с конечного x[] предыдущей, и распараллелить это нельзя, не сломав гистерезис.
-// Одиночный GPU-поток на зависимой FP64-цепочке — заведомо медленное железо.
-// КРС компилируется в нативную функцию шага через krs_cpu.h: это работает и для custom, и для
-// встроенных схем (req.krs_body в обоих случаях обычный C — у встроенных вывод codegen_scheme).
-//
-// Два отличия от GPU-двойника, оба в лучшую сторону: память — один блок траектории вместо
-// матрицы nPts x record_steps (GPU держит её трижды: d_data + d_outPeaks + d_timeOfPeaks); отмена
-// и прогресс работают на каждой точке свипа, а не только до запуска монолитного kernel'а.
-// Снимок БД 1D для экспорта (правый клик, export_bif1d) и CSV — для веток, которые не заполняют
-// его по ходу счёта (continuation на CPU и GPU, адаптивная цепочка). on_cpu — "device = CPU".
+namespace ucuda::cuda_detail {
 void fill_bif1d_snapshot(data_export::Bif1DSnapshot& sn, const Bifurcation1DRequest& req,
                                 bool continuation, bool on_cpu) {
     sn.values.assign(req.base_values.begin(), req.base_values.end());
@@ -188,11 +179,13 @@ void fill_bif1d_snapshot(data_export::Bif1DSnapshot& sn, const Bifurcation1DRequ
     sn.on_cpu        = on_cpu;
     sn.step_control  = req.adaptive.enabled ? req.adaptive.desc : std::string();
 }
+}
 
-
+namespace ucuda::cuda_detail {
 std::string exe_dir() { return platform::executable_dir(); }
+}
 
-
+namespace ucuda::cuda_detail {
 std::string read_text_file(const std::string& path, std::string& err) {
     std::ifstream f(path, std::ios::binary);
     if (!f) { err = "failed to open " + path; return {}; }
@@ -214,8 +207,9 @@ std::string read_text_file(const std::string& path, std::string& err) {
     }
     return s;
 }
+}
 
-
+namespace ucuda::cuda_detail {
 std::string replace_all(std::string s, const std::string& from, const std::string& to) {
     if (from.empty()) return s;
     size_t pos = 0;
@@ -225,7 +219,7 @@ std::string replace_all(std::string s, const std::string& from, const std::strin
     }
     return s;
 }
-
+}
 
 std::string hash_key(const std::string& krs_body, int amountOfX) {
     // peak_config_epoch(): knobs configCUDA.h уходят в NVRTC как #define, т.е. при их смене тот
@@ -234,17 +228,39 @@ std::string hash_key(const std::string& krs_body, int amountOfX) {
     // fmad — то же самое, но через опцию компиляции. Здесь в ключ идёт САМО значение, а не счётчик
     // поколений: флаг бинарный, поэтому возврат к прежнему положению переиспользует уже собранный
     // модуль вместо лишней перекомпиляции.
-    return "upstream-adaptive-v1:" + std::to_string(std::hash<std::string>{}(krs_body)) + ":" +
+    return std::to_string(std::hash<std::string>{}(krs_body)) + ":" +
            std::to_string(amountOfX) + ":pk" + std::to_string(peak_config_epoch()) +
            ":fm" + (get_nvrtc_fmad() ? "1" : "0") +
            ":rdc" + (get_nvrtc_rdc() ? "1" : "0");
 }
 
+namespace ucuda::cuda_detail {
+std::string lyap_nx_prefix(const std::string& krs_body) {
+    const int nx = dae_nx_from_body(krs_body);
+    return nx > 0 ? "#define UCUDA_LYAP_NX " + std::to_string(nx) + "\n" : std::string();
+}
+}
 
-// Блок #define'ов, дописываемый ПЕРЕД текстом виртуального configCUDA.h (тот оборачивает свои
-// дефолты в #ifndef). Один инжект покрывает все 14 шаблонов — они тянут configCUDA.h транзитивно
-// через cudaLibrary.cuh. Приведение к (numb) внутри макроса безопасно: разворачивается он только
-// в местах использования (cudaLibrary.cu), т.е. заведомо после typedef numb.
+namespace ucuda::cuda_detail {
+bool ad_is_bdf(const AdaptiveRequest& ad) {
+    return ad.prefix.find("UCUDA_BDF_DRIVER") != std::string::npos;
+}
+}
+
+namespace ucuda::cuda_detail {
+std::string time_prefix(const std::string& krs_body) {
+    return step_body_uses_time(krs_body) ? kNonautonomousDefine : std::string();
+}
+}
+
+namespace ucuda::cuda_detail {
+int lyap_dim(const std::string& krs_body, int N) {
+    const int nx = dae_nx_from_body(krs_body);
+    return (nx > 0 && nx < N) ? nx : N;
+}
+}
+
+namespace ucuda::cuda_detail {
 std::string peak_config_defines() {
     const PeakConfig c = get_peak_config();
     std::ostringstream o;
@@ -259,18 +275,17 @@ std::string peak_config_defines() {
       << "#define max_amount_of_peaks "        << c.max_amount_of_peaks << "\n";
     return o.str();
 }
+}
 
-
+namespace ucuda::cuda_detail {
 std::string cu_err(CUresult r) {
     const char* name = nullptr;
     cuGetErrorString(r, &name);
     return name ? std::string(name) : ("CUresult " + std::to_string((int)r));
 }
+}
 
-
-// Локальная host-копия __device__ __host__ getValueByIdx из cudaLibrary.cu:1266.
-// Для 1D-бифуркации valueNumber всегда 0, поэтому просто линейная интерполяция.
-// Нужна для расчёта значения параметра в CSV (host-side).
+namespace ucuda::cuda_detail {
 double getValueByIdx_local(size_t idx, int nPts, double lo, double hi) {
     // Одна арифметика с ядром — ucuda_node_value (configCUDA.h). Раньше здесь стояло
     // lo + (hi-lo)*idx/(n-1): при idx = nPts-1 это не давало РОВНО hi, и CSV сообщал параметр, в
@@ -279,34 +294,42 @@ double getValueByIdx_local(size_t idx, int nPts, double lo, double hi) {
     // ядро (ranges уходят туда через to_numb).
     return (double)ucuda_node_value((int)idx, nPts, (numb)lo, (numb)hi);
 }
+}
 
-
-// Host-копия getValueByIdx_log из cudaLibrary.cu -- та же формула, что кернел
-// реально использовал для этой точки при log_scale=true. Нужна, чтобы CSV
-// (см. getValueByIdx_local) сообщал то самое значение параметра, что было
-// просимулировано, а не линейную интерполяцию поверх log-распределённой сетки.
+namespace ucuda::cuda_detail {
 double getValueByIdx_log_local(size_t idx, int nPts, double lo, double hi) {
     // См. getValueByIdx_local: общая формула вместо копии. Здесь копия ещё и
     // умножала до деления, а ядро (getValueByIdxLog) — наоборот.
     return (double)ucuda_node_value_log((int)idx, nPts, (numb)lo, (numb)hi);
 }
+}
 
-
-// CSV по csv_output_path для веток, которые пишут его не по ходу счёта: тот же формат, что у
-// правого клика (export_*), — конфиг и строки.
+namespace ucuda::cuda_detail {
 void write_curve1d_csv(const LLE1DResult& r, const std::string& path) {
     if (!path.empty()) data_export::export_lle1d(r, path);
 }
-
-void write_curve1d_csv(const LS1DResult& r, const std::string& path) {
-    if (!path.empty()) data_export::export_ls1d(r, path);
 }
 
+namespace ucuda::cuda_detail {
+void write_curve1d_csv(const LS1DResult& r, const std::string& path, int K) {
+    if (path.empty()) return;
+    if (K >= r.n_exponents) { data_export::export_ls1d(r, path); return; }
+    LS1DResult t = r;
+    t.n_exponents = K;
+    for (auto& v : t.spectrum) if ((int)v.size() > K) v.resize((size_t)K);
+    data_export::export_ls1d(t, path);
+}
+}
 
-  // namespace
+namespace ucuda::cuda_detail {
+void dae_project(const KrsCpuStep& step, const numb* x, numb* v, const numb* a, int k, int n) {
+    if (k >= n) return;
+    for (int i = k; i < n; ++i) v[i] = x[i];
+    step.fn()(v, a, (numb)0);
+}
+}
 
-// Signal metrics: общий хвост всех трёх веток (GPU-классика, GPU-continuation,
-// CPU) — автошкала по конечным значениям, CSV, ok.
+namespace ucuda::cuda_detail {
 void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
     for (int m = 0; m < SIGM_COUNT; ++m) {
         double lo =  std::numeric_limits<double>::infinity();
@@ -325,96 +348,18 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             std::fprintf(stderr, "[metrics] CSV: %s\n", e.c_str());
     }
     res.ok = true;
+    res.cancelled = cancel_requested(req.cancel);   // ok + cancelled = частичный результат (Stop)
 }
 }
 
-
-
-    // Шаг тика прогресса. Кратен CHECK_INTERVAL, потому что тики ставятся в уже
-    // существующей проверке расходимости, и подобран так, чтобы точка отчиталась
-    // около 64 раз за свою работу: этого хватает на гладкий бар и не создаёт
-    // давки на одном адресе.
-    int ParametricEngine::Impl::progress_stride_for(size_t stepsPerPoint) {
+int ParametricEngine::Impl::progress_stride_for(size_t stepsPerPoint) {
         int s = (int)(stepsPerPoint / 64);
-        s -= s % kCheckInterval;
-        if (s < kCheckInterval) s = kCheckInterval;
+        s -= s % kLoopCheckBlock;
+        if (s < kLoopCheckBlock) s = kLoopCheckBlock;
         return s;
     }
 
-
-    // Activates the module already built for this key, if the pool still holds it.
-    template <class T>
-    bool ParametricEngine::Impl::cache_activate(ModuleLru<T>& pool, const std::string& key, T& active) {
-        if (active.module && active.key == key) return true;
-        return pool.take(key, active);
-    }
-
-
-    // Prewarm path: park the module in the pool WITHOUT touching the active slot -- a running
-    // task reads that slot from its own thread and must not see it change under it.
-    template <class T>
-    void ParametricEngine::Impl::cache_store(ModuleLru<T>& pool, const T& fresh, const std::string& pinned) {
-        std::vector<T> evicted;
-        pool.insert(fresh, pinned, evicted);
-        for (const T& e : evicted)
-            if (e.module) cuModuleUnload(e.module);
-    }
-
-
-    // The shared body of every compile_*_if_needed. `build` does the slow NVRTC work and runs
-    // WITHOUT the lock held; `activate` distinguishes a real Run (needs the module in the active
-    // slot) from a prewarm (pool only).
-    template <class T, class Build>
-    bool ParametricEngine::Impl::compile_into(ModuleLru<T>& pool, const std::string& key, T& active,
-                      bool activate, Build&& build, std::string& err) {
-        std::unique_lock<std::recursive_mutex> lk(cache_mu);
-        for (;;) {
-            if (activate ? cache_activate(pool, key, active) : pool.contains(key)) return true;
-            if (in_flight_keys.insert(key).second) break;   // nobody else is building it: we do
-            // wait() drops ONE level of a recursive_mutex, so compile_* must never be reached
-            // with cache_mu already held -- it would wait here holding the lock and deadlock.
-            compile_done.wait(lk);                          // someone is: take their result
-        }
-        if (!load_sources(err)) {
-            in_flight_keys.erase(key);
-            compile_done.notify_all();
-            return false;
-        }
-
-        T fresh;
-        lk.unlock();
-        const bool ok = build(fresh);   // seconds of NVRTC, lock released
-        lk.lock();
-
-        in_flight_keys.erase(key);
-        compile_done.notify_all();
-        if (!ok) return false;
-        if (activate) cache_publish(pool, fresh, active);
-        else          cache_store(pool, fresh, active.key);
-        return true;
-    }
-
-
-    // Pins the PREVIOUS active entry while inserting: a running task may still hold its kernels,
-    // and evicting it would unload code from under a live launch.
-    template <class T>
-    void ParametricEngine::Impl::cache_publish(ModuleLru<T>& pool, const T& fresh, T& active) {
-        std::vector<T> evicted;
-        pool.insert(fresh, active.key, evicted);
-        for (const T& e : evicted)
-            if (e.module) cuModuleUnload(e.module);
-        active = fresh;
-    }
-
-
-    template <class T>
-    void ParametricEngine::Impl::drain_pool(ModuleLru<T>& pool) {
-        for (const T& e : pool.drain())
-            if (e.module) cuModuleUnload(e.module);
-    }
-
-
-    ParametricEngine::Impl::~Impl() {
+ParametricEngine::Impl::~Impl() {
         if (inited) {
             cuCtxSetCurrent(context);
             drain_pool(pool_bif1d);
@@ -443,19 +388,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-    bool ParametricEngine::Impl::ensure_init(std::string& err) {
+bool ParametricEngine::Impl::ensure_init(std::string& err) {
         if (inited) return true;
         CUresult r = cuInit(0);
         if (r != CUDA_SUCCESS) { err = "cuInit: " + cu_err(r); return false; }
@@ -473,8 +406,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return true;
     }
 
-
-    bool ParametricEngine::Impl::load_sources(std::string& err) {
+bool ParametricEngine::Impl::load_sources(std::string& err) {
         // Перечитывать файлы с диска надо один раз, а вот текст configCUDA.h
         // пересобирать — на каждую смену peak-настроек (см. peak_config_defines).
         const uint64_t ep = peak_config_epoch();
@@ -484,7 +416,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             srcs_peak_epoch  = ep;
             return true;
         }
-        std::string root = exe_dir() + "/kernels/";
+        std::string root = exe_dir() + "\\kernels\\";
         std::string e;
         src_template          = read_text_file(root + "bifurcation1d.template.cu",      e); if (!e.empty()) { err = e; return false; }
         src_template_cont     = read_text_file(root + "bifurcation1d_cont.template.cu", e); if (!e.empty()) { err = e; return false; }
@@ -507,6 +439,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }
         src_cudaMacros_cuh    = read_text_file(root + "cudaMacros.cuh",            e); if (!e.empty()) { err = e; return false; }
         src_ucuda_adaptive_cuh = read_text_file(root + "ucuda_adaptive.cuh",       e); if (!e.empty()) { err = e; return false; }
+        src_ucuda_bdf_cuh     = read_text_file(root + "ucuda_bdf.cuh",            e); if (!e.empty()) { err = e; return false; }
         src_adaptive_part     = read_text_file(root + "adaptive_part.cu",          e); if (!e.empty()) { err = e; return false; }
         src_metrics_adaptive_part = read_text_file(root + "metrics_adaptive_part.cu", e); if (!e.empty()) { err = e; return false; }
         src_lyap_adaptive_part = read_text_file(root + "lyapunov_adaptive_part.cu", e); if (!e.empty()) { err = e; return false; }
@@ -517,86 +450,33 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return true;
     }
 
-
-    ParametricEngine::Impl::SrcSnapshot ParametricEngine::Impl::snapshot_sources(const std::string& tmpl) const {
+ParametricEngine::Impl::SrcSnapshot ParametricEngine::Impl::snapshot_sources(const std::string& tmpl) const {
         return { tmpl, src_cudaLibrary_cu, src_cudaLibrary_cuh, src_cudaMacros_cuh, src_configCUDA_h,
-                 src_ucuda_adaptive_cuh };
+                 src_ucuda_adaptive_cuh, src_ucuda_bdf_cuh };
     }
 
-    const ParametricEngine::Impl::KrsFn* ParametricEngine::Impl::krs_fn(const std::string& ph) {
+const ParametricEngine::Impl::KrsFn* ParametricEngine::Impl::krs_fn(const std::string& ph) {
         for (const KrsFn& f : kKrsFns) if (ph == f.ph) return &f;
         return nullptr;
     }
-   // ~50 КБ на запись
 
-    // Компиляция одной единицы трансляции в PTX. rdc=true — для половинок раздельной сборки.
-    bool ParametricEngine::Impl::compile_ptx(const std::string& src, const char* src_name,
+const ParametricEngine::Impl::KrsFn* ParametricEngine::Impl::krs_fn(const std::string& ph, bool nonauto) {
+        if (nonauto)
+            for (const KrsFn& f : kKrsFnsT) if (ph == f.ph) return &f;
+        return krs_fn(ph);
+    }
+
+bool ParametricEngine::Impl::compile_ptx(const std::string& src, const char* src_name,
                      const std::vector<const char*>& headers_src,
                      const std::vector<const char*>& headers_name,
                      const std::vector<const char*>& name_exprs,
                      bool rdc, std::string& out_ptx, std::vector<std::string>& lowered,
                      std::string& err) {
-        nvrtcProgram prog = nullptr;
-        nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), src_name,
-                                            (int)headers_src.size(),
-                                            headers_src.empty() ? nullptr : headers_src.data(),
-                                            headers_name.empty() ? nullptr : headers_name.data());
-        if (nr != NVRTC_SUCCESS) {
-            err = std::string("nvrtcCreateProgram(") + src_name + "): " + nvrtcGetErrorString(nr);
-            return false;
-        }
-        for (const char* sym : name_exprs) nvrtcAddNameExpression(prog, sym);
-
-        char arch[64];
-        std::snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major, cc_minor);
-        const std::string cuda_include = platform::cuda_include_dir();
-        const std::string cuda_include_opt = cuda_include.empty() ? std::string() : "-I" + cuda_include;
-        if (cuda_include_opt.empty()) {
-            err = "CUDA Toolkit headers not found - NVRTC will not find math_constants.h "
-                  "(install the CUDA Toolkit or set CUDA_PATH=...)";
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        std::string std_opt = "--std=c++17";
-        std::vector<const char*> opts = { arch, std_opt.c_str(), "-default-device",
-                                          cuda_include_opt.c_str(), nvrtc_fmad_opt() };
-        if (rdc) opts.push_back("--relocatable-device-code=true");
-        std::string dev_opt_storage;
-        add_profiling_nvrtc_opts(opts, dev_opt_storage);
-
-        nr = nvrtcCompileProgram(prog, (int)opts.size(), opts.data());
-        if (nr != NVRTC_SUCCESS) {
-            size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
-            std::string log;
-            if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
-            err = std::string("NVRTC compile failed (") + src_name + "):\n" + log;
-            nvrtcDestroyProgram(&prog);
-            return false;
-        }
-
-        size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
-        out_ptx.assign(ptxsz, '\0');
-        nvrtcGetPTX(prog, &out_ptx[0]);
-
-        // Mangled-имена копируем ДО destroy — после него указатели невалидны.
-        lowered.clear();
-        lowered.reserve(name_exprs.size());
-        for (const char* sym : name_exprs) {
-            const char* lo = nullptr;
-            nvrtcGetLoweredName(prog, sym, &lo);
-            lowered.push_back(lo ? lo : sym);
-        }
-        nvrtcDestroyProgram(&prog);
-        return true;
+        return nvrtc_compile_ptx(cc_major, cc_minor, src, src_name, headers_src, headers_name,
+                                 name_exprs, rdc, out_ptx, lowered, err);
     }
 
-
-    // Библиотечная половина: тот же шаблон, но вместо тела шага — вызов внешнего krs_step.
-    // Объявление вставляется сразу после #include "cudaLibrary.cuh" (он тянет numb из
-    // configCUDA.h, а сам КРС определяется четырьмя строками ниже — структура одинакова у всех
-    // 15 шаблонов).
-    bool ParametricEngine::Impl::lib_ptx_for(const SrcSnapshot& snap, const char* src_name, const std::string& lib_key,
+bool ParametricEngine::Impl::lib_ptx_for(const SrcSnapshot& snap, const char* src_name, const std::string& lib_key,
                      const std::vector<std::pair<std::string, std::string>>& subs,
                      const std::vector<const char*>& name_exprs,
                      CachedLibPtx& out, std::string& err) {
@@ -614,7 +494,9 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             src = replace_all(src, sub.first, sub.second);
         }
         std::string decls;
-        for (const KrsFn& f : kKrsFns) {
+        const bool nonauto = snap.tmpl.find(kNonautonomousDefine) != std::string::npos;
+        for (const KrsFn& f0 : kKrsFns) {
+            const KrsFn& f = *krs_fn(f0.ph, nonauto);
             if (src.find(f.ph) == std::string::npos) continue;
             src = replace_all(src, f.ph, f.call);
             decls += std::string("\nextern \"C\" __device__ void ") + f.name + "(" + f.params + ");";
@@ -623,9 +505,9 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
 
         const std::vector<const char*> hs = { snap.lib_cu.c_str(), snap.lib_cuh.c_str(),
                                               snap.macros_cuh.c_str(), snap.config_h.c_str(),
-                                              snap.adaptive_cuh.c_str() };
+                                              snap.adaptive_cuh.c_str(), snap.bdf_cuh.c_str() };
         const std::vector<const char*> hn = { "cudaLibrary.cu", "cudaLibrary.cuh",
-                                              "cudaMacros.cuh", "configCUDA.h", "ucuda_adaptive.cuh" };
+                                              "cudaMacros.cuh", "configCUDA.h", "ucuda_adaptive.cuh", "ucuda_bdf.cuh" };
         CachedLibPtx fresh;
         fresh.key = lib_key;
         const bool ok = compile_ptx(src, src_name, hs, hn, name_exprs, true,
@@ -641,10 +523,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return true;
     }
 
-
-    // Половина с шагом: отдельная единица трансляции на одном configCUDA.h (нужен и numb, и
-    // ucmplx для комплексных схем).
-    bool ParametricEngine::Impl::krs_ptx_for(const SrcSnapshot& snap,
+bool ParametricEngine::Impl::krs_ptx_for(const SrcSnapshot& snap,
                      const std::vector<std::pair<const KrsFn*, std::string>>& fns,
                      const std::string& amount_of_x, const std::string& krs_key,
                      std::string& out_ptx, std::string& err) {
@@ -673,10 +552,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return true;
     }
 
-
-    // Линкует половинки в cubin и грузит модуль. Указатель из cuLinkComplete живёт до
-    // cuLinkDestroy — модуль обязан загрузиться ДО разрушения линкера.
-    bool ParametricEngine::Impl::link_and_load(const std::string& lib_ptx, const std::string& krs_ptx,
+bool ParametricEngine::Impl::link_and_load(const std::string& lib_ptx, const std::string& krs_ptx,
                        CUmodule& out_module, std::string& err) {
         CUlinkState st = nullptr;
         // UCUDA_NVRTC_LINEINFO=1 (см. build_module): строки исходника переживают и линковку.
@@ -684,10 +560,11 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         CUjit_option jopt[2];
         void*        jval[2];
         unsigned     nj = 0;
-        const char* li = std::getenv("UCUDA_NVRTC_LINEINFO");
-        if (li && li[0] == '1' && std::strlen(li) < 16) { jopt[nj] = CU_JIT_GENERATE_LINE_INFO; jval[nj++] = (void*)(size_t)1; }
-        li = std::getenv("UCUDA_NVRTC_MAXRREG");
-        if (li && *li && std::strlen(li) < 16) { jopt[nj] = CU_JIT_MAX_REGISTERS; jval[nj++] = (void*)(size_t)std::atoi(li); }
+        char li[16];
+        unsigned long lin = env_value("UCUDA_NVRTC_LINEINFO", li, sizeof li);
+        if (lin > 0 && lin < sizeof li && li[0] == '1') { jopt[nj] = CU_JIT_GENERATE_LINE_INFO; jval[nj++] = (void*)(size_t)1; }
+        lin = env_value("UCUDA_NVRTC_MAXRREG", li, sizeof li);
+        if (lin > 0 && lin < sizeof li) { jopt[nj] = CU_JIT_MAX_REGISTERS; jval[nj++] = (void*)(size_t)std::atoi(li); }
         CUresult r = cuLinkCreate(nj, nj ? jopt : nullptr, nj ? jval : nullptr, &st);
         if (r != CUDA_SUCCESS) { err = "cuLinkCreate: " + cu_err(r); return false; }
         auto fail = [&](const std::string& what, CUresult rr) {
@@ -714,24 +591,35 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return true;
     }
 
-
-    // build_module — общая часть всех compile_*_if_needed: подстановка плейсхолдеров в шаблон,
-    // NVRTC-компиляция с едиными опциями, добыча mangled-имён и загрузка PTX. У вызывающих
-    // различаются только шаблон, имя исходника и набор символов.
-    // Ради этого всё и сведено: раньше блок был скопирован под каждый анализ, и когда --fmad стал
-    // настройкой, флаг проставили в nvrtc_engine.cpp, а копии здесь остались на дефолте NVRTC —
-    // карта и фазовый портрет считались разной арифметикой, и на фрактальной границе траектория
-    // уходила в другой аттрактор (см. nvrtc_fmad_opt).
-    // Требует выставленного контекста и уже загруженных источников (load_sources). При успехе
-    // out_module загружен, а lowered содержит по одному имени на каждый вход name_exprs в том же
-    // порядке. Символы, объявленные extern "C", в name_exprs передавать не нужно.
-    bool ParametricEngine::Impl::build_module(const SrcSnapshot& snap,
+bool ParametricEngine::Impl::build_module(const SrcSnapshot& snap_in,
                       const char* src_name,
                       const std::vector<std::pair<std::string, std::string>>& subs,
                       const std::vector<const char*>& name_exprs,
                       CUmodule& out_module,
                       std::vector<std::string>& lowered,
                       std::string& err) {
+        // Явное время t (этап 2): номер шага проведён через ядра БД, LLE/LS, Metrics, бассейнов и
+        // DFT на фиксированном шаге — их модули приходят с UCUDA_NONAUTONOMOUS (time_prefix).
+        // Остальным (адаптивные свипы, FastSync, Order, Network) — понятный отказ, а не
+        // "identifier ucuda_t is undefined" от NVRTC.
+        const bool nonauto = snap_in.tmpl.find(kNonautonomousDefine) != std::string::npos;
+        for (const auto& sub : subs)
+            if ((sub.first == "{{KRS_BODY}}" || sub.first == "{{KRS_RHS_BODY}}")
+                && step_body_uses_time(sub.second) && !nonauto) {
+                err = "explicit time t: FastSync and Network do not support it yet";
+                return false;
+            }
+        // Стадия предрасчёта (krs_prep.h): у шага с блоком констант ("CD fast") горячие
+        // циклы cudaLibrary.cu зовут ucudaKrsPrep / calculateDiscreteModelP. Их определения
+        // встают в шаблон: одной единицей трансляции — перед #include "cudaLibrary.cu"
+        // (сам calculateDiscreteModel остаётся самодостаточным для прочих вызовов), при
+        // раздельной сборке — обёртками над krs_prep / krs_step_p модуля КРС сразу после
+        // #include "ucuda/cuda/cudaLibrary.cuh". Шаблон меняется, значит меняется и ключ библиотеки.
+        KrsPrepSplit prep_sp;
+        bool has_prep = false;
+        for (const auto& sub : subs)
+            if (sub.first == "{{KRS_BODY}}") has_prep = krs_split_prep(sub.second, prep_sp);
+        SrcSnapshot snap = snap_in;
         // Раздельная сборка: библиотека без КРС компилируется один раз на (шаблон, размерность,
         // настройки) и переиспользуется, шаг живёт в своём модуле, склейка — cuLink. Замерено на
         // bifurcation2d + implicit midpoint: смена КРС 0.25 с против ~15 с одной единицей
@@ -741,8 +629,22 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             std::vector<std::pair<const KrsFn*, std::string>> krs_fns;
             std::string krs_all, amount_of_x = "3";
             std::string lib_key = src_name;
+            static const KrsFn kPrepFn  = { "", "krs_prep",   krs_prep_fn_params(),   "" };
+            static const KrsFn kStepPFn = { "", "krs_step_p", krs_step_p_fn_params(), "" };
+            if (has_prep) {
+                krs_fns.emplace_back(&kPrepFn,  krs_prep_fn_body(prep_sp));
+                krs_fns.emplace_back(&kStepPFn, krs_step_p_fn_body(prep_sp));
+                // Тела обеих выводятся из KRS_BODY, который ниже и так входит в ключ.
+                if (!krs_insert_after_line(snap.tmpl, "#include \"cudaLibrary.cuh\"",
+                                           krs_prep_lib_defs(prep_sp))) {
+                    // Шаблон без этой строки: шаг остаётся самодостаточным, циклы
+                    // берут пустой предрасчёт из cudaLibrary.cu.
+                    krs_fns.clear();
+                    snap.tmpl = snap_in.tmpl;
+                }
+            }
             for (const auto& sub : subs) {
-                if (const KrsFn* f = krs_fn(sub.first)) {
+                if (const KrsFn* f = krs_fn(sub.first, nonauto)) {
                     krs_fns.emplace_back(f, sub.second);
                     krs_all += f->name; krs_all += '\x1f'; krs_all += sub.second; krs_all += '\x1f';
                     continue;
@@ -786,8 +688,14 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
                          lib_err.c_str());
         }
 
-        std::string src = snap.tmpl;
+        // snap_in, а не snap: после неудачной раздельной сборки в snap.tmpl остались бы
+        // её обёртки над krs_prep / krs_step_p.
+        std::string src = snap_in.tmpl;
         for (const auto& sub : subs) src = replace_all(src, sub.first, sub.second);
+        if (has_prep)
+            krs_insert_before_line(src, "#include \"cudaLibrary.cu\"", krs_prep_inline_defs(prep_sp));
+        if (nvrtc_prune_kernels())
+            krs_insert_before_line(src, "#include \"cudaLibrary.cu\"", prune_kernel_defines(name_exprs, src));
 
         // Виртуальные заголовки для NVRTC. curand_kernel.h-stub НЕ нужен:
         // inline-stub в шаблонах + `#define CURAND_KERNEL_H_` блокируют как
@@ -798,6 +706,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             snap.macros_cuh.c_str(),
             snap.config_h.c_str(),
             snap.adaptive_cuh.c_str(),
+            snap.bdf_cuh.c_str(),
         };
         const char* header_names[] = {
             "cudaLibrary.cu",
@@ -805,8 +714,9 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             "cudaMacros.cuh",
             "configCUDA.h",
             "ucuda_adaptive.cuh",
+            "ucuda_bdf.cuh",
         };
-        constexpr int n_headers = 5;
+        constexpr int n_headers = 6;
 
         nvrtcProgram prog = nullptr;
         nvrtcResult nr = nvrtcCreateProgram(&prog, src.c_str(), src_name,
@@ -826,10 +736,15 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         // NVRTC по умолчанию не знает CUDA-include путей (math_constants.h,
         // curand_kernel.h и т.п.). Берём CUDA_PATH из окружения — его проставляет
         // CUDA Toolkit installer.
-        const std::string cuda_include = platform::cuda_include_dir();
-        const std::string cuda_include_opt = cuda_include.empty() ? std::string() : "-I" + cuda_include;
+        std::string cuda_include_opt;
+        {
+            char buf[4096];
+            unsigned long nlen = env_value("CUDA_PATH", buf, 4096);
+            if (nlen > 0 && nlen < 4096)
+                cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
+        }
         if (cuda_include_opt.empty()) {
-            err = "CUDA Toolkit headers not found - NVRTC will not find math_constants.h "
+            err = "the CUDA_PATH environment variable is not set - NVRTC will not find math_constants.h "
                   "(install the CUDA Toolkit or set CUDA_PATH=...)";
             nvrtcDestroyProgram(&prog);
             return false;
@@ -854,6 +769,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         size_t ptxsz = 0; nvrtcGetPTXSize(prog, &ptxsz);
         std::string ptx(ptxsz, '\0');
         nvrtcGetPTX(prog, &ptx[0]);
+        dump_module_ptx(src_name, src, ptx);
 
         // Mangled-имена копируем в свои строки ДО nvrtcDestroyProgram — после
         // destroy указатели становятся невалидны.
@@ -875,8 +791,9 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         void*        mval[1] = { nullptr };
         unsigned     nm = 0;
         {
-            const char* v = std::getenv("UCUDA_NVRTC_MAXRREG");
-            if (v && *v && std::strlen(v) < 16) { mval[0] = (void*)(size_t)std::atoi(v); nm = 1; }
+            char v[16];
+            const unsigned long n = env_value("UCUDA_NVRTC_MAXRREG", v, sizeof v);
+            if (n > 0 && n < sizeof v) { mval[0] = (void*)(size_t)std::atoi(v); nm = 1; }
         }
         CUresult r = cuModuleLoadDataEx(&mod, ptx.c_str(), nm, nm ? mopt : nullptr, nm ? mval : nullptr);
         if (r != CUDA_SUCCESS) {
@@ -887,10 +804,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return true;
     }
 
-
-    // Достаёт функцию из загруженного модуля. Отдельная обёртка — чтобы у
-    // вызывающих не размножалось одинаковое сообщение об ошибке.
-    bool ParametricEngine::Impl::module_fn(CUmodule mod, const std::string& name, CUfunction& out, std::string& err) {
+bool ParametricEngine::Impl::module_fn(CUmodule mod, const std::string& name, CUfunction& out, std::string& err) {
         CUresult r = cuModuleGetFunction(&out, mod, name.c_str());
         if (r != CUDA_SUCCESS) {
             err = "cuModuleGetFunction(" + name + "): " + cu_err(r);
@@ -899,8 +813,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return true;
     }
 
-
-    bool ParametricEngine::Impl::compile_if_needed(const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_if_needed(const std::string& krs_body, int amountOfX,
                            int par_or_var, std::string& err, bool activate ) {
         // Если worker-thread унаследовал чужой контекст (NvrtcEngine, например),
         // компиляция и загрузка модуля прицепят символы не в тот контекст. Жёстко
@@ -915,11 +828,11 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             // мог переиспользовать этот кэш без отдельной компиляции.
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template), "bifurcation1d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template), "bifurcation1d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
-                              { "calculateDiscreteModelCUDA", "peakFinderCUDA", "DFT_custom",
+                              { "calculateDiscreteModelCUDA", "peakFinderCUDA", "DFT_custom_pf",
                                 "calculateDiscreteModelPeaksCUDA" },
                               mod, mg, err))
                 return false;
@@ -934,14 +847,11 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    // Адаптивный модуль свипов (см. CachedAdModule). Тела адаптивного шага входят в ключ:
-    // от них зависит модуль КРС, как от krs_body.
-    bool ParametricEngine::Impl::compile_ad_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_ad_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
                               int par_or_var, std::string& err, bool activate ) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         // Узлы шага — свой модуль без плотного выхода (UCUDA_AD_NO_DENSE): состояние нити
         // легче на D, Xp, Fp, а стадии живут только внутри попытки. Своё имя исходника — от
         // него зависит ключ PTX библиотеки при раздельной сборке.
@@ -953,7 +863,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             std::vector<std::string> mg;
             const std::string tmpl = (nodes ? std::string(kAdNodesModulePrefix) : std::string())
                                    + src_template_bif2d + "\n" + src_adaptive_part;
-            if (!build_module(snapshot_sources(tmpl), nodes ? "adaptive_sweep_nodes.cu" : "adaptive_sweep.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), nodes ? "adaptive_sweep_nodes.cu" : "adaptive_sweep.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
@@ -963,36 +873,32 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
                                 { "{{KRS_DEVAL_BODY}}",  ad.deval },
                                 { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
                               { "calculateDiscreteModelPeaksAdCUDA", "calculateDiscreteModelAvgPeaksAdCUDA",
-                                "dbscanCUDA", "CUDA_dbscan_kernel",
-                                "CUDA_dbscan_search_fixed_points_kernel",
-                                "CUDA_dbscan_search_clear_points_kernel" },
+                                "dbscanCUDA",
+                                "dbscanWarpCUDA", "ucudaMaxPeaksCUDA", "dbscanWarp2DCUDA" },
                               mod, mg, err))
                 return false;
             fresh.key    = key;
             fresh.module = mod;
             CUfunction* slots[] = { &fresh.kernel_peaks, &fresh.kernel_avg, &fresh.kernel_dbscan,
-                                    &fresh.kernel_cdbscan, &fresh.kernel_search_fixed, &fresh.kernel_search_clear };
+                                    &fresh.kernel_dbscan_warp, &fresh.kernel_max_peaks, &fresh.kernel_dbscan_warp2d };
             for (int i = 0; i < 6; ++i)
                 if (!module_fn(mod, mg[(size_t)i], *slots[i], err)) { cuModuleUnload(mod); return false; }
             return true;
         }, err);
     }
 
-
-    // Модуль continuation БД 1D с адаптивным шагом (см. cached_ad_cont): тот же шаблон, но
-    // из adaptive_part.cu в него попадает только ядро цепочки.
-    bool ParametricEngine::Impl::compile_ad_cont_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_ad_cont_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
                                    std::string& err, bool activate ) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         const std::string key = hash_key(bodies, amountOfX) + ":ad_cont";
         return compile_into(pool_ad_cont, key, cached_ad_cont, activate, [&](CachedSimpleContModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
             const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_CONT_KERNEL 1\n"
                                    + src_template_bif2d + "\n" + src_adaptive_part;
-            if (!build_module(snapshot_sources(tmpl), "adaptive_cont.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), "adaptive_cont.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      "1" },
@@ -1011,13 +917,11 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    // Модуль LLE/LS с адаптивным шагом (см. CachedLyapAdModule). Оба ядра в одном модуле.
-    bool ParametricEngine::Impl::compile_lyap_ad_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_lyap_ad_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
                                    int par_or_var, std::string& err, bool activate ) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         const std::string key = hash_key(bodies, amountOfX) + ":lyap_ad:pov" + std::to_string(par_or_var);
         return compile_into(pool_lyap_ad, key, cached_lyap_ad, activate, [&](CachedLyapAdModule& fresh) {
             CUmodule mod = nullptr;
@@ -1025,13 +929,13 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_NO_DENSE 1\n"
                                      "#define UCUDA_AD_LYAPUNOV 1\n"
                                    + src_template_bif2d + "\n" + src_adaptive_part + "\n" + src_lyap_adaptive_part;
-            if (!build_module(snapshot_sources(tmpl), "lyapunov_adaptive.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), "lyapunov_adaptive.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
                                 { "{{KRS_RHS_BODY}}",    ad.rhs },
                                 { "{{KRS_EMB_BODY}}",    ad.emb },
-                                { "{{KRS_DPREP_BODY}}",  "" },
+                                { "{{KRS_DPREP_BODY}}",  ad_is_bdf(ad) ? ad.dprep : std::string() },
                                 { "{{KRS_DEVAL_BODY}}",  "" },
                                 { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
                               { "lyapunovLLEAdCUDA", "lyapunovLSAdCUDA" },
@@ -1046,15 +950,11 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    // Модуль continuation LLE/LS с адаптивным шагом (см. cached_lyap_ad_cont).
-    // activate = false — прогрев: модуль только в пул. Активный слот прогрев трогать не вправе:
-    // идущий расчёт берёт ядро из него уже после своей компиляции.
-    bool ParametricEngine::Impl::compile_lyap_ad_cont_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_lyap_ad_cont_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
                                         std::string& err, bool activate ) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         const std::string key = hash_key(bodies, amountOfX) + ":lyap_ad_cont";
         return compile_into(pool_lyap_ad_cont, key, cached_lyap_ad_cont, activate, [&](CachedLyapAdModule& fresh) {
             CUmodule mod = nullptr;
@@ -1062,13 +962,13 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             const std::string tmpl = "#define UCUDA_AD_NO_SWEEP_KERNELS 1\n#define UCUDA_AD_NO_DENSE 1\n"
                                      "#define UCUDA_AD_LYAPUNOV 1\n#define UCUDA_LYAP_AD_CONT_ONLY 1\n"
                                    + src_template_bif2d + "\n" + src_adaptive_part + "\n" + src_lyap_adaptive_part;
-            if (!build_module(snapshot_sources(tmpl), "lyapunov_adaptive_cont.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), "lyapunov_adaptive_cont.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      "1" },
                                 { "{{KRS_RHS_BODY}}",    ad.rhs },
                                 { "{{KRS_EMB_BODY}}",    ad.emb },
-                                { "{{KRS_DPREP_BODY}}",  "" },
+                                { "{{KRS_DPREP_BODY}}",  ad_is_bdf(ad) ? ad.dprep : std::string() },
                                 { "{{KRS_DEVAL_BODY}}",  "" },
                                 { "{{CTRL_CUSTOM}}",     adaptive_ctrl_source(ad.ctrl_body) } },
                               { "lyapunovLLEAdContCUDA", "lyapunovLSAdContCUDA" },
@@ -1083,179 +983,13 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    // LLE (ls = false) / LS (ls = true) 1D с адаптивным шагом одной цепочкой точек: continuation
-    // на GPU (одна нить, ucuda_lyap_chain) или любой режим на CPU (AdaptiveCpuModule — те же
-    // функции раздела UCUDA_AD_LYAPUNOV, собранные cl.exe). out[nPts * NC] (NaN — разлёт),
-    // stats[nPts * 4]. Возвращает false с текстом в err; отмена — cancelled = true.
-    template <class Req>
-    bool ParametricEngine::Impl::run_lyap_ad_seq(bool ls, const Req& req, std::vector<double>& out, std::vector<double>& stats,
-                         std::string& err, bool& cancelled) {
-        cancelled = false;
-        const AdaptiveRequest& ad = req.adaptive;
-        const int n = req.amountOfX, nPts = req.n_pts, NC = ls ? n : 1;
-        if (req.sweep_over_var) { err = "the adaptive step on this path supports a param sweep only"; return false; }
-        if (n <= 0 || n > kMaxAmountOfX) { err = "amountOfX out of range"; return false; }
-        if ((int)req.initial_conditions.size() != n) { err = "initial_conditions.size() != amountOfX"; return false; }
-        if ((int)req.base_values.size() > 64) { err = "too many base_values"; return false; }
-        const bool ad_axis = ad.axis_kind[0] != kAdAxisSystem;
-        if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size())) {
-            err = "param_index out of range"; return false;
-        }
-        const int    nBlocks = (int)(req.t_max / req.NT);
-        const int    nWarm   = lyap_warm_blocks(req.vector_transient, req.NT);
-        if (nBlocks <= 0) { err = "t_max / NT < 1"; return false; }
-        out.assign((size_t)nPts * NC, std::numeric_limits<double>::quiet_NaN());
-        stats.assign((size_t)nPts * 4, 0.0);
-        const int continuation = req.continuation ? 1 : 0;
-
-        if (req.use_cpu) {
-            AdaptiveCpuModule mod;
-            std::vector<KrsCpuDiag> diags;
-            // Те же аргументы, что у БД 1D (run_bif1d_cpu_ad), — одна DLL на все адаптивные CPU-ветки.
-            if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, n, peak_config_defines(), diags)) {
-                err = "CPU adaptive module:";
-                for (const KrsCpuDiag& d : diags)
-                    err += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
-                return false;
-            }
-            // Второй поток переносит отмену во флаг DLL и число готовых точек в прогресс.
-            volatile int cancelFlag = 0;
-            int progressCount = 0;                  // цепочка: счётчик DLL (точки)
-            std::atomic<int> donePts{ 0 };          // классика: точки готовых кусков
-            std::atomic<bool> done{ false };
-            std::thread watcher([&]() {
-                while (!done.load(std::memory_order_relaxed)) {
-                    if (req.cancel && req.cancel->load(std::memory_order_relaxed)) cancelFlag = 1;
-                    const int got = continuation ? *(volatile int*)&progressCount
-                                                 : donePts.load(std::memory_order_relaxed);
-                    if (req.progress)
-                        req.progress->store((float)got / (float)(nPts > 0 ? nPts : 1), std::memory_order_relaxed);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
-            });
-            if (continuation || !mod.lyap_range()) {
-                // Цепочка continuation — одна, в этом потоке.
-                mod.lyap()(ls ? 1 : 0, continuation, nPts, req.param_lo, req.param_hi, req.continuation_reverse ? 1 : 0,
-                           req.log_scale ? 1 : 0, ad_axis ? 0 : req.param_index, req.base_values.data(),
-                           (int)req.base_values.size(), req.initial_conditions.data(), &ad.params, ad.axis_kind[0],
-                           ad.tol_ratio, req.transient_time, req.NT, nBlocks, nWarm, req.eps, ad.lyap_renorm,
-                           req.max_value, out.data(), stats.data(), &cancelFlag, &progressCount);
-            } else {
-                // Классика: точки независимы — куски раздаются потокам по мере освобождения (цена
-                // точки с адаптивным шагом сильно разная). Тот же код точки, что у цепочки при
-                // continuation = 0 (ucuda_lyap_classic_range), поэтому результат от раздачи не зависит.
-                constexpr int kChunk = 2;
-                unsigned hw = std::thread::hardware_concurrency();
-                if (hw == 0) hw = 1;
-                const int nChunks  = (nPts + kChunk - 1) / kChunk;
-                const int nWorkers = (int)std::min<unsigned>(hw, (unsigned)(nChunks > 0 ? nChunks : 1));
-                std::atomic<int> nextChunk{ 0 };
-                auto worker = [&]() {
-                    for (;;) {
-                        const int c = nextChunk.fetch_add(1, std::memory_order_relaxed);
-                        if (c >= nChunks || cancelFlag) return;
-                        const int i0 = c * kChunk, i1 = (std::min)(nPts, i0 + kChunk);
-                        int prog = 0;
-                        mod.lyap_range()(ls ? 1 : 0, i0, i1, nPts, req.param_lo, req.param_hi, req.log_scale ? 1 : 0,
-                                         ad_axis ? 0 : req.param_index, req.base_values.data(),
-                                         (int)req.base_values.size(), req.initial_conditions.data(), &ad.params,
-                                         ad.axis_kind[0], ad.tol_ratio, req.transient_time, req.NT, nBlocks, nWarm,
-                                         req.eps, ad.lyap_renorm, req.max_value, out.data() + (size_t)i0 * NC,
-                                         stats.data() + (size_t)i0 * 4, &cancelFlag, &prog);
-                        donePts.fetch_add(i1 - i0, std::memory_order_relaxed);
-                    }
-                };
-                std::vector<std::thread> pool;
-                for (int w = 0; w < nWorkers; ++w) pool.emplace_back(worker);
-                for (std::thread& t : pool) t.join();
-            }
-            done.store(true, std::memory_order_relaxed);
-            watcher.join();
-            if (cancelFlag) { cancelled = true; err = "Cancelled by user"; return false; }
-            return true;
-        }
-
-        // GPU: однопоточное ядро цепочки.
-        if (!ensure_init(err)) return false;
-        cuCtxSetCurrent(context);
-        if (!compile_lyap_ad_cont_if_needed(ad, req.krs_body, n, err)) return false;
-        numb* d_baseValues = nullptr;
-        numb* d_baseX      = nullptr;
-        numb* d_result     = nullptr;
-        AdDeviceArgs adArgs;
-        RunSignals sig;
-        auto cleanup = [&]() {
-            adArgs.release();
-            if (d_baseValues) cudaFree(d_baseValues);
-            if (d_baseX)      cudaFree(d_baseX);
-            if (d_result)     cudaFree(d_result);
-            sig.release();
-        };
-        auto cuda_ok = [&](cudaError_t e, const char* where) {
-            if (e == cudaSuccess) return true;
-            err = std::string("CUDA ") + where + ": " + cudaGetErrorString(e);
-            cleanup();
-            return false;
-        };
-        if (!cuda_ok(cudaMalloc((void**)&d_baseValues, (req.base_values.empty() ? 1 : req.base_values.size()) * sizeof(numb)), "malloc baseValues")
-            || !cuda_ok(cudaMalloc((void**)&d_baseX, (size_t)n * sizeof(numb)), "malloc baseX")
-            || !cuda_ok(cudaMalloc((void**)&d_result, (size_t)nPts * NC * sizeof(numb)), "malloc result"))
-            return false;
-        {
-            const int kinds[2] = { ad.axis_kind[0], kAdAxisSystem };
-            if (!adArgs.alloc(ad, kinds, (size_t)nPts, err)) { cleanup(); return false; }
-        }
-        if (!sig.alloc(err)) { cleanup(); return false; }
-        const std::vector<numb> vals = to_numb(req.base_values), x0 = to_numb(req.initial_conditions);
-        if (!vals.empty() && !cuda_ok(cudaMemcpy(d_baseValues, vals.data(), vals.size() * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseValues"))
-            return false;
-        if (!cuda_ok(cudaMemcpy(d_baseX, x0.data(), (size_t)n * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseX"))
-            return false;
-        int    nPts_a = nPts, reverse_a = req.continuation_reverse ? 1 : 0, logScale_a = req.log_scale ? 1 : 0;
-        int    mut_a = ad_axis ? 0 : req.param_index, nv_a = (int)req.base_values.size(), axis_a = ad.axis_kind[0];
-        numb   lo_a = (numb)req.param_lo, hi_a = (numb)req.param_hi, tol_a = (numb)ad.tol_ratio;
-        numb   tTr_a = (numb)req.transient_time, NT_a = (numb)req.NT, eps_a = (numb)req.eps, max_a = (numb)req.max_value;
-        int    nBlocks_a = nBlocks, nWarm_a = nWarm, renorm_a = ad.lyap_renorm;
-        UcudaAdaptParams* dP = adArgs.params;
-        numb*  dSt = adArgs.stats;
-        int*   d_cancel = sig.cancelArg();
-        int*   d_prog   = sig.progressArg();
-        void* args[] = { &nPts_a, &lo_a, &hi_a, &reverse_a, &logScale_a, &mut_a, &d_baseValues, &nv_a, &d_baseX,
-                         &dP, &axis_a, &tol_a, &tTr_a, &NT_a, &nBlocks_a, &nWarm_a, &eps_a, &renorm_a, &max_a,
-                         &d_result, &dSt, &d_cancel, &d_prog };
-        CUresult r = cuLaunchKernel(ls ? cached_lyap_ad_cont.kernel_ls : cached_lyap_ad_cont.kernel_lle,
-                                    1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr);
-        if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(lyapunov adaptive continuation): " + cu_err(r); cleanup(); return false; }
-        if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, err)) {
-            cancelled = req.cancel && req.cancel->load(std::memory_order_relaxed);
-            cleanup();
-            return false;
-        }
-        if (!cuda_ok(cudaDeviceSynchronize(), "sync after lyapunov adaptive continuation")) return false;
-        std::vector<numb> h_res((size_t)nPts * NC), h_st((size_t)nPts * 4);
-        if (!cuda_ok(cudaMemcpy(h_res.data(), d_result, h_res.size() * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result")
-            || !cuda_ok(cudaMemcpy(h_st.data(), adArgs.stats, h_st.size() * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy stats"))
-            return false;
-        cleanup();
-        out.assign(h_res.begin(), h_res.end());
-        stats.assign(h_st.begin(), h_st.end());
-        return true;
-    }
-
-
-    // Ось настройки шага: rtol / atol / tol — только положительные значения (параметр
-    // регулятора может быть любым). Пусто — всё в порядке.
-    std::string ParametricEngine::Impl::ad_axis_range_error(int kind, double lo, double hi) {
+std::string ParametricEngine::Impl::ad_axis_range_error(int kind, double lo, double hi) {
         if ((kind == kAdAxisRtol || kind == kAdAxisAtol || kind == kAdAxisTol) && !(lo > 0.0 && hi > 0.0))
             return "lo/hi must be > 0 on the rtol / atol axis";
         return {};
     }
 
-
-    // Обе оси 2D — настройки шага, задевающие одно поле (rtol и tol, atol и tol, один параметр
-    // регулятора): ядро применяет оси по порядку, и Y затирала бы X. Пусто — всё в порядке.
-    std::string ParametricEngine::Impl::ad_axes_overlap_error(int kx, int ky) {
+std::string ParametricEngine::Impl::ad_axes_overlap_error(int kx, int ky) {
         auto fields = [](int k) -> unsigned {
             if (k == kAdAxisRtol) return 1u;
             if (k == kAdAxisAtol) return 2u;
@@ -1268,24 +1002,15 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return {};
     }
 
-
-    // Модуль узлов — для узлов шага при свипе по параметрам системы / НУ. Его ядрам настройки
-    // шага приходят по значению (константный банк аргументов) — передавать ad_param_arg.
-    // Свип по настройке шага (rtol, atol, параметр регулятора) идёт общим модулем.
-    bool ParametricEngine::Impl::ad_nodes_module(const AdaptiveRequest& ad) {
+bool ParametricEngine::Impl::ad_nodes_module(const AdaptiveRequest& ad) {
         return ad.raw_nodes && ad.axis_kind[0] == kAdAxisSystem && ad.axis_kind[1] == kAdAxisSystem;
     }
 
-    // Аргумент «настройки шага» для cuLaunchKernel: модуль узлов — сама структура, общий —
-    // указатель на её копию на устройстве (d_ptr — адрес переменной с этим указателем).
-    void* ParametricEngine::Impl::ad_param_arg(const AdaptiveRequest& ad, UcudaAdaptParams** d_ptr) {
+void* ParametricEngine::Impl::ad_param_arg(const AdaptiveRequest& ad, UcudaAdaptParams** d_ptr) {
         return ad_nodes_module(ad) ? (void*)const_cast<UcudaAdaptParams*>(&ad.params) : (void*)d_ptr;
     }
 
-
-    // Запуск ядра LLE (ls = false) или LS (ls = true) с адаптивным шагом на один чанк cur
-    // точек. Раскладка результата — как у LLEKernelCUDA / LSKernelCUDA, статистика — a.stats.
-    CUresult ParametricEngine::Impl::launch_lyap_ad(bool ls, AdDeviceArgs& a, const AdaptiveRequest& ad, int nPts, int cur,
+CUresult ParametricEngine::Impl::launch_lyap_ad(bool ls, AdDeviceArgs& a, const AdaptiveRequest& ad, int nPts, int cur,
                             size_t calculated, int dimension, numb* d_ranges, int* d_idx, numb* d_ic,
                             int nIC, numb* d_vals, int nVals, double maxValue, numb* d_res, int logAxisMask,
                             double transientTime, double tMax, double NT, double eps, double vectorTransient,
@@ -1312,11 +1037,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
                               nullptr, args, nullptr);
     }
 
-
-    // compile_lle_if_needed — отдельная компиляция для LLE-шаблона.
-    // Ключ кэша = hash(krs_body + amountOfX + "lle"), чтобы PTX от bif1d
-    // не путался с LLE даже при одной и той же KRS.
-    bool ParametricEngine::Impl::compile_lle_if_needed(const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_lle_if_needed(const std::string& krs_body, int amountOfX,
                                int par_or_var, std::string& err, bool activate ) {
         cuCtxSetCurrent(context);
         // par_or_var в kernel — compile-time макрос (см. bif1d). Два PTX-модуля
@@ -1325,7 +1046,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return compile_into(pool_lle, key, cached_lle, activate, [&](CachedLleModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_lle), "lle1d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_lle), "lle1d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -1340,19 +1061,14 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    // compile_lle_2d_if_needed — отдельный PTX-кэш для LLE-2D. Структура та
-    // же, что у compile_lle_if_needed; отличия только в исходнике шаблона
-    // (lle2d.template.cu) и в маркере ключа кэша (":lle2d"). Сам kernel
-    // (LLEKernelCUDA) — тот же, ловится по тому же имени.
-    bool ParametricEngine::Impl::compile_lle_2d_if_needed(const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_lle_2d_if_needed(const std::string& krs_body, int amountOfX,
                                   int par_or_var, std::string& err, bool activate ) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":lle2d:pov" + std::to_string(par_or_var);
         return compile_into(pool_lle_2d, key, cached_lle_2d, activate, [&](CachedLleModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_lle_2d), "lle2d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_lle_2d), "lle2d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -1367,16 +1083,14 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    // compile_ls_if_needed — третий шаблон. Ключ кэша помечен ":ls".
-    bool ParametricEngine::Impl::compile_ls_if_needed(const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_ls_if_needed(const std::string& krs_body, int amountOfX,
                               int par_or_var, std::string& err, bool activate ) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":ls:pov" + std::to_string(par_or_var);
         return compile_into(pool_ls, key, cached_ls, activate, [&](CachedLsModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_ls), "ls1d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_ls), "ls1d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -1391,17 +1105,14 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    // compile_ls_2d_if_needed — отдельный шаблон ls2d.template.cu, тот же kernel
-    // LSKernelCUDA. Ключ кэша помечен ":ls2d:" — изолирован от ":ls:" slot'а.
-    bool ParametricEngine::Impl::compile_ls_2d_if_needed(const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_ls_2d_if_needed(const std::string& krs_body, int amountOfX,
                                  int par_or_var, std::string& err, bool activate ) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":ls2d:pov" + std::to_string(par_or_var);
         return compile_into(pool_ls_2d, key, cached_ls_2d, activate, [&](CachedLsModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_ls_2d), "ls2d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_ls_2d), "ls2d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -1416,10 +1127,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    // compile_bif1d_cont_if_needed — отдельный модуль (single-thread sequential
-    // continuation kernel + peakFinderCUDA). Cache key с суффиксом :cont.
-    bool ParametricEngine::Impl::compile_bif1d_cont_if_needed(const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_bif1d_cont_if_needed(const std::string& krs_body, int amountOfX,
                                       std::string& err, bool activate ) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":cont";
@@ -1430,10 +1138,10 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             // cudaLibrary.cu целиком) и нужен continuation-ветке run_dft_1d.
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_cont), "bifurcation1d_cont.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_cont), "bifurcation1d_cont.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body } },
-                              { "peakFinderCUDA", "DFT_custom" },
+                              { "peakFinderCUDA", "DFT_custom_pf" },
                               mod, mg, err))
                 return false;
 
@@ -1447,12 +1155,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    // compile_simple_cont_if_needed — общий компилятор для одноядерных
-    // continuation-модулей (LLE и LS). От compile_bif1d_cont_if_needed
-    // отличается только тем, что регистрировать mangled-имена не нужно:
-    // единственный нужный символ объявлен extern "C".
-    bool ParametricEngine::Impl::compile_simple_cont_if_needed(ModuleLru<CachedSimpleContModule>& pool,
+bool ParametricEngine::Impl::compile_simple_cont_if_needed(ModuleLru<CachedSimpleContModule>& pool,
                                        CachedSimpleContModule& slot,
                                        const std::string& tmpl,
                                        const char* kernel_name,
@@ -1465,7 +1168,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return compile_into(pool, key, slot, true, [&](CachedSimpleContModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;   // пуст: единственный символ — extern "C"
-            if (!build_module(snapshot_sources(tmpl), src_name,
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + tmpl), src_name,
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body } },
                               {},
@@ -1479,22 +1182,19 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    // compile_bif2d_if_needed — шаблон bifurcation2d.template.cu, два kernel'а:
-    // calculateDiscreteModelPeaksCUDA + dbscanCUDA.
-    // Cache key: ":bif2d:" + par_or_var.
-    bool ParametricEngine::Impl::compile_bif2d_if_needed(const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_bif2d_if_needed(const std::string& krs_body, int amountOfX,
                                  int par_or_var, std::string& err, bool activate ) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":bif2d:" + std::to_string(par_or_var);
         return compile_into(pool_bif2d, key, cached_bif2d, activate, [&](CachedBif2dModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_bif2d), "bifurcation2d.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_bif2d), "bifurcation2d.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
-                              { "calculateDiscreteModelPeaksCUDA", "dbscanCUDA" },
+                              { "calculateDiscreteModelPeaksCUDA", "dbscanCUDA",
+                                "dbscanWarpCUDA", "ucudaMaxPeaksCUDA", "dbscanWarp2DCUDA" },
                               mod, mg, err))
                 return false;
 
@@ -1502,16 +1202,14 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             fresh.module = mod;
             if (!module_fn(mod, mg[0], fresh.kernel_fused,  err)) { cuModuleUnload(mod); return false; }
             if (!module_fn(mod, mg[1], fresh.kernel_dbscan, err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[2], fresh.kernel_dbscan_warp, err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[3], fresh.kernel_max_peaks,   err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[4], fresh.kernel_dbscan_warp2d, err)) { cuModuleUnload(mod); return false; }
             return true;
         }, err);
     }
 
-
-    // compile_metrics_if_needed — шаблон signal_metrics.template.cu, одно ядро
-    // calculateDiscreteModelMetricsCUDA. Cache key: ":metrics:" + par_or_var.
-    // minmax — min/max по интерполированным экстремумам (SIGM_MINMAX_INTERP, см. шаблон):
-    // другой модуль, поэтому и в ключе, и в имени исходника (ключ библиотечной половины).
-    bool ParametricEngine::Impl::compile_metrics_if_needed(const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_metrics_if_needed(const std::string& krs_body, int amountOfX,
                                    int par_or_var, std::string& err, bool activate ,
                                    bool minmax ) {
         cuCtxSetCurrent(context);
@@ -1522,7 +1220,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             std::vector<std::string> mg;
             const std::string tmpl = minmax ? "#define SIGM_MINMAX_INTERP 1\n" + src_template_metrics
                                             : src_template_metrics;
-            if (!build_module(snapshot_sources(tmpl), minmax ? "signal_metrics_mm.cu" : "signal_metrics.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + tmpl), minmax ? "signal_metrics_mm.cu" : "signal_metrics.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body },
                                 { "{{PAR_OR_VAR}}",  std::to_string(par_or_var) } },
@@ -1538,13 +1236,11 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    // Метрики с адаптивным шагом (см. cached_metrics_ad).
-    bool ParametricEngine::Impl::compile_metrics_ad_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_metrics_ad_if_needed(const AdaptiveRequest& ad, const std::string& krs_body, int amountOfX,
                                       int par_or_var, std::string& err, bool activate ) {
         cuCtxSetCurrent(context);
         std::string bodies = krs_body;
-        for (const std::string* b : { &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
+        for (const std::string* b : { &ad.prefix, &ad.rhs, &ad.emb, &ad.dprep, &ad.deval, &ad.ctrl_body }) { bodies += '\x1f'; bodies += *b; }
         // Узлы шага — модуль без плотного выхода, как у БД (см. compile_ad_if_needed).
         const bool nodes = ad_nodes_module(ad);
         const std::string key = hash_key(bodies, amountOfX) + ":metrics_ad:pov" + std::to_string(par_or_var)
@@ -1557,7 +1253,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
                                    + "#define SIGM_MINMAX_INTERP 1\n#define UCUDA_AD_NO_SWEEP_KERNELS 1\n"
                                    + src_template_metrics + "\n"
                                    + src_adaptive_part + "\n" + src_metrics_adaptive_part;
-            if (!build_module(snapshot_sources(tmpl), nodes ? "signal_metrics_ad_nodes.cu" : "signal_metrics_ad.cu",
+            if (!build_module(snapshot_sources(ad.prefix + time_prefix(ad.rhs) + tmpl), nodes ? "signal_metrics_ad_nodes.cu" : "signal_metrics_ad.cu",
                               { { "{{AMOUNT_OF_X}}",     std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",        krs_body },
                                 { "{{PAR_OR_VAR}}",      std::to_string(par_or_var) },
@@ -1577,11 +1273,12 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    std::string ParametricEngine::Impl::metrics_axes(const SignalMetricsRequest& req, MetricsAxes& a) {
+std::string ParametricEngine::Impl::metrics_axes(const SignalMetricsRequest& req, MetricsAxes& a) {
         auto check_param = [&](int p) { return p >= 0 && p < (int)req.base_values.size(); };
         auto check_var   = [&](int v) { return v >= 0 && v < req.amountOfX; };
 
+        if (req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) return kDaeZAxisMsg;
+        if (req.dimension == 2 && req.sweep_over_var_2 && dae_z_axis(req.krs_body, req.var_sweep_index_2)) return kDaeZAxisMsg;
         if (req.log_scale && !(req.param_lo > 0.0 && req.param_hi > 0.0))
             return "log scale requires param lo/hi > 0 (X axis)";
 
@@ -1688,12 +1385,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return {};
     }
 
-
-    // run_signal_metrics — одно fused-ядро на чанк (интегрирование + суммы +
-    // PeakStream), результат — SIGM_COUNT строк SoA на ячейку. Бюджет памяти как
-    // у run_bif2d: траектории нет, на ячейку — выходные строки, флаг и (только
-    // под медианную частоту) строка межпиковых интервалов.
-    SignalMetricsResult ParametricEngine::Impl::run_signal_metrics(const SignalMetricsRequest& req) {
+SignalMetricsResult ParametricEngine::Impl::run_signal_metrics(const SignalMetricsRequest& req) {
         SignalMetricsResult res;
         auto fail = [&](const std::string& msg) -> SignalMetricsResult& { res.error = msg; return res; };
 
@@ -1866,7 +1558,8 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         res.param_lo_2  = req.param_lo_2; res.param_hi_2 = req.param_hi_2;
         res.log_scale   = req.log_scale;  res.log_scale_2 = req.log_scale_2;
         res.metric_mask = mask;
-        res.flags.assign(total_cells, REGIME_UNBOUND);
+        // Точки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.flags.assign(total_cells, REGIME_CANCELLED);
         for (int m = 0; m < SIGM_COUNT; ++m)
             if ((mask >> m) & 1) res.values[m].assign(total_cells, std::numeric_limits<double>::quiet_NaN());
 
@@ -1874,6 +1567,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         std::vector<int>  h_flags(chunk);
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             SIGM_CANCEL_CHECK();
             if (req.progress) req.progress->store((float)((double)(chunk * iter) * ticksPerCell / ticksTotal), std::memory_order_relaxed);
             const size_t cur = (iter == amountOfIteration - 1) ? total_cells - chunk * iter : chunk;
@@ -1953,7 +1647,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
                                    (double)(chunk * iter) * ticksPerCell,
                                    ticksTotal, res.error)) { cleanup(); return res; }
             SIGM_CHECK(cudaStreamSynchronize(stream), "sync stream");
-            SIGM_CANCEL_CHECK();
+            // Stop посреди чанка: прерванные точки помечены REGIME_CANCELLED, метрики у них NaN.
 
             // Индекс ядра -> индекс результата: в 2D при swap_xy ядро шло по осям
             // в обратном порядке, результат всегда в раскладке GUI [iy*n + ix].
@@ -1993,11 +1687,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return res;
     }
 
-
-    // GPU-continuation Metrics: одно однопоточное ядро на весь свип (точки
-    // зависят друг от друга). Буфер интервалов — одна строка, ядро
-    // переиспользует её от точки к точке.
-    SignalMetricsResult ParametricEngine::Impl::run_metrics_continuation_gpu(const SignalMetricsRequest& req) {
+SignalMetricsResult ParametricEngine::Impl::run_metrics_continuation_gpu(const SignalMetricsRequest& req) {
         SignalMetricsResult res;
         auto fail = [&](const std::string& msg) -> SignalMetricsResult& { res.error = msg; return res; };
 
@@ -2091,9 +1781,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         SMC_CHECK(cudaDeviceSynchronize(), "sync after metrics cont");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED / NaN, начало цело.
 
         res.dimension   = 1;
         res.n_pts       = nPts;
@@ -2122,15 +1810,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return res;
     }
 
-
-    // Continuation метрик с адаптивным шагом: signalMetricsContinuationAdKernel, одна нить
-    // на всю цепочку. Устроено как run_metrics_continuation_gpu; h — шаг вывода, не свипается.
-    // Метрики 1D с адаптивным шагом на CPU: AdaptiveCpuModule, вход ucuda_cpu_ad_metrics — построчные
-    // копии calculateDiscreteModelMetricsAdCUDA (классика, кусками по потокам) и
-    // signalMetricsContinuationAdKernel (continuation, цепочка в этом потоке). Раскладка и сборка
-    // результата — как у GPU-путей (run_signal_metrics / run_metrics_continuation_ad). Валидация и
-    // оси — вызывающего (run_signal_metrics, metrics_axes).
-    SignalMetricsResult ParametricEngine::Impl::run_metrics_cpu_ad(const SignalMetricsRequest& req, const MetricsAxes& ax) {
+SignalMetricsResult ParametricEngine::Impl::run_metrics_cpu_ad(const SignalMetricsRequest& req, const MetricsAxes& ax) {
         SignalMetricsResult res;
         auto fail = [&](const std::string& msg) -> SignalMetricsResult& { res.error = msg; return res; };
         const AdaptiveRequest& ad = req.adaptive;
@@ -2143,7 +1823,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         {
             std::vector<KrsCpuDiag> diags;
             if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, req.amountOfX,
-                             peak_config_defines(), diags) || !mod.metrics()) {
+                             ad.prefix + peak_config_defines(), diags) || !mod.metrics()) {
                 std::string e = "CPU adaptive module:";
                 for (const KrsCpuDiag& d : diags)
                     e += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
@@ -2174,11 +1854,14 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         res.metric_mask = mask;
         res.continuation         = cont;
         res.continuation_reverse = cont && req.continuation_reverse;
-        res.flags.assign((size_t)nPts, REGIME_UNBOUND);
+        // Точки, до которых не дошёл Stop, остаются пустыми.
+        res.flags.assign((size_t)nPts, REGIME_CANCELLED);
         for (int m = 0; m < SIGM_COUNT; ++m)
             if ((mask >> m) & 1) res.values[m].assign((size_t)nPts, std::numeric_limits<double>::quiet_NaN());
         res.ad_stats.assign((size_t)nPts * 4, 0.0);
 
+        // Stop до запуска — прежний отказ, а не пустой частичный результат.
+        if (cancel_requested(req.cancel)) { res.cancelled = true; return fail("Cancelled by user"); }
         volatile int cancelFlag = 0;
         std::atomic<int> donePts{ 0 };
         std::atomic<bool> finished{ false };
@@ -2202,15 +1885,15 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         bool aborted = false;
         if (cont) {
             std::vector<double> iv(needIntervals ? peakStride : 0), om((size_t)SIGM_COUNT * nPts), st((size_t)nPts * 4);
-            std::vector<int> fl((size_t)nPts);
+            // Stop рвёт цепочку: хвост, до которого она не дошла, остаётся пустым.
+            std::vector<int> fl((size_t)nPts, REGIME_CANCELLED);
+            std::fill(om.begin(), om.end(), std::numeric_limits<double>::quiet_NaN());
             aborted = !call(0, nPts, needIntervals ? iv.data() : nullptr, om.data(), fl.data(), st.data(), &chainProg);
-            if (!aborted) {
-                for (int j = 0; j < nPts; ++j) res.flags[(size_t)j] = fl[(size_t)j];
-                for (int m = 0; m < SIGM_COUNT; ++m)
-                    if ((mask >> m) & 1)
-                        for (int j = 0; j < nPts; ++j) res.values[m][(size_t)j] = om[(size_t)m * nPts + j];
-                res.ad_stats = st;
-            }
+            for (int j = 0; j < nPts; ++j) res.flags[(size_t)j] = fl[(size_t)j];
+            for (int m = 0; m < SIGM_COUNT; ++m)
+                if ((mask >> m) & 1)
+                    for (int j = 0; j < nPts; ++j) res.values[m][(size_t)j] = om[(size_t)m * nPts + j];
+            res.ad_stats = st;
         } else {
             // Куски точек — потокам по мере освобождения; строки кусков не пересекаются.
             constexpr int kChunk = 4;
@@ -2229,9 +1912,11 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
                     if (c >= nChunks || stop.load(std::memory_order_relaxed)) return;
                     const int i0 = c * kChunk, i1 = (std::min)(nPts, i0 + kChunk), rows = i1 - i0;
                     int prog = 0;
-                    if (!call(i0, i1, needIntervals ? iv.data() : nullptr, om.data(), fl.data(), st.data(), &prog)) {
-                        stop.store(true); return;
-                    }
+                    // Stop рвёт кусок: строки, до которых он не дошёл, остаются пустыми.
+                    std::fill(fl.begin(), fl.end(), REGIME_CANCELLED);
+                    std::fill(om.begin(), om.end(), std::numeric_limits<double>::quiet_NaN());
+                    const bool whole = call(i0, i1, needIntervals ? iv.data() : nullptr, om.data(), fl.data(), st.data(), &prog) != 0;
+                    if (!whole) stop.store(true);
                     for (int r = 0; r < rows; ++r) {
                         res.flags[(size_t)(i0 + r)] = fl[(size_t)r];
                         for (int q = 0; q < 4; ++q) res.ad_stats[(size_t)(i0 + r) * 4 + q] = st[(size_t)r * 4 + q];
@@ -2239,6 +1924,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
                     for (int m = 0; m < SIGM_COUNT; ++m)
                         if ((mask >> m) & 1)
                             for (int r = 0; r < rows; ++r) res.values[m][(size_t)(i0 + r)] = om[(size_t)m * rows + r];
+                    if (!whole) return;
                     donePts.fetch_add(rows, std::memory_order_relaxed);
                 }
             };
@@ -2249,14 +1935,13 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }
         finished.store(true, std::memory_order_relaxed);
         watcher.join();
-        if (aborted || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+        (void)aborted;   // Stop: частичный результат, cancelled ставит metrics_finish
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         metrics_finish(res, req);
         return res;
     }
 
-
-    SignalMetricsResult ParametricEngine::Impl::run_metrics_continuation_ad(const SignalMetricsRequest& req) {
+SignalMetricsResult ParametricEngine::Impl::run_metrics_continuation_ad(const SignalMetricsRequest& req) {
         SignalMetricsResult res;
         auto fail = [&](const std::string& msg) -> SignalMetricsResult& { res.error = msg; return res; };
 
@@ -2364,9 +2049,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         SMA_CHECK(cudaDeviceSynchronize(), "sync after metrics adaptive continuation");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED / NaN, начало цело.
 
         res.dimension   = 1;
         res.n_pts       = nPts;
@@ -2399,46 +2082,177 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return res;
     }
 
-
-    // compile_basins_if_needed — отдельный шаблон basins.template.cu, регистрирует 5 kernel'ов:
-    // calculateDiscreteModelCUDA, avgPeakFinderCUDA и три DBSCAN-kernel'а (cluster,
-    // search_fixed_points, search_clear_points). Cache-ключ помечен `:basins`; par_or_var=0
-    // захардкожен в шаблоне, поэтому ключа не требует — только хэш krs_body/amountOfX.
-    bool ParametricEngine::Impl::compile_basins_if_needed(const std::string& krs_body, int amountOfX,
+bool ParametricEngine::Impl::compile_basins_if_needed(const std::string& krs_body, int amountOfX,
                                   std::string& err, bool activate ) {
         cuCtxSetCurrent(context);
         std::string key = hash_key(krs_body, amountOfX) + ":basins";
         return compile_into(pool_basins, key, cached_basins, activate, [&](CachedBasinsModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> mg;
-            if (!build_module(snapshot_sources(src_template_basins), "basins.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body) + lyap_nx_prefix(krs_body) + src_template_basins), "basins.cu",
                               { { "{{AMOUNT_OF_X}}", std::to_string(amountOfX) },
                                 { "{{KRS_BODY}}",    krs_body } },
-                              { "calculateDiscreteModelAvgPeaksCUDA",
-                                "CUDA_dbscan_kernel",
-                                "CUDA_dbscan_search_fixed_points_kernel",
-                                "CUDA_dbscan_search_clear_points_kernel" },
+                              { "calculateDiscreteModelAvgPeaksCUDA" },
                               mod, mg, err))
                 return false;
 
             fresh.key    = key;
             fresh.module = mod;
-            if (!module_fn(mod, mg[0], fresh.kernel_fused,        err)) { cuModuleUnload(mod); return false; }
-            if (!module_fn(mod, mg[1], fresh.kernel_dbscan,       err)) { cuModuleUnload(mod); return false; }
-            if (!module_fn(mod, mg[2], fresh.kernel_search_fixed, err)) { cuModuleUnload(mod); return false; }
-            if (!module_fn(mod, mg[3], fresh.kernel_search_clear, err)) { cuModuleUnload(mod); return false; }
+            if (!module_fn(mod, mg[0], fresh.kernel_fused, err)) { cuModuleUnload(mod); return false; }
             return true;
         }, err);
     }
 
+bool ParametricEngine::Impl::basins_dbscan_host(const numb* X, const numb* Y, const int* H, size_t n, double eps,
+                                   const std::shared_ptr<std::atomic<bool>>& cancel,
+                                   const std::shared_ptr<std::atomic<float>>& progress,
+                                   int* labels, int& n_pos, int& n_neg) {
+        n_pos = 0; n_neg = 0;
+        numb eps2 = (numb)eps;
+        eps2 = eps2 * eps2;   // в numb, как eps * eps в CUDA_dbscan_kernel
+        const bool fmad = get_nvrtc_fmad();
+        auto near_pt = [&](size_t a, size_t b) {
+            const numb dx = X[b] - X[a];
+            const numb dy = Y[b] - Y[a];
+            const numb d2 = fmad ? (numb)std::fma(dx, dx, dy * dy) : dx * dx + dy * dy;
+            return d2 <= eps2;
+        };
+        auto cancelled = [&]() { return cancel && cancel->load(std::memory_order_relaxed); };
 
-    // FastSynchro — два режима.
+        // Ячейка: сторона s чуть меньше eps/√2 (запас 1e-4 перекрывает округления и numb = float).
+        // Ключ считается в double; при |x/s| > 2^32 погрешность ключа съела бы запас, такие точки
+        // (и вообще нечисловые признаки) идут мимо сетки.
+        const double s   = eps / std::sqrt(2.0) * (1.0 - 1e-4);
+        const double lim = 4294967296.0;
+        struct Key { long long cx, cy; uint32_t i; };
+        std::vector<Key> keys;     keys.reserve(n);
+        std::vector<uint32_t> offgrid;   // конечные, но вне сетки: перебор против всех
+        std::vector<int> node(n, -1);   // узел union-find точки; -1 — Unbound (не участвует)
+        for (size_t i = 0; i < n; ++i) {
+            if (H[i] == REGIME_UNBOUND) continue;
+            if (!std::isfinite((double)X[i]) || !std::isfinite((double)Y[i])) continue;   // узел получит ниже; соседей у NaN/inf нет
+            const double qx = (double)X[i] / s, qy = (double)Y[i] / s;
+            if (!(std::fabs(qx) <= lim && std::fabs(qy) <= lim)) { offgrid.push_back((uint32_t)i); continue; }
+            keys.push_back({ (long long)std::floor(qx), (long long)std::floor(qy), (uint32_t)i });
+        }
+        std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
+            return a.cx != b.cx ? a.cx < b.cx : (a.cy != b.cy ? a.cy < b.cy : a.i < b.i);
+        });
+        struct Cell { long long cx, cy; size_t b, e; double x0, x1, y0, y1; };
+        std::vector<Cell> cells;
+        for (size_t k = 0; k < keys.size();) {
+            size_t e = k;
+            Cell c{ keys[k].cx, keys[k].cy, k, k, INFINITY, -INFINITY, INFINITY, -INFINITY };
+            for (; e < keys.size() && keys[e].cx == c.cx && keys[e].cy == c.cy; ++e) {
+                const size_t i = keys[e].i;
+                c.x0 = (std::min)(c.x0, (double)X[i]); c.x1 = (std::max)(c.x1, (double)X[i]);
+                c.y0 = (std::min)(c.y0, (double)Y[i]); c.y1 = (std::max)(c.y1, (double)Y[i]);
+                node[i] = (int)cells.size();
+            }
+            c.e = e;
+            cells.push_back(c);
+            k = e;
+        }
+        int nodes = (int)cells.size();
+        for (uint32_t i : offgrid) node[i] = nodes++;
+        for (size_t i = 0; i < n; ++i)
+            if (H[i] != REGIME_UNBOUND && node[i] < 0) node[i] = nodes++;   // NaN/inf: свой узел навсегда
 
-    // Один helper для обоих режимов — параметризован шаблоном и списком
-    // kernel-symbols. Ключ кэша включает все substituted-параметры
-    // (type_of_synch, error_estim, fs_error_trs), чтобы при их смене recompile
-    // действительно случился.
-    bool ParametricEngine::Impl::compile_fs_module(const std::string& src_template,
+        std::vector<int> parent((size_t)nodes);
+        for (int v = 0; v < nodes; ++v) parent[(size_t)v] = v;
+        auto find = [&](int v) {
+            while (parent[(size_t)v] != v) { parent[(size_t)v] = parent[(size_t)parent[(size_t)v]]; v = parent[(size_t)v]; }
+            return v;
+        };
+        auto unite = [&](int a, int b) {
+            a = find(a); b = find(b);
+            if (a != b) { if (a < b) std::swap(a, b); parent[(size_t)a] = b; }
+        };
+
+        // Пары соседних ячеек. Окно 5x5 без центра, каждая неупорядоченная пара — один раз (сосед
+        // с большим ключом). Пара, уже связанная через другие ячейки, не проверяется: плотные
+        // кластеры сливаются за первые же проверки. Перед перебором точек — отсев по
+        // прямоугольникам ячеек с тем же запасом.
+        const double gapMax2 = eps * eps * (1.0 + 1e-4);
+        auto box_gap2 = [](double ax0, double ax1, double ay0, double ay1,
+                           double bx0, double bx1, double by0, double by1) {
+            const double gx = (std::max)(0.0, (std::max)(ax0 - bx1, bx0 - ax1));
+            const double gy = (std::max)(0.0, (std::max)(ay0 - by1, by0 - ay1));
+            return gx * gx + gy * gy;
+        };
+        auto find_cell = [&](long long cx, long long cy) -> int {
+            auto it = std::lower_bound(cells.begin(), cells.end(), std::make_pair(cx, cy),
+                [](const Cell& c, const std::pair<long long, long long>& k) {
+                    return c.cx != k.first ? c.cx < k.first : c.cy < k.second;
+                });
+            return (it != cells.end() && it->cx == cx && it->cy == cy) ? (int)(it - cells.begin()) : -1;
+        };
+        for (size_t a = 0; a < cells.size(); ++a) {
+            if ((a & 1023) == 0) {
+                if (cancelled()) return false;
+                if (progress) progress->store(0.9f * float(a) / float(cells.size()), std::memory_order_relaxed);
+            }
+            const Cell& A = cells[a];
+            for (int ox = 0; ox <= 2; ++ox)
+                for (int oy = -2; oy <= 2; ++oy) {
+                    if (ox == 0 && oy <= 0) continue;
+                    const int b = find_cell(A.cx + ox, A.cy + oy);
+                    if (b < 0 || find((int)a) == find(b)) continue;
+                    const Cell& B = cells[(size_t)b];
+                    if (box_gap2(A.x0, A.x1, A.y0, A.y1, B.x0, B.x1, B.y0, B.y1) > gapMax2) continue;
+                    bool hit = false;
+                    for (size_t p = A.b; p < A.e && !hit; ++p) {
+                        const size_t i = keys[p].i;
+                        const double xi = (double)X[i], yi = (double)Y[i];
+                        if (box_gap2(xi, xi, yi, yi, B.x0, B.x1, B.y0, B.y1) > gapMax2) continue;
+                        for (size_t q = B.b; q < B.e; ++q)
+                            if (near_pt(i, keys[q].i)) { hit = true; break; }
+                    }
+                    if (hit) unite((int)a, b);
+                }
+        }
+        // Точки вне сетки: перебор против всех конечных точек (на практике их нет).
+        for (uint32_t u : offgrid) {
+            if (cancelled()) return false;
+            for (size_t j = 0; j < n; ++j)
+                if (j != u && H[j] != REGIME_UNBOUND && near_pt(u, j)) unite(node[u], node[j]);
+        }
+
+        // Метки: компоненты с FP — по возрастанию наименьшего индекса FP, затем остальные — по
+        // наименьшему индексу Osc. Первая встреча корня при обходе по возрастанию индекса и есть
+        // этот наименьший индекс.
+        std::vector<int> labelOf((size_t)nodes, 0);
+        for (size_t i = 0; i < n; ++i)
+            if (H[i] == REGIME_FIXED_POINT) { int& l = labelOf[(size_t)find(node[i])]; if (l == 0) l = --n_neg; }
+        for (size_t i = 0; i < n; ++i)
+            if (H[i] == REGIME_OSCILLATION) { int& l = labelOf[(size_t)find(node[i])]; if (l == 0) l = ++n_pos; }
+        for (size_t i = 0; i < n; ++i)
+            labels[i] = node[i] >= 0 ? labelOf[(size_t)find(node[i])] : 0;
+        if (progress) progress->store(1.0f, std::memory_order_relaxed);
+        return true;
+    }
+
+bool ParametricEngine::Impl::basins_dbscan_grid(const numb* d_X, const numb* d_Y, const int* d_helpful, int* d_labels,
+                            size_t total_cells, double eps,
+                            const std::shared_ptr<std::atomic<bool>>& cancel,
+                            const std::shared_ptr<std::atomic<float>>& progress,
+                            int& n_pos, int& n_neg, std::string& err) {
+        err.clear();
+        const size_t n = total_cells;
+        std::vector<numb> X(n), Y(n);
+        std::vector<int>  H(n), labels(n);
+        cudaError_t ce = cudaMemcpy(X.data(), d_X, n * sizeof(numb), cudaMemcpyDeviceToHost);
+        if (ce == cudaSuccess) ce = cudaMemcpy(Y.data(), d_Y, n * sizeof(numb), cudaMemcpyDeviceToHost);
+        if (ce == cudaSuccess) ce = cudaMemcpy(H.data(), d_helpful, n * sizeof(int), cudaMemcpyDeviceToHost);
+        if (ce != cudaSuccess) { err = std::string("CUDA memcpy dbscan D2H: ") + cudaGetErrorString(ce); return false; }
+        if (!basins_dbscan_host(X.data(), Y.data(), H.data(), n, eps, cancel, progress, labels.data(), n_pos, n_neg))
+            return false;
+        ce = cudaMemcpy(d_labels, labels.data(), n * sizeof(int), cudaMemcpyHostToDevice);
+        if (ce != cudaSuccess) { err = std::string("CUDA memcpy dbscan labels H2D: ") + cudaGetErrorString(ce); return false; }
+        return true;
+    }
+
+bool ParametricEngine::Impl::compile_fs_module(const std::string& src_template,
                            const std::string& tag, // ":fs_attr" или ":fs_grid"
                            int amountOfX,
                            const std::string& krs_body,
@@ -2485,8 +2299,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    bool ParametricEngine::Impl::compile_order_module(bool activate, int amountOfX, int amountOfValues,
+bool ParametricEngine::Impl::compile_order_module(bool activate, int amountOfX, int amountOfValues,
                               const std::string& krs_body, const std::string& ref_body,
                               std::string& err)
     {
@@ -2500,7 +2313,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             CUmodule mod = nullptr;
             std::vector<std::string> lowered;
             // orderEstimateKernel объявлено extern "C" — в name_exprs не нужно.
-            if (!build_module(snapshot_sources(src_template_order), "order.cu",
+            if (!build_module(snapshot_sources(time_prefix(krs_body + ref_body) + src_template_order), "order.cu",
                               { { "{{AMOUNT_OF_X}}",      std::to_string(amountOfX) },
                                 { "{{AMOUNT_OF_VALUES}}", std::to_string(amountOfValues) },
                                 { "{{KRS_BODY}}",         krs_body },
@@ -2523,21 +2336,14 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    // prewarm_* — компиляция без расчёта. Ключи считаются ровно так же, как в соответствующем
-    // run_*, иначе прогретый модуль не был бы найден. Ошибки не всплывают: не прогрелось — Run
-    // скомпилирует сам и покажет ошибку уже там.
-    // CPU-ветки адаптивного шага (БД 1D, метрики, LLE/LS) считают одной cl.exe-DLL с теми же
-    // аргументами сборки: прогрев собирает её в дисковый кэш (build_cached_dll), Run её только
-    // загружает. GPU-модули им не нужны.
-    void ParametricEngine::Impl::prewarm_ad_cpu(const AdaptiveRequest& ad, int amountOfX) {
+void ParametricEngine::Impl::prewarm_ad_cpu(const AdaptiveRequest& ad, int amountOfX) {
         if (!ad.setup_error.empty()) return;
         AdaptiveCpuModule mod;
         std::vector<KrsCpuDiag> diags;
-        (void)mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, amountOfX, peak_config_defines(), diags);
+        (void)mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, amountOfX, ad.prefix + peak_config_defines(), diags);
     }
 
-    void ParametricEngine::Impl::prewarm_metrics(const SignalMetricsRequest& req) {
+void ParametricEngine::Impl::prewarm_metrics(const SignalMetricsRequest& req) {
         if (req.use_cpu) {   // Fixed: CPU-шаг собирает cl.exe при Run; адаптивный — общая CPU-DLL
             if (req.adaptive.enabled) prewarm_ad_cpu(req.adaptive, req.amountOfX);
             return;
@@ -2553,15 +2359,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             compile_metrics_if_needed(req.krs_body, req.amountOfX, ax.par_or_var, err, false, req.minmax_interp);
     }
 
-
-    // Stability — область устойчивости схемы на двумерной задаче Дальквиста.
-    //
-    // Считать тут почти нечего: ячейка — это ДВА шага схемы (по одному от
-    // каждого базисного вектора), поэтому вся карта 512x512 стоит столько же,
-    // сколько один узел p(h) при t_max/h = 1000. Чанкование оставлено только
-    // ради отмены и прогресса: экстраполяционная обёртка с десятком стадий на
-    // мелкой сетке всё-таки набирает заметное время.
-    StabilityResult ParametricEngine::Impl::run_stability(const StabilityRequest& req) {
+StabilityResult ParametricEngine::Impl::run_stability(const StabilityRequest& req) {
         StabilityResult res;
         auto fail = [&](const std::string& msg) -> StabilityResult& { res.error = msg; return res; };
 
@@ -2683,17 +2481,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return res;
     }
 
-
-    // Performance — «время счёта vs достигнутая ошибка» по одномерной сетке.
-    //
-    // Два прохода. Первый — обычный run_order по той же оси: он даёт E1/E2,
-    // статусы и фактический шаг узла и НЕ засекается. Второй — собственно
-    // замер: на каждом узле warmup холостых запусков, затем repeats запусков
-    // под cudaEvent'ами, стоящими вплотную вокруг cuLaunchKernel. Всё, что
-    // запуском ядра не является — компиляция модуля, H2D значений, выделение
-    // выходного буфера, D2H, — из измеряемого интервала вынесено; кэш модуля
-    // к этому моменту уже прогрет order-проходом.
-    PerfResult ParametricEngine::Impl::run_performance(const PerfRequest& req) {
+PerfResult ParametricEngine::Impl::run_performance(const PerfRequest& req) {
         PerfResult res;
         res.axis = req.axis;
         auto fail = [&](const std::string& msg) -> PerfResult& { res.error = msg; return res; };
@@ -2940,11 +2728,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         return res;
     }
 
-
-    // -----------------------------------------------------------------------
-    // Network — сеть связанных осцилляторов (kernels/network.template.cu).
-
-    bool ParametricEngine::Impl::compile_network_module(bool activate, int amountOfX, int amountOfValues,
+bool ParametricEngine::Impl::compile_network_module(bool activate, int amountOfX, int amountOfValues,
                                 const std::string& krs_body, const std::string& coupling_body,
                                 std::string& err)
     {
@@ -2972,8 +2756,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         }, err);
     }
 
-
-    NetworkResult ParametricEngine::Impl::run_network(const NetworkRequest& req) {
+NetworkResult ParametricEngine::Impl::run_network(const NetworkRequest& req) {
         NetworkResult res;
         auto fail = [&](const std::string& msg) -> NetworkResult& { res.error = msg; return res; };
 
@@ -3006,6 +2789,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         if (req.transient < 0.0) return fail("transient must be >= 0");
         if (req.pre_scaller < 1) return fail("preScaller must be >= 1");
         if (req.max_points < 2)  return fail("max_points must be >= 2");
+        if (req.steps_per_launch < 0) return fail("steps_per_launch must be >= 0");
 
         // Состояние всей сети живёт в динамической shared — отсюда потолок.
         const size_t shared_bytes = (size_t)req.n_nodes * (size_t)req.amountOfX * sizeof(numb);
@@ -3100,6 +2884,27 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         if (stepsPerLaunch < 1)          stepsPerLaunch = 1;
         if (stepsPerLaunch > totalSteps) stepsPerLaunch = totalSteps;
 
+        if (req.steps_per_launch > 0 && req.steps_per_launch < stepsPerLaunch)
+            stepsPerLaunch = req.steps_per_launch;
+
+        // Event pairs are allocated only for an explicit benchmark request.
+        // Record the end before host polling/status copies, so these are excluded.
+        struct NetworkEvents {
+            CUevent begin = nullptr, end = nullptr;
+            ~NetworkEvents() {
+                if (end && cuEventDestroy(end) != CUDA_SUCCESS)
+                    std::fprintf(stderr, "network: cuEventDestroy(end) failed\n");
+                if (begin && cuEventDestroy(begin) != CUDA_SUCCESS)
+                    std::fprintf(stderr, "network: cuEventDestroy(begin) failed\n");
+            }
+        } events;
+        if (req.measure_gpu_time) {
+            CUresult r = cuEventCreate(&events.begin, CU_EVENT_DEFAULT);
+            if (r != CUDA_SUCCESS) return fail("network event create: " + cu_err(r));
+            r = cuEventCreate(&events.end, CU_EVENT_DEFAULT);
+            if (r != CUDA_SUCCESS) return fail("network event create: " + cu_err(r));
+        }
+
         const int    progressStride = progress_stride_for((size_t)totalSteps);
         const double ticksTotal     = (double)totalSteps / (double)progressStride;
         double ticksDone = 0.0;
@@ -3135,14 +2940,30 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
             };
 
             sig.resetTicks();
+            if (req.measure_gpu_time) {
+                CUresult r = cuEventRecord(events.begin, nullptr);
+                if (r != CUDA_SUCCESS) return fail("network event begin: " + cu_err(r));
+            }
             CUresult r = cuLaunchKernel(cached_network.kernel, 1, 1, 1, blockSize, 1, 1,
                                         (unsigned)shared_bytes, nullptr, args, nullptr);
             if (r != CUDA_SUCCESS) return fail("cuLaunchKernel(network): " + cu_err(r));
+            ++res.launch_count;
+            if (req.measure_gpu_time) {
+                r = cuEventRecord(events.end, nullptr);
+                if (r != CUDA_SUCCESS) return fail("network event end: " + cu_err(r));
+            }
             if (!wait_with_signals(0, sig, req.cancel, req.progress, ticksDone, ticksTotal, err))
                 return fail(err);
             cudaDeviceSynchronize();
             cudaError_t ce = cudaGetLastError();
             if (ce != cudaSuccess) return fail(std::string("network kernel: ") + cudaGetErrorString(ce));
+
+            if (req.measure_gpu_time) {
+                float elapsed = 0.0f; // CUDA event API requires float milliseconds.
+                r = cuEventElapsedTime(&elapsed, events.begin, events.end);
+                if (r != CUDA_SUCCESS) return fail("network event elapsed: " + cu_err(r));
+                res.gpu_ms += elapsed;
+            }
 
             ticksDone += (double)count / (double)progressStride;
 
@@ -3194,5 +3015,3 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
         res.ok          = true;
         return res;
     }
-template bool ParametricEngine::Impl::run_lyap_ad_seq<LLE1DRequest>(bool, const LLE1DRequest&, std::vector<double>&, std::vector<double>&, std::string&, bool&);
-template bool ParametricEngine::Impl::run_lyap_ad_seq<LS1DRequest>(bool, const LS1DRequest&, std::vector<double>&, std::vector<double>&, std::string&, bool&);

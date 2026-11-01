@@ -5,6 +5,8 @@ void write_order_config(std::ostringstream& o, const OrderConfig& c) {
     o << "\"label\":";           jstr(o, c.label);           o << ",";
     o << "\"scheme\":";          jstr(o, c.scheme);          o << ",";
     o << "\"symmetry_s\":";      jstr(o, c.symmetry_s);      o << ",";
+    o << "\"cd_fp_iters\":";      jstr(o, c.cd_fp_iters);      o << ",";
+    o << "\"newton_tol\":"; jstr(o, c.newton.tol); o << ",\"newton_max_iters\":"; jstr(o, c.newton.max_iters); o << ",\"newton_full\":" << (c.newton.full ? "true" : "false") << ",";
     o << "\"calc_kind\":"        << c.calc_kind             << ",";
     o << "\"two_d\":"            << (c.two_d ? "true" : "false") << ",";
     o << "\"axis_x_target\":"    << c.axis_x_target         << ",";
@@ -56,6 +58,10 @@ bool read_order_field(JP& p, OrderConfig& c, const std::string& key) {
     if      (key == "label")            c.label            = p.str();
     else if (key == "scheme")           c.scheme           = p.str();
     else if (key == "symmetry_s")       c.symmetry_s       = p.str();
+    else if (key == "cd_fp_iters")       c.cd_fp_iters       = p.str();
+    else if (key == "newton_tol")          c.newton.tol       = p.str();
+    else if (key == "newton_max_iters")    c.newton.max_iters = p.str();
+    else if (key == "newton_full")         c.newton.full      = p.boolean();
     else if (key == "calc_kind") {
         const int k = std::stoi(p.str_or_num());
         c.calc_kind = (k == kOrderCalcPerf || k == kOrderCalcStab) ? k : kOrderCalcOrder;

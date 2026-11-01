@@ -6,20 +6,57 @@
 #include <cstdio>
 #include <cstdlib>
 #include "ucuda/equations/sysparse.hpp"
+#include "ucuda/equations/dae_ir.h"       // build_system для ДАУ
+#include "ucuda/equations/dae_devices.h"  // dae_dc_operating_point
+#include "ucuda/numerics/kicad_import.h"
+#include "ucuda/numerics/spice_parse.h"  // import_circuit
+#include <filesystem>
 #include <stdexcept>
-
-// Newton knobs are UI strings; parse them here, once, on the way into System.
-// Out-of-range or unparseable input falls back to the defaults rather than
-// producing a scheme body that cannot converge.
-static void apply_newton_settings(System& s, bool full, const std::string& tol,
-                                  const std::string& iters) {
-    s.newton_full = full;
-    try { double v = std::stod(tol);      if (v > 0.0) s.newton_tol = v; }       catch (...) {}
-    try { int    v = std::stoi(iters);    if (v > 0)   s.newton_max_iters = v; } catch (...) {}
-}
 
 // Строит System из текущего режима ввода и алфавита.
 System AppModel::build_system() const {
+    // ДАУ: X = [x; z], rhs = [f; g], dae_nx = число x (dae_ir.h). Схемы — только ДАУ.
+    // dae_as_ode: z подставлены в f — ОДУ по x для всех схем и вкладок (dae_reduce_to_ode), а сами
+    // z остаются в состоянии выходами (System::out_exprs): шаг пересчитывает их по новому x, и
+    // их видят выход БД, метрики и оси графиков, как обычные переменные.
+    if (is_dae) {
+        // Вспомогательные функции — те же, что у ОДУ: подставляются в уравнения при разборе.
+        FuncDefs funcs;
+        if (use_aux_funcs && !func_defs_text.empty()) funcs = parse_func_defs(func_defs_text);
+        System s = parse_dae(plain_text, vars_text, alg_text, params_text, dae_index_text, funcs).as_codegen_system();
+        if (!dae_as_ode) return s;
+        if (!dae_index1_structural(s)) {
+            // Уровень C (индекс 2-3): связи заменяются продифференцированными со стабилизацией
+            // (d/dt + alpha)^m g = 0 — дальше это индекс 1 для уровней A/B.
+            double alpha = 0;
+            if (!parse_num_checked(dae_stab_alpha, alpha))
+                throw std::runtime_error("solve as ODE (level C): stabilization alpha is not a number");
+            System s1;
+            std::string why;
+            if (!dae_stabilized_index1(s, alpha, s1, &why)) throw std::runtime_error("solve as ODE (level C): " + why);
+            s = s1;
+        }
+        System ode;
+        std::vector<std::string> zex;
+        std::string why;
+        if (!dae_reduce_to_ode(s, ode, &zex, &why)) {
+            // Уровень B: связь не разрешается явно — z Ньютоном в каждом вычислении f (System::zb_g).
+            // Нужен индекс 1: в каждой связи есть z (иначе dg/dz вырожден).
+            ode = System{};
+            ode.vars = s.vars;
+            ode.params = s.params;
+            ode.latex = s.latex;
+            ode.cd_fp_iters = s.cd_fp_iters;
+            ode.rhs.assign(s.rhs.begin(), s.rhs.begin() + s.dae_nx);
+            ode.zb_g.assign(s.rhs.begin() + s.dae_nx, s.rhs.end());
+            if (!dae_index1_structural(s))
+                throw std::runtime_error("solve as ODE: " + why);
+            return ode;
+        }
+        ode.vars.insert(ode.vars.end(), s.vars.begin() + s.dae_nx, s.vars.end());
+        ode.out_exprs = zex;
+        return ode;
+    }
     std::vector<std::string> alpha = parse_alphabet();
 
     // вспомогательные функции (опция)
@@ -32,7 +69,6 @@ System AppModel::build_system() const {
         if (latex_text.empty()) throw std::runtime_error("LaTeX is empty");
         if (alpha.empty()) throw std::runtime_error("alphabet is empty");
         System s = parse_system_from_latex(latex_text, alpha, param_order, funcs, is_map);
-        apply_newton_settings(s, newton_full, newton_tol, newton_max_iters);
         return s;
     }
 
@@ -42,7 +78,6 @@ System AppModel::build_system() const {
     if (plain_text.empty()) throw std::runtime_error("equations are empty");
     if (alpha.empty()) throw std::runtime_error("alphabet is empty");
     System s = parse_system_from_latex(plain_text, alpha, param_order, funcs, is_map);
-    apply_newton_settings(s, newton_full, newton_tol, newton_max_iters);
     return s;
 }
 
@@ -129,6 +164,21 @@ bool AppModel::refresh_symbols() {
         return out;
     };
 
+    // ДАУ: переменные — x, затем z (как в X шага), параметры — как в params_text.
+    if (is_dae) {
+        try {
+            const System sys = build_system();
+            known_vars = sys.vars;
+            known_params = sys.params;
+            apply_sync();
+            return true;
+        }
+        catch (const std::exception& e) {
+            error_message = e.what();
+            return false;
+        }
+    }
+
     // Если заданы явные vars_text И params_text — используем их напрямую.
     // Это новый удобный формат: переменные и параметры разделены явно.
     if (!vars_text.empty() && !params_text.empty()) {
@@ -167,11 +217,141 @@ bool AppModel::refresh_symbols() {
     }
 }
 
+bool AppModel::import_circuit(std::string* report, std::string* err) {
+    if (circuit_source.empty()) { if (err) *err = "no circuit file"; return false; }
+    std::string net, log;
+    if (!circuit_source_load(circuit_source, net, &log, err)) return false;
+    SpiceImportOptions o;
+    o.base_dir = std::filesystem::u8path(circuit_source).parent_path().u8string();
+    o.ideal_opamps = circuit_ideal_opamps;
+    o.no_junction_caps = circuit_no_jcaps;
+    o.ideal_diodes = circuit_ideal_diodes;
+    o.ideal_bjts = circuit_ideal_bjts;
+    SpiceImportResult r;
+    if (!spice_import(net, o, r, err)) return false;
+    // Схема — источник истины: уравнения, номиналы и НУ берутся из неё целиком.
+    is_dae = true;
+    mode = InputMode::Plain;
+    plain_text = r.plain_text;
+    vars_text = r.vars_text;
+    alg_text = r.alg_text;
+    params_text = r.params_text;
+    param_order = ParamOrder::AsInAlphabet;
+    dae_index_text.clear();
+    use_aux_funcs = false;
+    init_conditions = r.init_conditions;
+    param_values = r.param_values;
+    {
+        // Разложенное пользователем остаётся; новые параметры — в группы импорта.
+        std::vector<std::string> names;
+        for (const auto& pg : r.param_groups) names.push_back(pg.first);
+        pg_merge_auto(param_groups, names, r.param_groups);
+        names.clear();
+        for (const auto& pg : r.ic_groups) names.push_back(pg.first);
+        pg_merge_auto(ic_groups, names, r.ic_groups);
+        for (const auto& kv : r.field_labels) field_labels.emplace(kv.first, kv.second);
+    }
+    if (!r.step_h.empty()) step_h = r.step_h;
+    circuit_netlist = net;
+    if (note.empty() && !r.title.empty()) note = r.title;
+    // Без UIC и без НУ SPICE стартует переходный процесс из рабочей точки — так же и здесь.
+    std::string op;
+    if (r.uic) op = "initial values: as given (UIC)";
+    else if (!r.op_plain_text.empty()) {
+        // .ic без UIC, как в SPICE: рабочая точка с удержанными узлами .ic, затем узлы отпускаются (z при
+        // старте расчёта согласуются с x уже по исходным уравнениям).
+        try {
+            const DaeSystem d = parse_dae(r.op_plain_text, vars_text, alg_text, params_text, dae_index_text, FuncDefs{});
+            const System s = d.as_codegen_system();
+            std::vector<double> a = { 0.5 };
+            for (const std::string& p : d.params) {
+                auto it = param_values.find(p);
+                a.push_back(it == param_values.end() ? 0.0 : parse_num(it->second, 0.0));
+            }
+            std::vector<double> X;
+            for (const std::string& v : s.vars) {
+                auto it = init_conditions.find(v);
+                X.push_back(it == init_conditions.end() ? 0.0 : parse_num(it->second, 0.0));
+            }
+            int it = 0;
+            std::string why;
+            if (dae_dc_operating_point(s, a.data(), (int)a.size(), 0.0, X.data(), &it, &why)) {
+                for (size_t i = 0; i < s.vars.size(); ++i) init_conditions[s.vars[i]] = fmt_num_shortest(X[i]);
+                op = "initial values: DC operating point with the .ic nodes held (" + std::to_string(it)
+                   + " Newton iterations), then released";
+            } else op = "initial values: .ic as given; DC operating point with the .ic nodes held failed: " + why;
+        } catch (const std::exception& e) {
+            op = std::string("initial values: .ic as given; DC operating point: ") + e.what();
+        }
+    }
+    else if (r.has_ic) op = "initial values: IC= / .ic (no DC operating point)";
+    else {
+        std::string orep, oerr;
+        op = dae_operating_point(&orep, &oerr) ? "initial values: " + orep
+                                               : "initial values: zero; DC operating point failed: " + oerr;
+    }
+    if (report) {
+        std::string s = r.summary;
+        if (!r.t_stop.empty()) s += "\n.tran: h = " + r.step_h + " s, T = " + r.t_stop + " s";
+        s += "\n" + op;
+        for (const std::string& n : r.notes) s += "\n" + n;
+        s += "\nnodes:";
+        for (const auto& kv : r.node_vars) s += " " + kv.first + "=" + kv.second;
+        *report = s;
+    }
+    return true;
+}
+
+bool AppModel::dae_operating_point(std::string* report, std::string* err) {
+    try {
+        FuncDefs funcs;
+        if (use_aux_funcs && !func_defs_text.empty()) funcs = parse_func_defs(func_defs_text);
+        const DaeSystem d = parse_dae(plain_text, vars_text, alg_text, params_text, dae_index_text, funcs);
+        const System s = d.as_codegen_system();
+        std::vector<double> a = { 0.5 };
+        for (const std::string& p : d.params) {
+            auto it = param_values.find(p);
+            a.push_back(it == param_values.end() ? 0.0 : parse_num(it->second, 0.0));
+        }
+        std::vector<double> X;
+        for (const std::string& v : s.vars) {
+            auto it = init_conditions.find(v);
+            X.push_back(it == init_conditions.end() ? 0.0 : parse_num(it->second, 0.0));
+        }
+        int it = 0;
+        std::string why;
+        if (!dae_dc_operating_point(s, a.data(), (int)a.size(), 0.0, X.data(), &it, &why)) {
+            if (err) *err = why;
+            return false;
+        }
+        for (size_t i = 0; i < s.vars.size(); ++i) init_conditions[s.vars[i]] = fmt_num_shortest(X[i]);
+        if (report) *report = "DC operating point (" + std::to_string(it) + " Newton iterations)";
+        return true;
+    } catch (const std::exception& e) {
+        if (err) *err = e.what();
+        return false;
+    }
+}
+
 SystemRecord AppModel::to_record() const {
     SystemRecord r;
     r.name = name;
     r.note = note;
     r.is_map = is_map;
+    r.is_dae = is_dae;
+    r.alg_text = alg_text;
+    r.dae_index_text = dae_index_text;
+    r.dae_as_ode = dae_as_ode;
+    r.dae_stab_alpha = dae_stab_alpha;
+    r.circuit_source = circuit_source;
+    r.circuit_netlist = circuit_netlist;
+    r.circuit_ideal_opamps = circuit_ideal_opamps;
+    r.circuit_no_jcaps = circuit_no_jcaps;
+    r.circuit_ideal_diodes = circuit_ideal_diodes;
+    r.circuit_ideal_bjts = circuit_ideal_bjts;
+    r.param_groups = param_groups;
+    r.ic_groups = ic_groups;
+    r.field_labels = field_labels;
     switch (mode) {
     case InputMode::Image: r.mode = "Image"; break;
     case InputMode::Latex: r.mode = "LaTeX"; break;
@@ -194,6 +374,9 @@ SystemRecord AppModel::to_record() const {
     r.scheme_rk45 = scheme_rk45;
     r.scheme_dop853 = scheme_dop853;
     r.scheme_cd = scheme_cd;
+    r.scheme_cdfast = scheme_cdfast;
+    r.scheme_cdfp = scheme_cdfp;
+    r.scheme_cdfastfp = scheme_cdfastfp;
     r.scheme_ccd = scheme_ccd;
     r.scheme_ccd4 = scheme_ccd4;
     r.scheme_ccd4s3 = scheme_ccd4s3;
@@ -220,6 +403,7 @@ SystemRecord AppModel::to_record() const {
     r.newton_full = newton_full;
     r.newton_tol = newton_tol;
     r.newton_max_iters = newton_max_iters;
+    r.cd_fp_iters = cd_fp_iters;
     r.symmetry_s = symmetry_s;
     r.step_h = step_h;
     r.init_conditions = init_conditions;
@@ -227,6 +411,7 @@ SystemRecord AppModel::to_record() const {
     r.custom_schemes = custom_schemes;
     r.wrapper_schemes = wrapper_schemes;
     r.disabled_wrappers = disabled_wrappers;
+    r.dae_schemes_off = dae_schemes_off;
     return r;
 }
 
@@ -234,6 +419,21 @@ void AppModel::from_record(const SystemRecord& r) {
     name = r.name;
     note = r.note;
     is_map = r.is_map;
+    is_dae = r.is_dae;
+    alg_text = r.alg_text;
+    dae_index_text = r.dae_index_text;
+    dae_as_ode = r.dae_as_ode;
+    dae_stab_alpha = r.dae_stab_alpha;
+    circuit_source = r.circuit_source;
+    circuit_netlist = r.circuit_netlist;
+    circuit_ideal_opamps = r.circuit_ideal_opamps;
+    circuit_no_jcaps = r.circuit_no_jcaps;
+    circuit_ideal_diodes = r.circuit_ideal_diodes;
+    circuit_ideal_bjts = r.circuit_ideal_bjts;
+    param_groups = r.param_groups;
+    ic_groups = r.ic_groups;
+    field_labels = r.field_labels;
+    pg_ui = ParamGroupsUi{};
     if (r.mode == "Image") mode = InputMode::Image;
     else if (r.mode == "Plain") mode = InputMode::Plain;
     else mode = InputMode::Latex;
@@ -257,6 +457,9 @@ void AppModel::from_record(const SystemRecord& r) {
     scheme_rk45 = r.scheme_rk45;
     scheme_dop853 = r.scheme_dop853;
     scheme_cd = r.scheme_cd;
+    scheme_cdfast = r.scheme_cdfast;
+    scheme_cdfp = r.scheme_cdfp;
+    scheme_cdfastfp = r.scheme_cdfastfp;
     scheme_ccd = r.scheme_ccd;
     scheme_ccd4 = r.scheme_ccd4;
     scheme_ccd4s3 = r.scheme_ccd4s3;
@@ -283,6 +486,7 @@ void AppModel::from_record(const SystemRecord& r) {
     newton_full = r.newton_full;
     newton_tol = r.newton_tol;
     newton_max_iters = r.newton_max_iters;
+    cd_fp_iters = r.cd_fp_iters;
     symmetry_s = r.symmetry_s;
     step_h = r.step_h;
     init_conditions = r.init_conditions;
@@ -291,6 +495,7 @@ void AppModel::from_record(const SystemRecord& r) {
     wrapper_schemes = r.wrapper_schemes;
     sort_wrapper_schemes(wrapper_schemes);   // старые библиотеки — в порядке добавления
     disabled_wrappers = r.disabled_wrappers;
+    dae_schemes_off = r.dae_schemes_off;
     loaded_name = r.name;          // запоминаем имя на диске
     // обновим списки символов (без падения, если система ещё неполна)
     refresh_symbols();
@@ -301,7 +506,8 @@ void AppModel::from_record(const SystemRecord& r) {
     if (is_map
         || scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78 || scheme_dopri78_legacy
         || scheme_rk45 || scheme_dop853
-        || scheme_cd || scheme_ccd || scheme_ccd4 || scheme_ccd4s3 || scheme_ccd4s4 || scheme_ccd4ss01
+        || scheme_cd || scheme_cdfast
+        || scheme_cdfp || scheme_cdfastfp || scheme_ccd || scheme_ccd4|| scheme_ccd4s3 || scheme_ccd4s4 || scheme_ccd4ss01
         || scheme_ccd4ss10
         || scheme_cd10 || scheme_ccd10 || scheme_ccd4_10 || scheme_ccd4s3_10 || scheme_ccd4s4_10
         || scheme_ieuler || scheme_imidpoint
@@ -309,6 +515,64 @@ void AppModel::from_record(const SystemRecord& r) {
         || scheme_gbs || scheme_gbs24 || scheme_gbs246 || scheme_gbs2468 || scheme_gbs246810 || scheme_gbs24681012
         || !custom_schemes.empty() || !wrapper_schemes.empty())   // их код тоже в превью
         generate();
+    circuit_layout_defaults();
+}
+
+std::vector<std::string> AppModel::ic_fields(const std::vector<std::string>& vars, int* hidden) const {
+    if (hidden) *hidden = 0;
+    if (show_alg_ic || !is_dae || alg_text.empty()) return vars;
+    std::set<std::string> alg;
+    std::string cur;
+    for (size_t i = 0; i <= alg_text.size(); ++i) {
+        const char c = i < alg_text.size() ? alg_text[i] : ',';
+        if (c == ',') { if (!cur.empty()) alg.insert(cur); cur.clear(); }
+        else if (c != ' ' && c != '\t' && c != '\r' && c != '\n') cur += c;
+    }
+    std::vector<std::string> out;
+    for (const std::string& v : vars) {
+        if (alg.count(v)) { if (hidden) ++*hidden; }
+        else out.push_back(v);
+    }
+    return out;
+}
+
+void AppModel::circuit_layout_defaults() {
+    if (!is_dae || circuit_netlist.empty() || !ic_groups.empty()) return;
+    auto split = [](const std::string& s) {
+        std::vector<std::string> v;
+        std::string cur;
+        for (size_t i = 0; i <= s.size(); ++i) {
+            const char c = i < s.size() ? s[i] : ',';
+            if (c == ',') { if (!cur.empty()) v.push_back(cur); cur.clear(); }
+            else if (c != ' ' && c != '\t' && c != '\r' && c != '\n') cur += c;
+        }
+        return v;
+    };
+    const std::vector<std::string> xs = split(vars_text), zs = split(alg_text);
+    std::vector<std::string> names = xs;
+    names.insert(names.end(), zs.begin(), zs.end());
+    SpiceImportOptions o;
+    if (!circuit_source.empty()) o.base_dir = std::filesystem::u8path(circuit_source).parent_path().u8string();
+    o.ideal_opamps = circuit_ideal_opamps;
+    o.no_junction_caps = circuit_no_jcaps;
+    o.ideal_diodes = circuit_ideal_diodes;
+    o.ideal_bjts = circuit_ideal_bjts;
+    SpiceImportResult r;
+    std::string err;
+    try {
+        if (spice_import(circuit_netlist, o, r, &err)) {
+            pg_merge_auto(ic_groups, names, r.ic_groups);
+            for (const auto& kv : r.field_labels) field_labels.emplace(kv.first, kv.second);
+        }
+    } catch (const std::exception&) {}
+    // Имена, которых разбор не дал (запись старше правил имён), — по роли.
+    std::set<std::string> placed;
+    for (const ParamGroup& g : ic_groups) placed.insert(g.params.begin(), g.params.end());
+    for (const std::string& x : xs) if (!placed.count(x)) pg_get(ic_groups, "States").params.push_back(x);
+    for (const std::string& z : zs)
+        if (!placed.count(z))
+            pg_get(ic_groups, z.rfind("v_", 0) == 0 ? "Algebraic (computed)/Node potentials"
+                                                    : "Algebraic (computed)/Branch currents").params.push_back(z);
 }
 
 void AppModel::clear() {
@@ -326,9 +590,23 @@ void AppModel::clear() {
     param_order = ParamOrder::AsInAlphabet;
     mode = InputMode::Image;
     is_map = false;
+    is_dae = false;
+    alg_text.clear();
+    dae_index_text.clear();
+    dae_as_ode = false;
+    dae_stab_alpha = "10";
+    circuit_source.clear();
+    circuit_netlist.clear();
+    circuit_ideal_opamps = false;
+    circuit_no_jcaps = circuit_ideal_diodes = circuit_ideal_bjts = false;
+    param_groups.clear();
+    ic_groups.clear();
+    field_labels.clear();
+    pg_ui = ParamGroupsUi{};
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_dopri78_legacy
         = scheme_rk45 = scheme_dop853
-        = scheme_cd = scheme_ccd = scheme_ccd4 = scheme_ccd4s3 = scheme_ccd4s4 = scheme_ccd4ss01
+        = scheme_cd = scheme_cdfast
+        = scheme_cdfp = scheme_cdfastfp = scheme_ccd = scheme_ccd4= scheme_ccd4s3 = scheme_ccd4s4 = scheme_ccd4ss01
         = scheme_ccd4ss10
         = scheme_cd10 = scheme_ccd10 = scheme_ccd4_10 = scheme_ccd4s3_10 = scheme_ccd4s4_10
         = scheme_ieuler = scheme_imidpoint
@@ -338,12 +616,14 @@ void AppModel::clear() {
     newton_full = false;
     newton_tol = "1e-10";
     newton_max_iters = "8";
+    cd_fp_iters = "4";
     step_h.clear();
     init_conditions.clear();
     param_values.clear();
     custom_schemes.clear();
     wrapper_schemes.clear();
     disabled_wrappers.clear();
+    dae_schemes_off.clear();
     known_vars.clear();
     known_params.clear();
     generated_code.clear();
@@ -358,6 +638,10 @@ bool AppModel::start_phase_analysis() {
     // передать уравнения в сессию и сгенерировать КРС для NVRTC
     try {
         phase_session.sys = build_system();
+        // ДАУ, сведённая к ОДУ: z теперь в состоянии (System::out_exprs), наблюдаемые вне
+        // состояния ей не нужны.
+        phase_session.observables.clear();
+        phase_session.obs_exprs.clear();
         // метод по умолчанию — из текущего выбора схемы в модели, если задан
         phase_session.regenerate_krs();
     }
@@ -391,6 +675,7 @@ bool AppModel::start_parametric_analysis() {
     lle_session.loaded_system_name         = name;
     ls_session.loaded_system_name          = name;
     metrics_session.loaded_system_name     = name;
+    ++session_epoch[(int)AppMode::Parametric];
     return true;
 }
 
@@ -404,6 +689,7 @@ bool AppModel::start_dft1d_analysis() {
     }
     catch (...) {}
     dft1d_session.loaded_system_name = name;
+    ++session_epoch[(int)AppMode::Dft1D];
     return true;
 }
 
@@ -417,6 +703,7 @@ bool AppModel::start_basins_analysis() {
     }
     catch (...) {}
     basins_session.loaded_system_name = name;
+    ++session_epoch[(int)AppMode::Basins];
     return true;
 }
 
@@ -430,6 +717,7 @@ bool AppModel::start_order_analysis() {
     }
     catch (...) {}
     order_session.loaded_system_name = name;
+    ++session_epoch[(int)AppMode::Order];
     return true;
 }
 
@@ -443,6 +731,7 @@ bool AppModel::start_network_analysis() {
     }
     catch (...) {}
     network_session.loaded_system_name = name;
+    ++session_epoch[(int)AppMode::Network];
     return true;
 }
 
@@ -456,6 +745,7 @@ bool AppModel::start_fastsync_analysis() {
     }
     catch (...) {}
     fastsync_session.loaded_system_name = name;
+    ++session_epoch[(int)AppMode::FastSync];
     return true;
 }
 
@@ -509,6 +799,7 @@ struct SweepTargetSlot {
 struct BroadcastSlots {
     std::string* h           = nullptr;
     std::string* symmetry    = nullptr;
+    std::string* cd_fp_iters = nullptr;
     std::string* t_max       = nullptr;
     std::string* transient   = nullptr;
     std::string* pre_scaller = nullptr;
@@ -590,6 +881,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = 0;
         out.h         = &m.phase_session.step_h;
         out.symmetry  = &m.phase_session.symmetry_s;
+        out.cd_fp_iters = &m.phase_session.cd_fp_iters;
         out.t_max     = &m.phase_session.sim_time;
         out.transient = &m.phase_session.skip_time;
         out.params    = &m.phase_session.param_values;
@@ -603,7 +895,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.bifurcation_session.active_diagram_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.pre_scaller = &c->pre_scaller_text; out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
@@ -623,7 +915,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.lle_session.active_curve_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
@@ -643,7 +935,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.ls_session.active_curve_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
@@ -663,7 +955,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.dft1d_session.active_config_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.pre_scaller = &c->pre_scaller_text; out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
@@ -680,7 +972,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.basins_session.active_config_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.pre_scaller = &c->pre_scaller_text; out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
@@ -699,7 +991,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.fastsync_session.active_config_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.pre_scaller = &c->pre_scaller_text; out.max_value = &c->max_value_text;
         out.params = &c->param_values;
@@ -713,7 +1005,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         // пересобираются из него срезами apply_shared_to_* на каждом Run.
         resolved_idx = 0;
         auto& c = m.custom_session.shared;
-        out.h = &c.h_text; out.symmetry = &c.symmetry_s;
+        out.h = &c.h_text; out.symmetry = &c.symmetry_s; out.cd_fp_iters = &c.cd_fp_iters;
         out.t_max = &c.t_max_text; out.transient = &c.transient_text;
         out.pre_scaller = &c.pre_scaller_text; out.max_value = &c.max_value_text;
         out.params = &c.param_values; out.ics = &c.initial_conditions;
@@ -734,7 +1026,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.metrics_session.active_config_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.transient = &c->transient_text;
         out.pre_scaller = &c->pre_scaller_text; out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
@@ -754,7 +1046,7 @@ bool slots_for(AppModel& m, BroadcastTab tab, int idx,
         resolved_idx = (idx < 0) ? m.order_session.active_config_index : idx;
         auto* c = config_at(v, resolved_idx);
         if (!c) return false;
-        out.h = &c->h_text; out.symmetry = &c->symmetry_s;
+        out.h = &c->h_text; out.symmetry = &c->symmetry_s; out.cd_fp_iters = &c->cd_fp_iters;
         out.t_max = &c->t_max_text; out.max_value = &c->max_value_text;
         out.params = &c->param_values; out.ics = &c->initial_conditions;
         out.scheme = &c->scheme;
@@ -774,6 +1066,7 @@ std::string* string_slot(const BroadcastSlots& s, BroadcastField f) {
     switch (f) {
         case BroadcastField::StepH:      return s.h;
         case BroadcastField::SymmetryS:  return s.symmetry;
+        case BroadcastField::CdFpIters:  return s.cd_fp_iters;
         case BroadcastField::TMax:       return s.t_max;
         case BroadcastField::Transient:  return s.transient;
         case BroadcastField::PreScaller: return s.pre_scaller;

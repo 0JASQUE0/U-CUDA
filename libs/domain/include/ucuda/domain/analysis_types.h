@@ -127,19 +127,23 @@ inline int clamp_gpu_block_size(int threads) {
 //                          намеренно выключена, FP считается как обычная точка), 0 = unbound,
 //                          1 = oscillation.
 //   Basins helpful_array — ровно -1 / 0 / 1.
-// regime_code() приводит любой из них к каноническим -1 / 0 / 1.
+// Во всех них -2 (REGIME_CANCELLED) — точка, которую не досчитал Stop (частичный результат).
+// regime_code() приводит любой из них к каноническим -1 / 0 / 1 / -2.
 inline int regime_code(int flag) {
-    return flag < 0 ? REGIME_FIXED_POINT
+    return flag == REGIME_CANCELLED ? REGIME_CANCELLED
+         : flag < 0 ? REGIME_FIXED_POINT
                     : (flag == 0 ? REGIME_UNBOUND : REGIME_OSCILLATION);
 }
 inline bool regime_is_oscillation(int flag) { return flag >  0; }
-inline bool regime_is_fixed_point(int flag) { return flag <  0; }
+inline bool regime_is_fixed_point(int flag) { return flag <  0 && flag != REGIME_CANCELLED; }
 inline bool regime_is_unbound    (int flag) { return flag == 0; }
+inline bool regime_is_cancelled  (int flag) { return flag == REGIME_CANCELLED; }
 // Подпись режима в UI — одна на все диаграммы (подсказки хитмап, сводки, легенды). Принимает и
 // сырые флаги, как regime_code(). "Diverged" сюда не входит: отдельного кода расходимости нет,
 // nan/inf ядра пишут в unbound.
 inline const char* regime_label(int flag) {
-    return flag < 0 ? "Equilibrium" : (flag == 0 ? "Unbound" : "Oscillation");
+    return flag == REGIME_CANCELLED ? "Not computed (stopped)"
+         : flag < 0 ? "Equilibrium" : (flag == 0 ? "Unbound" : "Oscillation");
 }
 
 // Адаптивный шаг в свипах (ядра kernels/adaptive_part.cu). enabled == false — прежний
@@ -163,6 +167,13 @@ struct AdaptiveRequest {
     int    peak_interp = 2;              // узлы шага: 0 — узел, 1 — парабола, 2 — Эрмит по f
     std::string rhs, emb, dprep, deval;  // тела AdaptiveCode
     std::string ctrl_body;               // C body пользовательского регулятора, иначе пусто
+    // #define'ы перед текстом модуля (и прелюдия CPU-DLL). У BDF 1-5 — UCUDA_BDF_DRIVER, UCUDA_BDF_NX,
+    // UCUDA_BDF_KIDX: драйвер свипов — многошаговый (kernels/ucuda_bdf.cuh), rhs = [f; g], dprep — якобиан.
+    // У DAE Rodas4 — UCUDA_AD_DAE_NX (проекция z0 точки и клонов в драйвере).
+    std::string prefix;
+    // Переменные, которые тела добавляют к состоянию системы (BDF индекса 3: множители GGL mu, старт 0).
+    // Запрос свипа берёт amountOfX + extra_x и НУ с нулями в хвосте; результаты — по прежним индексам.
+    int extra_x = 0;
     UcudaAdaptParams params{};
     int    axis_kind[2] = { kAdAxisSystem, kAdAxisSystem };
     double tol_ratio = 1e-2;
@@ -246,12 +257,24 @@ struct Bifurcation1DRequest {
     // Cooperative cancellation token. Shared between caller (session) and
     // worker thread; engine checks it between kernel launches and aborts
     // with cancelled=true if set. nullptr = no cancellation.
+    // Bif / LLE / LS / DFT / Metrics: Stop after the first launch keeps what was
+    // computed — the result comes back with ok = true AND cancelled = true, and the
+    // points Stop cut off are flagged REGIME_CANCELLED (values NaN). ok = false with
+    // cancelled = true is still "nothing to show" (stopped before the first launch).
     std::shared_ptr<std::atomic<bool>> cancel;
 
     // Progress reporting (0.0 .. 1.0). Engine writes after each chunk;
     // GUI reads each frame to drive a progress bar. nullptr = no reporting.
     std::shared_ptr<std::atomic<float>> progress;
 };
+
+// Частичный результат по Stop (см. cancel выше): что-то посчитано и это стоит показать.
+// Пусто (все точки REGIME_CANCELLED) — то же, что отмена до запуска: прежняя картинка остаётся.
+inline bool partial_result_worth_showing(bool ok, const std::vector<int>& flags) {
+    if (!ok) return false;
+    for (int f : flags) if (f != REGIME_CANCELLED) return true;
+    return false;
+}
 
 struct Bifurcation1DResult {
     bool ok = false;
@@ -848,6 +871,10 @@ struct BasinsRequest {
     int axis_y_var = 1;       // 0-based индекс по Y
     double axis_x_lo = -10.0, axis_x_hi = 10.0;
     double axis_y_lo = -10.0, axis_y_hi = 10.0;
+    // ±log-сетка по оси (ucuda_node_value_symlog, порт легаси basinsOfAttraction_logAxes):
+    // |x| лог-равномерно на [lo, hi] по обе стороны от нуля. Требует lo, hi > 0 и чётного n_pts >= 4.
+    bool   axis_x_symlog = false;
+    bool   axis_y_symlog = false;
     int    n_pts = 200;
 
     int    writable_var   = 0;
@@ -890,6 +917,7 @@ struct BasinsResult {
     double axis_x_lo = 0.0, axis_x_hi = 0.0;
     double axis_y_lo = 0.0, axis_y_hi = 0.0;
     int axis_x_var = 0, axis_y_var = 1;
+    bool axis_x_symlog = false, axis_y_symlog = false;   // как в BasinsRequest
 
     // Все four-поля размер n_pts² row-major (iy*n + ix):
     std::vector<int>    basin_idx;       // ≥1 = Osc cluster; ≤-1 = FP cluster; 0 = Unbound
@@ -911,8 +939,8 @@ struct BasinsResult {
 // Basins recluster — DBSCAN-only прогон поверх кэшированных фич (avg_peaks / avg_intervals /
 // helpful_array из предыдущего run_basins). Используется кнопкой "Clustering" в GUI: меняешь
 // eps_dbscan, не пересчитывая траекторно-feature часть (≈99% времени основного run_basins).
-// krs_body + amountOfX нужны, чтобы compile_basins_if_needed подхватил кэш-ключ модуля; сами
-// DBSCAN-kernel'ы от системы уравнений не зависят.
+// DBSCAN считается на CPU, GPU и модуль бассейнов не нужны; krs_body + amountOfX только
+// проверяются на непустоту (контракт прежней GPU-версии, которой нужен был кэш-ключ модуля).
 struct BasinsReclusterRequest {
     std::string krs_body;
     int amountOfX = 0;
@@ -1430,6 +1458,12 @@ struct NetworkRequest {
                                     // pre_scaller, если при заданном не влезает
     double max_value = 1.0e6;
 
+    // Optional chunk cap for reproducibility tests / headless runs. 0 keeps the
+    // existing automatic TDR budget; a positive value can only shorten it.
+    long long steps_per_launch = 0;
+    // CUDA event timing around kernel launches only; opt-in, no events by default.
+    bool measure_gpu_time = false;
+
     // See Bifurcation1DRequest::cancel / ::progress.
     std::shared_ptr<std::atomic<bool>>  cancel;
     std::shared_ptr<std::atomic<float>> progress;
@@ -1458,6 +1492,9 @@ struct NetworkResult {
     std::vector<double> data;
     std::vector<int>    status;     // [n_nodes], NetworkNodeStatus
     int n_diverged = 0;
+
+    double gpu_ms = 0.0;            // sum of kernel event intervals (when requested)
+    int launch_count = 0;
 
     // Диапазоны по переменной, по КОНЕЧНЫМ значениям — для автоскейла кривых
     // и раскраски графа.
@@ -1604,3 +1641,39 @@ struct SignalMetricsResult {
 // CSV одной таблицей: x [, y], regime, метрики из маски. Зовёт и движок
 // (csv_output_path), и ПКМ-экспорт с графика.
 bool signal_metrics_write_csv(const SignalMetricsResult& r, const std::string& path, std::string& err);
+
+// --- Оценка времени счёта траекторий (см. time_estimate.h) ---------------------------------
+// Цена шага — взвешенное число арифметических инструкций типа numb в PTX тела КРС (IEEE-деление
+// и корень ~8, остальное по 1). Медленные ветви libm (редукция больших аргументов sin/cos) живут
+// в отдельных .func и в счёт не входят.
+struct KrsStepCost {
+    double ops   = 0.0;    // на один вызов шага
+    bool   loops = false;  // есть цикл (Ньютон неявных схем, итерации CD FP): посчитан один проход
+};
+// Без контекста: только NVRTC. Тяжёлый (~0.2-1 с) — звать из фонового потока.
+bool krs_step_cost(const std::string& krs_body, int amountOfX, KrsStepCost& out, std::string& err);
+
+// Калибровка карты: два калибровочных шага (Эйлер и RK4 Лоренца) в цикле, повторяющем
+// loopCalculateDiscreteModel_int, блоки по варпу, на двух загрузках SM. Модель времени:
+//   steps * max(w * ns_thr * (ops + c0_thr), ns_lat * (ops + c0_lat)), w — варпов на SM;
+// c0 — постоянная добавка шага (цикл, shared, запись траектории) в тех же операциях.
+struct GpuCalibration {
+    std::string device;
+    int    sm_count   = 0;
+    int    numb_bytes = 0;     // калибровка float и double — разные числа
+    double calib_ops  = 0.0;   // цена калибровочного RK4 (для справки)
+    double ns_thr = 0.0;       // нс на операцию на варп при насыщенном SM (32 варпа)
+    double c0_thr = 0.0;
+    double ns_lat = 0.0;       // нс на операцию, когда в SM один варп (латентность цепочки)
+    double c0_lat = 0.0;
+    // Во сколько раз настоящие ядра свипов медленнее калибровочного на ту же операцию (регистры,
+    // занятость, запись траектории в большой массив). Стартовое значение замерено на RTX 2060
+    // (Basins / LLE, Лоренц, Euler..DOPRI78: 1.2-1.6), дальше уточняется по завершённым
+    // расчётам (TrajTimeEstimator::learn).
+    double kernel_factor = 1.3;
+};
+bool gpu_device_info(std::string& name, int& sm_count, std::string& err);
+// <каталог exe>\gpu_calibration.txt — хранилище калибровок (time_estimate.h).
+std::string gpu_calibration_path();
+// Занимает GPU на ~0.5-1 с. Звать, когда расчётов нет: иначе замер завышен.
+bool gpu_calibrate(GpuCalibration& out, std::string& err);

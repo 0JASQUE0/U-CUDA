@@ -58,7 +58,8 @@ inline bool operator!=(const AdaptiveSettings& a, const AdaptiveSettings& b) { r
 // Текст отказа для схемы без адаптивного шага — один на UI и движки.
 inline const char* adaptive_scheme_hint() {
     return "Adaptive step needs a scheme with an embedded error estimate: RK45, DOPRI78, DOP853, "
-           "GBS 2-4 ... or Extr(...) with at least two stages.";
+           "GBS 2-4 ... or Extr(...) with at least two stages; on a DAE: any DAE method (Rodas4 with its "
+           "embedded pair, the others by step doubling) or DAE BDF 1-5.";
 }
 
 // ---- Встроенные регуляторы ------------------------------------------------------

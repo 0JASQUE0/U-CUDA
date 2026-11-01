@@ -1,5 +1,4 @@
 ﻿#include "session_internal.h"
-
 using namespace ucuda::analysis_detail;
 
 
@@ -20,6 +19,8 @@ void LyapunovSpectrumAnalysisSession::load_from_record(const SystemRecord& r,
     c.h_text = default_h_from_record(r);
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -37,8 +38,6 @@ void LyapunovSpectrumAnalysisSession::load_from_record(const SystemRecord& r,
     active_curve_index = 0;
     running_curve_index = -1;
 }
-
-
 
 
 void LyapunovSpectrumAnalysisSession::remove_curve(int i) {
@@ -142,6 +141,7 @@ void LyapunovSpectrumAnalysisSession::request_cancel() {
 bool LyapunovSpectrumAnalysisSession::poll() {
     if (!in_flight) return false;
     bool cancelled = false;
+    std::string stop_note;
     std::string label;
     int idx = running_curve_index;
     if (idx >= 0 && idx < (int)curves.size()) label = curves[idx].label;
@@ -150,7 +150,8 @@ bool LyapunovSpectrumAnalysisSession::poll() {
         if (run_future_2d.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LS2DResult r = run_future_2d.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)curves.size()) {
             apply_ls2d_result(curves[idx], std::move(r));
         }
     } else {
@@ -158,13 +159,15 @@ bool LyapunovSpectrumAnalysisSession::poll() {
         if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         LS1DResult r = run_future.get();
         cancelled = r.cancelled;
-        if (!cancelled && idx >= 0 && idx < (int)curves.size()) {
+        stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
+        if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)curves.size()) {
             apply_ls1d_result(curves[idx], std::move(r));
         }
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label.empty() ? std::string("LS") : label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;

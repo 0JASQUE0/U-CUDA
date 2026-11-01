@@ -1,5 +1,973 @@
 ﻿#include "expression_internal.h"
 using namespace ucuda::equations_detail;
+
+namespace ucuda::equations_detail {
+std::string dae_scheme_body(const System& s, DaeScheme sch) {
+    switch (sch) {
+    case DaeScheme::BDF1:        return scheme_implicit_common(s, ImplicitKind::Euler, s.dae_nx, false);
+    case DaeScheme::Trapezoidal: return scheme_implicit_common(s, ImplicitKind::Euler, s.dae_nx, true);
+    case DaeScheme::TRBDF2:      return dae_tr_bdf2(s);
+    case DaeScheme::SDIRK2:      return dae_sdirk2(s);
+    case DaeScheme::ImplicitMidpoint: return scheme_implicit_common(s, ImplicitKind::Midpoint, s.dae_nx, false);
+    case DaeScheme::Radau5:      return dae_radau5(s);
+    case DaeScheme::CDIndex2:    return dae_cd2(s);
+    case DaeScheme::BDF1GGL: case DaeScheme::Radau5GGL: break;   // codegen_dae_scheme
+    case DaeScheme::ROS2:        return dae_ros2(s);
+    case DaeScheme::ROS3P:       return dae_rosenbrock(s, ros3p_tab());
+    case DaeScheme::Rodas4:      return dae_rosenbrock(s, rodas4_tab());
+    case DaeScheme::CD:          return dae_cd(s, false);
+    case DaeScheme::CDYoshida4:  return dae_cd(s, true);
+    case DaeScheme::ExplicitEuler: {
+        static const double A[] = { 0 }, b[] = { 1 }, c[] = { 0 };
+        return dae_explicit_rk(s, 1, A, b, c);
+    }
+    case DaeScheme::ExplicitMidpoint: {
+        static const double A[] = { 0, 0, 0.5, 0 }, b[] = { 0, 1 }, c[] = { 0, 0.5 };
+        return dae_explicit_rk(s, 2, A, b, c);
+    }
+    case DaeScheme::RK4: {
+        static const double A[] = { 0, 0, 0, 0,  0.5, 0, 0, 0,  0, 0.5, 0, 0,  0, 0, 1, 0 };
+        static const double b[] = { 1.0 / 6, 1.0 / 3, 1.0 / 3, 1.0 / 6 }, c[] = { 0, 0.5, 0.5, 1 };
+        return dae_explicit_rk(s, 4, A, b, c);
+    }
+    }
+    throw std::runtime_error("unknown DAE scheme");
+}
+}
+
+namespace ucuda::equations_detail {
+std::string pn_print(const PN& n, bool latex) {
+        auto p = [latex](const PN& x) { return pn_print(x, latex); };
+        switch (n->kind) {
+        case Node::Num: {
+            char buf[40];
+            std::snprintf(buf, sizeof(buf), "%.17g", std::fabs(n->num));
+            return std::signbit(n->num) ? "(-" + std::string(buf) + ")" : std::string(buf);
+        }
+        case Node::Sym: return n->name;
+        case Node::Neg: return "(-" + p(n->a) + ")";
+        case Node::Add: return "(" + p(n->a) + " + " + p(n->b) + ")";
+        case Node::Sub: return "(" + p(n->a) + " - " + p(n->b) + ")";
+        case Node::Mul: return "(" + p(n->a) + " * " + p(n->b) + ")";
+        case Node::Div: return "(" + p(n->a) + " / " + p(n->b) + ")";
+        case Node::Pow: return "(" + p(n->a) + ")^" + (latex ? "{" + p(n->b) + "}" : "(" + p(n->b) + ")");
+        case Node::Call: {
+            std::string o = n->name + "(";
+            for (size_t k = 0; k < n->args.size(); ++k) o += (k ? ", " : "") + p(n->args[k]);
+            return o + ")";
+        }
+        }
+        return "0";
+    }
+}
+
+namespace ucuda::equations_detail {
+PN pn_subst(const PN& n, const std::map<std::string, PN>& m) {
+        if (!n) return n;
+        if (n->kind == Node::Sym) { auto it = m.find(n->name); return it != m.end() ? it->second : n; }
+        auto c = std::make_shared<Node>(*n);
+        c->a = pn_subst(n->a, m);
+        c->b = pn_subst(n->b, m);
+        for (auto& x : c->args) x = pn_subst(x, m);
+        return c;
+    }
+}
+
+namespace ucuda::equations_detail {
+PN pn_total_dt(const PN& c, const System& s, const std::vector<PN>& f) {
+        PN r = pn_num(0.0);
+        for (int i = 0; i < s.dae_nx; ++i)
+            if (pn_contains_var(c, s.vars[(size_t)i])) r = jd_add(r, pn_mul(pn_diff(c, s.vars[(size_t)i]), f[(size_t)i]));
+        if (pn_contains_var(c, "t")) r = jd_add(r, pn_diff(c, "t"));
+        return r;
+    }
+}
+
+namespace ucuda::equations_detail {
+bool dae_deriv_array(const System& s, std::vector<std::vector<PN>>& lv, std::string* why) {
+        const int N = (int)s.vars.size(), nx = s.dae_nx, nz = N - nx;
+        if (nx < 0 || (int)s.rhs.size() != N) { if (why) *why = "not a DAE system"; return false; }
+        std::vector<PN> f((size_t)nx);
+        for (int i = 0; i < nx; ++i) { Parser p(s.rhs[(size_t)i], s.latex); f[(size_t)i] = p.parse(); }
+        auto has_z = [&](const PN& c) {
+            for (int j = nx; j < N; ++j) if (pn_contains_var(c, s.vars[(size_t)j])) return true;
+            return false;
+        };
+        lv.assign((size_t)nz, {});
+        for (int k = 0; k < nz; ++k) {
+            Parser p(s.rhs[(size_t)(nx + k)], s.latex);
+            PN c = p.parse();
+            lv[(size_t)k].push_back(c);
+            while (!has_z(c)) {
+                if ((int)lv[(size_t)k].size() > 3) {
+                    if (why) *why = "constraint " + std::to_string(k + 1) + " still has no algebraic variable after 3 "
+                                    "time derivatives (index > 3, or a constraint that does not involve z)";
+                    return false;
+                }
+                c = pn_total_dt(c, s, f);
+                if (pn_is_zero(c)) {
+                    if (why) *why = "constraint " + std::to_string(k + 1) + " has a zero time derivative: it does not "
+                                    "determine any algebraic variable";
+                    return false;
+                }
+                lv[(size_t)k].push_back(c);
+            }
+        }
+        return true;
+    }
+}
+
+namespace ucuda::equations_detail {
+bool dense_solve(std::vector<double> A, std::vector<double>& b, int n) {
+        double amax = 0;
+        for (double v : A) amax = std::fmax(amax, std::fabs(v));
+        if (!(amax <= 1e300)) return false;
+        for (int k = 0; k < n; ++k) {
+            int p = k;
+            for (int i = k + 1; i < n; ++i) if (std::fabs(A[(size_t)i * n + k]) > std::fabs(A[(size_t)p * n + k])) p = i;
+            if (!(std::fabs(A[(size_t)p * n + k]) > 1e-13 * (amax > 0 ? amax : 1.0))) return false;
+            if (p != k) { for (int j = 0; j < n; ++j) std::swap(A[(size_t)k * n + j], A[(size_t)p * n + j]); std::swap(b[(size_t)k], b[(size_t)p]); }
+            for (int i = k + 1; i < n; ++i) {
+                const double m = A[(size_t)i * n + k] / A[(size_t)k * n + k];
+                for (int j = k; j < n; ++j) A[(size_t)i * n + j] -= m * A[(size_t)k * n + j];
+                b[(size_t)i] -= m * b[(size_t)k];
+            }
+        }
+        for (int k = n - 1; k >= 0; --k) {
+            double v = b[(size_t)k];
+            for (int j = k + 1; j < n; ++j) v -= A[(size_t)k * n + j] * b[(size_t)j];
+            b[(size_t)k] = v / A[(size_t)k * n + k];
+        }
+        return true;
+    }
+}
+
+namespace ucuda::equations_detail {
+bool dae_consistent_hidden(const System& s, const std::vector<std::vector<PN>>& lv, const double* a, int na,
+                                  double t0, double* X, std::string* why) {
+    const int N = (int)s.vars.size(), nx = s.dae_nx, nz = N - nx;
+    std::vector<std::string> xc, zc;   // тексты связей уровня x и уровня z
+    for (const auto& l : lv) {
+        for (size_t j = 0; j + 1 < l.size(); ++j) xc.push_back(pn_print(l[j], s.latex));
+        zc.push_back(pn_print(l.back(), s.latex));
+    }
+    // Вычислитель выражений над X кусками по N строк (у SystemEvaluator rhs и vars одной длины).
+    System e;
+    e.vars = s.vars;
+    e.params = s.params;
+    e.latex = s.latex;
+    const int M = (int)s.params.size();
+    std::vector<double> ae(a, a + (na < M + 1 ? na : M + 1));
+    ae.resize((size_t)M + 1, 0.0);
+    if (system_uses_time(s)) { e.params.push_back("t"); ae.push_back(t0); }
+    struct Group { std::vector<SystemEvaluator> ev; int K = 0; };
+    auto make = [&](const std::vector<std::string>& ex) {
+        Group g;
+        g.K = (int)ex.size();
+        for (int b = 0; b < g.K; b += N) {
+            System c = e;
+            c.rhs.assign((size_t)N, "0");
+            for (int i = 0; i < N && b + i < g.K; ++i) c.rhs[(size_t)i] = ex[(size_t)(b + i)];
+            g.ev.emplace_back(c);
+        }
+        return g;
+    };
+    std::vector<double> buf((size_t)N), jb((size_t)N * N);
+    auto val = [&](Group& g, double* out) {
+        for (size_t b = 0; b < g.ev.size(); ++b) {
+            g.ev[b].eval(X, ae.data(), buf.data());
+            for (int i = 0; i < N && (int)b * N + i < g.K; ++i) out[b * N + i] = buf[(size_t)i];
+        }
+    };
+    auto jac = [&](Group& g, double* J) {   // J[K x N]
+        for (size_t b = 0; b < g.ev.size(); ++b) {
+            g.ev[b].eval_jacobian(X, ae.data(), jb.data());
+            for (int i = 0; i < N && (int)b * N + i < g.K; ++i)
+                for (int j = 0; j < N; ++j) J[(b * N + i) * N + j] = jb[(size_t)i * N + j];
+        }
+    };
+    Group gx = make(xc), gz = make(zc);
+    const std::vector<double> X0(X, X + N);
+    // 1. x на связи уровня x
+    const int m = gx.K;
+    double shift = 0;
+    if (m > 0) {
+        std::vector<double> r((size_t)m), J((size_t)m * N), A((size_t)m * m);
+        bool ok = false;
+        for (int it = 0; it < 60; ++it) {
+            val(gx, r.data());
+            double rn = 0, xn = 0;
+            for (double v : r) rn = std::fmax(rn, std::fabs(v));
+            for (int i = 0; i < nx; ++i) xn = std::fmax(xn, std::fabs(X[i]));
+            if (!(rn <= 1e300)) break;
+            if (rn <= 1e-14 * (1.0 + xn)) { ok = true; break; }
+            jac(gx, J.data());
+            for (int p = 0; p < m; ++p)
+                for (int q = 0; q < m; ++q) {
+                    double v = 0;
+                    for (int i = 0; i < nx; ++i) v += J[(size_t)p * N + i] * J[(size_t)q * N + i];
+                    A[(size_t)p * m + q] = v;
+                }
+            if (!dense_solve(A, r, m)) {
+                if (why) *why = "hidden constraints on x are dependent or singular at x0 (d c/dx C C^T singular)";
+                std::copy(X0.begin(), X0.end(), X);
+                return false;
+            }
+            for (int i = 0; i < nx; ++i) {
+                double d = 0;
+                for (int p = 0; p < m; ++p) d += J[(size_t)p * N + i] * r[(size_t)p];
+                X[i] -= d;
+            }
+        }
+        if (!ok) {
+            if (why) *why = "projecting x0 onto the hidden constraints did not converge";
+            std::copy(X0.begin(), X0.end(), X);
+            return false;
+        }
+        for (int i = 0; i < nx; ++i) shift = std::fmax(shift, std::fabs(X[i] - X0[(size_t)i]));
+    }
+    // 2. z из последних элементов (Ньютон по z при найденном x)
+    std::vector<double> r((size_t)nz), J((size_t)nz * N), A((size_t)nz * nz);
+    for (int it = 0; it < 60; ++it) {
+        val(gz, r.data());
+        double rn = 0;
+        for (double v : r) rn = std::fmax(rn, std::fabs(v));
+        if (!(rn <= 1e300)) break;
+        jac(gz, J.data());
+        for (int p = 0; p < nz; ++p)
+            for (int q = 0; q < nz; ++q) A[(size_t)p * nz + q] = J[(size_t)p * N + nx + q];
+        if (!dense_solve(A, r, nz)) {
+            if (why) *why = "the differentiated constraints do not determine z (singular): index above 3 or a "
+                            "degenerate configuration";
+            std::copy(X0.begin(), X0.end(), X);
+            return false;
+        }
+        double dn = 0, zn = 0;
+        for (int q = 0; q < nz; ++q) {
+            X[nx + q] -= r[(size_t)q];
+            dn = std::fmax(dn, std::fabs(r[(size_t)q]));
+            zn = std::fmax(zn, std::fabs(X[nx + q]));
+        }
+        if (dn <= 1e-13 * (1.0 + zn)) {
+            if (why) {
+                char b[160];
+                std::snprintf(b, sizeof(b), "hidden constraints (index %d): ", (int)std::max_element(lv.begin(), lv.end(),
+                    [](const std::vector<PN>& p, const std::vector<PN>& q) { return p.size() < q.size(); })->size());
+                *why = b;
+                if (shift > 0) { std::snprintf(b, sizeof(b), "x0 projected (max shift %.2e), ", shift); *why += b; }
+                *why += "z from the differentiated constraints";
+            }
+            return true;
+        }
+    }
+    if (why) *why = "Newton for z on the differentiated constraints did not converge";
+    std::copy(X0.begin(), X0.end(), X);
+    return false;
+}
+}
+
+namespace ucuda::equations_detail {
+System sys_core(const System& s) {
+        System c = s;
+        if (!s.zb_g.empty() && c.zb_names.empty())
+            c.zb_names.assign(s.vars.begin() + (long long)s.rhs.size(), s.vars.end());
+        c.vars.resize(s.rhs.size());
+        c.out_exprs.clear();
+        return c;
+    }
+}
+
+namespace ucuda::equations_detail {
+bool zb_scheme_ok(Scheme sch) {
+        switch (sch) {
+        case Scheme::Euler: case Scheme::ExplicitMidpoint: case Scheme::RK4: case Scheme::DOPRI78:
+        case Scheme::DOPRI78Legacy: case Scheme::RK45: case Scheme::DOP853:
+        case Scheme::GBS: case Scheme::GBS24: case Scheme::GBS246: case Scheme::GBS2468:
+        case Scheme::GBS246810: case Scheme::GBS24681012:
+            return true;
+        default:
+            return false;
+        }
+    }
+}
+
+namespace ucuda::equations_detail {
+std::string zb_prelude(const System& c, int nx) {
+        const int nz = (int)c.zb_g.size();
+        System sx = c;
+        sx.vars.resize((size_t)nx);
+        NameMap nm = build_namemap(sx, "xs", system_uses_time(c) ? "ucuda_tz" : "");
+        std::vector<std::string> G(nz), Jz((size_t)nz * nz);
+        for (int k = 0; k < nz; ++k) {
+            Parser p(c.zb_g[k], c.latex);
+            const PN g = p.parse();
+            jac_check_differentiable(g);
+            G[k] = emit_to_str(g, nm);
+            for (int m = 0; m < nz; ++m) Jz[(size_t)k * nz + m] = emit_to_str(pn_diff(g, c.zb_names[m]), nm);
+        }
+        const int slot = newton_slot(c);
+        std::ostringstream o;
+        o << "    /* Solve as ODE, level B: z from g(x, z, t) = 0 by Newton before every f */\n";
+        o << "    numb ucuda_zb_v[" << nz << "], ucuda_zb_c[" << nx << "], ucuda_zb_tc = (numb)0;\n";
+        o << "    bool ucuda_zb_has = false;\n";
+        for (int k = 0; k < nz; ++k) o << "    ucuda_zb_v[" << k << "] = X[" << nx + k << "];\n";
+        o << "    auto ucuda_zb = [&](const numb* xs, const numb ucuda_tz) {\n"
+             "        bool same = ucuda_zb_has && ucuda_tz == ucuda_zb_tc;\n";
+        o << "        for (int i = 0; i < " << nx << " && same; ++i) same = xs[i] == ucuda_zb_c[i];\n"
+             "        if (same) return;\n";
+        o << "        for (int i = 0; i < " << nx << "; ++i) ucuda_zb_c[i] = xs[i];\n"
+             "        ucuda_zb_tc = ucuda_tz; ucuda_zb_has = true;\n"
+             "        (void)ucuda_tz;\n";
+        o << "        const numb zb_tol = a[" << slot << "];\n"
+             "        const int zb_max = (int)a[" << slot + 1 << "];\n";
+        o << "        numb Gm[" << nz << "], Jmm[" << nz * nz << "];\n"
+             "        int ik, ir, ic, ip; numb mx, av, mlt, nrm, zz;\n"
+             "        for (int it = 0; it < zb_max; ++it) {\n";
+        for (int k = 0; k < nz; ++k) o << "            Gm[" << k << "] = (" << G[k] << ");\n";
+        for (int k = 0; k < nz * nz; ++k) o << "            Jmm[" << k << "] = (" << Jz[(size_t)k] << ");\n";
+        o << "            for (ik = 0; ik < " << nz << "; ik++) {\n"
+             "                ip = ik; mx = fabs(Jmm[ik * " << nz << " + ik]);\n"
+             "                for (ir = ik + 1; ir < " << nz << "; ir++) { av = fabs(Jmm[ir * " << nz << " + ik]); if (av > mx) { mx = av; ip = ir; } }\n"
+             "                if (ip != ik) { for (ic = 0; ic < " << nz << "; ic++) { mlt = Jmm[ik * " << nz << " + ic]; Jmm[ik * " << nz << " + ic] = Jmm[ip * " << nz << " + ic]; Jmm[ip * " << nz << " + ic] = mlt; }"
+             " mlt = Gm[ik]; Gm[ik] = Gm[ip]; Gm[ip] = mlt; }\n"
+             "                for (ir = ik + 1; ir < " << nz << "; ir++) {\n"
+             "                    mlt = Jmm[ir * " << nz << " + ik] / Jmm[ik * " << nz << " + ik];\n"
+             "                    for (ic = ik; ic < " << nz << "; ic++) Jmm[ir * " << nz << " + ic] -= mlt * Jmm[ik * " << nz << " + ic];\n"
+             "                    Gm[ir] -= mlt * Gm[ik];\n"
+             "                }\n"
+             "            }\n"
+             "            for (ik = " << nz - 1 << "; ik >= 0; ik--) {\n"
+             "                for (ic = ik + 1; ic < " << nz << "; ic++) Gm[ik] -= Jmm[ik * " << nz << " + ic] * Gm[ic];\n"
+             "                Gm[ik] /= Jmm[ik * " << nz << " + ik];\n"
+             "            }\n"
+             "            nrm = 0; zz = 0;\n";
+        for (int k = 0; k < nz; ++k)
+            o << "            ucuda_zb_v[" << k << "] -= Gm[" << k << "]; nrm += Gm[" << k << "] * Gm[" << k
+              << "]; zz += ucuda_zb_v[" << k << "] * ucuda_zb_v[" << k << "];\n";
+        o << "            if (nrm < zb_tol * zb_tol || nrm < zb_tol * zb_tol * zz) break;\n"
+             "        }\n"
+             "    };\n";
+        return o.str();
+    }
+}
+
+namespace ucuda::equations_detail {
+std::string zb_tail(const System& c, const char* st, const std::string& tname, int nx) {
+        std::ostringstream o;
+        o << "    ucuda_zb(" << st << ", " << (tname.empty() ? "(numb)0" : tname) << ");\n";
+        for (size_t k = 0; k < c.zb_g.size(); ++k)
+            o << "    " << st << "[" << nx + (int)k << "] = ucuda_zb_v[" << k << "];\n";
+        return o.str();
+    }
+}
+
+namespace ucuda::equations_detail {
+System sys_augmented_b(const System& s) {
+        System a = sys_core(s);
+        const int nx = (int)s.rhs.size(), nz = (int)s.zb_g.size();
+        std::vector<PN> f(nx);
+        for (int i = 0; i < nx; ++i) { Parser p(s.rhs[i], s.latex); f[i] = p.parse(); }
+        const bool ut = system_uses_time(s);
+        for (int k = 0; k < nz; ++k) {
+            Parser p(s.zb_g[k], s.latex);
+            const PN g = p.parse();
+            for (int m = 0; m < nz; ++m)
+                if (m != k && pn_contains_var(g, a.zb_names[m]))
+                    throw std::runtime_error("adaptive step, Solve as ODE with a nonlinear constraint: constraint "
+                        + std::to_string(k + 1) + " couples several z - use a fixed step or a DAE method");
+            PN num = pn_num(0.0);
+            for (int i = 0; i < nx; ++i) {
+                const PN di = pn_diff(g, s.vars[i]);
+                if (!pn_is_zero(di)) num = pn_is_zero(num) ? pn_mul(di, f[i]) : pn_add(num, pn_mul(di, f[i]));
+            }
+            if (ut) {
+                const PN dt = pn_diff(g, "t");
+                if (!pn_is_zero(dt)) num = pn_is_zero(num) ? dt : pn_add(num, dt);
+            }
+            a.vars.push_back(a.zb_names[(size_t)k]);
+            a.rhs.push_back(pn_print(pn_neg(pn_div(num, pn_diff(g, a.zb_names[(size_t)k]))), s.latex));
+        }
+        return a;
+    }
+}
+
+namespace ucuda::equations_detail {
+void zb_adaptive_finish(AdaptiveCode& c, const System& s) {
+        const int nx = (int)s.rhs.size();
+        System core = sys_core(s);
+        const std::string pre = zb_prelude(core, nx);
+        for (std::string* b : { &c.rhs, &c.emb, &c.dprep })
+            if (b->find("ucuda_zb(") != std::string::npos) *b = pre + *b;
+        c.emb += zb_tail(core, "Y", time_name(s, "(ucuda_t + h)"), nx);
+        for (size_t k = 0; k < s.zb_g.size(); ++k)
+            c.emb += "    E[" + std::to_string(nx + (int)k) + "] = (numb)0;\n";
+    }
+}
+
+namespace ucuda::equations_detail {
+std::string outputs_tail(const System& s, const char* st, const std::string& tname) {
+        const int nx = (int)s.rhs.size();
+        const NameMap nm = build_namemap(sys_core(s), st, tname);
+        std::ostringstream o;
+        o << "    // z outputs: phi(x) of the new state (passive: not in f)\n";
+        for (size_t j = 0; j < s.out_exprs.size(); ++j) {
+            Parser p(s.out_exprs[j], s.latex);
+            o << "    " << st << "[" << nx + (int)j << "] = " << emit_to_str(p.parse(), nm) << ";\n";
+        }
+        return o.str();
+    }
+}
+
+namespace ucuda::equations_detail {
+System sys_augmented(const System& s) {
+        System a = sys_core(s);
+        const int nx = (int)s.rhs.size();
+        std::vector<PN> f(nx);
+        for (int i = 0; i < nx; ++i) { Parser p(s.rhs[i], s.latex); f[i] = p.parse(); }
+        const bool ut = system_uses_time(s);
+        for (size_t j = 0; j < s.out_exprs.size(); ++j) {
+            Parser p(s.out_exprs[j], s.latex);
+            const PN phi = p.parse();
+            jac_check_differentiable(phi);
+            PN d = pn_num(0.0);
+            for (int i = 0; i < nx; ++i) {
+                const PN di = pn_diff(phi, s.vars[i]);
+                if (!pn_is_zero(di)) d = pn_is_zero(d) ? pn_mul(di, f[i]) : pn_add(d, pn_mul(di, f[i]));
+            }
+            if (ut) {
+                const PN dt = pn_diff(phi, "t");
+                if (!pn_is_zero(dt)) d = pn_is_zero(d) ? dt : pn_add(d, dt);
+            }
+            a.vars.push_back(s.vars[(size_t)nx + j]);
+            a.rhs.push_back(pn_print(d, s.latex));
+        }
+        return a;
+    }
+}
+
+namespace ucuda::equations_detail {
+void adaptive_outputs_tail(AdaptiveCode& c, const System& s) {
+        const int nx = (int)s.rhs.size();
+        c.emb += outputs_tail(s, "Y", time_name(s, "(ucuda_t + h)"));
+        for (size_t j = 0; j < s.out_exprs.size(); ++j)
+            c.emb += "    E[" + std::to_string(nx + (int)j) + "] = (numb)0;\n";
+    }
+}
+
+namespace ucuda::equations_detail {
+int builtin_scheme_rank(const std::string& name) {
+    const int n = (int)(sizeof(kSchemeRows) / sizeof(kSchemeRows[0]));
+    for (int i = 0; i < n; ++i)
+        if (name == kSchemeRows[i].name) return i;
+    return -1;
+}
+}
+
+namespace ucuda::equations_detail {
+std::string wrap_trim(const std::string& s) {
+        size_t a = 0, b = s.size();
+        while (a < b && std::isspace((unsigned char)s[a])) ++a;
+        while (b > a && std::isspace((unsigned char)s[b - 1])) --b;
+        return s.substr(a, b - a);
+    }
+}
+
+namespace ucuda::equations_detail {
+bool wrap_split_head(const std::string& head, std::string* label,
+                         std::string* base, std::string* err) {
+        const size_t bar = head.find('|');
+        if (bar == std::string::npos) { label->clear(); *base = wrap_trim(head); return true; }
+        *label = wrap_trim(head.substr(0, bar));
+        *base  = wrap_trim(head.substr(bar + 1));
+        if (label->empty()) { if (err) *err = "empty scheme label"; return false; }
+        if (!wrapper_label_ok(*label)) {
+            if (err) *err = "scheme label must not contain '|', ',', '(' or ')'";
+            return false;
+        }
+        return true;
+    }
+}
+
+namespace ucuda::equations_detail {
+bool starts_with(const std::string& s, const char* pref) {
+    const size_t n = std::strlen(pref);
+    return s.size() >= n && s.compare(0, n, pref) == 0;
+}
+}
+
+namespace ucuda::equations_detail {
+bool extr_parse_substeps(const std::string& s, int* out) {
+    if (s.empty() || s.size() > 9) return false;
+    for (char c : s) if (c < '0' || c > '9') return false;
+    const long v = std::strtol(s.c_str(), nullptr, 10);
+    if (v < 1 || v > kExtrMaxSubsteps) return false;
+    *out = (int)v;
+    return true;
+}
+}
+
+namespace ucuda::equations_detail {
+long long ex_gcd(long long a, long long b) {
+    if (a < 0) a = -a;
+    if (b < 0) b = -b;
+    while (b) { const long long t = a % b; a = b; b = t; }
+    return a ? a : 1;
+}
+}
+
+namespace ucuda::equations_detail {
+bool ex_mul(long long a, long long b, long long& r) {
+    if (a == 0 || b == 0) { r = 0; return true; }
+    const long long q = a * b;
+    if (q / b != a) return false;
+    r = q;
+    return true;
+}
+}
+
+namespace ucuda::equations_detail {
+bool ex_norm(ExRat& x) {
+    if (x.d == 0) return false;
+    if (x.d < 0) { x.d = -x.d; x.n = -x.n; }
+    const long long g = ex_gcd(x.n, x.d);
+    x.n /= g;
+    x.d /= g;
+    return true;
+}
+}
+
+namespace ucuda::equations_detail {
+bool ex_mul_rat(ExRat a, ExRat b, ExRat& out) {
+    // Сокращаем крест-накрест ДО умножения: так переполнение наступает много
+    // позже, а знаменатели тут растут как произведение разностей n^q.
+    const long long g1 = ex_gcd(a.n, b.d), g2 = ex_gcd(b.n, a.d);
+    a.n /= g1; b.d /= g1;
+    b.n /= g2; a.d /= g2;
+    if (!ex_mul(a.n, b.n, out.n)) return false;
+    if (!ex_mul(a.d, b.d, out.d)) return false;
+    return ex_norm(out);
+}
+}
+
+namespace ucuda::equations_detail {
+bool ex_add_rat(ExRat a, ExRat b, ExRat& out) {
+    const long long g = ex_gcd(a.d, b.d);
+    long long den, t1, t2;
+    if (!ex_mul(a.d, b.d / g, den)) return false;
+    if (!ex_mul(a.n, b.d / g, t1)) return false;
+    if (!ex_mul(b.n, a.d / g, t2)) return false;
+    if ((t2 > 0 && t1 > LLONG_MAX - t2) || (t2 < 0 && t1 < LLONG_MIN - t2)) return false;
+    out.n = t1 + t2;
+    out.d = den;
+    return ex_norm(out);
+}
+}
+
+namespace ucuda::equations_detail {
+bool ex_pow(long long base, int e, long long& out) {
+    out = 1;
+    for (int i = 0; i < e; ++i)
+        if (!ex_mul(out, base, out)) return false;
+    return true;
+}
+}
+
+namespace ucuda::equations_detail {
+bool extrapolation_weights_rational(const std::vector<int>& n, int p, bool symmetric,
+                                    std::vector<ExRat>& out) {
+    const int K = (int)n.size();
+    if (K < 2) return false;
+    const int q = symmetric ? 2 : 1;
+    const int e = p + q * (K - 2);
+    if (e < 0) return false;
+
+    std::vector<ExRat> g((size_t)K);
+    ExRat sum{ 0, 1 };
+    for (int k = 0; k < K; ++k) {
+        long long num = 0, den = 1, pk = 1;
+        if (!ex_pow((long long)n[k], e, num)) return false;
+        if (!ex_pow((long long)n[k], q, pk))  return false;
+        for (int m = 0; m < K; ++m) {
+            if (m == k) continue;
+            long long pm = 1;
+            if (!ex_pow((long long)n[m], q, pm)) return false;
+            if (!ex_mul(den, pm - pk, den))      return false;
+        }
+        g[(size_t)k] = ExRat{ num, den };
+        if (!ex_norm(g[(size_t)k]))               return false;
+        if (!ex_add_rat(sum, g[(size_t)k], sum))  return false;
+    }
+    if (sum.n == 0) return false;
+
+    out.assign((size_t)K, ExRat{ 0, 1 });
+    for (int k = 0; k < K; ++k) {
+        const ExRat inv{ sum.d, sum.n };
+        if (!ex_mul_rat(g[(size_t)k], inv, out[(size_t)k])) return false;
+        // Числитель и знаменатель обязаны быть точны в double, иначе печать
+        // дробью ничего не меняет: литерал снова округлится.
+        constexpr long long kExact = 9007199254740992LL;   // 2^53
+        if (out[(size_t)k].n >  kExact || out[(size_t)k].n < -kExact ||
+            out[(size_t)k].d >  kExact) return false;
+    }
+    return true;
+}
+}
+
+namespace ucuda::equations_detail {
+std::string ex_rat_expr(const ExRat& r) {
+    std::string s = "(numb)(" + std::to_string(r.n) + ".0)";
+    if (r.d != 1) s = "(" + s + "/(numb)(" + std::to_string(r.d) + ".0))";
+    return s;
+}
+}
+
+namespace ucuda::equations_detail {
+std::string scheme_gbs(const System& s, int K) {
+    if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
+    const int N = (int)s.vars.size();
+    if (N < 1) throw std::runtime_error("GBS needs a non-empty system");
+    const std::vector<int> n = gbs_substeps(K);
+    // Явное время: старт в t, leapfrog z_m — в t + m*hs, сглаживание f(z_n) — в t + h.
+    const auto f0 = rhs_over(s, "X0_gbs", time_name(s));
+    const auto f1 = rhs_over(s, "Z1_gbs", time_name(s, "(ucuda_t + (numb)m_gbs * hs_gbs)"));
+    const auto f1s = rhs_over(s, "Z1_gbs", time_name(s, "(ucuda_t + h)"));
+
+    std::vector<double> alpha(1, 1.0);
+    std::vector<ExRat>  arat(1, ExRat{ 1, 1 });
+    bool alpha_exact = true;
+    if (K > 1) {
+        alpha       = extrapolation_weights(n, 2, true);
+        alpha_exact = extrapolation_weights_rational(n, 2, true, arat);
+    }
+    int cost = 0;
+    for (int v : n) cost += v + 1;   // n подшагов + сглаживание
+
+    const std::string Ns = std::to_string(N), Ks = std::to_string(K);
+    std::ostringstream o;
+    o << "    // --- GBS";
+    if (K == 1) o << " (n=2)";
+    else for (int k = 0; k < K; ++k) o << (k ? "-" : " ") << n[k];
+    o << ": Gragg modified midpoint, " << K << " stage" << (K == 1 ? "" : "s")
+      << ", order " << 2 * K << ", " << cost << " RHS evaluations per step ---\n";
+    for (int k = 0; k < K; ++k) {
+        o << "    //   n = " << n[k] << "   alpha = " << fmtnum(alpha[k]);
+        if (alpha_exact) o << " = " << arat[(size_t)k].n << "/" << arat[(size_t)k].d;
+        o << "\n";
+    }
+
+    o << "    numb X0_gbs[" << Ns << "], AC_gbs[" << Ns << "], Z0_gbs[" << Ns
+      << "], Z1_gbs[" << Ns << "], ZT_gbs[" << Ns << "];\n";
+    o << "    const numb W_gbs[" << Ks << "] = { ";
+    for (int k = 0; k < K; ++k) {
+        if (k) o << ", ";
+        o << (alpha_exact ? ex_rat_expr(arat[(size_t)k]) : ("(numb)(" + fmtnum(alpha[k]) + ")"));
+    }
+    o << " };\n";
+    o << "    int i_gbs, m_gbs, k_gbs;\n";
+    o << "    for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) { X0_gbs[i_gbs] = X[i_gbs]; AC_gbs[i_gbs] = (numb)0; }\n";
+    o << "    for (k_gbs = 0; k_gbs < " << Ks << "; ++k_gbs) {\n";
+    o << "        const int  n_gbs  = 2 * (k_gbs + 1);\n";
+    o << "        const numb hs_gbs = h * ((numb)1 / (numb)n_gbs);\n";
+    o << "        // старт: явный Эйлер на первый подшаг\n";
+    o << "        for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) Z0_gbs[i_gbs] = X0_gbs[i_gbs];\n";
+    for (int i = 0; i < N; ++i)
+        o << "        Z1_gbs[" << i << "] = X0_gbs[" << i << "] + hs_gbs * (" << f0[i] << ");\n";
+    o << "        // leapfrog: z_{m+1} = z_{m-1} + 2*hs*f(z_m), всего n подшагов\n";
+    o << "        for (m_gbs = 1; m_gbs < n_gbs; ++m_gbs) {\n";
+    for (int i = 0; i < N; ++i)
+        o << "            ZT_gbs[" << i << "] = Z0_gbs[" << i << "] + (numb)2 * hs_gbs * (" << f1[i] << ");\n";
+    o << "            for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) { Z0_gbs[i_gbs] = Z1_gbs[i_gbs]; Z1_gbs[i_gbs] = ZT_gbs[i_gbs]; }\n";
+    o << "        }\n";
+    o << "        // сглаживание Грэгга: (z_{n-1} + z_n + hs*f(z_n)) / 2\n";
+    for (int i = 0; i < N; ++i)
+        o << "        AC_gbs[" << i << "] += W_gbs[k_gbs] * (numb)0.5 * (Z0_gbs[" << i << "] + Z1_gbs["
+          << i << "] + hs_gbs * (" << f1s[i] << "));\n";
+    o << "    }\n";
+    o << "    for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) X[i_gbs] = AC_gbs[i_gbs];\n";
+    return o.str();
+}
+}
+
+namespace ucuda::equations_detail {
+bool wrapper_can_inline(const std::string& body) {
+    for (const char* kw : { "return", "goto" }) {
+        const size_t n = std::strlen(kw);
+        for (size_t p = body.find(kw); p != std::string::npos; p = body.find(kw, p + 1)) {
+            const bool left  = p == 0 || !(std::isalnum((unsigned char)body[p - 1]) || body[p - 1] == '_');
+            const bool right = p + n >= body.size()
+                               || !(std::isalnum((unsigned char)body[p + n]) || body[p + n] == '_');
+            if (left && right) return false;
+        }
+    }
+    return true;
+}
+}
+
+namespace ucuda::equations_detail {
+void emit_indented(std::ostringstream& o, const std::string& body, const char* indent) {
+    size_t pos = 0;
+    while (pos < body.size()) {
+        size_t eol = body.find('\n', pos);
+        if (eol == std::string::npos) eol = body.size();
+        const std::string line = body.substr(pos, eol - pos);
+        if (!line.empty()) o << indent << line;
+        o << "\n";
+        pos = eol + 1;
+    }
+}
+}
+
+namespace ucuda::equations_detail {
+ExtrAdWeights extr_ad_weights(const std::vector<int>& n, int p, bool symmetric) {
+    const int K = (int)n.size();
+    const std::vector<double> alpha = extrapolation_weights(n, p, symmetric);
+    const std::vector<int> nlo(n.begin(), n.end() - 1);
+    const std::vector<double> beta = extrapolation_weights(nlo, p, symmetric);
+    std::vector<ExRat> arat;
+    const bool exact = extrapolation_weights_rational(n, p, symmetric, arat);
+    ExtrAdWeights w;
+    for (int k = 0; k < K; ++k) {
+        w.alpha.push_back(exact ? ex_rat_expr(arat[(size_t)k]) : ("(numb)(" + fmtnum(alpha[k]) + ")"));
+        const double b = k < K - 1 ? beta[(size_t)k] : 0.0;
+        w.diff.push_back("(numb)(" + fmtnum(alpha[k] - b) + ")");
+    }
+    return w;
+}
+}
+
+namespace ucuda::equations_detail {
+AdaptiveCode extr_ad_code(const System& s, int p, int q, int emb_rhs) {
+    AdaptiveCode c;
+    c.rhs = adaptive_rhs_body(s);
+    c.p = p; c.q = q; c.nlo = 1; c.wstages = 0; c.dsize = 4;
+    c.emb_rhs = emb_rhs; c.dprep_rhs = 0; c.dense_order = 3;
+    c.dprep = hermite_dprep_body(s); c.deval = hermite_deval_body(s);
+    return c;
+}
+}
+
+namespace ucuda::equations_detail {
+void extr_ad_finish(std::ostringstream& o, const System& s, const char* ac, const char* ec) {
+    const int N = (int)s.vars.size();
+    o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) { Y[i_ea] = " << ac << "[i_ea]; E[i_ea] = "
+      << ec << "[i_ea]; }\n";
+    const auto fy = rhs_over(s, "Y", time_name(s, "(ucuda_t + h)"));   // F1 = f(t + h, Y)
+    for (int v = 0; v < N; ++v) o << "    F1[" << v << "] = (" << fy[(size_t)v] << ");\n";
+}
+}
+
+namespace ucuda::equations_detail {
+double cd_implicit_sweep_rhs(const System& s, int iters ) {
+    const int N = (int)s.vars.size();
+    if (N < 1 || (int)s.rhs.size() != N) return 0.0;
+    double sum = 0.0;
+    for (int i = 0; i < N; ++i) {
+        Parser p(s.rhs[(size_t)i], s.latex);
+        PN coef, rem;
+        sum += cd_try_extract_linear(p.parse(), s.vars[(size_t)i], coef, rem) ? 1.0 : (double)iters;
+    }
+    return sum / (double)N;
+}
+}
+
+namespace ucuda::equations_detail {
+std::string comp_trim(const std::string& s) {
+        size_t a = 0, b = s.size();
+        while (a < b && std::isspace((unsigned char)s[a])) ++a;
+        while (b > a && std::isspace((unsigned char)s[b - 1])) --b;
+        return s.substr(a, b - a);
+    }
+}
+
+namespace ucuda::equations_detail {
+bool comp_split(const std::string& tail, std::vector<std::string>& out) {
+        int depth = 0;
+        std::string cur;
+        for (char c : tail) {
+            if (c == '(') ++depth;
+            else if (c == ')' && --depth < 0) return false;
+            if (c == ',' && depth == 0) { out.push_back(cur); cur.clear(); continue; }
+            cur += c;
+        }
+        if (depth != 0) return false;
+        out.push_back(cur);
+        return true;
+    }
+}
+
+namespace ucuda::equations_detail {
+bool comp_fold(const PN& n, double* v) {
+        if (!n) return false;
+        double a = 0, b = 0;
+        switch (n->kind) {
+        case Node::Num: *v = n->num; return true;
+        case Node::Neg: if (!comp_fold(n->a, &a)) return false; *v = -a; return true;
+        case Node::Add: case Node::Sub: case Node::Mul: case Node::Div: case Node::Pow:
+            if (!comp_fold(n->a, &a) || !comp_fold(n->b, &b)) return false;
+            switch (n->kind) {
+            case Node::Add: *v = a + b; break;
+            case Node::Sub: *v = a - b; break;
+            case Node::Mul: *v = a * b; break;
+            case Node::Div: if (b == 0.0) return false; *v = a / b; break;
+            default:        *v = std::pow(a, b); break;
+            }
+            return true;
+        default: return false;   // Sym / Call
+        }
+    }
+}
+
+namespace ucuda::equations_detail {
+bool comp_is_plain_number(const std::string& s) {
+        if (s.empty()) return false;
+        size_t i = 0;
+        if (s[i] == '+' || s[i] == '-') ++i;
+        bool digits = false, dot = false;
+        while (i < s.size() && (std::isdigit((unsigned char)s[i]) || s[i] == '.')) {
+            if (s[i] == '.') { if (dot) return false; dot = true; }
+            else digits = true;
+            ++i;
+        }
+        if (!digits) return false;
+        if (i == s.size()) return true;
+        if (s[i] != 'e' && s[i] != 'E') return false;
+        ++i;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+        if (i == s.size()) return false;
+        while (i < s.size()) { if (!std::isdigit((unsigned char)s[i])) return false; ++i; }
+        return true;
+    }
+}
+
+namespace ucuda::equations_detail {
+std::string comp_strip_index(const std::string& line) {
+        size_t i = 0;
+        while (i < line.size() && std::isdigit((unsigned char)line[i])) ++i;
+        if (i == 0 || i == line.size()) return line;
+        size_t j = i;
+        while (j < line.size() && (std::isspace((unsigned char)line[j])
+                                   || line[j] == ')' || line[j] == ';' || line[j] == ':')) ++j;
+        if (j == i || j == line.size()) return line;
+        const std::string rest = comp_trim(line.substr(j));
+        return comp_is_plain_number(rest) ? rest : line;
+    }
+}
+
+namespace ucuda::equations_detail {
+bool comp_fold_env(const PN& n, const std::map<std::string, double>& env, double* v) {
+        if (!n) return false;
+        double a = 0, b = 0;
+        switch (n->kind) {
+        case Node::Num: *v = n->num; return true;
+        case Node::Sym: {
+            auto it = env.find(n->name);
+            if (it == env.end()) return false;
+            *v = it->second; return true;
+        }
+        case Node::Neg:
+            if (!comp_fold_env(n->a, env, &a)) return false;
+            *v = -a; return true;
+        case Node::Add: case Node::Sub: case Node::Mul: case Node::Div: case Node::Pow:
+            if (!comp_fold_env(n->a, env, &a) || !comp_fold_env(n->b, env, &b)) return false;
+            switch (n->kind) {
+            case Node::Add: *v = a + b; break;
+            case Node::Sub: *v = a - b; break;
+            case Node::Mul: *v = a * b; break;
+            case Node::Div: if (b == 0.0) return false; *v = a / b; break;
+            default:        *v = std::pow(a, b); break;
+            }
+            return true;
+        case Node::Call: {
+            if (n->args.size() == 1) {
+                if (!comp_fold_env(n->args[0], env, &a)) return false;
+                const std::string& f = n->name;
+                if (f == "sqrt") { if (a < 0) return false; *v = std::sqrt(a); return true; }
+                if (f == "cbrt")               { *v = std::cbrt(a); return true; }
+                if (f == "exp")                { *v = std::exp(a);  return true; }
+                if (f == "log")  { if (a <= 0) return false; *v = std::log(a); return true; }
+                if (f == "sin")                { *v = std::sin(a);  return true; }
+                if (f == "cos")                { *v = std::cos(a);  return true; }
+                if (f == "tan")                { *v = std::tan(a);  return true; }
+                if (f == "fabs" || f == "abs") { *v = std::fabs(a); return true; }
+                return false;
+            }
+            if (n->args.size() == 2 && n->name == "pow") {
+                if (!comp_fold_env(n->args[0], env, &a)) return false;
+                if (!comp_fold_env(n->args[1], env, &b)) return false;
+                *v = std::pow(a, b); return true;
+            }
+            return false;
+        }
+        default: return false;
+        }
+    }
+}
+
+namespace ucuda::equations_detail {
+std::string comp_round_literals(const std::string& s, int digits) {
+        std::string out;
+        for (size_t i = 0; i < s.size(); ) {
+            const char c = s[i];
+            // Идентификатор забирает свои цифры целиком, иначе g1 стало бы g1.
+            if (std::isalpha((unsigned char)c) || c == '_') {
+                while (i < s.size() && (std::isalnum((unsigned char)s[i]) || s[i] == '_'))
+                    out += s[i++];
+                continue;
+            }
+            const bool starts_num = std::isdigit((unsigned char)c)
+                || (c == '.' && i + 1 < s.size() && std::isdigit((unsigned char)s[i + 1]));
+            if (!starts_num) { out += c; ++i; continue; }
+
+            const char* start = s.c_str() + i;
+            char* end = nullptr;
+            const double v = std::strtod(start, &end);
+            if (end == start) { out += c; ++i; continue; }
+            const size_t len = (size_t)(end - start);
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.*g", digits, v);
+            // Короче из двух: у "2" и "1e-05" %g даёт ровно исходное.
+            if (std::strlen(buf) < len) out += buf;
+            else                        out.append(start, len);
+            i += len;
+        }
+        return out;
+    }
+}
+
+namespace ucuda::equations_detail {
+WrapperKey wrapper_key(const std::string& name) {
+    WrapperKey k;
+    ExtrapolationSpec esp;
+    CompositionSpec   csp;
+    if (parse_extrapolation_name(name, &esp)) {
+        k.kind   = esp.re_at_output ? 1 : 0;
+        k.base   = esp.base;
+        k.stages = (int)esp.n.size();
+        k.n      = esp.n;
+    } else if (parse_composition_name(name, &csp)) {
+        k.kind   = 2;
+        k.base   = csp.base;
+        k.stages = (int)csp.gammas.size();
+    }
+    const int r = builtin_scheme_rank(k.base);
+    k.base_rank = r >= 0 ? r : INT_MAX;
+    k.canon     = wrapper_canonical_name(name);
+    return k;
+}
+}
+
+namespace ucuda::equations_detail {
+bool wrapper_key_less(const WrapperKey& x, const WrapperKey& y) {
+    if (x.kind != y.kind)           return x.kind < y.kind;
+    if (x.base_rank != y.base_rank) return x.base_rank < y.base_rank;
+    if (x.base != y.base)           return x.base < y.base;
+    if (x.stages != y.stages)       return x.stages < y.stages;
+    if (x.n != y.n)                 return x.n < y.n;
+    return x.canon < y.canon;
+}
+}
+
+
 void adaptive_err_weights(const MultiDoubleCoef* b, int S, const MultiDoubleCoef* bh, int lc,
                           MultiDoubleCoef* w) {
     auto two_sum = [](double a, double c, double& err) {
@@ -19,14 +987,30 @@ void adaptive_err_weights(const MultiDoubleCoef* b, int S, const MultiDoubleCoef
     }
 }
 
+
 bool scheme_supports_adaptive(Scheme sch) {
     return sch == Scheme::RK45 || sch == Scheme::DOP853
         || sch == Scheme::DOPRI78 || sch == Scheme::DOPRI78Legacy;
 }
 
+
 AdaptiveCode codegen_adaptive(const System& s, Scheme sch) {
+    if (!s.zb_g.empty() && s.vars.size() > s.rhs.size()) {   // уровень B: dz/dt строками, z(Y) Ньютоном
+        AdaptiveCode c = codegen_adaptive(sys_augmented_b(s), sch);
+        zb_adaptive_finish(c, s);
+        return c;
+    }
+    if (!s.out_exprs.empty()) {   // выходы z: строки с dz/dt, затем z = phi(Y), E_z = 0
+        AdaptiveCode c = codegen_adaptive(sys_augmented(s), sch);
+        adaptive_outputs_tail(c, s);
+        return c;
+    }
     if (s.vars.size() != s.rhs.size())
         throw std::runtime_error("vars/rhs size mismatch");
+    if (s.dae_nx >= 0) throw std::runtime_error("adaptive step for DAE systems is not implemented yet");
+    // Пары RK45 / DOP853 / DOPRI78 печатают время стадий сами (adaptive_emb_body,
+    // dop853_dprep_body); сигнатуры функций с ucuda_t ставит модуль по
+    // UCUDA_NONAUTONOMOUS (признак — step_body_uses_time(rhs)).
     AdaptiveCode c;
     c.rhs = adaptive_rhs_body(s);
     EmbSpec e{};
@@ -66,6 +1050,7 @@ AdaptiveCode codegen_adaptive(const System& s, Scheme sch) {
     return c;
 }
 
+
 std::string codegen_coupling(const System& s, const std::vector<std::string>& exprs,
                              const std::string& self_state, const std::string& nbr_state,
                              const std::string& self_par, const std::string& nbr_par,
@@ -102,6 +1087,7 @@ std::string codegen_coupling(const System& s, const std::vector<std::string>& ex
     return o.str();
 }
 
+
 Scheme scheme_from_name(const std::string& name) {
     if (name == "Euler-Cromer")      return Scheme::EulerCromer;
     if (name == "Explicit Midpoint") return Scheme::ExplicitMidpoint;
@@ -111,6 +1097,9 @@ Scheme scheme_from_name(const std::string& name) {
     if (name == "RK45")              return Scheme::RK45;
     if (name == "DOP853")            return Scheme::DOP853;
     if (name == "CD")                return Scheme::CD;
+    if (name == "CD fast")           return Scheme::CDFast;
+    if (name == "CD FP")             return Scheme::CDFP;
+    if (name == "CD fast FP")        return Scheme::CDFastFP;
     if (name == "Complex CD")        return Scheme::ComplexCD;
     if (name == "Complex CD4")       return Scheme::ComplexCD4;
     if (name == "CCD4 (o4s3)")       return Scheme::ComplexCD4S3;
@@ -137,66 +1126,7 @@ Scheme scheme_from_name(const std::string& name) {
     if (name == "Map")               return Scheme::Map;
     return Scheme::Euler;
 }
-
-// --- Паспорт встроенных схем -----------------------------------------------
-// Порядки — те, что замерены и записаны в подсказках чекбоксов (см. gui.cpp).
-// Напоминание про a[0] = 1/2: у CD, Complex CD, Complex CD4, CCD4 (o4s3),
-// CCD4 (o4s4) (и их вариантов _{1-0}), SEMP и SIMP
-// заявленный порядок достигается только при этом значении, иначе все они
-// падают до первого. Здесь стоит паспортный (то есть при a[0] = 1/2) —
-// предупредить пользователя обязан UI.
-namespace {
-// Порядок строк = порядок в таблице схем UI (kBuiltinSchemes в gui.cpp): по
-// нему sort_wrapper_schemes ставит опорники обёрток, и список обёрток
-// читается теми же блоками, что и список встроенных.
-struct SchemeRow { const char* name; int order; bool symmetric; };
-const SchemeRow kSchemeRows[] = {
-    { "Euler",                  1, false },
-    { "Euler-Cromer",           1, false },
-    { "D",                      1, false },
-    { "Implicit Euler",         1, false },
-    { "Explicit Midpoint",      2, false },
-    { "Implicit Midpoint",      2, true  },  // Phi* ∘ Phi, самосопряжённая
-    { "CD",                     2, true  },  // самосопряжённая при a[0] = 1/2
-    // {1-0}: неявная половина первой; порядок и симметрия как у исходных.
-    { "CD_{1-0}",               2, true  },
-    { "Complex CD",             2, false },
-    { "Complex CD_{1-0}",       2, false },
-    { "Complex Implicit Euler", 2, false },
-    { "SEMP",                   2, false },  // предиктор-корректор, не Phi* ∘ Phi
-    { "SIMP",                   2, false },
-    { "RK4",                    4, false },
-    { "Complex CD4",            4, false },
-    { "Complex CD4_{1-0}",      4, false },
-    { "CCD4 (o4s3)",            4, true  },  // палиндром (a, 1-2a, a)
-    { "CCD4 (o4s3)_{1-0}",      4, true  },
-    { "CCD4 (o4s4)",            4, true  },  // палиндром (g/2, gc/2, gc/2, g/2)
-    { "CCD4 (o4s4)_{1-0}",      4, true  },
-    { "CCD4 (s-split)_{0-1}",   4, false },  // самосопряжена до Re, после Re дефект O(h^6)
-    { "CCD4 (s-split)_{1-0}",   4, false },  // то же над сопряжённым базовым методом
-    { "RK45",                   5, false },  // Dormand-Prince 5(4), шаг решением 5-го порядка
-    { "DOPRI78",                8, false },
-    { "DOPRI78 (legacy)",       8, false },  // дроби статьи без уточнения
-    { "DOP853",                 8, false },
-    // ГБШ: опорная GBS (n=2) не самосопряжена как одношаговый метод
-    // (дефект O(h^6)), поэтому Extr над ней на трёх стадиях даёт 5, а не 6.
-    // Экстраполяторы — не база для дальнейших обёрток.
-    { "GBS (n=2)",              2, false },
-    { "GBS 2-4",                4, false },
-    { "GBS 2-4-6",              6, false },
-    { "GBS 2-4-6-8",            8, false },
-    { "GBS 2-4-6-8-10",        10, false },
-    { "GBS 2-4-6-8-10-12",     12, false },
-};
-
-// Номер строки паспорта, -1 — не встроенная схема.
-int builtin_scheme_rank(const std::string& name) {
-    const int n = (int)(sizeof(kSchemeRows) / sizeof(kSchemeRows[0]));
-    for (int i = 0; i < n; ++i)
-        if (name == kSchemeRows[i].name) return i;
-    return -1;
-}
-} // namespace
+ // namespace
 
 bool builtin_scheme_traits(const std::string& name, int* order, bool* symmetric) {
     const int i = builtin_scheme_rank(name);
@@ -205,37 +1135,7 @@ bool builtin_scheme_traits(const std::string& name, int* order, bool* symmetric)
     if (symmetric) *symmetric = kSchemeRows[i].symmetric;
     return true;
 }
-
-// --- Имя обёртки: необязательная метка --------------------------------------
-
-namespace {
-
-    std::string wrap_trim(const std::string& s) {
-        size_t a = 0, b = s.size();
-        while (a < b && std::isspace((unsigned char)s[a])) ++a;
-        while (b > a && std::isspace((unsigned char)s[b - 1])) --b;
-        return s.substr(a, b - a);
-    }
-
-    // Голова имени — то, что стоит до ПОСЛЕДНЕЙ '|', то есть до коэффициентов.
-    // Метка, если она есть, идёт первой: "s17o8|Short CD". Режем по ПЕРВОЙ
-    // черте, тогда как база берётся по последней, — старое имя без метки
-    // ("Short CD") головы с чертой не имеет и разбирается ровно как раньше.
-    bool wrap_split_head(const std::string& head, std::string* label,
-                         std::string* base, std::string* err) {
-        const size_t bar = head.find('|');
-        if (bar == std::string::npos) { label->clear(); *base = wrap_trim(head); return true; }
-        *label = wrap_trim(head.substr(0, bar));
-        *base  = wrap_trim(head.substr(bar + 1));
-        if (label->empty()) { if (err) *err = "empty scheme label"; return false; }
-        if (!wrapper_label_ok(*label)) {
-            if (err) *err = "scheme label must not contain '|', ',', '(' or ')'";
-            return false;
-        }
-        return true;
-    }
-
-} // namespace
+ // namespace
 
 bool wrapper_label_ok(const std::string& label) {
     if (label.empty()) return false;
@@ -245,6 +1145,7 @@ bool wrapper_label_ok(const std::string& label) {
     return true;
 }
 
+
 std::string wrapper_sanitize_label(const std::string& label) {
     std::string out;
     for (char c : label)
@@ -252,15 +1153,6 @@ std::string wrapper_sanitize_label(const std::string& label) {
     return wrap_trim(out);
 }
 
-// --- Экстраполяция Ричардсона ----------------------------------------------
-
-static const char* const kExtrPrefix  = "Extr(";
-static const char* const kExtrZPrefix = "ExtrZ(";   // Re только на выходе
-
-static bool starts_with(const std::string& s, const char* pref) {
-    const size_t n = std::strlen(pref);
-    return s.size() >= n && s.compare(0, n, pref) == 0;
-}
 
 std::string make_extrapolation_name(const std::string& base, const std::vector<int>& n,
                                     const std::string& label, bool re_at_output) {
@@ -274,16 +1166,6 @@ std::string make_extrapolation_name(const std::string& base, const std::vector<i
     return s + ")";
 }
 
-// "12" -> 12. Отказывает на пустой строке, нецифрах и выходе за диапазон,
-// чтобы кривое имя из старого JSON не превратилось молча в рабочую схему.
-static bool extr_parse_substeps(const std::string& s, int* out) {
-    if (s.empty() || s.size() > 9) return false;
-    for (char c : s) if (c < '0' || c > '9') return false;
-    const long v = std::strtol(s.c_str(), nullptr, 10);
-    if (v < 1 || v > kExtrMaxSubsteps) return false;
-    *out = (int)v;
-    return true;
-}
 
 bool parse_extrapolation_name(const std::string& name, ExtrapolationSpec* out,
                               std::string* err) {
@@ -344,132 +1226,12 @@ bool parse_extrapolation_name(const std::string& name, ExtrapolationSpec* out,
     return true;
 }
 
+
 int extrapolation_order(int stages, int p, bool symmetric) {
     if (stages < 1) return p;
     return symmetric ? p + 2 * (stages - 1) : p + stages - 1;
 }
-
-// Точная рациональная арифметика для весов экстраполяции.
-//
-// Веса — отношения небольших целых, но напечатанные десятичным литералом они
-// несут ошибку ~1e-16 ОТ СЕБЯ: литерал читается как double, в какой бы
-// точности ни считала схема. Экстраполяция складывает почти равные величины с
-// коэффициентами порядка единиц (у Extr(CD|1,2,3,4) это 16/45, -729/280,
-// 1024/315), так что ошибка коэффициентов не сокращается, а садится прямо в
-// результат макрошага. На dd-ветке вкладки Order это держало полку на уровне
-// double и сводило расширенную точность к нулю: p валился с 8 до -1 там, где
-// с точными дробями он остаётся 8.01 при E1 = 2e-18.
-//
-// Поэтому печатаем дробь, а не число: деление выполняется уже в numb.
-namespace {
-
-struct ExRat { long long n, d; };
-
-long long ex_gcd(long long a, long long b) {
-    if (a < 0) a = -a;
-    if (b < 0) b = -b;
-    while (b) { const long long t = a % b; a = b; b = t; }
-    return a ? a : 1;
-}
-
-// false — переполнение; вызывающий откатывается на печать литералом.
-bool ex_mul(long long a, long long b, long long& r) {
-    if (a == 0 || b == 0) { r = 0; return true; }
-    const long long q = a * b;
-    if (q / b != a) return false;
-    r = q;
-    return true;
-}
-
-bool ex_norm(ExRat& x) {
-    if (x.d == 0) return false;
-    if (x.d < 0) { x.d = -x.d; x.n = -x.n; }
-    const long long g = ex_gcd(x.n, x.d);
-    x.n /= g;
-    x.d /= g;
-    return true;
-}
-
-bool ex_mul_rat(ExRat a, ExRat b, ExRat& out) {
-    // Сокращаем крест-накрест ДО умножения: так переполнение наступает много
-    // позже, а знаменатели тут растут как произведение разностей n^q.
-    const long long g1 = ex_gcd(a.n, b.d), g2 = ex_gcd(b.n, a.d);
-    a.n /= g1; b.d /= g1;
-    b.n /= g2; a.d /= g2;
-    if (!ex_mul(a.n, b.n, out.n)) return false;
-    if (!ex_mul(a.d, b.d, out.d)) return false;
-    return ex_norm(out);
-}
-
-bool ex_add_rat(ExRat a, ExRat b, ExRat& out) {
-    const long long g = ex_gcd(a.d, b.d);
-    long long den, t1, t2;
-    if (!ex_mul(a.d, b.d / g, den)) return false;
-    if (!ex_mul(a.n, b.d / g, t1)) return false;
-    if (!ex_mul(b.n, a.d / g, t2)) return false;
-    if ((t2 > 0 && t1 > LLONG_MAX - t2) || (t2 < 0 && t1 < LLONG_MIN - t2)) return false;
-    out.n = t1 + t2;
-    out.d = den;
-    return ex_norm(out);
-}
-
-bool ex_pow(long long base, int e, long long& out) {
-    out = 1;
-    for (int i = 0; i < e; ++i)
-        if (!ex_mul(out, base, out)) return false;
-    return true;
-}
-
-// Те же alpha, что в extrapolation_weights, но без единого округления.
-// Подстановка u_k = 1/n_k^q в alpha_k ~ n_k^p * prod 1/(u_k - u_m) даёт
-// gamma_k = n_k^(p + q(K-2)) / prod_{m!=k} (n_m^q - n_k^q); общий множитель
-// сокращается нормировкой суммы в единицу.
-bool extrapolation_weights_rational(const std::vector<int>& n, int p, bool symmetric,
-                                    std::vector<ExRat>& out) {
-    const int K = (int)n.size();
-    if (K < 2) return false;
-    const int q = symmetric ? 2 : 1;
-    const int e = p + q * (K - 2);
-    if (e < 0) return false;
-
-    std::vector<ExRat> g((size_t)K);
-    ExRat sum{ 0, 1 };
-    for (int k = 0; k < K; ++k) {
-        long long num = 0, den = 1, pk = 1;
-        if (!ex_pow((long long)n[k], e, num)) return false;
-        if (!ex_pow((long long)n[k], q, pk))  return false;
-        for (int m = 0; m < K; ++m) {
-            if (m == k) continue;
-            long long pm = 1;
-            if (!ex_pow((long long)n[m], q, pm)) return false;
-            if (!ex_mul(den, pm - pk, den))      return false;
-        }
-        g[(size_t)k] = ExRat{ num, den };
-        if (!ex_norm(g[(size_t)k]))               return false;
-        if (!ex_add_rat(sum, g[(size_t)k], sum))  return false;
-    }
-    if (sum.n == 0) return false;
-
-    out.assign((size_t)K, ExRat{ 0, 1 });
-    for (int k = 0; k < K; ++k) {
-        const ExRat inv{ sum.d, sum.n };
-        if (!ex_mul_rat(g[(size_t)k], inv, out[(size_t)k])) return false;
-        // Числитель и знаменатель обязаны быть точны в double, иначе печать
-        // дробью ничего не меняет: литерал снова округлится.
-        constexpr long long kExact = 9007199254740992LL;   // 2^53
-        if (out[(size_t)k].n >  kExact || out[(size_t)k].n < -kExact ||
-            out[(size_t)k].d >  kExact) return false;
-    }
-    return true;
-}
-
-std::string ex_rat_expr(const ExRat& r) {
-    std::string s = "(numb)(" + std::to_string(r.n) + ".0)";
-    if (r.d != 1) s = "(" + s + "/(numb)(" + std::to_string(r.d) + ".0))";
-    return s;
-}
-
-} // namespace
+ // namespace
 
 std::vector<double> extrapolation_weights(const std::vector<int>& n, int p, bool symmetric) {
     const int K = (int)n.size();
@@ -494,6 +1256,7 @@ std::vector<double> extrapolation_weights(const std::vector<int>& n, int p, bool
     return alpha;
 }
 
+
 bool extrapolation_weights_exact(const std::vector<int>& n, int p, bool symmetric,
                                  std::vector<std::string>* out) {
     std::vector<ExRat> r;
@@ -506,122 +1269,14 @@ bool extrapolation_weights_exact(const std::vector<int>& n, int p, bool symmetri
                                 : std::to_string(v.n) + "/" + std::to_string(v.d));
     return true;
 }
-
-// ГБШ (см. Scheme::GBS в codegen.hpp). Не обёртка над готовым телом, как
-// wrap_extrapolation, а свой эмиттер: стадия держит ДВА состояния (z_{m-1},
-// z_m) через все подшаги, и повтором одношаговой базы её не выразить.
-// Правые части печатаются по одному разу на каждое из трёх мест (старт,
-// leapfrog, сглаживание), а номер стадии идёт рантайм-циклом, поэтому тело не
-// растёт с K. Веса — те же, что у Extr с симметричной базой порядка 2, точными
-// дробями, когда сходятся.
-namespace ucuda::equations_detail {
-std::string scheme_gbs(const System& s, int K) {
-    if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
-    const int N = (int)s.vars.size();
-    if (N < 1) throw std::runtime_error("GBS needs a non-empty system");
-    const std::vector<int> n = gbs_substeps(K);
-    const auto f0 = rhs_over(s, "X0_gbs");
-    const auto f1 = rhs_over(s, "Z1_gbs");
-
-    std::vector<double> alpha(1, 1.0);
-    std::vector<ExRat>  arat(1, ExRat{ 1, 1 });
-    bool alpha_exact = true;
-    if (K > 1) {
-        alpha       = extrapolation_weights(n, 2, true);
-        alpha_exact = extrapolation_weights_rational(n, 2, true, arat);
-    }
-    int cost = 0;
-    for (int v : n) cost += v + 1;   // n подшагов + сглаживание
-
-    const std::string Ns = std::to_string(N), Ks = std::to_string(K);
-    std::ostringstream o;
-    o << "    // --- GBS";
-    if (K == 1) o << " (n=2)";
-    else for (int k = 0; k < K; ++k) o << (k ? "-" : " ") << n[k];
-    o << ": Gragg modified midpoint, " << K << " stage" << (K == 1 ? "" : "s")
-      << ", order " << 2 * K << ", " << cost << " RHS evaluations per step ---\n";
-    for (int k = 0; k < K; ++k) {
-        o << "    //   n = " << n[k] << "   alpha = " << fmtnum(alpha[k]);
-        if (alpha_exact) o << " = " << arat[(size_t)k].n << "/" << arat[(size_t)k].d;
-        o << "\n";
-    }
-
-    o << "    numb X0_gbs[" << Ns << "], AC_gbs[" << Ns << "], Z0_gbs[" << Ns
-      << "], Z1_gbs[" << Ns << "], ZT_gbs[" << Ns << "];\n";
-    o << "    const numb W_gbs[" << Ks << "] = { ";
-    for (int k = 0; k < K; ++k) {
-        if (k) o << ", ";
-        o << (alpha_exact ? ex_rat_expr(arat[(size_t)k]) : ("(numb)(" + fmtnum(alpha[k]) + ")"));
-    }
-    o << " };\n";
-    o << "    int i_gbs, m_gbs, k_gbs;\n";
-    o << "    for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) { X0_gbs[i_gbs] = X[i_gbs]; AC_gbs[i_gbs] = (numb)0; }\n";
-    o << "    for (k_gbs = 0; k_gbs < " << Ks << "; ++k_gbs) {\n";
-    o << "        const int  n_gbs  = 2 * (k_gbs + 1);\n";
-    o << "        const numb hs_gbs = h / (numb)n_gbs;\n";
-    o << "        // старт: явный Эйлер на первый подшаг\n";
-    o << "        for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) Z0_gbs[i_gbs] = X0_gbs[i_gbs];\n";
-    for (int i = 0; i < N; ++i)
-        o << "        Z1_gbs[" << i << "] = X0_gbs[" << i << "] + hs_gbs * (" << f0[i] << ");\n";
-    o << "        // leapfrog: z_{m+1} = z_{m-1} + 2*hs*f(z_m), всего n подшагов\n";
-    o << "        for (m_gbs = 1; m_gbs < n_gbs; ++m_gbs) {\n";
-    for (int i = 0; i < N; ++i)
-        o << "            ZT_gbs[" << i << "] = Z0_gbs[" << i << "] + (numb)2 * hs_gbs * (" << f1[i] << ");\n";
-    o << "            for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) { Z0_gbs[i_gbs] = Z1_gbs[i_gbs]; Z1_gbs[i_gbs] = ZT_gbs[i_gbs]; }\n";
-    o << "        }\n";
-    o << "        // сглаживание Грэгга: (z_{n-1} + z_n + hs*f(z_n)) / 2\n";
-    for (int i = 0; i < N; ++i)
-        o << "        AC_gbs[" << i << "] += W_gbs[k_gbs] * (numb)0.5 * (Z0_gbs[" << i << "] + Z1_gbs["
-          << i << "] + hs_gbs * (" << f1[i] << "));\n";
-    o << "    }\n";
-    o << "    for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) X[i_gbs] = AC_gbs[i_gbs];\n";
-    return o.str();
-}
-
-// --- Подстановка тела базы в обёртки ------------------------------------------
-//
-// Обёртки (Extr, ExtrZ, Comp) печатают тело базы прямо в каждую стадию, блоком
-// с собственным "const numb h = <подшаг>": внутренний h затеняет макрошаг, и
-// тело по-прежнему не правится ни в одном символе. Раньше тело уходило один раз
-// в локальную лямбду step_ex(h), и это решал компилятор: NVRTC её встраивал
-// всегда, а MSVC на CPU-пути — не всегда. У ExtrZ(Complex CD4|1,2,3) он оставил
-// шесть настоящих вызовов на шаг, и шаг выходил на треть медленнее (354 против
-// 268 нс, побитово тот же результат). Текст растёт в K раз, но ровно столько
-// копий NVRTC делал и сам.
-//
-// Лямбда остаётся запасным путём для тела с return или goto: return внутри
-// подставленного тела вышел бы из всего calculateDiscreteModel, а метка,
-// размноженная по стадиям, не скомпилировалась бы (метки видны во всей функции).
-bool wrapper_can_inline(const std::string& body) {
-    for (const char* kw : { "return", "goto" }) {
-        const size_t n = std::strlen(kw);
-        for (size_t p = body.find(kw); p != std::string::npos; p = body.find(kw, p + 1)) {
-            const bool left  = p == 0 || !(std::isalnum((unsigned char)body[p - 1]) || body[p - 1] == '_');
-            const bool right = p + n >= body.size()
-                               || !(std::isalnum((unsigned char)body[p + n]) || body[p + n] == '_');
-            if (left && right) return false;
-        }
-    }
-    return true;
-}
-
-// Тело построчно с дополнительным отступом: панель KRS показывает текст как есть.
-void emit_indented(std::ostringstream& o, const std::string& body, const char* indent) {
-    size_t pos = 0;
-    while (pos < body.size()) {
-        size_t eol = body.find('\n', pos);
-        if (eol == std::string::npos) eol = body.size();
-        const std::string line = body.substr(pos, eol - pos);
-        if (!line.empty()) o << indent << line;
-        o << "\n";
-        pos = eol + 1;
-    }
-}
-} // namespace
+ // namespace
 
 std::string wrap_extrapolation(const std::string& base_body, int N,
                                const std::vector<int>& n, int p, bool symmetric,
                                const std::string& base_name) {
+    // Неавтономная база: каждый подшаг получает своё время t0 + s*(h/n) — затенённым
+    // ucuda_t (inline) или вторым аргументом лямбды. Иначе все подшаги считались бы в t_n.
+    const bool ht = step_body_uses_time(base_body);
     const int K = (int)n.size();
     if (K < 1) throw std::runtime_error("extrapolation needs at least one stage");
     if (N < 1) throw std::runtime_error("extrapolation needs a non-empty system");
@@ -654,11 +1309,12 @@ std::string wrap_extrapolation(const std::string& base_body, int N,
     // подшагом без единой правки текста — это же позволяет обернуть кастомную
     // КРС, содержимое которой нам непрозрачно.
     const bool inl = wrapper_can_inline(base_body);
+    if (ht) o << "    const numb ucuda_t_ex = ucuda_t;\n";
     if (inl) {
         o << "    const numb h_ex = h;\n\n";
     } else {
         o << "    // base contains return/goto: kept in a lambda, see wrapper_can_inline\n";
-        o << "    auto step_ex = [&](const numb h) {\n";
+        o << "    auto step_ex = [&](const numb h" << (ht ? ", const numb ucuda_t" : "") << ") {\n";
         emit_indented(o, base_body, "    ");
         o << "    };\n\n";
     }
@@ -668,12 +1324,17 @@ std::string wrap_extrapolation(const std::string& base_body, int N,
           << " of h/" << n[k] << "\n";
         if (inl) {
             o << "    for (int s_ex = 0; s_ex < " << n[k] << "; ++s_ex) {\n";
-            o << "        const numb h = h_ex / (numb)" << fmtnum((double)n[k]) << ";\n";
+            o << "        const numb h = h_ex * ((numb)1 / (numb)" << fmtnum((double)n[k]) << ");\n";
+            if (ht) o << "        const numb ucuda_t = ucuda_t_ex + (numb)s_ex * h;\n";
             emit_indented(o, base_body, "    ");
             o << "    }\n";
+        } else if (ht) {
+            o << "    for (int s_ex = 0; s_ex < " << n[k] << "; ++s_ex) step_ex(h * ((numb)1 / (numb)"
+              << fmtnum((double)n[k]) << "), ucuda_t_ex + (numb)s_ex * h * ((numb)1 / (numb)"
+              << fmtnum((double)n[k]) << "));\n";
         } else {
-            o << "    for (int s_ex = 0; s_ex < " << n[k] << "; ++s_ex) step_ex(h / (numb)"
-              << fmtnum((double)n[k]) << ");\n";
+            o << "    for (int s_ex = 0; s_ex < " << n[k] << "; ++s_ex) step_ex(h * ((numb)1 / (numb)"
+              << fmtnum((double)n[k]) << "));\n";
         }
         o << "    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) { AC_ex[i_ex] += "
           << (alpha_exact ? ex_rat_expr(arat[(size_t)k])
@@ -687,6 +1348,7 @@ std::string wrap_extrapolation(const std::string& base_body, int N,
     o << "\n    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) X[i_ex] = AC_ex[i_ex];\n";
     return o.str();
 }
+
 
 // ExtrZ. Отличие от wrap_extrapolation ровно одно: состояние стадий,
 // начальная точка и накопитель — ucmplx, ядро базы работает прямо на Z[] без
@@ -734,7 +1396,7 @@ std::string wrap_extrapolation_complex(const std::string& core_body, int N,
         o << "    // stage " << k << ": " << n[k] << " substep" << (n[k] == 1 ? "" : "s")
           << " of h/" << n[k] << ", no Re in between\n";
         o << "    for (int s_ex = 0; s_ex < " << n[k] << "; ++s_ex) {\n";
-        o << "        const numb h = h_ex / (numb)" << fmtnum((double)n[k]) << ";\n";
+        o << "        const numb h = h_ex * ((numb)1 / (numb)" << fmtnum((double)n[k]) << ");\n";
         emit_indented(o, core_body, "    ");
         o << "    }\n";
         o << "    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) { AC_ex[i_ex] = AC_ex[i_ex] + "
@@ -748,66 +1410,23 @@ std::string wrap_extrapolation_complex(const std::string& core_body, int N,
     o << "\n    for (int i_ex = 0; i_ex < " << Ns << "; ++i_ex) X[i_ex] = AC_ex[i_ex].re;\n";
     return o.str();
 }
-
-// --- Адаптивный шаг экстраполяторов ----------------------------------------
-//
-// Вложенная пара из одних и тех же стадий T_1..T_K: старшее решение Y = sum alpha_k T_k
-// (веса и порядок — как у постоянного шага), младшее — по первым K-1 стадиям с весами
-// beta (порядок extrapolation_order(K-1)). Оценка ошибки E = Y - Yhat = sum (alpha_k -
-// beta_k) T_k, beta_K = 0 — по разности весов, как у RK-пар. Это обычная локальная
-// экстраполяция: регулятор ведёт по ошибке Yhat (показатель 1/(q+1)), а шаг продолжает Y.
-// Y печатается тем же выражением, что в wrap_extrapolation / scheme_gbs, поэтому
-// принятый шаг с тем же h совпадает с шагом постоянного Extr / GBS (GBS берёт f(X) из F0
-// — то же значение, на вычисление f меньше на стадию). F1 = f(Y): FSAL драйвера и
-// эрмитов плотный выход 3-го порядка (как у DOPRI78).
-namespace {
-
-// Веса alpha (по всем K стадиям) и разности alpha - beta литералами: alpha — точными
-// дробями, когда сходятся (как у постоянного шага), разности — double: это только оценка.
-struct ExtrAdWeights {
-    std::vector<std::string> alpha, diff;
-};
-
-ExtrAdWeights extr_ad_weights(const std::vector<int>& n, int p, bool symmetric) {
-    const int K = (int)n.size();
-    const std::vector<double> alpha = extrapolation_weights(n, p, symmetric);
-    const std::vector<int> nlo(n.begin(), n.end() - 1);
-    const std::vector<double> beta = extrapolation_weights(nlo, p, symmetric);
-    std::vector<ExRat> arat;
-    const bool exact = extrapolation_weights_rational(n, p, symmetric, arat);
-    ExtrAdWeights w;
-    for (int k = 0; k < K; ++k) {
-        w.alpha.push_back(exact ? ex_rat_expr(arat[(size_t)k]) : ("(numb)(" + fmtnum(alpha[k]) + ")"));
-        const double b = k < K - 1 ? beta[(size_t)k] : 0.0;
-        w.diff.push_back("(numb)(" + fmtnum(alpha[k] - b) + ")");
-    }
-    return w;
-}
-
-// Общая часть AdaptiveCode экстраполятора: правая часть, плотный выход, порядки.
-AdaptiveCode extr_ad_code(const System& s, int p, int q, int emb_rhs) {
-    AdaptiveCode c;
-    c.rhs = adaptive_rhs_body(s);
-    c.p = p; c.q = q; c.nlo = 1; c.wstages = 0; c.dsize = 4;
-    c.emb_rhs = emb_rhs; c.dprep_rhs = 0; c.dense_order = 3;
-    c.dprep = hermite_dprep_body(s); c.deval = hermite_deval_body(s);
-    return c;
-}
-
-// Хвост emb: Y, E и F1 = f(Y).
-void extr_ad_finish(std::ostringstream& o, const System& s, const char* ac, const char* ec) {
-    const int N = (int)s.vars.size();
-    o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) { Y[i_ea] = " << ac << "[i_ea]; E[i_ea] = "
-      << ec << "[i_ea]; }\n";
-    const auto fy = rhs_over(s, "Y");
-    for (int v = 0; v < N; ++v) o << "    F1[" << v << "] = (" << fy[(size_t)v] << ");\n";
-}
-
-} // namespace
+ // namespace
 
 AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& base_body,
                                             const std::vector<int>& n, int p, bool symmetric,
                                             const std::string& base_name, double base_rhs) {
+    if (!s.zb_g.empty() && s.vars.size() > s.rhs.size()) {   // база уже несёт свой Ньютон по z
+        AdaptiveCode c = codegen_adaptive_extrapolation(sys_augmented_b(s), base_body, n, p, symmetric,
+                                                        base_name, base_rhs);
+        zb_adaptive_finish(c, s);
+        return c;
+    }
+    if (!s.out_exprs.empty()) {   // база (codegen_scheme) уже пересчитывает z после каждого подшага
+        AdaptiveCode c = codegen_adaptive_extrapolation(sys_augmented(s), base_body, n, p, symmetric,
+                                                        base_name, base_rhs);
+        adaptive_outputs_tail(c, s);
+        return c;
+    }
     if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
     const int N = (int)s.vars.size(), K = (int)n.size();
     if (N < 1) throw std::runtime_error("extrapolation needs a non-empty system");
@@ -831,11 +1450,15 @@ AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& 
     o << "    numb XS_ea[" << N << "];\n";
     o << "    numb* const X = XS_ea;\n";
     const bool inl = wrapper_can_inline(base_body);
+    // Явное время — как у wrap_extrapolation: подшаг s начинается в t + s*h/n (t попытки —
+    // аргумент emb от драйвера), внутренний ucuda_t затеняет его для тела базы.
+    const bool ht = step_body_uses_time(base_body);
+    if (ht) o << "    const numb ucuda_t_ea = ucuda_t;\n";
     if (inl) {
         o << "    const numb h_ea = h;\n";
     } else {
         o << "    // base contains return/goto: kept in a lambda, see wrapper_can_inline\n";
-        o << "    auto step_ea = [&](const numb h) {\n";
+        o << "    auto step_ea = [&](const numb h" << (ht ? ", const numb ucuda_t" : "") << ") {\n";
         emit_indented(o, base_body, "    ");
         o << "    };\n";
     }
@@ -844,11 +1467,15 @@ AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& 
         o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) X[i_ea] = X0_ea[i_ea];\n";
         if (inl) {
             o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) {\n";
-            o << "        const numb h = h_ea / (numb)" << fmtnum((double)n[k]) << ";\n";
+            o << "        const numb h = h_ea * ((numb)1 / (numb)" << fmtnum((double)n[k]) << ");\n";
+            if (ht) o << "        const numb ucuda_t = ucuda_t_ea + (numb)s_ea * h;\n";
             emit_indented(o, base_body, "    ");
             o << "    }\n";
+        } else if (ht) {
+            o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) step_ea(h * ((numb)1 / (numb)" << fmtnum((double)n[k])
+              << "), ucuda_t_ea + (numb)s_ea * h * ((numb)1 / (numb)" << fmtnum((double)n[k]) << "));\n";
         } else {
-            o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) step_ea(h / (numb)" << fmtnum((double)n[k]) << ");\n";
+            o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) step_ea(h * ((numb)1 / (numb)" << fmtnum((double)n[k]) << "));\n";
         }
         o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) { AC_ea[i_ea] += " << w.alpha[(size_t)k]
           << " * X[i_ea]; EC_ea[i_ea] += " << w.diff[(size_t)k] << " * X[i_ea]; }\n";
@@ -863,6 +1490,7 @@ AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& 
     return c;
 }
 
+
 // ExtrZ: стадии и обе суммы — ucmplx, ядро базы шагает по Z[] без Re между подшагами, Re
 // берётся на выходе (как wrap_extrapolation_complex). Веса — симметричные: разложение Re стадии
 // идёт по чётным степеням, поэтому Re младшей комбинации — решение порядка
@@ -870,7 +1498,9 @@ AdaptiveCode codegen_adaptive_extrapolation(const System& s, const std::string& 
 AdaptiveCode codegen_adaptive_extrapolation_complex(const System& s, const std::string& core_body,
                                                     const std::vector<int>& n, int p,
                                                     const std::string& base_name, double base_rhs) {
+    if (!s.out_exprs.empty()) throw std::runtime_error(kOutputsNoComplex);
     if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
+    if (system_uses_time(s)) throw std::runtime_error(kTimeUnsupportedMsg);
     const int N = (int)s.vars.size(), K = (int)n.size();
     if (N < 1) throw std::runtime_error("extrapolation needs a non-empty system");
     if (K < 2) throw std::runtime_error("adaptive step needs an extrapolation with at least two stages "
@@ -896,7 +1526,7 @@ AdaptiveCode codegen_adaptive_extrapolation_complex(const System& s, const std::
           << ", no Re in between\n";
         o << "    for (int i_ea = 0; i_ea < " << N << "; ++i_ea) Z[i_ea] = Z0_ea[i_ea];\n";
         o << "    for (int s_ea = 0; s_ea < " << n[k] << "; ++s_ea) {\n";
-        o << "        const numb h = h_ea / (numb)" << fmtnum((double)n[k]) << ";\n";
+        o << "        const numb h = h_ea * ((numb)1 / (numb)" << fmtnum((double)n[k]) << ");\n";
         emit_indented(o, core_body, "    ");
         o << "    }\n";
         // Сумма — тем же выражением, что у постоянного ExtrZ (AC = AC + alpha * Z).
@@ -915,7 +1545,18 @@ AdaptiveCode codegen_adaptive_extrapolation_complex(const System& s, const std::
     return c;
 }
 
+
 AdaptiveCode codegen_adaptive_gbs(const System& s, int K) {
+    if (!s.zb_g.empty() && s.vars.size() > s.rhs.size()) {
+        AdaptiveCode c = codegen_adaptive_gbs(sys_augmented_b(s), K);
+        zb_adaptive_finish(c, s);
+        return c;
+    }
+    if (!s.out_exprs.empty()) {
+        AdaptiveCode c = codegen_adaptive_gbs(sys_augmented(s), K);
+        adaptive_outputs_tail(c, s);
+        return c;
+    }
     if (s.vars.size() != s.rhs.size()) throw std::runtime_error("vars/rhs size mismatch");
     const int N = (int)s.vars.size();
     if (N < 1) throw std::runtime_error("GBS needs a non-empty system");
@@ -923,7 +1564,9 @@ AdaptiveCode codegen_adaptive_gbs(const System& s, int K) {
                                         "from the first K-1 stages)");
     const std::vector<int> n = gbs_substeps(K);
     const ExtrAdWeights w = extr_ad_weights(n, 2, true);
-    const auto f1 = rhs_over(s, "Z1_gbs");
+    // Явное время — как у scheme_gbs: leapfrog z_m в t + m*hs, сглаживание f(z_n) в t + h.
+    const auto f1  = rhs_over(s, "Z1_gbs", time_name(s, "(ucuda_t + (numb)m_gbs * hs_gbs)"));
+    const auto f1s = rhs_over(s, "Z1_gbs", time_name(s, "(ucuda_t + h)"));
     int cost = 0;
     for (int v : n) cost += v;   // n - 1 leapfrog + сглаживание; f(X) — из F0
 
@@ -946,7 +1589,7 @@ AdaptiveCode codegen_adaptive_gbs(const System& s, int K) {
          "EC_gbs[i_gbs] = (numb)0; }\n";
     o << "    for (k_gbs = 0; k_gbs < " << Ks << "; ++k_gbs) {\n";
     o << "        const int  n_gbs  = 2 * (k_gbs + 1);\n";
-    o << "        const numb hs_gbs = h / (numb)n_gbs;\n";
+    o << "        const numb hs_gbs = h * ((numb)1 / (numb)n_gbs);\n";
     o << "        // старт: явный Эйлер на первый подшаг, f(X) — F0 драйвера\n";
     o << "        for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) {\n";
     o << "            Z0_gbs[i_gbs] = X0_gbs[i_gbs];\n";
@@ -962,7 +1605,7 @@ AdaptiveCode codegen_adaptive_gbs(const System& s, int K) {
     o << "        // сглаживание Грэгга: (z_{n-1} + z_n + hs*f(z_n)) / 2\n";
     for (int i = 0; i < N; ++i)
         o << "        T_gbs[" << i << "] = (numb)0.5 * (Z0_gbs[" << i << "] + Z1_gbs[" << i << "] + hs_gbs * ("
-          << f1[(size_t)i] << "));\n";
+          << f1s[(size_t)i] << "));\n";
     o << "        for (i_gbs = 0; i_gbs < " << Ns << "; ++i_gbs) { AC_gbs[i_gbs] += W_gbs[k_gbs] * T_gbs[i_gbs]; "
          "EC_gbs[i_gbs] += V_gbs[k_gbs] * T_gbs[i_gbs]; }\n";
     o << "    }\n";
@@ -973,6 +1616,7 @@ AdaptiveCode codegen_adaptive_gbs(const System& s, int K) {
     return c;
 }
 
+
 int builtin_scheme_rhs_per_step(const std::string& name) {
     static const struct { const char* name; int k; } kTab[] = {
         { "Euler", 1 }, { "Explicit Midpoint", 2 }, { "RK4", 4 }, { "RK45", 6 },
@@ -982,21 +1626,10 @@ int builtin_scheme_rhs_per_step(const std::string& name) {
     return 0;
 }
 
-// Неявный полушаг CD (и стадия SIMP, и шаг D): по компоненте — одно вычисление f_i, если она
-// линейна по своей переменной (аналитика), иначе CD_ITERS простых итераций; в единицах полной f.
-static double cd_implicit_sweep_rhs(const System& s) {
-    const int N = (int)s.vars.size();
-    if (N < 1 || (int)s.rhs.size() != N) return 0.0;
-    double sum = 0.0;
-    for (int i = 0; i < N; ++i) {
-        Parser p(s.rhs[(size_t)i], s.latex);
-        PN coef, rem;
-        sum += cd_try_extract_linear(p.parse(), s.vars[(size_t)i], coef, rem) ? 1.0 : (double)CD_ITERS;
-    }
-    return sum / (double)N;
-}
 
 double scheme_rhs_per_step(const System& s, const std::string& name) {
+    if ((!s.out_exprs.empty() || !s.zb_g.empty()) && s.vars.size() > s.rhs.size())
+        return scheme_rhs_per_step(sys_core(s), name);   // z: пересчёт выходов / Ньютон в цене f не учтён
     if (const int k = builtin_scheme_rhs_per_step(name); k > 0) return (double)k;
     ExtrapolationSpec es;
     if (parse_extrapolation_name(name, &es)) {
@@ -1019,9 +1652,11 @@ double scheme_rhs_per_step(const System& s, const std::string& name) {
         case Scheme::SEMP:         return 2.0;
         case Scheme::SIMP:         return cd_implicit_sweep_rhs(s) + 1.0;
         case Scheme::D:            return cd_implicit_sweep_rhs(s);
-        case Scheme::CD: case Scheme::CD10:
+        case Scheme::CD: case Scheme::CD10: case Scheme::CDFast:
         case Scheme::ComplexCD: case Scheme::ComplexCD10:
             return 1.0 + cd_implicit_sweep_rhs(s);
+        case Scheme::CDFP: case Scheme::CDFastFP:
+            return 1.0 + cd_implicit_sweep_rhs(s, cd_fp_iters_of(s));
         case Scheme::ComplexCD4: case Scheme::ComplexCD4_10:
         case Scheme::ComplexCD4SS01: case Scheme::ComplexCD4SS10:
             return 2.0 * (1.0 + cd_implicit_sweep_rhs(s));
@@ -1037,15 +1672,28 @@ double scheme_rhs_per_step(const System& s, const std::string& name) {
     }
 }
 
+
 bool adaptive_scheme_name_supported(const std::string& name) {
+    if (name == "DAE Rodas4") return true;   // ДАУ: codegen_adaptive_dae
+    {   // прочие одношаговые методы ДАУ — удвоением шага (codegen_adaptive_dae_doubling)
+        DaeScheme ds;
+        if (dae_scheme_from_name(name, &ds) && dae_scheme_order(ds) > 0) return true;
+    }
+    if (scheme_is_multistep(name)) return true;   // свой драйвер (multistep_bdf.h)
     if (scheme_supports_adaptive(scheme_from_name(name)) && name != "Euler") return true;
     if (gbs_stage_count(scheme_from_name(name)) >= 2) return true;
     ExtrapolationSpec spec;
     return parse_extrapolation_name(name, &spec) && spec.n.size() >= 2;   // Extr и ExtrZ
 }
 
+
 int adaptive_scheme_q_guess(const std::string& name) {
     if (name == "RK45") return 4;
+    if (name == "DAE Rodas4") return 3;
+    {
+        DaeScheme ds;
+        if (dae_scheme_from_name(name, &ds) && dae_scheme_order(ds) > 0) return dae_scheme_order(ds);
+    }
     const int K = gbs_stage_count(scheme_from_name(name));
     if (K >= 2) return 2 * (K - 1);
     ExtrapolationSpec spec;
@@ -1055,9 +1703,6 @@ int adaptive_scheme_q_guess(const std::string& name) {
     return 7;
 }
 
-// --- Композиция -------------------------------------------------------------
-
-static const char* const kCompPrefix = "Comp(";
 
 std::string make_composition_name(const std::string& base,
                                   const std::vector<std::string>& gammas,
@@ -1071,55 +1716,7 @@ std::string make_composition_name(const std::string& base,
     }
     return s + ")";
 }
-
-namespace {
-
-    std::string comp_trim(const std::string& s) {
-        size_t a = 0, b = s.size();
-        while (a < b && std::isspace((unsigned char)s[a])) ++a;
-        while (b > a && std::isspace((unsigned char)s[b - 1])) --b;
-        return s.substr(a, b - a);
-    }
-
-    // Режем только по запятым ВЕРХНЕГО уровня: коэффициент — выражение, и
-    // запятая внутри pow(g,2) не должна заканчивать токен.
-    bool comp_split(const std::string& tail, std::vector<std::string>& out) {
-        int depth = 0;
-        std::string cur;
-        for (char c : tail) {
-            if (c == '(') ++depth;
-            else if (c == ')' && --depth < 0) return false;
-            if (c == ',' && depth == 0) { out.push_back(cur); cur.clear(); continue; }
-            cur += c;
-        }
-        if (depth != 0) return false;
-        out.push_back(cur);
-        return true;
-    }
-
-    // Сворачивает коэффициент в число. false на любом символе — тогда значение
-    // известно только в рантайме, и звать нас незачем.
-    bool comp_fold(const PN& n, double* v) {
-        if (!n) return false;
-        double a = 0, b = 0;
-        switch (n->kind) {
-        case Node::Num: *v = n->num; return true;
-        case Node::Neg: if (!comp_fold(n->a, &a)) return false; *v = -a; return true;
-        case Node::Add: case Node::Sub: case Node::Mul: case Node::Div: case Node::Pow:
-            if (!comp_fold(n->a, &a) || !comp_fold(n->b, &b)) return false;
-            switch (n->kind) {
-            case Node::Add: *v = a + b; break;
-            case Node::Sub: *v = a - b; break;
-            case Node::Mul: *v = a * b; break;
-            case Node::Div: if (b == 0.0) return false; *v = a / b; break;
-            default:        *v = std::pow(a, b); break;
-            }
-            return true;
-        default: return false;   // Sym / Call
-        }
-    }
-
-} // namespace
+ // namespace
 
 bool parse_composition_name(const std::string& name, CompositionSpec* out,
                             std::string* err) {
@@ -1172,50 +1769,7 @@ bool parse_composition_name(const std::string& name, CompositionSpec* out,
     if (out) *out = spec;
     return true;
 }
-
-namespace {
-
-    // Чистый числовой литерал: знак, цифры, точка, экспонента — и ничего
-    // больше. Нужен ровно одному месту: решить, был ли первый столбец строки
-    // нумерующим. Поэтому и такая строгость — "- 2*g1" числом не считается,
-    // и "1 - 2*g1" не теряет свою единицу.
-    bool comp_is_plain_number(const std::string& s) {
-        if (s.empty()) return false;
-        size_t i = 0;
-        if (s[i] == '+' || s[i] == '-') ++i;
-        bool digits = false, dot = false;
-        while (i < s.size() && (std::isdigit((unsigned char)s[i]) || s[i] == '.')) {
-            if (s[i] == '.') { if (dot) return false; dot = true; }
-            else digits = true;
-            ++i;
-        }
-        if (!digits) return false;
-        if (i == s.size()) return true;
-        if (s[i] != 'e' && s[i] != 'E') return false;
-        ++i;
-        if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
-        if (i == s.size()) return false;
-        while (i < s.size()) { if (!std::isdigit((unsigned char)s[i])) return false; ++i; }
-        return true;
-    }
-
-    // Срезает нумерующий первый столбец: "3<tab>-0.3825" -> "-0.3825".
-    // Разделителем считаются пробелы/табы и ')' ';' ':' — но НЕ точка (иначе
-    // "1.35" распалось бы на индекс 1 и коэффициент 35) и НЕ запятая (её
-    // разбирает разделение строки на коэффициенты).
-    std::string comp_strip_index(const std::string& line) {
-        size_t i = 0;
-        while (i < line.size() && std::isdigit((unsigned char)line[i])) ++i;
-        if (i == 0 || i == line.size()) return line;
-        size_t j = i;
-        while (j < line.size() && (std::isspace((unsigned char)line[j])
-                                   || line[j] == ')' || line[j] == ';' || line[j] == ':')) ++j;
-        if (j == i || j == line.size()) return line;
-        const std::string rest = comp_trim(line.substr(j));
-        return comp_is_plain_number(rest) ? rest : line;
-    }
-
-} // namespace
+ // namespace
 
 bool parse_composition_coeff_file(const std::string& text,
                                   std::vector<std::string>* out, std::string* err) {
@@ -1266,6 +1820,7 @@ bool parse_composition_coeff_file(const std::string& text,
     return true;
 }
 
+
 bool composition_sums(const CompositionSpec& spec, double* sum, double* cube_sum) {
     double s = 0.0, c = 0.0;
     for (const std::string& g : spec.gammas) {
@@ -1280,95 +1835,7 @@ bool composition_sums(const CompositionSpec& spec, double* sum, double* cube_sum
     if (cube_sum) *cube_sum = c;
     return true;
 }
-
-namespace {
-
-    // comp_fold с окружением: Sym берётся из env, Call считается для функций,
-    // которые в коэффициенте шага вообще осмысленны (sqrt(2), cbrt(2) в
-    // классических композициях). Неизвестное имя — честный false, а не ноль:
-    // подставить ноль значило бы показать пользователю число, которого схема
-    // считать не будет.
-    bool comp_fold_env(const PN& n, const std::map<std::string, double>& env, double* v) {
-        if (!n) return false;
-        double a = 0, b = 0;
-        switch (n->kind) {
-        case Node::Num: *v = n->num; return true;
-        case Node::Sym: {
-            auto it = env.find(n->name);
-            if (it == env.end()) return false;
-            *v = it->second; return true;
-        }
-        case Node::Neg:
-            if (!comp_fold_env(n->a, env, &a)) return false;
-            *v = -a; return true;
-        case Node::Add: case Node::Sub: case Node::Mul: case Node::Div: case Node::Pow:
-            if (!comp_fold_env(n->a, env, &a) || !comp_fold_env(n->b, env, &b)) return false;
-            switch (n->kind) {
-            case Node::Add: *v = a + b; break;
-            case Node::Sub: *v = a - b; break;
-            case Node::Mul: *v = a * b; break;
-            case Node::Div: if (b == 0.0) return false; *v = a / b; break;
-            default:        *v = std::pow(a, b); break;
-            }
-            return true;
-        case Node::Call: {
-            if (n->args.size() == 1) {
-                if (!comp_fold_env(n->args[0], env, &a)) return false;
-                const std::string& f = n->name;
-                if (f == "sqrt") { if (a < 0) return false; *v = std::sqrt(a); return true; }
-                if (f == "cbrt")               { *v = std::cbrt(a); return true; }
-                if (f == "exp")                { *v = std::exp(a);  return true; }
-                if (f == "log")  { if (a <= 0) return false; *v = std::log(a); return true; }
-                if (f == "sin")                { *v = std::sin(a);  return true; }
-                if (f == "cos")                { *v = std::cos(a);  return true; }
-                if (f == "tan")                { *v = std::tan(a);  return true; }
-                if (f == "fabs" || f == "abs") { *v = std::fabs(a); return true; }
-                return false;
-            }
-            if (n->args.size() == 2 && n->name == "pow") {
-                if (!comp_fold_env(n->args[0], env, &a)) return false;
-                if (!comp_fold_env(n->args[1], env, &b)) return false;
-                *v = std::pow(a, b); return true;
-            }
-            return false;
-        }
-        default: return false;
-        }
-    }
-
-    // Округляет КАЖДЫЙ числовой литерал в строке, не трогая имена и операторы.
-    // Работает и на цельном числе, и на выражении: "-1.2599210498948732*g1"
-    // укорачивается так же, как "1.3512071919596578".
-    std::string comp_round_literals(const std::string& s, int digits) {
-        std::string out;
-        for (size_t i = 0; i < s.size(); ) {
-            const char c = s[i];
-            // Идентификатор забирает свои цифры целиком, иначе g1 стало бы g1.
-            if (std::isalpha((unsigned char)c) || c == '_') {
-                while (i < s.size() && (std::isalnum((unsigned char)s[i]) || s[i] == '_'))
-                    out += s[i++];
-                continue;
-            }
-            const bool starts_num = std::isdigit((unsigned char)c)
-                || (c == '.' && i + 1 < s.size() && std::isdigit((unsigned char)s[i + 1]));
-            if (!starts_num) { out += c; ++i; continue; }
-
-            const char* start = s.c_str() + i;
-            char* end = nullptr;
-            const double v = std::strtod(start, &end);
-            if (end == start) { out += c; ++i; continue; }
-            const size_t len = (size_t)(end - start);
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "%.*g", digits, v);
-            // Короче из двух: у "2" и "1e-05" %g даёт ровно исходное.
-            if (std::strlen(buf) < len) out += buf;
-            else                        out.append(start, len);
-            i += len;
-        }
-        return out;
-    }
-
-} // namespace
+ // namespace
 
 bool composition_gamma_values(const CompositionSpec& spec,
                               const std::map<std::string, std::string>& param_values,
@@ -1409,6 +1876,7 @@ bool composition_gamma_values(const CompositionSpec& spec,
     return all_ok;
 }
 
+
 std::string wrapper_display_name(const std::string& name, int digits) {
     // Метка пользователя ЗАМЕНЯЕТ описание целиком: её задавали ровно затем,
     // чтобы в списке и в комбо стояло "S17o8", а не семнадцать коэффициентов.
@@ -1428,51 +1896,7 @@ std::string wrapper_display_name(const std::string& name, int digits) {
         shown.push_back(comp_round_literals(g, digits));
     return make_composition_name(spec.base, shown);
 }
-
-// --- Порядок списка обёрток --------------------------------------------------
-
-namespace {
-
-// Ключ сортировки обёртки. Метку не содержит: переименование строку не двигает.
-struct WrapperKey {
-    int              kind = 3;      // 0 Extr, 1 ExtrZ, 2 Comp, 3 не разобралось
-    int              base_rank = 0; // строка паспорта; кастомные — после всех встроенных
-    std::string      base;          // для кастомных опорников — алфавит
-    int              stages = 0;
-    std::vector<int> n;             // подшаги Extr
-    std::string      canon;         // имя без метки — последний разделитель
-};
-
-WrapperKey wrapper_key(const std::string& name) {
-    WrapperKey k;
-    ExtrapolationSpec esp;
-    CompositionSpec   csp;
-    if (parse_extrapolation_name(name, &esp)) {
-        k.kind   = esp.re_at_output ? 1 : 0;
-        k.base   = esp.base;
-        k.stages = (int)esp.n.size();
-        k.n      = esp.n;
-    } else if (parse_composition_name(name, &csp)) {
-        k.kind   = 2;
-        k.base   = csp.base;
-        k.stages = (int)csp.gammas.size();
-    }
-    const int r = builtin_scheme_rank(k.base);
-    k.base_rank = r >= 0 ? r : INT_MAX;
-    k.canon     = wrapper_canonical_name(name);
-    return k;
-}
-
-bool wrapper_key_less(const WrapperKey& x, const WrapperKey& y) {
-    if (x.kind != y.kind)           return x.kind < y.kind;
-    if (x.base_rank != y.base_rank) return x.base_rank < y.base_rank;
-    if (x.base != y.base)           return x.base < y.base;
-    if (x.stages != y.stages)       return x.stages < y.stages;
-    if (x.n != y.n)                 return x.n < y.n;
-    return x.canon < y.canon;
-}
-
-} // namespace
+ // namespace
 
 void sort_wrapper_schemes(std::vector<std::string>& names) {
     std::vector<std::pair<WrapperKey, std::string>> v;
@@ -1484,12 +1908,14 @@ void sort_wrapper_schemes(std::vector<std::string>& names) {
     for (size_t i = 0; i < v.size(); ++i) names[i] = std::move(v[i].second);
 }
 
+
 std::string wrapper_group_title(const std::string& name) {
     static const char* const kKind[] = { "Extr", "ExtrZ", "Comp" };
     const WrapperKey k = wrapper_key(name);
     if (k.kind > 2) return {};
     return std::string(kKind[k.kind]) + " over " + k.base;
 }
+
 
 std::string wrapper_canonical_name(const std::string& name) {
     ExtrapolationSpec esp;
@@ -1499,6 +1925,7 @@ std::string wrapper_canonical_name(const std::string& name) {
     if (parse_composition_name(name, &csp)) return make_composition_name(csp.base, csp.gammas);
     return name;
 }
+
 
 std::string wrapper_relabel(const std::string& name, const std::string& label) {
     const std::string lb = wrapper_sanitize_label(label);
@@ -1510,6 +1937,7 @@ std::string wrapper_relabel(const std::string& name, const std::string& label) {
     return name;
 }
 
+
 std::string wrapper_label(const std::string& name) {
     ExtrapolationSpec esp;
     if (parse_extrapolation_name(name, &esp)) return esp.label;
@@ -1518,9 +1946,12 @@ std::string wrapper_label(const std::string& name) {
     return {};
 }
 
+
 std::string wrap_composition(const std::string& base_body, const System& sys,
                              const std::vector<std::string>& gammas,
                              int p, bool symmetric, const std::string& base_name) {
+    // Неавтономная база: стадия k начинается в t0 + h*(gamma_0 + ... + gamma_{k-1}).
+    const bool ht = step_body_uses_time(base_body);
     const int K = (int)gammas.size();
     if (K < 1) throw std::runtime_error("composition needs at least one stage");
     if (base_body.empty()) throw std::runtime_error("composition needs a base body");
@@ -1569,25 +2000,37 @@ std::string wrap_composition(const std::string& base_body, const System& sys,
 
     // Та же подстановка, что у wrap_extrapolation, и по той же причине:
     // внутренний h затеняет макрошаг, поэтому база не правится ни в одном символе.
+    // Начало стадии k в долях h: (gamma_0 + ... + gamma_{k-1}), только при явном времени.
+    auto t_off = [&](int k) {
+        std::string acc = "(numb)0";
+        for (int j = 0; j < k; ++j) acc += " + (" + gc[(size_t)j] + ")";
+        return acc;
+    };
+    if (ht) o << "    const numb ucuda_t_co = ucuda_t;\n";
     if (wrapper_can_inline(base_body)) {
         o << "    const numb h_co = h;\n";
         for (int k = 0; k < K; ++k) {
             o << "    {   // stage " << k << "\n";
             o << "        const numb h = h_co * (" << gc[(size_t)k] << ");\n";
+            if (ht) o << "        const numb ucuda_t = ucuda_t_co + h_co * (" << t_off(k) << ");\n";
             emit_indented(o, base_body, "    ");
             o << "    }\n";
         }
     } else {
         o << "    // base contains return/goto: kept in a lambda, see wrapper_can_inline\n";
-        o << "    auto step_co = [&](const numb h) {\n";
+        o << "    auto step_co = [&](const numb h" << (ht ? ", const numb ucuda_t" : "") << ") {\n";
         emit_indented(o, base_body, "    ");
         o << "    };\n\n";
-        for (int k = 0; k < K; ++k)
-            o << "    step_co(h * (" << gc[(size_t)k] << "));\n";
+        for (int k = 0; k < K; ++k) {
+            o << "    step_co(h * (" << gc[(size_t)k] << ")";
+            if (ht) o << ", ucuda_t_co + h * (" << t_off(k) << ")";
+            o << ");\n";
+        }
     }
 
     return o.str();
 }
+
 
 std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch) {
     // Одна форма на оба пути. CPU-интегратор считает тот же AST через
@@ -1600,9 +2043,12 @@ std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch) {
     return codegen_scheme(s, sch);
 }
 
+
 std::vector<std::string> codegen_rhs(const System& s) {
-    return rhs_over(s, "X");
+    // Превью: явное время печатается как есть, "t" (в шаге оно станет временем стадии).
+    return rhs_over(s, "X", system_uses_time(s) ? "t" : "");
 }
+
 
 // Нормализация значения параметра
 std::string normalize_value(const std::string& value) {

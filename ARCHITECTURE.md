@@ -97,4 +97,13 @@ The application resolves packaged resources relative to the executable, not the 
 
 ## Documentation map
 
+DAE IR, device expansion and scheme generation belong to equations. Domain owns
+serializable DAE/Newton settings and sparse numerical data types. Numerics owns
+the CPU BDF driver and SPICE/KiCad import; CUDA owns GPU/NVRTC execution of the
+same adaptive/BDF algorithms. Runtime packaging includes their common headers.
+Test executables depend on the owning libraries and never require GUI. The
+GoogleTest/Benchmark dependencies and artifact/baseline CLI live only in tests.
+Domain's trajectory work description contains only values; the asynchronous
+GPU cost estimator belongs to application, alongside AppModel.
+
 The root [README.md](README.md) answers “where should I start?”. [libs/README.md](libs/README.md) maps library ownership. Directory README files explain design and entry points; directory AGENTS files contain operational rules for coding agents.

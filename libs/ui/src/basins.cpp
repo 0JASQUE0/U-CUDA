@@ -1,23 +1,17 @@
 ﻿#include "gui_internal.h"
+using namespace ucuda::ui_detail;
 
 namespace ucuda::ui_detail {
-
-
-// owner_id блока плотов одного basins-config'а (5 внутренних табов на config).
 [[nodiscard]] unsigned basins_base_oid(int config_index) {
     return 0x1BA50000u + (unsigned)config_index * 5u;
 }
+}
 
-
-// Цвет бассейна `display_id` — ровно тот, которым его красит хитмапа.
-// Повторяет квантование из FS_HEATMAP (plot_renderer.cpp): t по [vmin,vmax],
-// дискретизация по полосам с edge-aligned сэмплированием, затем reverse.
+namespace ucuda::ui_detail {
 ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
-                              int config_index, int display_id) {
-    double vmin = 0.0, vmax = 0.0;
-    basins_colorbar_range(c, vmin, vmax);
-
-    int  cm      = (c.colormap_idx[0] >= 0) ? c.colormap_idx[0] : model.basins_colormap;
+                              int config_index, int display_id,
+                              double vmin, double vmax) {
+    int  cm     = (c.colormap_idx[0] >= 0) ? c.colormap_idx[0] : model.basins_colormap;
     bool reverse = false;
     // discrete_default для этого вью = true, поэтому дефолт (пока панель ни
     // разу не рисовалась) — дискретный, по одной полосе на целый id.
@@ -50,11 +44,18 @@ ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
     if (reverse) t = 1.0f - t;
     return ImGui::ColorConvertU32ToFloat4(cmap_sample(t, (HeatmapColormap)cm));
 }
+}
 
+namespace ucuda::ui_detail {
+ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
+                              int config_index, int display_id) {
+    double vmin = 0.0, vmax = 0.0;
+    basins_colorbar_range(c, vmin, vmax);
+    return basins_id_color(c, model, config_index, display_id, vmin, vmax);
+}
+}
 
-// Панель «Phase portraits» внутри Basins Controls. Интегратор и параметры —
-// из самого basins-config'а; своё тут только время моделирования, прореживание,
-// ограничитель числа аттракторов и выбор CPU/GPU.
+namespace ucuda::ui_detail {
 void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
     BasinsAnalysisSession& s = model.basins_session;
     if (cfg_idx < 0 || cfg_idx >= (int)s.configs.size()) return;
@@ -239,8 +240,9 @@ void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
 
     if (changed) s.phase_settings_dirty = true;
 }
+}
 
-
+namespace ucuda::ui_detail {
 void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     BasinsAnalysisSession& s = model.basins_session;
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
@@ -309,15 +311,27 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
             c.axis_y_var = (s.vars.size() > 1) ? 1 : 0;
         const std::vector<const char*> items = c_str_list(s.vars);
 
+        // ±log — сетка легаси basinsOfAttraction_logAxes: |x| по логарифму на [lo, hi] по обе
+        // стороны от нуля, lo/hi тогда — границы модуля. Условия проверяет run_basins.
+        auto symlog_toggle = [](const char* id, bool& on) {
+            ImGui::SameLine();
+            ImGui::Checkbox(id, &on);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("|x| log-spaced on [lo, hi] on both sides of 0\n"
+                                  "(nodes -hi..-lo, +lo..+hi, monotone).\n"
+                                  "lo, hi > 0; Resolution even.");
+        };
         ImGui::SetNextItemWidth(kComboW);
         ImGui::Combo("Axis X (IC)", &c.axis_x_var, items.data(), (int)items.size());
-        InputNumStr("X lo", c.axis_x_lo_text, kFieldW);
-        InputNumStr("X hi", c.axis_x_hi_text, kFieldW);
+        symlog_toggle("\xC2\xB1log##bas_xsym", c.axis_x_symlog);
+        InputNumStr(c.axis_x_symlog ? "|X| lo" : "X lo", c.axis_x_lo_text, kFieldW);
+        InputNumStr(c.axis_x_symlog ? "|X| hi" : "X hi", c.axis_x_hi_text, kFieldW);
 
         ImGui::SetNextItemWidth(kComboW);
         ImGui::Combo("Axis Y (IC)", &c.axis_y_var, items.data(), (int)items.size());
-        InputNumStr("Y lo", c.axis_y_lo_text, kFieldW);
-        InputNumStr("Y hi", c.axis_y_hi_text, kFieldW);
+        symlog_toggle("\xC2\xB1log##bas_ysym", c.axis_y_symlog);
+        InputNumStr(c.axis_y_symlog ? "|Y| lo" : "Y lo", c.axis_y_lo_text, kFieldW);
+        InputNumStr(c.axis_y_symlog ? "|Y| hi" : "Y hi", c.axis_y_hi_text, kFieldW);
     } else {
         ImGui::TextDisabled("No variables (load a system first)");
     }
@@ -335,6 +349,8 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         IntegrationFields f;
         f.h           = &c.h_text;
         f.symmetry_s  = &c.symmetry_s;
+        f.cd_fp_iters = &c.cd_fp_iters;
+        f.newton      = &c.newton;
         f.t_max       = &c.t_max_text;
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
@@ -405,24 +421,15 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
             "OK: %dx%d, %d clusters (+ %d FP clusters)",
             c.result.n_pts, c.result.n_pts,
             c.result.n_clusters, -c.result.min_cluster_idx);
-        draw_regime_summary(c.result.helpful_array);
+        draw_regime_summary(c.result.helpful_array, &c.regime_counts, c.data_generation);
         draw_adaptive_stats(c.result.ad_stats);
     } else if (!c.last_error.empty()) {
         draw_error_box("##basins_err", c.last_error);
     }
 }
+}
 
-
-// Plot Basins: inner tab-bar по 5 представлениям. Heatmap-views — per (config × tab) в
-// std::map по owner_id: HeatmapView/Plot2DView хранят data_gen_cached внутри без учёта
-// owner_id, поэтому один view нельзя переиспользовать между configs (после Run All у двух
-// configs одинаковый data_generation=1 → кэш не инвалидируется и на чужой вкладке виден
-// предыдущий буфер). Map с lazy-init решает это и сохраняет независимый zoom/pan per (config, tab).
-// spiral_coords_from_center / renumber_basins_spiral / ensure_basins_spiral_cache переехали в
-// analysis_session.cpp (объявления в analysis_session.h): перенумерация нужна не только для
-// отрисовки, но и для выбора представительных ячеек в фазовых портретах
-// (BasinsAnalysisSession::rebuild_phase_ics), а тот слой про GUI ничего не знает.
-
+namespace ucuda::ui_detail {
 void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     BasinsAnalysisSession& s = model.basins_session;
     if (s.configs.empty()) {
@@ -435,13 +442,38 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
     // Owner IDs зависят от индекса config — каждый basin имеет независимый
     // zoom/pan per inner tab. Схема: 0x1BA50000 + cfg*5 + tab (max 50 configs).
     const unsigned base_oid = basins_base_oid(s.active_config_index);
-    auto& renderer = ui_resource<std::unique_ptr<PlotRenderer>, 7>();
+    auto& renderer = ui_resource<std::unique_ptr<PlotRenderer>, 3000>();
     // hm_basins — на уровне файла (basins_heatmaps()), см. комментарий у объявления.
-    auto& hm_avgpk = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 80>();
-    auto& hm_avgint = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 81>();
-    auto& hm_states = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 8>();
-    auto& scatter_views = ui_resource<std::map<unsigned, std::unique_ptr<Plot2DView>>, 9>();
+    auto& hm_avgpk = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 3001>();
+    auto& hm_avgint = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 3002>();
+    auto& hm_states = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 3003>();
+    auto& scatter_views = ui_resource<std::map<unsigned, std::unique_ptr<Plot2DView>>, 3004>();
+    // Точки Scatter, разложенные по кластерам (см. вкладку 4 ниже). Кэш
+    // отрисовки, не состояние UI: восстанавливается из c.result в любой момент.
+    struct ScatterClusterCache {
+        bool   valid = false;
+        int    gen = 0;
+        bool   renumber = false;
+        size_t total = 0;
+        int    valid_pts = 0;
+        double vmin = 0.0, vmax = 0.0;   // basins_colorbar_range
+        const int*  src_idx = nullptr;
+        const void* src_x   = nullptr;
+        std::vector<int>                 ids;
+        std::vector<std::vector<double>> bufs;
+        std::vector<std::string>         labels;
+    };
+    auto& scatter_cache = ui_resource<std::map<unsigned, ScatterClusterCache>, 3005>();
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
+    static int seen_epoch = 0;
+    if (session_reloaded(model, AppModel::AppMode::Basins, seen_epoch)) {
+        scatter_cache.clear();
+        invalidate_views(basins_heatmaps());
+        invalidate_views(hm_avgpk);
+        invalidate_views(hm_avgint);
+        invalidate_views(hm_states);
+        invalidate_views(scatter_views);
+    }
     auto get_hm = [](std::map<unsigned, std::unique_ptr<HeatmapView>>& m, unsigned oid,
                      bool discrete_default) -> HeatmapView& {
         auto& slot = m[oid];
@@ -461,7 +493,12 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
             slot->points_mode = true;
             slot->show_legend = false;
             slot->point_size_px = 3.0f;
-            slot->pad_x = false;
+            // Запас 2.5% размаха с каждой стороны по обеим осям: без него крайние
+            // кластеры ложились на рамку и маркеры обрезались ею наполовину.
+            slot->pad_x = true;
+            slot->pad_y = true;
+            slot->pad_frac = 0.025;
+            slot->pad_degenerate_rel = true;
         }
         return *slot;
     };
@@ -577,7 +614,29 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
             topts.extras = [&]() { draw_renumber(/*same_line*/ true); };
             draw_heatmap_toolbar(*active_hm, topts);
         } else {
-            draw_renumber(/*same_line*/ false);   // Scatter-таб: только Renumber
+            // Scatter-таб: Renumber и стиль точек (форма, размер, α — per-config,
+            // уходят в _last_basins.json через phase_settings_dirty).
+            draw_renumber(/*same_line*/ false);
+            if (c.active_plot_tab == 4) {
+                ImGui::SameLine();
+                if (draw_style_toolbar("Custom point style", "bas_scatter", c.scatter_custom_style,
+                        [&c]() {
+                            if (c.scatter_marker < 0 || c.scatter_marker >= kPointMarkerCount)
+                                c.scatter_marker = 0;
+                            bool ch = false;
+                            ImGui::SetNextItemWidth(150);
+                            ch |= ImGui::Combo("Marker##bas_scatter", &c.scatter_marker,
+                                               kPointMarkerNames, kPointMarkerCount);
+                            ImGui::SetNextItemWidth(150);
+                            ch |= ImGui::SliderFloat("Point size##bas_scatter", &c.scatter_point_size,
+                                                     0.5f, 12.0f, "%.1f");
+                            ImGui::SetNextItemWidth(150);
+                            ch |= ImGui::SliderFloat("Alpha##bas_scatter", &c.scatter_alpha,
+                                                     0.0f, 1.0f, "%.2f");
+                            return ch;
+                        }))
+                    s.phase_settings_dirty = true;
+            }
         }
     }
     if (c.renumber_spiral) ensure_basins_spiral_cache(c);
@@ -586,6 +645,11 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
     size_t total = (size_t)n * (size_t)n;
     double xlo = c.result.axis_x_lo, xhi = c.result.axis_x_hi;
     double ylo = c.result.axis_y_lo, yhi = c.result.axis_y_hi;
+    // Шкала осей — свойство посчитанной сетки (результата), а не текущих галок конфига.
+    for (HeatmapView* hv : { &hm_basins_v, &hm_avgpk_v, &hm_avgint_v, &hm_states_v }) {
+        hv->x_axis.symlog = c.result.axis_x_symlog;
+        hv->y_axis.symlog = c.result.axis_y_symlog;
+    }
 
     auto axis_name = [&](int var_idx) -> std::string {
         if (var_idx >= 0 && var_idx < (int)s.vars.size())
@@ -698,49 +762,67 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
         const int* src_idx = c.renumber_spiral
                                  ? c.basin_idx_spiral.data()
                                  : c.result.basin_idx.data();
-        int min_id = c.renumber_spiral ? c.min_cluster_idx_spiral : c.result.min_cluster_idx;
-
-        // Сгруппируем точки по basin_idx.
-        std::map<int, std::vector<double>> bufs;
-        int valid_pts = 0;
-        for (size_t k = 0; k < total; ++k) {
-            int id = src_idx[k];
-            double xp = c.result.avg_peaks[k];
-            double yp = c.result.avg_intervals[k];
-            if (!std::isfinite(xp) || !std::isfinite(yp)) continue;
-            if (xp ==  kSentinelNoData || xp == -kSentinelNoData ||
-                yp ==  kSentinelNoData || yp == -kSentinelNoData) continue;
-            bufs[id].push_back((double)xp);
-            bufs[id].push_back((double)yp);
-            ++valid_pts;
+        // Раскладка точек по кластерам — ОДИН раз на результат, а не каждый кадр:
+        // на сетке 2000x2000 это 4 млн push_back в std::map и ~64 МБ аллокаций за
+        // кадр, тогда как VBO в Plot2DView по тому же gen-токену не перезаливается
+        // вовсе. Ключ кэша повторяет gen-токен scatter'а (data_generation +
+        // renumber_spiral) плюс размер сетки. Прореживания нет: рисуются все точки,
+        // редкие выбросы не теряются.
+        ScatterClusterCache& sc = scatter_cache[base_oid + 4u];
+        // Указатели на буферы результата — страховка на случай, когда тот же oid
+        // достаётся другому config'у (удаление вкладки) с совпавшим data_generation.
+        if (!sc.valid || sc.gen != c.data_generation || sc.renumber != c.renumber_spiral ||
+            sc.total != total || sc.src_idx != src_idx || sc.src_x != c.result.avg_peaks.data()) {
+            std::map<int, std::vector<double>> bufs;
+            int valid_pts = 0;
+            for (size_t k = 0; k < total; ++k) {
+                int id = src_idx[k];
+                double xp = c.result.avg_peaks[k];
+                double yp = c.result.avg_intervals[k];
+                if (!std::isfinite(xp) || !std::isfinite(yp)) continue;
+                if (xp ==  kSentinelNoData || xp == -kSentinelNoData ||
+                    yp ==  kSentinelNoData || yp == -kSentinelNoData) continue;
+                bufs[id].push_back((double)xp);
+                bufs[id].push_back((double)yp);
+                ++valid_pts;
+            }
+            sc.ids.clear(); sc.bufs.clear(); sc.labels.clear();
+            sc.ids.reserve(bufs.size()); sc.bufs.reserve(bufs.size()); sc.labels.reserve(bufs.size());
+            for (auto& kv : bufs) {
+                sc.ids.push_back(kv.first);
+                sc.bufs.push_back(std::move(kv.second));
+                sc.labels.push_back("c" + std::to_string(kv.first));
+            }
+            sc.valid_pts = valid_pts;
+            // Диапазон colorbar'а карты зависит только от данных и Renumber —
+            // кэшируем вместе с раскладкой (он сканирует всю helpful_array).
+            basins_colorbar_range(c, sc.vmin, sc.vmax);
+            sc.gen       = c.data_generation;
+            sc.renumber  = c.renumber_spiral;
+            sc.total     = total;
+            sc.src_idx   = src_idx;
+            sc.src_x     = c.result.avg_peaks.data();
+            sc.valid     = true;
         }
-        if (valid_pts == 0) {
+        if (sc.valid_pts == 0) {
             ImGui::TextDisabled("No valid (avgPeak, avgInterval) points.");
             return;
         }
 
-        // Буферы локальные: render() ниже забирает точки синхронно, дольше
-        // вызова указатели не нужны (static здесь ещё и делил бы память между
-        // config'ами бассейнов).
-        std::vector<std::vector<double>> series_buffers;
-        std::vector<std::string>        series_labels;
-        series_buffers.reserve(bufs.size());
-        series_labels.reserve(bufs.size());
-
         std::vector<PlotSeriesInput> series_in;
         std::vector<bool> init_vis, glob_vis;
-        for (auto& kv : bufs) {
-            int id = kv.first;
-            series_buffers.push_back(std::move(kv.second));
-            series_labels.push_back("c" + std::to_string(id));
-            // Цвет per-cluster через ic_base_color (golden-ratio hash). Сдвиг
-            // на (id - min_id) — чтобы FP-кластеры (отрицательные) и Osc
-            // (положительные) тоже разделялись.
+        series_in.reserve(sc.bufs.size());
+        for (size_t j = 0; j < sc.bufs.size(); ++j) {
+            const int id = sc.ids[j];
+            // Цвет кластера — ровно тот, которым его ячейки красит карта «Basins»
+            // (basins_id_color: та же колормапа, reverse, дискретизация и диапазон
+            // FP..0..Osc, живые настройки вью карты). Пересчёт каждый кадр дешёвый
+            // (по вызову на кластер), зато смена колормапы видна сразу.
             PlotSeriesInput si;
-            si.points   = series_buffers.back().empty() ? nullptr : series_buffers.back().data();
-            si.n_points = (int)(series_buffers.back().size() / 2);
-            si.color    = ic_base_color(id - min_id);
-            si.label    = series_labels.back();
+            si.points   = sc.bufs[j].empty() ? nullptr : sc.bufs[j].data();
+            si.n_points = (int)(sc.bufs[j].size() / 2);
+            si.color    = basins_id_color(c, model, s.active_config_index, id, sc.vmin, sc.vmax);
+            si.label    = sc.labels[j];
             series_in.push_back(si);
             init_vis.push_back(true);
             glob_vis.push_back(true);
@@ -756,6 +838,21 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
         // sqrt(dx^2+dy^2) <= eps), и множители Feature 1/2 в них уже вписаны на GPU, поэтому
         // накрытые кружком ячейки — кандидаты попасть в один бассейн.
         scatter_v.hover_circle_r = parse_ratio_or(c.eps_dbscan_text, 0.5);
+        // Стиль точек — каждый кадр из config'а (immediate mode). Выключенный
+        // стиль возвращает прежний вид: marker -1 = сплошной GL-пойнт 3 px.
+        // α через point_alpha, а не через цвет серии: point_alpha включает
+        // смешивание (у сплошного GL-пойнта альфа писалась бы прямо в текстуру).
+        if (c.scatter_custom_style) {
+            const int mk = (c.scatter_marker >= 0 && c.scatter_marker < kPointMarkerCount)
+                         ? c.scatter_marker : 0;
+            scatter_v.point_marker  = mk;
+            scatter_v.point_size_px = c.scatter_point_size;
+            scatter_v.point_alpha   = c.scatter_alpha;
+        } else {
+            scatter_v.point_marker  = -1;
+            scatter_v.point_size_px = 3.0f;
+            scatter_v.point_alpha   = -1.0f;
+        }
         // gen-token включает renumber_spiral — иначе Plot2DView::series_cache_
         // не перезаливает GPU-буфер и подписи/цвета остаются от прошлой версии.
         int scatter_gen = c.data_generation * 2 + (c.renumber_spiral ? 1 : 0);
@@ -764,12 +861,9 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
                              series_in, init_vis, glob_vis, fit);
     }
 }
+}
 
-
-// Окна фазовых портретов по бассейнам — только для АКТИВНОГО config'а
-// (панель хитмапы показывает его же). Набор проекций и результат у каждого
-// config'а свои, поэтому переключение вкладки сразу показывает свои окна с
-// уже посчитанными данными.
+namespace ucuda::ui_detail {
 void draw_basins_phase_windows(AppModel& model, const GuiCallbacks& cb) {
     BasinsAnalysisSession& s = model.basins_session;
     s.ensure_phase_slots();
@@ -830,16 +924,32 @@ void draw_basins_phase_windows(AppModel& model, const GuiCallbacks& cb) {
     // Окно могли закрыть крестиком — список окон изменился, надо сохранить.
     if (sl.phase.projections.size() != n_before) s.phase_settings_dirty = true;
 }
+}
 
+namespace ucuda::ui_detail {
+void basins_phase_tick(AppModel& model) {
+    BasinsAnalysisSession& s = model.basins_session;
+    s.ensure_phase_slots();
+    const double now = ImGui::GetTime();
+    for (int i = 0; i < (int)s.configs.size(); ++i) {
+        BasinsConfig&    c  = s.configs[(size_t)i];
+        BasinsPhaseSlot& sl = *s.phase_slots[(size_t)i];
+        const std::string sig = build_basins_phase_signature(c);
+        if (sig != sl.pending_signature) {
+            sl.pending_signature = sig;
+            sl.pending_since     = now;
+        }
+        if (sig == sl.run_signature) continue;         // актуально
+        if (!c.pp_autorun) continue;
+        if (!c.last_run_ok || c.result.basin_idx.empty()) continue;
+        if (sl.phase.in_flight) continue;
+        if (now - sl.pending_since < kBasinsPhaseDebounceSec) continue;   // ещё печатают
+        s.request_phase_run(i);
+    }
+}
+}
 
-// Раз в кадр: пометить устаревшие портреты и, если включён Autorun, поставить их в
-// очередь. Дебаунс 300 мс — иначе каждое нажатие клавиши в текстовом поле стартовало бы
-// новый GPU-прогон. Проходим по ВСЕМ config'ам: после «Run all…» автозапуск должен
-// подхватить каждый пересчитанный конфиг, а не только открытый.
-
-
-// Fast Synchro Controls + Plot — recurrent synchronization (anti-sync).
-// Mode 0 = On Attractor (trajectory + per-point error); Mode 1 = On Grid.
+namespace ucuda::ui_detail {
 void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     FastSyncAnalysisSession& s = model.fastsync_session;
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
@@ -918,6 +1028,12 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
                       &model, model.is_map, &s.wrapper_schemes);
     if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
         InputNumStr("symmetry s", c.symmetry_s, kFieldW);
+    if (scheme_uses_cd_fp_iters(c.scheme)) {
+        InputNumStr("FP iterations n", c.cd_fp_iters, kFieldW);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
+    }
+    if (scheme_uses_newton(c.scheme))
+        draw_newton_fields(c.newton, kFieldW, "fs_newton");
     ImGui::Separator();
 
     // Mode-specific axes

@@ -37,12 +37,12 @@
 
 						if (doInterpolatePeaks) {
 							numb denom = data[j - 1] - (numb)2.0 * data[j] + data[j + 1];
-							numb delta = 0.0;
-							//denom == (numb)0.0 ? delta = 0.0 : delta = 0.5 * (data[j - 1] - data[j + 1]) / denom;
-							if (fabs(denom) > 1e-12) {
-								delta = 0.5 * (data[j - 1] - data[j + 1]) / denom;
+							// Литералы через (numb): голый 0.5 уводил float-сборку в FP64 на каждом пике.
+							numb delta = (numb)0;
+							if (fabs(denom) > (numb)1e-12) {
+								delta = (numb)0.5 * (data[j - 1] - data[j + 1]) / denom;
 							}
-							outPeaks[peakBase + amountOfPeaks] = data[j] - 0.25 * (data[j - 1] - data[j + 1]) * delta;
+							outPeaks[peakBase + amountOfPeaks] = data[j] - (numb)0.25 * (data[j - 1] - data[j + 1]) * delta;
 							timeOfPeaks[peakBase + amountOfPeaks] = (numb)(j - startDataIndex - 1) + delta; // в оригинале delta*h но у нас тут индексы, умнодение на h потом
 						}
 						else {
@@ -126,6 +126,7 @@
 
 // Нахождение пиков в "data" массиве в многопоточном режиме
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_peakFinderCUDA)
 __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h, const int* actualIterations,
 	const size_t peakStride, const int peakCapacity, const bool emitAllSamples)
@@ -147,11 +148,9 @@ __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int a
 		return;
 	}
 
-	if (amountOfPeaks[idx] == REGIME_UNBOUND)
-	{
-		amountOfPeaks[idx] = REGIME_UNBOUND;
+	// Cancelled — тоже без данных, код проносим как есть.
+	if (amountOfPeaks[idx] == REGIME_UNBOUND || amountOfPeaks[idx] == REGIME_CANCELLED)
 		return;
-	}
 
 	// dt-sweep: only the first actualIterations[idx] samples of this thread's
 	// (worst-case-sized) block are real data -- the rest is stale/uninitialised
@@ -173,7 +172,9 @@ __global__ void peakFinderCUDA(numb* data, const size_t sizeOfBlock, const int a
 		peakBase, peakCapacity );
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_globalPeakFinderCUDA)
 __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* globalPeakValue)
 {
@@ -193,7 +194,9 @@ __global__ void globalPeakFinderCUDA(numb* data, const size_t sizeOfBlock, const
 	globalPeakValue[idx] = globalPeakFinder(data, (size_t)idx * sizeOfBlock, sizeOfBlock);
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_DFT_custom)
 __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq, numb h,
 	const int logFreqAxis)
@@ -219,7 +222,7 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 		return;
 	}
 
-	if (checker == 0)
+	if (checker == 0 || checker == REGIME_CANCELLED)
 	{
 		for (size_t i = 0; i < nFreq; i++) {
 			AkCOS[startIndexFreq + i] = 0.0;
@@ -249,8 +252,9 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 		BkSIN[startIndexFreq + k] = 0;
 		f_k = logFreqAxis ? getValueByIdx_log((int)k, nFreq, freq_lo, freq_hi, 0)
 		                   : (f_start + (numb)k * f_step);
-		cos_theta = cos(2.0 * pi * h * f_k);
-		sin_theta = sin(2.0 * pi * h * f_k);
+		// (numb)2.0: с голым 2.0 cos/sin шли в double и во float-сборке.
+		cos_theta = cos((numb)2.0 * pi * h * f_k);
+		sin_theta = sin((numb)2.0 * pi * h * f_k);
 		cos_n = 1.0;
 		sin_n = 0.0;
 		int reset_counter = RESET_INTERVAL;
@@ -275,7 +279,7 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 			if (--reset_counter == 0) {
 				reset_counter = RESET_INTERVAL;
 				if (n + 1 < sizeOfBlock) {
-					numb exact_angle = psi * f_k * (numb)(n + 1.0);
+					numb exact_angle = psi * f_k * (numb)(n + 1);
 					cos_n = cosf(exact_angle);
 					sin_n = sinf(exact_angle);
 				}
@@ -292,7 +296,77 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 
 	return;
 }
+#endif
 
+// DFT_custom с потоком на пару (точка, частота) вместо потока на точку. Аргументы те же, сетка —
+// amountOfBlocks * nFreq потоков. Зачем: в DFT_custom поток последовательно проходит nFreq частот
+// по sizeOfBlock отсчётов, а точек свипа в 1D мало (500..2000 — 16..63 блока на 30 SM), так что
+// GPU простаивал: FP64 занят на 18 %, ~3.4 с на свип почти независимо от числа точек.
+// Арифметика на пару (k, точка) — та же, операция в операцию (f_k, поворот, сброс через
+// cosf/sinf, деление в конце), сумма лишь копится в регистре, а не в AkCOS[]: результат бит-в-бит
+// как у DFT_custom. Соседние потоки — соседние частоты одной точки, поэтому data[n] и window[n]
+// варп читает одним запросом. DFT_custom оставлен для NonLinAnal (hostLibrary.cu).
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_DFT_custom_pf)
+__global__ void DFT_custom_pf(numb* data, const int sizeOfBlock, const int amountOfBlocks,
+	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq, numb h,
+	const int logFreqAxis)
+{
+	const size_t tid = (size_t)threadIdx.x + (size_t)blockIdx.x * blockDim.x;
+	if (tid >= (size_t)amountOfBlocks * (size_t)nFreq)
+		return;
+	const size_t idx = tid / (size_t)nFreq;
+	const size_t k   = tid - idx * (size_t)nFreq;
+
+	const size_t startDataIndex = idx * sizeOfBlock;
+	const size_t outIndex       = idx * nFreq + k;
+
+	const int checker = __ldg(&checkerArray[idx]);
+	if (checker == -1) { AkCOS[outIndex] = -1.0; BkSIN[outIndex] = -1.0; return; }
+	if (checker == 0 || checker == REGIME_CANCELLED) { AkCOS[outIndex] = 0.0;  BkSIN[outIndex] = 0.0;  return; }
+
+	const int RESET_INTERVAL = 1000;
+
+	const numb freq_lo = __ldg(&rangesFreq[0]);
+	const numb freq_hi = __ldg(&rangesFreq[1]);
+	const numb f_step = (freq_hi - freq_lo) / (numb)(nFreq - 1);
+	const numb f_start = freq_lo;
+	const numb psi = 2 * pi * h;
+
+	const numb f_k = logFreqAxis ? getValueByIdx_log((int)k, nFreq, freq_lo, freq_hi, 0)
+	                             : (f_start + (numb)k * f_step);
+	const numb cos_theta = cos((numb)2.0 * pi * h * f_k);
+	const numb sin_theta = sin((numb)2.0 * pi * h * f_k);
+	numb cos_n = 1.0;
+	numb sin_n = 0.0;
+	numb ak = 0;
+	numb bk = 0;
+	int reset_counter = RESET_INTERVAL;
+
+	for (size_t n = 0; n < sizeOfBlock; n++) {
+		const numb wd = __ldg(&window[n]) * __ldg(&data[startDataIndex + n]);
+		ak += wd * cos_n;
+		bk += wd * sin_n;
+
+		numb new_cos = cos_n * cos_theta - sin_n * sin_theta;
+		numb new_sin = sin_n * cos_theta + cos_n * sin_theta;
+		cos_n = new_cos;
+		sin_n = new_sin;
+
+		if (--reset_counter == 0) {
+			reset_counter = RESET_INTERVAL;
+			if (n + 1 < sizeOfBlock) {
+				numb exact_angle = psi * f_k * (numb)(n + 1);
+				cos_n = cosf(exact_angle);
+				sin_n = sinf(exact_angle);
+			}
+		}
+	}
+	AkCOS[outIndex] = ak / (numb)sizeOfBlock;
+	BkSIN[outIndex] = bk / (numb)sizeOfBlock;
+}
+#endif
+
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_MeanAndMedianFreqCUDA)
 __global__ void MeanAndMedianFreqCUDA(const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanFreq,  numb* medianFreq)
 {
@@ -322,7 +396,9 @@ __global__ void MeanAndMedianFreqCUDA(const int sizeOfBlock, const int amountOfB
 	MeanAndMedianFreq(idx, idx * sizeOfBlock, AoP, outPeaks, timeOfPeaks, meanFreq, medianFreq);
 	//return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_MeanAndVarianceCUDA)
 __global__ void MeanAndVarianceCUDA(const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb* meanPeak, numb* variancePeak, numb* meanInterval, numb* varianceInterval, numb* maxPeak, numb* maxInterval)
 {
@@ -376,7 +452,9 @@ __global__ void MeanAndVarianceCUDA(const int sizeOfBlock, const int amountOfBlo
 	MeanAndVariance(idx, idx * sizeOfBlock, AoP, outPeaks, timeOfPeaks, meanPeak, variancePeak, meanInterval, varianceInterval, maxPeak, maxInterval);
 	//return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_peakFinderCUDA_H)
 __global__ void peakFinderCUDA_H(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, numb h)
 {
@@ -395,7 +473,9 @@ __global__ void peakFinderCUDA_H(numb* data, const int sizeOfBlock, const int am
 	amountOfPeaks[idx] = peakFinder(data, idx * sizeOfBlock, amountOfPeaks[idx], outPeaks, timeOfPeaks, h);
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_peakFinderCUDAForCalculationOfPeriodicityByOstrovsky)
 __global__ void peakFinderCUDAForCalculationOfPeriodicityByOstrovsky(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, numb* outPeaks, numb* timeOfPeaks, bool* flags, numb ostrovskyThreshold)
 {
@@ -461,6 +541,7 @@ __global__ void peakFinderCUDAForCalculationOfPeriodicityByOstrovsky(numb* data,
 		flags[idx * 5 + 4] = false;
 	return;
 }
+#endif
 
 __device__ __host__ int kde(numb* data, const int startDataIndex, const int amountOfPoints,
 	int maxAmountOfPeaks, int kdeSampling, numb kdeSamplesInterval1,
@@ -530,6 +611,7 @@ __device__ __host__ int kde(numb* data, const int startDataIndex, const int amou
 	return resultKde;
 }
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_kdeCUDA)
 __global__ void kdeCUDA(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* amountOfPeaks, int* kdeResult, int maxAmountOfPeaks, int kdeSampling, numb kdeSamplesInterval1,
 	numb kdeSamplesInterval2, numb kdeSmoothH)
@@ -546,6 +628,7 @@ __global__ void kdeCUDA(numb* data, const int sizeOfBlock, const int amountOfBlo
 	kdeResult[idx] = kde(data, idx * sizeOfBlock, amountOfPeaks[idx], maxAmountOfPeaks,
 		kdeSampling, kdeSamplesInterval1, kdeSamplesInterval2, kdeSmoothH);
 }
+#endif
 
 // Вычисляет расстояние между двумя точками
 
@@ -617,12 +700,14 @@ __device__ __host__ void ucuda_heapsort(numb* a, int n)
 // Отсюда O(P log P) вместо O(P^2): при P = 2500 это ~56 тысяч операций против
 // 6.25 миллионов.
 //
-// values — исходные значения (не меняются), scratch — рабочий буфер на P элементов.
+// values — исходные значения (не меняются), scratch — рабочий буфер на P элементов,
+// scale — множитель оси (mult_peak / mult_interval): умножаем при копировании, а не
+// на месте в буфере пиков, — то же произведение, на запись меньше.
 // Сравнение `!(gap < eps)` повторяет порог общего пути ровно, включая строгость.
 __device__ __host__ int ucuda_components_1d(const numb* values, numb* scratch,
-	const int amountOfPeaks, const numb eps)
+	const int amountOfPeaks, const numb eps, const numb scale)
 {
-	for (int i = 0; i < amountOfPeaks; ++i) scratch[i] = values[i];
+	for (int i = 0; i < amountOfPeaks; ++i) scratch[i] = values[i] * scale;
 	ucuda_heapsort(scratch, amountOfPeaks);
 
 	int clusters = 1;

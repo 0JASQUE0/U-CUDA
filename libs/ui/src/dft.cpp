@@ -1,8 +1,7 @@
 ﻿#include "gui_internal.h"
+using namespace ucuda::ui_detail;
 
 namespace ucuda::ui_detail {
-
-
 void draw_dft1d_controls(AppModel& model, SystemLibrary& lib) {
     Dft1DAnalysisSession& s = model.dft1d_session;
 
@@ -97,11 +96,9 @@ void draw_dft1d_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::SameLine();
     if (ImGui::Button("Reset windows layout")) { model.dft1d_layout_generation++; }
 }
+}
 
-
-// Per-window heatmap rendering — mirrors the colored_1d block of
-// draw_bifurcation_plot (toolbar + lazy display-cache rebuild + render()) and
-// draw_basins_plot's colormap/autoscale/swap-axes toolbar.
+namespace ucuda::ui_detail {
 void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
                            Dft1DPlotWindow& win,
                            PlotRenderer& renderer,
@@ -244,6 +241,7 @@ void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb
         double x1 = rev ? lo : hi;
 
         hc.cell_regime = regime_cell_label(c.result.flags, 0);   // флаг на точку свипа (колонку)
+        hc.cell_not_computed = cancelled_cell_mask(c.result.flags, 0);
         ImVec2 avail = ImGui::GetContentRegionAvail();
         ImVec2 origin = ImGui::GetCursorScreenPos();
         hc.render(renderer, origin, avail,
@@ -259,11 +257,15 @@ void draw_dft1d_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb
         ImGui::PopID();
     }
 }
+}
 
-
+namespace ucuda::ui_detail {
 void draw_dft1d_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
-    auto& renderers = ui_resource<std::map<int, std::unique_ptr<PlotRenderer>>, 5>();
-    auto& heatmaps = ui_resource<std::map<int, std::map<int, std::unique_ptr<HeatmapView>>>, 6>();
+    auto& renderers = ui_resource<std::map<int, std::unique_ptr<PlotRenderer>>, 3006>();
+    auto& heatmaps = ui_resource<std::map<int, std::map<int, std::unique_ptr<HeatmapView>>>, 3007>();
+    static int seen_epoch = 0;
+    if (session_reloaded(model, AppModel::AppMode::Dft1D, seen_epoch))
+        for (auto& kv : heatmaps) invalidate_views(kv.second);
 
     int to_remove = -1;
     for (int i = 0; i < (int)model.dft1d_plot_windows.size(); ++i) {
@@ -294,19 +296,9 @@ void draw_dft1d_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCallb
         model.remove_dft1d_plot_window(to_remove);
     }
 }
+}
 
-
-// Basins of attraction: controls + 5-plot window (inner tab-bar).
-
-// Basins: общие хелперы карты + панель фазовых портретов по бассейнам.
-
-// Диапазон colorbar'а таба «Basins» — единственный источник истины и для хитмапы, и для цвета
-// траекторий в фазовых портретах (иначе цвет бассейна на карте и его траектории разъезжаются):
-//   min_cluster_id..-1 — FP-кластеры (если есть отрицательные)
-//   0                  — расходящиеся ячейки (helpful_array[i] == 0)
-//   1..n_clusters      — осциллирующие кластеры
-// Когда FP-кластеров нет и ничего не разошлось, «кластера 0» не существует — сдвигаем vmin к 1,
-// чтобы в colorbar'е не было фантомной полосы.
+namespace ucuda::ui_detail {
 void basins_colorbar_range(const BasinsConfig& c, double& vmin, double& vmax) {
     const int n_clusters     = c.renumber_spiral ? c.n_clusters_spiral      : c.result.n_clusters;
     const int min_cluster_id = c.renumber_spiral ? c.min_cluster_idx_spiral : c.result.min_cluster_idx;

@@ -17,6 +17,8 @@ void write_network_config(std::ostringstream& o, const NetworkConfig& c) {
     o << "\"label\":";            jstr(o, c.label);            o << ",";
     o << "\"scheme\":";           jstr(o, c.scheme);           o << ",";
     o << "\"symmetry_s\":";       jstr(o, c.symmetry_s);       o << ",";
+    o << "\"cd_fp_iters\":";       jstr(o, c.cd_fp_iters);       o << ",";
+    o << "\"newton_tol\":"; jstr(o, c.newton.tol); o << ",\"newton_max_iters\":"; jstr(o, c.newton.max_iters); o << ",\"newton_full\":" << (c.newton.full ? "true" : "false") << ",";
     o << "\"h_text\":";           jstr(o, c.h_text);           o << ",";
     o << "\"t_max_text\":";       jstr(o, c.t_max_text);       o << ",";
     o << "\"transient_text\":";   jstr(o, c.transient_text);   o << ",";
@@ -83,6 +85,10 @@ bool read_network_field(JP& p, NetworkConfig& c, const std::string& key) {
     if      (key == "label")              c.label              = p.str();
     else if (key == "scheme")             c.scheme             = p.str();
     else if (key == "symmetry_s")         c.symmetry_s         = p.str();
+    else if (key == "cd_fp_iters")         c.cd_fp_iters         = p.str();
+    else if (key == "newton_tol")          c.newton.tol       = p.str();
+    else if (key == "newton_max_iters")    c.newton.max_iters = p.str();
+    else if (key == "newton_full")         c.newton.full      = p.boolean();
     else if (key == "h_text")             c.h_text             = p.str();
     else if (key == "t_max_text")         c.t_max_text         = p.str();
     else if (key == "transient_text")     c.transient_text     = p.str();

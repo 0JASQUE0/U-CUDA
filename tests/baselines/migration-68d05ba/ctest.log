@@ -1,0 +1,13 @@
+Test project E:/progs/CUDA/U-CUDA/build/windows
+    Start 1: adaptive_cpu
+1/4 Test #1: adaptive_cpu .....................   Passed   11.03 sec
+    Start 2: adaptive_gpu
+2/4 Test #2: adaptive_gpu .....................   Passed   69.14 sec
+    Start 3: architecture
+3/4 Test #3: architecture .....................   Passed    0.03 sec
+    Start 4: gpu_smoke
+4/4 Test #4: gpu_smoke ........................   Passed    5.12 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Total Test time (real) =  85.34 sec

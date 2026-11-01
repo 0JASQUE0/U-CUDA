@@ -28,7 +28,7 @@ static void require(bool pass, const char* message) {
 }
 static void compile(KrsCpuStep& step, const std::string& body, int nx, int nv) {
     std::vector<KrsCpuDiag> diags;
-    if (!step.compile(body,nx,nv,diags)) {
+    if (!step.compile(body,nx,nv+kSchemeTailSlots,diags)) {
         for (const auto& d:diags) std::cerr << d.message << '\n';
         throw std::runtime_error("fixed-step native compilation failed");
     }
@@ -92,15 +92,15 @@ static void session_tests() {
 
 static void numerical_tests(bool gpu) {
     System sys; sys.vars={"x","y"}; sys.rhs={"-x","-2*y"};
-    const double initial[]={1,1}, params[]={0.5};
+    const double initial[]={1,1}, params[]={0.5,4,1e-12,25,0};
     SystemEvaluator evaluator(sys);
     for (const auto& name : {"Euler","RK4","DOPRI78","Complex CD","Complex CD4","Complex Implicit Euler","SEMP","SIMP"}) {
         const auto body=compute_krs_for_scheme({},sys,name);
         if (body.empty()) throw std::runtime_error(std::string("fixed-step generation failed for ")+name);
         KrsCpuStep step; compile(step,body,2,1);
         std::vector<std::vector<double>> native, interpreted;
-        require(computePhasePortraitCPU_custom(step.fn(),initial,2,params,1,.001,101,10,native),"native trajectory failed");
-        require(computePhasePortraitCPU(evaluator,int_scheme_from_string(name),initial,2,params,1,.001,101,10,interpreted),"interpreted trajectory failed");
+        require(computePhasePortraitCPU_custom(step.fn(),initial,2,params,5,.001,101,10,native),"native trajectory failed");
+        require(computePhasePortraitCPU(evaluator,int_scheme_from_string(name),initial,2,params,5,.001,101,10,interpreted),"interpreted trajectory failed");
         require(native.size()==101,"sample count changed");
         for(size_t i=0;i<native.size();++i)
             for (int k=0;k<2;++k)
@@ -110,7 +110,7 @@ static void numerical_tests(bool gpu) {
             NvrtcEngine engine;
             require(engine.compile(body,2),engine.error().c_str());
             std::vector<std::vector<std::vector<double>>> result;
-            require(engine.run_phase_portraits({1,1,2,2},2,{.5},.001,101,10,result),engine.error().c_str());
+            require(engine.run_phase_portraits({1,1,2,2},2,{.5,4,1e-12,25,0},.001,101,10,result),engine.error().c_str());
             require(result.size()==2 && result[0].size()==101,"GPU trajectory dimensions changed");
             for(size_t i=0;i<native.size();++i)
                 require(std::abs(result[0][i][0]-native[i][0])<1e-11,"CPU/GPU fixed steps differ");
@@ -120,12 +120,12 @@ static void numerical_tests(bool gpu) {
     // An exact linear custom step detects subdivision, hidden scheme substitution and off-by-one samples.
     KrsCpuStep step; compile(step,"X[0] += h;",1,1);
     std::vector<std::vector<double>> out;
-    require(computePhasePortraitCPU_custom(step.fn(),initial,1,params,1,.125,9,3,out),"custom trajectory failed");
+    require(computePhasePortraitCPU_custom(step.fn(),initial,1,params,5,.125,9,3,out),"custom trajectory failed");
     for(int i=0;i<9;++i) require(out[i][0]==1+(3+i)*.125,"custom step/sample ordering changed");
     if(gpu) {
         NvrtcEngine engine; require(engine.compile("X[0] += h;",1),engine.error().c_str());
         std::vector<std::vector<std::vector<double>>> result;
-        require(engine.run_phase_portraits({1},1,{.5},.125,9,3,result),engine.error().c_str());
+        require(engine.run_phase_portraits({1},1,{.5,4,1e-12,25,0},.125,9,3,result),engine.error().c_str());
         require(result[0]==out,"custom CPU/GPU sample ordering differs");
     }
     // Move ownership and cached custom fixed steps remain valid.
@@ -171,14 +171,14 @@ static void cpu_analysis_tests() {
     const auto body=codegen_scheme(sys,Scheme::RK4);
     ParametricEngine engine;
     Bifurcation1DRequest bif; bif.krs_body=body; bif.amountOfX=1; bif.initial_conditions={1};
-    bif.base_values={.5}; bif.n_pts=2; bif.h=.01; bif.t_max=1; bif.use_cpu=true;
+    bif.base_values={.5,4,1e-12,25,0}; bif.n_pts=2; bif.h=.01; bif.t_max=1; bif.use_cpu=true;
     auto br=engine.run_bifurcation_1d(bif); require(br.ok,br.error.c_str());
     Dft1DRequest dft; dft.krs_body=body; dft.amountOfX=1; dft.initial_conditions={1};
-    dft.base_values={.5}; dft.n_pts=2; dft.h=.01; dft.t_max=1; dft.n_freq=8; dft.use_cpu=true; dft.pre_scaller=3;
+    dft.base_values={.5,4,1e-12,25,0}; dft.n_pts=2; dft.h=.01; dft.t_max=1; dft.n_freq=8; dft.use_cpu=true; dft.pre_scaller=3;
     auto dr=engine.run_dft_1d(dft); require(dr.ok,dr.error.c_str());
     // Upstream subtracts the fixed-point check from each normalization block: exactly NT/h steps.
     LLE1DRequest lle; lle.krs_body=body; lle.amountOfX=1; lle.initial_conditions={1};
-    lle.base_values={.5}; lle.n_pts=2; lle.h=.01; lle.t_max=2; lle.NT=.1; lle.eps=1e-4; lle.use_cpu=true;
+    lle.base_values={.5,4,1e-12,25,0}; lle.n_pts=2; lle.h=.01; lle.t_max=2; lle.NT=.1; lle.eps=1e-4; lle.use_cpu=true;
     for (bool continuation : {false,true}) {
         lle.continuation=continuation;
         auto r=engine.run_lle_1d(lle); require(r.ok,r.error.c_str());
@@ -186,7 +186,7 @@ static void cpu_analysis_tests() {
     }
     System diagonal; diagonal.vars={"x","y"}; diagonal.rhs={"-x","-2*y"};
     LS1DRequest ls; ls.krs_body=codegen_scheme(diagonal,Scheme::RK4); ls.amountOfX=2;
-    ls.initial_conditions={1,1}; ls.base_values={.5}; ls.n_pts=2; ls.h=.01;
+    ls.initial_conditions={1,1}; ls.base_values={.5,4,1e-12,25,0}; ls.n_pts=2; ls.h=.01;
     ls.t_max=10; ls.NT=.1; ls.eps=1e-4; ls.use_cpu=true;
     for (bool continuation : {false,true}) {
         ls.continuation=continuation;
@@ -198,7 +198,7 @@ static void cpu_analysis_tests() {
 
 static void sampling_sweep_tests(bool gpu) {
     Dft1DRequest req;
-    req.krs_body="X[0] += h;"; req.amountOfX=1; req.initial_conditions={1}; req.base_values={.5};
+    req.krs_body="X[0] += h;"; req.amountOfX=1; req.initial_conditions={1}; req.base_values={.5,4,1e-12,25,0};
     req.n_pts=2; req.h=.125; req.transient_time=.375; req.t_max=3; req.pre_scaller=3;
     req.n_freq=3; req.freq_lo=0; req.freq_hi=1; req.window_type=0; req.use_cpu=!gpu;
     ParametricEngine engine;
@@ -237,13 +237,13 @@ static void gpu_analysis_tests() {
     System sys; sys.vars={"x"}; sys.rhs={"-x"};
     const auto body=codegen_scheme(sys,Scheme::RK4);
         Bifurcation1DRequest req; req.krs_body=body; req.amountOfX=1; req.initial_conditions={1};
-        req.base_values={.5}; req.n_pts=2; req.h=.01; req.t_max=1;
+        req.base_values={.5,4,1e-12,25,0}; req.n_pts=2; req.h=.01; req.t_max=1;
         ParametricEngine sweep;
         auto br=sweep.run_bifurcation_1d(req);
         if(!br.ok) throw std::runtime_error(br.error);
 
         LLE1DRequest lle; lle.krs_body=body; lle.amountOfX=1; lle.initial_conditions={1};
-        lle.base_values={.5}; lle.n_pts=2; lle.h=.01; lle.t_max=2; lle.NT=.1; lle.eps=1e-4;
+        lle.base_values={.5,4,1e-12,25,0}; lle.n_pts=2; lle.h=.01; lle.t_max=2; lle.NT=.1; lle.eps=1e-4;
         auto lr=sweep.run_lle_1d(lle);
         if(!lr.ok) throw std::runtime_error(lr.error);
         require(lr.lyapunov.size()==2 && std::abs(lr.lyapunov[0]+1.0)<1e-4,"fixed-step GPU LLE normalization interval changed");
@@ -259,7 +259,7 @@ static void gpu_analysis_tests() {
         System diagonal; diagonal.vars={"x","y"}; diagonal.rhs={"-x","-2*y"};
         auto db=codegen_scheme(diagonal,Scheme::RK4);
         LS1DRequest ls; ls.krs_body=db; ls.amountOfX=2; ls.initial_conditions={1,1};
-        ls.base_values={.5}; ls.n_pts=2; ls.h=.01; ls.t_max=10; ls.NT=.1; ls.eps=1e-4;
+        ls.base_values={.5,4,1e-12,25,0}; ls.n_pts=2; ls.h=.01; ls.t_max=10; ls.NT=.1; ls.eps=1e-4;
         auto sr=sweep.run_ls_1d(ls);
         if(!sr.ok) throw std::runtime_error(sr.error);
         require(sr.spectrum.size()==2 && std::abs(sr.spectrum[0][0]+sr.spectrum[0][1]+3.0)<1e-4,"fixed-step LS normalization interval changed");
@@ -273,27 +273,27 @@ static void gpu_analysis_tests() {
         require(std::abs(scont.spectrum[0][0]+scont.spectrum[0][1]+3.0)<1e-4,"fixed-step LS continuation incorrect");
 
         Dft1DRequest dft; dft.krs_body=body; dft.amountOfX=1; dft.initial_conditions={1};
-        dft.base_values={.5}; dft.n_pts=2; dft.h=.01; dft.t_max=1; dft.n_freq=8;
+        dft.base_values={.5,4,1e-12,25,0}; dft.n_pts=2; dft.h=.01; dft.t_max=1; dft.n_freq=8;
         auto dr=sweep.run_dft_1d(dft); if(!dr.ok) throw std::runtime_error(dr.error);
         BasinsRequest basins; basins.krs_body=db; basins.amountOfX=2;
-        basins.initial_conditions={1,1}; basins.base_values={.5}; basins.n_pts=2;
+        basins.initial_conditions={1,1}; basins.base_values={.5,4,1e-12,25,0}; basins.n_pts=2;
         basins.h=.01; basins.t_max=1; basins.transient_time=0;
         auto basin=sweep.run_basins(basins); if(!basin.ok) throw std::runtime_error(basin.error);
-        FastSyncRequest sync; sync.krs_body=db; sync.amountOfX=2; sync.values={.5};
+        FastSyncRequest sync; sync.krs_body=db; sync.amountOfX=2; sync.values={.5,4,1e-12,25,0};
         sync.ic_master={1,1}; sync.ic_slave={1.01,1.01}; sync.k_forward={1,1}; sync.k_backward={1,1};
         sync.h=.01; sync.t_max=.1; sync.window=.05; sync.iter_of_synchr=2; sync.transient_time=0;
         auto synced=sweep.run_fastsync(sync); if(!synced.ok) throw std::runtime_error(synced.error);
 
         Bifurcation2DRequest b2; b2.krs_body=db; b2.amountOfX=2; b2.initial_conditions={1,1};
-        b2.base_values={.5}; b2.n_pts=2; b2.sweep_over_var=b2.sweep_over_var_2=true;
+        b2.base_values={.5,4,1e-12,25,0}; b2.n_pts=2; b2.sweep_over_var=b2.sweep_over_var_2=true;
         b2.var_sweep_index=0; b2.var_sweep_index_2=1; b2.h=.01; b2.t_max=1;
         auto b2r=sweep.run_bifurcation_2d(b2); if(!b2r.ok) throw std::runtime_error(b2r.error);
         LLE2DRequest l2; l2.krs_body=db; l2.amountOfX=2; l2.initial_conditions={1,1};
-        l2.base_values={.5}; l2.n_pts=2; l2.sweep_over_var=l2.sweep_over_var_2=true;
+        l2.base_values={.5,4,1e-12,25,0}; l2.n_pts=2; l2.sweep_over_var=l2.sweep_over_var_2=true;
         l2.var_sweep_index=0; l2.var_sweep_index_2=1; l2.h=.01; l2.t_max=1; l2.NT=.1;
         auto l2r=sweep.run_lle_2d(l2); if(!l2r.ok) throw std::runtime_error(l2r.error);
         LS2DRequest s2; s2.krs_body=db; s2.amountOfX=2; s2.initial_conditions={1,1};
-        s2.base_values={.5}; s2.n_pts=2; s2.sweep_over_var=s2.sweep_over_var_2=true;
+        s2.base_values={.5,4,1e-12,25,0}; s2.n_pts=2; s2.sweep_over_var=s2.sweep_over_var_2=true;
         s2.var_sweep_index=0; s2.var_sweep_index_2=1; s2.h=.01; s2.t_max=1; s2.NT=.1;
         auto s2r=sweep.run_ls_2d(s2); if(!s2r.ok) throw std::runtime_error(s2r.error);
 
@@ -301,7 +301,7 @@ static void gpu_analysis_tests() {
     // Uniform phase output remains valid input to RQA.
     NvrtcEngine engine; require(engine.compile(body,1),engine.error().c_str());
     std::vector<std::vector<std::vector<double>>> result;
-    require(engine.run_phase_portraits({1},1,{.5},.01,129,0,result),engine.error().c_str());
+    require(engine.run_phase_portraits({1},1,{.5,4,1e-12,25,0},.01,129,0,result),engine.error().c_str());
     rqa::Config rq; rq.source=rqa::Source::StateVector; rq.points=128;
     rqa::Result rr; require(rqa::compute(result[0],.01,rq,rr),"RQA failed on fixed-step uniform samples");
 }
@@ -335,7 +335,7 @@ static void upstream_session_tests() {
 
 static void upstream_adaptive_tests(bool gpu) {
     System sys; sys.vars={"x","y"}; sys.rhs={"-x","-2*y"};
-    const double ic[]={1,1}, values[]={.5};
+    const double ic[]={1,1}, values[]={.5,4,1e-12,25,0};
     for (const std::string scheme : {"RK45","DOPRI78","DOP853","GBS 2-4","Extr(RK4|1,2)","Extr(Complex CD|2,4)"}) {
         std::cerr << "Adaptive scheme: " << scheme << std::endl;
         const AdaptiveCode code=adaptive_code_for_scheme({},sys,scheme);
@@ -366,7 +366,7 @@ static void upstream_adaptive_tests(bool gpu) {
             }
             if(!gpu) continue;
             PhaseAdaptiveRequest req; req.rhs=code.rhs;req.emb=code.emb;req.dprep=code.dprep;req.deval=code.deval;
-            req.ctrl_body=ctrl;req.amountOfX=2;req.ic_flat={1,1};req.N=1;req.values={.5};req.params=params;
+            req.ctrl_body=ctrl;req.amountOfX=2;req.ic_flat={1,1};req.N=1;req.values={.5,4,1e-12,25,0};req.params=params;
             req.raw=raw;req.t_skip=.25;req.t_rec=1;req.dt=.01;req.total=total;req.max_pts=cap;req.log_cap=256;
             NvrtcEngine engine; PhaseAdaptiveResult result;
             require(engine.run_phase_portraits_adaptive(req,result),engine.error().c_str());
@@ -415,25 +415,25 @@ static void upstream_sweep_tests(bool gpu) {
     for(bool cpu : {true,false}) {
         if(!cpu && !gpu) continue;
         for(bool continuation : {false,true}) {
-            LLE1DRequest lle;lle.krs_body=codegen_scheme(scalar,Scheme::RK45);lle.amountOfX=1;lle.initial_conditions={1};lle.base_values={.5};
+            LLE1DRequest lle;lle.krs_body=codegen_scheme(scalar,Scheme::RK45);lle.amountOfX=1;lle.initial_conditions={1};lle.base_values={.5,4,1e-12,25,0};
             lle.n_pts=2;lle.h=.01;lle.t_max=2;lle.NT=.1;lle.eps=1e-4;lle.transient_time=.25;
             lle.use_cpu=cpu;lle.continuation=continuation;lle.adaptive=scalar_ad;
             auto lr=engine.run_lle_1d(lle);if(!lr.ok) throw std::runtime_error(lr.error);
             require(lr.ad_stats.size()==8 && lr.ad_stats[0]>0,"adaptive LLE lost step statistics");
             require(std::abs(lr.lyapunov[0]+1)<.01,"adaptive LLE normalization inaccurate");
-            LS1DRequest ls;ls.krs_body=fixed;ls.amountOfX=2;ls.initial_conditions={1,1};ls.base_values={.5};
+            LS1DRequest ls;ls.krs_body=fixed;ls.amountOfX=2;ls.initial_conditions={1,1};ls.base_values={.5,4,1e-12,25,0};
             ls.n_pts=2;ls.h=.01;ls.t_max=2;ls.NT=.1;ls.eps=1e-4;ls.transient_time=.25;
             ls.use_cpu=cpu;ls.continuation=continuation;ls.adaptive=ad;
             auto sr=engine.run_ls_1d(ls);if(!sr.ok) throw std::runtime_error(sr.error);
             require(sr.ad_stats.size()==8 && std::abs(sr.spectrum[0][0]+sr.spectrum[0][1]+3)<.01,
                     "adaptive LS normalization inaccurate");
-            Bifurcation1DRequest bif;bif.krs_body=fixed;bif.amountOfX=2;bif.initial_conditions={1,1};bif.base_values={.5};
+            Bifurcation1DRequest bif;bif.krs_body=fixed;bif.amountOfX=2;bif.initial_conditions={1,1};bif.base_values={.5,4,1e-12,25,0};
             bif.n_pts=2;bif.h=.01;bif.t_max=1;bif.transient_time=.25;bif.use_cpu=cpu;
             bif.continuation=continuation;bif.adaptive=ad;
             auto br=engine.run_bifurcation_1d(bif);if(!br.ok) throw std::runtime_error(br.error);
             require(br.ad_stats.size()==8 && br.ad_stats[0]>0,"adaptive bifurcation statistics missing");
             SignalMetricsRequest metrics;metrics.krs_body=fixed;metrics.amountOfX=2;metrics.initial_conditions={1,1};
-            metrics.base_values={.5};metrics.n_pts=2;metrics.h=.01;metrics.t_max=1;metrics.transient_time=.25;
+            metrics.base_values={.5,4,1e-12,25,0};metrics.n_pts=2;metrics.h=.01;metrics.t_max=1;metrics.transient_time=.25;
             metrics.use_cpu=cpu;metrics.continuation=continuation;metrics.adaptive=ad;
             metrics.metric_mask=(1<<SIGM_MEAN)|(1<<SIGM_MIN)|(1<<SIGM_MAX);
             for(bool raw : {false,true}) {
@@ -452,20 +452,20 @@ static void upstream_grid_tests() {
     const auto ad=make_upstream_request(sys);const auto body=codegen_scheme(sys,Scheme::RK45);
     ParametricEngine engine;
     BasinsRequest basins;basins.krs_body=body;basins.amountOfX=2;basins.initial_conditions={1,1};
-    basins.base_values={.5};basins.n_pts=2;basins.h=.01;basins.t_max=1;basins.transient_time=.25;basins.adaptive=ad;
+    basins.base_values={.5,4,1e-12,25,0};basins.n_pts=2;basins.h=.01;basins.t_max=1;basins.transient_time=.25;basins.adaptive=ad;
     auto br=engine.run_basins(basins);if(!br.ok) throw std::runtime_error(br.error);
     require(br.ad_stats.size()==16 && br.ad_stats[0]>0,"adaptive basins statistics missing");
-    Bifurcation2DRequest bif;bif.krs_body=body;bif.amountOfX=2;bif.initial_conditions={1,1};bif.base_values={.5};
+    Bifurcation2DRequest bif;bif.krs_body=body;bif.amountOfX=2;bif.initial_conditions={1,1};bif.base_values={.5,4,1e-12,25,0};
     bif.n_pts=2;bif.sweep_over_var=bif.sweep_over_var_2=true;bif.var_sweep_index=0;bif.var_sweep_index_2=1;
     bif.h=.01;bif.t_max=1;bif.transient_time=.25;bif.adaptive=ad;
     auto b2=engine.run_bifurcation_2d(bif);if(!b2.ok) throw std::runtime_error(b2.error);
     require(b2.ad_stats.size()==16,"adaptive bifurcation grid statistics missing");
-    LLE2DRequest lle;lle.krs_body=body;lle.amountOfX=2;lle.initial_conditions={1,1};lle.base_values={.5};
+    LLE2DRequest lle;lle.krs_body=body;lle.amountOfX=2;lle.initial_conditions={1,1};lle.base_values={.5,4,1e-12,25,0};
     lle.n_pts=2;lle.sweep_over_var=lle.sweep_over_var_2=true;lle.var_sweep_index=0;lle.var_sweep_index_2=1;
     lle.h=.01;lle.t_max=2;lle.NT=.1;lle.eps=1e-4;lle.adaptive=ad;
     auto lr=engine.run_lle_2d(lle);if(!lr.ok) throw std::runtime_error(lr.error);
     require(lr.ad_stats.size()==16 && lr.values[0]>=-2.01 && lr.values[0]<=-.99,"adaptive LLE grid invalid");
-    LS2DRequest ls;ls.krs_body=body;ls.amountOfX=2;ls.initial_conditions={1,1};ls.base_values={.5};
+    LS2DRequest ls;ls.krs_body=body;ls.amountOfX=2;ls.initial_conditions={1,1};ls.base_values={.5,4,1e-12,25,0};
     ls.n_pts=2;ls.sweep_over_var=ls.sweep_over_var_2=true;ls.var_sweep_index=0;ls.var_sweep_index_2=1;
     ls.h=.01;ls.t_max=2;ls.NT=.1;ls.eps=1e-4;ls.adaptive=ad;
     auto sr=engine.run_ls_2d(ls);if(!sr.ok) throw std::runtime_error(sr.error);

@@ -1,5 +1,42 @@
 # Integration: fixed and upstream adaptive steps
 
+## Main synchronization, November 2026
+
+The integration branch starts at modular-adaptive
+`68d05ba4899d1e74377148f42bc7225c53b7151a` and merges main
+`81989f49193f990d0311b8dab73f1282ff52e486` (63 upstream commits).
+The initial reference was captured before merging: four original CTest checks
+passed on RTX 4070 SUPER and CPU/GPU Euler, RK4, DOPRI78 and Complex CD
+trajectories/timings were saved. See [migration evidence](tests/baselines/README.md).
+
+All upstream computation, DAE, BDF, circuit import, Network, GUI and serialization
+changes are assigned to the existing modules. Monolithic source/project copies
+are removed; CMake remains the build definition. User library files are untouched.
+GL caches belong to UI resources; background polling, queue progression and
+Order autosave remain in AppModel::tick, including when views are hidden.
+
+Accepted upstream behavior changes to review with the merged reference:
+
+- DAE structural indices, consistency, constraint solvers, GGL reduction,
+  implicit/explicit/Rosenbrock methods and native adaptive DAE execution.
+- Shared variable-order BDF 1-5, fixed-step BDF and associated validation.
+- Newton options and iteration-tail slots, explicit-time step indexing and
+  new CD fast/FP variants. Existing equation parameter positions are preserved.
+- Updated LLE/LS handling for DAE differential dimension and adaptive blocks,
+  Network execution/serialization, SPICE/KiCad import and device models.
+- New session fields follow upstream defaults; older fixed/adaptive JSON remains
+  loadable and covered by load/save/load tests. Unsupported solver/analysis
+  combinations report errors rather than silently selecting another algorithm.
+- On the migration decay workload, RK4's upstream stage accumulation differs
+  from the previous branch by at most 1.11e-16 at the endpoint. This roundoff
+  difference is accepted under the numerical tolerances; exact map and
+  extended-precision fixtures retain exact comparisons.
+
+NVCC and NVRTC use the same split device sources and packaged adaptive/BDF,
+sparse-LU and scheme headers. Native CPU compilation keeps Windows/POSIX exports
+and paths. The native regression runner, matrix and acceptance policy are
+documented in [tests/README.md](tests/README.md).
+
 The adaptive implementation comes from [0JASQUE0/U-CUDA, commit 77568e0](https://github.com/0JASQUE0/U-CUDA/commit/77568e0349f8190187db28748f8783bbe161f355). It replaces the retired local DOPRI5 wrapper. The upstream sources are adapted to this repository's modules and portable runtime compilation; the user library is not copied or overwritten.
 
 ## Fixed step

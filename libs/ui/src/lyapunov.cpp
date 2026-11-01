@@ -1,9 +1,7 @@
 ﻿#include "gui_internal.h"
+using namespace ucuda::ui_detail;
 
 namespace ucuda::ui_detail {
-
-
-// Tab bar по LLE-кривым + кнопка «+» (копирует последнюю).
 void draw_lle_controls(AppModel& model, SystemLibrary& /*lib*/) {
     LLEAnalysisSession& s = model.lle_session;
 
@@ -17,11 +15,9 @@ void draw_lle_controls(AppModel& model, SystemLibrary& /*lib*/) {
     if (tabs.active    >= 0) s.active_curve_index = tabs.active;
     if (tabs.to_remove >= 0) model.remove_lle_curve(tabs.to_remove);
 }
+}
 
-
-// Plot LLE: линии (points_mode=false), каждая кривая — λ(param). При mode_2d=true у
-// активной кривой вместо линий рисуется HeatmapView (сетка λ(p1, p2) с colormap'ом).
-// Per-window-state shape — как у draw_bifurcation_plot (обоснование см. там).
+namespace ucuda::ui_detail {
 void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
                           const ParametricPlotWindow& win,
                           PlotRenderer& renderer, Plot2DView& view,
@@ -92,6 +88,7 @@ void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
             };
 
             heatmap.cell_regime = regime_cell_label(cact.result_2d.flags, cact.result_2d.n_pts);
+            heatmap.cell_not_computed = cancelled_cell_mask(cact.result_2d.flags, cact.result_2d.n_pts);
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             heatmap.render(renderer, origin, avail,
@@ -120,12 +117,8 @@ void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
         return;
     }
 
-    // Подпись X + X-fit диапазон — см. configure_sweep_x_axis_from.
-    configure_sweep_x_axis_from(view, win.members, s.curves, s.params, s.vars,
-        [](const LLECurveConfig& c, double& lo, double& hi) {
-            sweep_range_from_result(c.result.param_lo, c.result.param_hi,
-                                    c.param_lo_text, c.param_hi_text, lo, hi);
-        });
+    // Подпись X — см. configure_sweep_x_axis_from.
+    configure_sweep_x_axis_from(view, win.members, s.curves, s.params, s.vars);
     view.y_axis.name = "lambda";
 
     auto& bufs = window_point_bufs(win.id, win.members.size());
@@ -213,11 +206,9 @@ void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
                 series_in, init_vis, glob_vis, any_fit);
     handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
 }
+}
 
-
-// LS: контролы (per-curve в табе) + line-plot λ_k(param), N экспонент
-// на один спектр-«прогон». UX зеркало LLE.
-
+namespace ucuda::ui_detail {
 void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSession& s, int idx) {
     LSCurveConfig& c = s.curves[idx];
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
@@ -289,6 +280,8 @@ void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSession& s,
         IntegrationFields f;
         f.h          = &c.h_text;
         f.symmetry_s = &c.symmetry_s;
+        f.cd_fp_iters = &c.cd_fp_iters;
+        f.newton      = &c.newton;
         f.t_max      = &c.t_max_text;
         f.transient  = &c.transient_text;
         f.max_value  = &c.max_value_text;   // decimator'а у LS нет
@@ -334,7 +327,7 @@ void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSession& s,
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
                 "OK: %dx%d heatmap, %d exponents",
                 c.result_2d.n_pts, c.result_2d.n_pts, c.result_2d.n_exponents);
-            draw_regime_summary(c.result_2d.flags);
+            draw_regime_summary(c.result_2d.flags, &c.regime_counts_2d, c.data_generation_2d);
             draw_adaptive_stats(c.result_2d.ad_stats);
         }
         else if (!c.last_error.empty()) {
@@ -352,8 +345,9 @@ void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSession& s,
         }
     }
 }
+}
 
-
+namespace ucuda::ui_detail {
 void draw_ls_controls(AppModel& model, SystemLibrary& /*lib*/) {
     LyapunovSpectrumAnalysisSession& s = model.ls_session;
 
@@ -367,13 +361,9 @@ void draw_ls_controls(AppModel& model, SystemLibrary& /*lib*/) {
     if (tabs.active    >= 0) s.active_curve_index = tabs.active;
     if (tabs.to_remove >= 0) model.remove_ls_curve(tabs.to_remove);
 }
+}
 
-
-// Plot LS: каждая кривая раскладывается на N линий по числу экспонент, серия =
-// spectrum_idx * N + exponent_idx, цвета через ic_base_color(seq). При mode_2d=true у
-// активной кривой рисуется HeatmapView с одной выбранной экспонентой; combo "Exponent"
-// над хитмапой переключает плоскость без повторного Run.
-// Per-window-state shape — как у draw_bifurcation_plot (обоснование см. там).
+namespace ucuda::ui_detail {
 void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
                          const ParametricPlotWindow& win,
                          PlotRenderer& renderer, Plot2DView& view,
@@ -463,6 +453,7 @@ void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
             };
 
             heatmap_ls.cell_regime = regime_cell_label(cact.result_2d.flags, cact.result_2d.n_pts);
+            heatmap_ls.cell_not_computed = cancelled_cell_mask(cact.result_2d.flags, cact.result_2d.n_pts);
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             heatmap_ls.render(renderer, origin, avail,
@@ -491,12 +482,8 @@ void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
         return;
     }
 
-    // Подпись X + X-fit диапазон — см. configure_sweep_x_axis_from.
-    configure_sweep_x_axis_from(view, win.members, s.curves, s.params, s.vars,
-        [](const LSCurveConfig& c, double& lo, double& hi) {
-            sweep_range_from_result(c.result.param_lo, c.result.param_hi,
-                                    c.param_lo_text, c.param_hi_text, lo, hi);
-        });
+    // Подпись X — см. configure_sweep_x_axis_from.
+    configure_sweep_x_axis_from(view, win.members, s.curves, s.params, s.vars);
 
     // Подсчитываем общее число серий этого окна — sum(n_exponents per member).
     size_t total_series = 0;
@@ -602,14 +589,9 @@ void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
                 series_in, init_vis, glob_vis, any_fit);
     handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
 }
+}
 
-
-// Metrics: контролы (per-config в табе) + графики. UX зеркалит LLE: те же
-// свип, 2D-режим и блок интегрирования, плюс выбор сигнала и набора метрик.
-// Какую из посчитанных метрик рисовать, решает таб-бар окна графика
-// (ParametricPlotWindow::metric) — как вид в окне Basins.
-
-// Подсказка к чекбоксу метрики — определение ровно в том виде, как считает ядро.
+namespace ucuda::ui_detail {
 const char* signal_metric_tooltip(int m) {
     switch (m) {
     case SIGM_MAX:   return "Maximum of the recorded signal over the window after the transient.";
@@ -646,8 +628,9 @@ const char* signal_metric_tooltip(int m) {
     default: return "";
     }
 }
+}
 
-
+namespace ucuda::ui_detail {
 void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisSession& s, int idx) {
     SignalMetricsConfig& c = s.configs[idx];
     model.broadcast_source_tab = BroadcastTab::Metrics;
@@ -741,6 +724,8 @@ void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisSession&
         IntegrationFields f;
         f.h           = &c.h_text;
         f.symmetry_s  = &c.symmetry_s;
+        f.cd_fp_iters = &c.cd_fp_iters;
+        f.newton      = &c.newton;
         f.t_max       = &c.t_max_text;
         f.transient   = &c.transient_text;
         f.pre_scaller = &c.pre_scaller_text;
@@ -766,15 +751,16 @@ void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisSession&
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK: %dx%d grid", r.n_pts, r.n_pts);
         else
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK: n_pts=%d", r.n_pts);
-        draw_regime_summary(r.flags);
+        draw_regime_summary(r.flags, &c.regime_counts, c.mode_2d ? c.data_generation_2d : c.data_generation);
         draw_adaptive_stats(r.ad_stats);
     }
     else if (!c.last_error.empty()) {
         draw_error_box("##met_err", c.last_error);
     }
 }
+}
 
-
+namespace ucuda::ui_detail {
 void draw_metrics_controls(AppModel& model, SystemLibrary& /*lib*/) {
     SignalMetricsAnalysisSession& s = model.metrics_session;
     const TabBarResult tabs = draw_config_tab_bar(
@@ -786,15 +772,11 @@ void draw_metrics_controls(AppModel& model, SystemLibrary& /*lib*/) {
     if (tabs.active    >= 0) s.active_config_index = tabs.active;
     if (tabs.to_remove >= 0) model.remove_metrics_config(tabs.to_remove);
 }
+}
 
-
-// Таб-бар выбора метрики над графиком. Табы — метрики, посчитанные хотя бы у
-// одного члена окна (до первого прогона — отмеченные в конфигах). Выбор живёт
-// в win.metric и сохраняется вместе с окнами; ImGui помнит выбранный таб сам,
-// поэтому при расхождении (окно только что загружено, выбранной метрики больше
-// нет) таб выставляется явно через SetSelected.
+namespace ucuda::ui_detail {
 void draw_metric_tab_bar(AppModel& model, ParametricPlotWindow& win, int avail_mask) {
-    static std::map<int, int> shown;   // win.id -> метрика, которую таб-бар показывал
+    auto& shown = ui_resource<std::map<int, int>, 3014>();   // win.id -> метрика, которую таб-бар показывал
     if (avail_mask == 0) avail_mask = kSignalMetricAllMask;
     bool force = false;
     if (win.metric < 0 || win.metric >= SIGM_COUNT || !((avail_mask >> win.metric) & 1)) {
@@ -823,8 +805,9 @@ void draw_metric_tab_bar(AppModel& model, ParametricPlotWindow& win, int avail_m
     }
     shown[win.id] = win.metric;
 }
+}
 
-
+namespace ucuda::ui_detail {
 void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
                               ParametricPlotWindow& win,
                               PlotRenderer& renderer, Plot2DView& view,
@@ -905,6 +888,7 @@ void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& 
             // значения в той же ячейке, и текстура обязана перестроиться.
             const int gen = cact.data_generation_2d * SIGM_COUNT + m;
             heatmap.cell_regime = regime_cell_label(r.flags, r.n_pts);
+            heatmap.cell_not_computed = cancelled_cell_mask(r.flags, r.n_pts);
             ImVec2 avail_sz = ImGui::GetContentRegionAvail();
             ImVec2 origin   = ImGui::GetCursorScreenPos();
             heatmap.render(renderer, origin, avail_sz,
@@ -932,11 +916,7 @@ void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& 
         return;
     }
 
-    configure_sweep_x_axis_from(view, win.members, s.configs, s.params, s.vars,
-        [](const SignalMetricsConfig& c, double& lo, double& hi) {
-            sweep_range_from_result(c.result.param_lo, c.result.param_hi,
-                                    c.param_lo_text, c.param_hi_text, lo, hi);
-        });
+    configure_sweep_x_axis_from(view, win.members, s.configs, s.params, s.vars);
     view.y_axis.name = signal_metric_axis_label(m);
 
     auto& bufs = window_point_bufs(win.id, win.members.size());
@@ -995,7 +975,7 @@ void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& 
     // Смена метрики — другие единицы по Y: без автоподгонки кривая уехала бы
     // за пределы старого вида.
     {
-        static std::map<int, int> last_metric;
+        auto& last_metric = ui_resource<std::map<int, int>, 3015>();
         auto it = last_metric.find(win.id);
         if (it == last_metric.end() || it->second != m) any_fit = true;
         last_metric[win.id] = m;

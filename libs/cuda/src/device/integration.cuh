@@ -1,10 +1,13 @@
 ﻿__device__  bool loopCalculateDiscreteModel(numb* x, const numb* values, 
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
-	int writableVar, const numb maxValue, numb* data, 
-	const int startDataIndex, const int writeStep)
+	int writableVar, const numb maxValue, numb* data,
+	const int startDataIndex, const int writeStep UCUDA_NP)
 {
 
 	numb xPrev[AMOUNTOFX];
+	UcudaKrsPre krsPre;
+	ucudaKrsPrep(krsPre, values, h);
+	UCUDA_NBEGIN
 	// Глобальный цикл, который производит вычисления заданные amountOfIterations раз
 	// Счётчик size_t под стать amountOfIterations: при int-счётчике широкий
 	// параметр не давал бы ничего, цикл переполнялся бы на 2^31-м шаге.
@@ -20,11 +23,12 @@
 
 		// Моделируем систему preScaller раз ( то есть если preScaller > 1, то мы пропустим ( preScaller - 1 ) в смоделированной траектории )
 		for ( int j = 0; j < preScaller; ++j )
-			calculateDiscreteModel(x, values, h);
+			UCUDA_STEP(x, values, h, krsPre);
 
 		// Если isnan или isinf - возвращаем false, ибо это нежелательное поведение системы
 		if ( isnan( x[writableVar] ) || isinf( x[writableVar] ) )
 		{
+			UCUDA_NEND
 			return false;
 		}
 
@@ -32,28 +36,142 @@
 		if ( maxValue != 0 )
 			if ( fabs( x[writableVar] ) > maxValue )
 			{
+				UCUDA_NEND
 				return false;
 			}
 	}
 
+	UCUDA_NEND
 	return true;
 }
 
-__device__  __host__ int loopCalculateDiscreteModel_int(
-	numb* x, const numb* values,
+// x[w] без индекса во время выполнения: маска q == w считается до цикла, в цикле —
+// только выборы. С x[w] весь массив состояния уходил бы в локальную память.
+__device__ __host__ __forceinline__ void ucudaPickMask(bool* sel, const int w)
+{
+	for (int q = 0; q < AMOUNTOFX; ++q) sel[q] = (q == w);
+}
+__device__ __host__ __forceinline__ numb ucudaPickVar(const numb* x, const bool* sel)
+{
+	numb s = x[0];
+	for (int q = 1; q < AMOUNTOFX; ++q) s = sel[q] ? x[q] : s;
+	return s;
+}
+
+// Шаг проверки (прогресс, Stop, расходимость) в циклах без записи траектории: транзиент,
+// блоки LLE/LS и цикл с пиками. Проверка — после шагов 0, 1000, 2000, ..., а шаги между
+// ними идут внутренним циклом с постоянным числом итераций. С проверкой через счётчик на
+// каждом шаге цикл был «расходящимся» (своё число шагов у нити), и компилятор ставил
+// на каждую итерацию барьеры и голосование варпа: во float это стоило вдвое больше шага
+// Эйлера (транзиент x3.1 после правки; в double шаг дороже, и выигрыша нет). Циклы с
+// записью траектории и метрики проверяют по-прежнему раз в CHECK_INTERVAL (100);
+// CPU-двойники — с тем же шагом (cpu_loop_model). Шаг прогресса в движке кратен обоим.
+constexpr int UCUDA_LOOP_CHECK_BLOCK = 1000;
+
+// Проверка раз в UCUDA_LOOP_CHECK_BLOCK шагов: прогресс, Stop, расходимость. Возвращает
+// REGIME_CANCELLED / REGIME_UNBOUND, если цикл надо прервать, иначе UCUDA_LOOP_GO.
+constexpr int UCUDA_LOOP_GO = 2;
+__device__ __host__ __forceinline__ int ucudaLoopCheck(const numb* x, const numb maxValue,
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported,
+	size_t& sinceReport)
+{
+	if (progressCounter != nullptr && progressStride > 0) {
+		sinceReport += UCUDA_LOOP_CHECK_BLOCK;
+		if (sinceReport >= (size_t)progressStride) {
+#ifdef __CUDA_ARCH__
+			atomicAdd(progressCounter, 1);
+#endif
+			if (ticksReported != nullptr) ++(*ticksReported);
+			sinceReport = 0;
+		}
+	}
+	if (ucudaCancelRequested(cancelFlag)) return REGIME_CANCELLED;
+	numb checker = 0;
+	for (int j = 0; j < AMOUNTOFX; ++j)
+		checker = checker + abs(x[j]);
+	if (isnan(checker) || isinf(checker))
+		return REGIME_UNBOUND;
+	if (maxValue != 0)
+		if (abs(checker) > maxValue)
+			return REGIME_UNBOUND;
+	return UCUDA_LOOP_GO;
+}
+
+// Прогресс и Stop за короткие куски работы — NT-блоки LLE/LS. Блоки зовутся без
+// счётчика и без флага отмены, а шаги копятся здесь:
+//  - цикл шагов засчитывает себе UCUDA_LOOP_CHECK_BLOCK шагов уже на первой проверке, и
+//    при блоке в 100 шагов тиков выходило в разы больше ожидаемого — бар упирался в 100 %
+//    задолго до конца;
+//  - флаг отмены лежит в памяти хоста, и его чтение на каждом блоке (x и каждый клон)
+//    шло через PCIe по одному: LLE 2D 256², float, NT = 0.1 — 105 мс против 13 без него.
+// Отмена проверяется раз в UCUDA_LOOP_CHECK_BLOCK шагов ведущей траектории, как в
+// остальных циклах. Возвращает true, если пришёл Stop.
+__device__ __forceinline__ bool ucudaBlockSignals(const volatile int* cancelFlag,
+	int* progressCounter, int progressStride, size_t steps,
+	size_t& sinceTick, size_t& sinceCancel, int& ticks)
+{
+	if (progressCounter != nullptr && progressStride > 0) {
+		sinceTick += steps;
+		if (sinceTick >= (size_t)progressStride) {
+			const int n = (int)(sinceTick / (size_t)progressStride);
+			sinceTick -= (size_t)n * (size_t)progressStride;
+			atomicAdd(progressCounter, n);
+			ticks += n;
+		}
+	}
+	sinceCancel += steps;
+	if (sinceCancel < (size_t)UCUDA_LOOP_CHECK_BLOCK) return false;
+	sinceCancel = 0;
+	return ucudaCancelRequested(cancelFlag);
+}
+
+// Тело loopCalculateDiscreteModel_int (обёртка ниже). x — копия состояния в регистрах:
+// с x в shared каждый шаг читал и писал его заново (3 LDS + 3 STS), и дешёвые схемы во
+// float упирались в это, а не в арифметику. Отсюда и выбор x[writableVar] без индекса
+// во время выполнения — с ним компилятор кладёт весь массив в локальную память.
+__device__ __host__ __forceinline__ int loopCalculateDiscreteModel_int_core(
+	numb* __restrict__ x, const numb* __restrict__ values,
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, numb* data,
 	const size_t startDataIndex, const int writeStep,
-	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NREF)
 {
 	//numb* xPrev = new numb[amountOfX];
 	numb xPrev[AMOUNTOFX];
 	numb checker;
+	UcudaKrsPre krsPre;
+	ucudaKrsPrep(krsPre, values, h);
+	bool pick[AMOUNTOFX];
+	ucudaPickMask(pick, writableVar);
 	size_t sinceReport = 0;
+	// Обратный отсчёт до проверки вместо i % CHECK_INTERVAL: деление size_t на
+	// каждом шаге стоило ~12% времени ядра. Проверки — те же i = 0, 100, 200, ...
+	int untilCheck = 0;
 
+	// Без записи траектории — блоками (см. UCUDA_LOOP_CHECK_BLOCK): шаг i, кратный блоку,
+	// проверка, затем блок - 1 шагов внутренним циклом без проверок.
+	if (data == nullptr) {
+		size_t i = 0;
+		while (i < amountOfIterations) {
+			UCUDA_STEP(x, values, h, krsPre);
+			++i;
+			const int r = ucudaLoopCheck(x, maxValue, cancelFlag, progressCounter, progressStride, ticksReported, sinceReport);
+			if (r != UCUDA_LOOP_GO) return r;
+			if (amountOfIterations - i >= (size_t)(UCUDA_LOOP_CHECK_BLOCK - 1)) {
+				#pragma unroll 4
+				for (int k = 0; k < UCUDA_LOOP_CHECK_BLOCK - 1; ++k)
+					UCUDA_STEP(x, values, h, krsPre);
+				i += UCUDA_LOOP_CHECK_BLOCK - 1;
+			} else {
+				for (; i < amountOfIterations; ++i)
+					UCUDA_STEP(x, values, h, krsPre);
+			}
+		}
+	}
+	else
 	// Глобальный цикл, который производит вычисления заданные amountOfIterations раз
 	for (size_t i = 0; i < amountOfIterations; ++i)
-	{	
+	{
 		//#pragma unroll
 		//for (int j = 0; j < AMOUNTOFX; ++j)
 		//{
@@ -74,19 +192,20 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 				else
 					data[startDataIndex + i] = x[0];
 			} else {
-				data[startDataIndex + i] = x[writableVar];
+				data[startDataIndex + i] = ucudaPickVar(x, pick);
 			}
 
 			//#pragma unroll
 			for (int j = 0; j < preScaller; ++j) {
 				//calculateDiscreteModel_rand(startDataIndex + i * writeStep, x, values, h);
-				calculateDiscreteModel(x, values, h);
+				UCUDA_STEP(x, values, h, krsPre);
 			}
 		}
 		else
-			calculateDiscreteModel(x, values, h);
+			UCUDA_STEP(x, values, h, krsPre);
 
-		if (i % CHECK_INTERVAL == 0) {
+		if (--untilCheck < 0) {
+			untilCheck = CHECK_INTERVAL - 1;
 			if (progressCounter != nullptr && progressStride > 0) {
 				sinceReport += CHECK_INTERVAL;
 				if (sinceReport >= (size_t)progressStride) {
@@ -97,9 +216,9 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 					sinceReport = 0;
 				}
 			}
-			// Cancel отдаёт REGIME_UNBOUND: результат отменённого прогона
-			// хост всё равно выбрасывает, нового кода режима заводить не стали.
-			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
+			// Cancel отдаёт REGIME_CANCELLED: по Stop хост показывает посчитанные точки,
+			// а прерванные — пустыми, не путая их с расходимостью.
+			if (ucudaCancelRequested(cancelFlag)) return REGIME_CANCELLED;
 			checker = 0;
 			//#pragma unroll
 			for (int j = 0; j < AMOUNTOFX; ++j) {
@@ -133,7 +252,7 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 	//#pragma unroll
 	for (int j = 0; j < preScaller; ++j) {
 		//calculateDiscreteModel_rand(startDataIndex + i * writeStep, x, values, h);
-		calculateDiscreteModel(x, values, h);
+		UCUDA_STEP(x, values, h, krsPre);
 	}
 
 	// Возврат — REGIME_* из configCUDA.h:
@@ -166,63 +285,103 @@ __device__  __host__ int loopCalculateDiscreteModel_int(
 	return 1;
 }
 
+// Тот же сэмпл, что записался бы в data[] (см. loopCalculateDiscreteModel_int).
+__device__ __host__ __forceinline__ numb ucudaSampleOf(const numb* x, const int writableVar, const bool* pick)
+{
+	if (writableVar < 0) {
+		if constexpr (AMOUNTOFX >= 3)
+			return x[0] + pi*x[1] + euler*x[2];
+		else if constexpr (AMOUNTOFX == 2)
+			return x[0] + pi*x[1];
+		else
+			return x[0];
+	}
+	return ucudaPickVar(x, pick);
+}
+
+// Сколько сэмплов цикл с пиками обрабатывает за раз: сначала столько шагов (сэмплы — в
+// регистры), потом PeakStream по ним развёрнуто. Окно w0/w1/w2 тогда не перекладывается
+// с регистра на регистр каждый сэмпл. Замерено (БД 2D, float): 4 — лучше 1 и 8.
+constexpr int UCUDA_PEAK_CHUNK = 4;
+
 // loopCalculateDiscreteModelPeaks_int -- sibling of loopCalculateDiscreteModel_int
 // that feeds each sample to a PeakStream instead of storing it. Everything else
-// (preScaller, the CHECK_INTERVAL divergence test, the trailing fixed-point
-// check) is the same code path, so the returned REGIME_* is the same too.
-__device__ __host__ int loopCalculateDiscreteModelPeaks_int(
-	numb* x, const numb* values,
+// (preScaller, the divergence test every UCUDA_LOOP_CHECK_BLOCK steps, the trailing
+// fixed-point check) is the same code path, so the returned REGIME_* is the same too.
+//
+// Body (wrapper below): x is the register copy of the state. EA = peaks.emitAll,
+// PS1 = (preScaller == 1) -- template parameters, so neither is tested per sample.
+// The chunked part reorders only the pushes: every step, and the divergence test
+// after it, happens at the same i as in the plain loop; on an early exit the point
+// is discarded, so the samples not yet pushed do not matter.
+template <bool EA, bool PS1>
+__device__ __host__ __forceinline__ int loopCalculateDiscreteModelPeaks_int_core(
+	numb* __restrict__ x, const numb* __restrict__ values,
 	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
 	int writableVar, const numb maxValue, PeakStream& peaks,
-	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported)
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NREF)
 {
 	numb xPrev[AMOUNTOFX];
-	numb checker;
 	size_t sinceReport = 0;
+	// Обратный отсчёт до проверки (в хвосте и при emitAll) вместо i % блок: деление size_t
+	// на каждом шаге стоило ~12% времени ядра. Проверки — после шагов 0, 1000, 2000, ...
+	int untilCheck = 0;
+	UcudaKrsPre krsPre;
+	ucudaKrsPrep(krsPre, values, h);
+	bool pick[AMOUNTOFX];
+	ucudaPickMask(pick, writableVar);
 
-	for (size_t i = 0; i < amountOfIterations; ++i)
-	{
-		// Тот же сэмпл, что записался бы в data[] (см. loopCalculateDiscreteModel_int).
-		numb sample;
-		if (writableVar < 0) {
-			if constexpr (AMOUNTOFX >= 3)
-				sample = x[0] + pi*x[1] + euler*x[2];
-			else if constexpr (AMOUNTOFX == 2)
-				sample = x[0] + pi*x[1];
-			else
-				sample = x[0];
-		} else {
-			sample = x[writableVar];
-		}
-
-		if (peaks.emitAll) peaks.pushRaw(sample);
-		else               peaks.push(sample);
-
-		for (int j = 0; j < preScaller; ++j)
-			calculateDiscreteModel(x, values, h);
-
-		if (i % CHECK_INTERVAL == 0) {
-			if (progressCounter != nullptr && progressStride > 0) {
-				sinceReport += CHECK_INTERVAL;
-				if (sinceReport >= (size_t)progressStride) {
-#ifdef __CUDA_ARCH__
-					atomicAdd(progressCounter, 1);
-#endif
-					if (ticksReported != nullptr) ++(*ticksReported);
-					sinceReport = 0;
+	size_t i = 0;
+	if (!EA) {
+		const size_t chunked = amountOfIterations - amountOfIterations % UCUDA_PEAK_CHUNK;
+		// Проверка — только в первой порции блока из UCUDA_LOOP_CHECK_BLOCK сэмплов (после шага
+		// с номером, кратным блоку), остальные порции блока идут циклом без неё.
+		static_assert(UCUDA_LOOP_CHECK_BLOCK % UCUDA_PEAK_CHUNK == 0, "the check must land on a chunk start");
+		auto chunk = [&](bool check) -> int {
+			numb samples[UCUDA_PEAK_CHUNK];
+			#pragma unroll
+			for (int k = 0; k < UCUDA_PEAK_CHUNK; ++k) {
+				samples[k] = ucudaSampleOf(x, writableVar, pick);
+				if (PS1) UCUDA_STEP(x, values, h, krsPre);
+				else for (int j = 0; j < preScaller; ++j) UCUDA_STEP(x, values, h, krsPre);
+				if (k == 0 && check) {
+					const int r = ucudaLoopCheck(x, maxValue, cancelFlag, progressCounter, progressStride, ticksReported, sinceReport);
+					if (r != UCUDA_LOOP_GO) return r;
 				}
 			}
-			if (cancelFlag != nullptr && *cancelFlag != 0) return REGIME_UNBOUND;
-			checker = 0;
-			for (int j = 0; j < AMOUNTOFX; ++j)
-				checker = checker + abs(x[j]);
+			#pragma unroll
+			for (int k = 0; k < UCUDA_PEAK_CHUNK; ++k)
+				peaks.pushAt(samples[k], i + k);
+			i += UCUDA_PEAK_CHUNK;
+			return UCUDA_LOOP_GO;
+		};
+		constexpr int kChunksPerBlock = UCUDA_LOOP_CHECK_BLOCK / UCUDA_PEAK_CHUNK;
+		while (i < chunked) {   // здесь i кратно блоку
+			const int r = chunk(true);
+			if (r != UCUDA_LOOP_GO) return r;
+			if (chunked - i >= (size_t)(kChunksPerBlock - 1) * UCUDA_PEAK_CHUNK) {
+				for (int c = 0; c < kChunksPerBlock - 1; ++c) chunk(false);
+			} else {
+				while (i < chunked) chunk(false);
+			}
+		}
+		// Хвост ниже ведёт отсчёт сам: следующая проверка — на ближайшем i, кратном блоку.
+		untilCheck = (i % UCUDA_LOOP_CHECK_BLOCK == 0) ? 0 : (int)(UCUDA_LOOP_CHECK_BLOCK - i % UCUDA_LOOP_CHECK_BLOCK);
+	}
 
-			if (isnan(checker) || isinf(checker))
-				return 0;
+	for (; i < amountOfIterations; ++i)
+	{
+		const numb sample = ucudaSampleOf(x, writableVar, pick);
+		if (EA) peaks.pushRaw(sample);
+		else    peaks.pushAt(sample, i);
 
-			if (maxValue != 0)
-				if (abs(checker) > maxValue)
-					return 0;
+		if (PS1) UCUDA_STEP(x, values, h, krsPre);
+		else for (int j = 0; j < preScaller; ++j) UCUDA_STEP(x, values, h, krsPre);
+
+		if (--untilCheck < 0) {
+			untilCheck = UCUDA_LOOP_CHECK_BLOCK - 1;
+			const int r = ucudaLoopCheck(x, maxValue, cancelFlag, progressCounter, progressStride, ticksReported, sinceReport);
+			if (r != UCUDA_LOOP_GO) return r;
 		}
 	}
 
@@ -230,7 +389,7 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 		xPrev[j] = x[j];
 
 	for (int j = 0; j < preScaller; ++j)
-		calculateDiscreteModel(x, values, h);
+		UCUDA_STEP(x, values, h, krsPre);
 
 	numb tempResult = 0;
 	for (int j = 0; j < AMOUNTOFX; ++j)
@@ -242,6 +401,50 @@ __device__ __host__ int loopCalculateDiscreteModelPeaks_int(
 	return 1;
 }
 
+// Обёртки с прежними сигнатурами: состояние копируется из shared в регистры на входе
+// и обратно на выходе (см. loopCalculateDiscreteModel_int_core).
+__device__ __host__ int loopCalculateDiscreteModel_int(
+	numb* xs, const numb* values,
+	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
+	int writableVar, const numb maxValue, numb* data,
+	const size_t startDataIndex, const int writeStep,
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NP)
+{
+	numb x[AMOUNTOFX];
+	UCUDA_NBEGIN
+	for (int j = 0; j < AMOUNTOFX; ++j) x[j] = xs[j];
+	const int r = loopCalculateDiscreteModel_int_core(x, values, h, amountOfIterations, amountOfX, preScaller,
+		writableVar, maxValue, data, startDataIndex, writeStep, cancelFlag, progressCounter, progressStride, ticksReported UCUDA_NA(ucudaN));
+	for (int j = 0; j < AMOUNTOFX; ++j) xs[j] = x[j];
+	UCUDA_NEND
+	return r;
+}
+
+__device__ __host__ int loopCalculateDiscreteModelPeaks_int(
+	numb* xs, const numb* values,
+	const numb h, const size_t amountOfIterations, const int amountOfX, const int preScaller,
+	int writableVar, const numb maxValue, PeakStream& peaks,
+	const volatile int* cancelFlag, int* progressCounter, int progressStride, int* ticksReported UCUDA_NP)
+{
+	numb x[AMOUNTOFX];
+	UCUDA_NBEGIN
+	for (int j = 0; j < AMOUNTOFX; ++j) x[j] = xs[j];
+	int r;
+	if (peaks.emitAll)
+		r = loopCalculateDiscreteModelPeaks_int_core<true, false>(x, values, h, amountOfIterations, amountOfX,
+			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported UCUDA_NA(ucudaN));
+	else if (preScaller == 1)
+		r = loopCalculateDiscreteModelPeaks_int_core<false, true>(x, values, h, amountOfIterations, amountOfX,
+			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported UCUDA_NA(ucudaN));
+	else
+		r = loopCalculateDiscreteModelPeaks_int_core<false, false>(x, values, h, amountOfIterations, amountOfX,
+			preScaller, writableVar, maxValue, peaks, cancelFlag, progressCounter, progressStride, ticksReported UCUDA_NA(ucudaN));
+	for (int j = 0; j < AMOUNTOFX; ++j) xs[j] = x[j];
+	UCUDA_NEND
+	return r;
+}
+
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_distributedCalculateDiscreteModelCUDA)
 __global__ void distributedCalculateDiscreteModelCUDA(
 	const size_t		amountOfPointsForSkip,
 	const int		amountOfThreads,
@@ -281,6 +484,7 @@ __global__ void distributedCalculateDiscreteModelCUDA(
 
 	return;
 }
+#endif
 
 // Глобальная функция, которая вычисляет траекторию нескольких систем
 
@@ -345,6 +549,10 @@ __device__ __forceinline__ bool ucudaSetupSweepPoint(
 		for (int i = 0; i < dimension; ++i) {
 			if (i == hSweepAxis) continue;
 			bool isLog = (logAxisMask >> i) & 1;
+			// ±log — только у бассейнов (оси НУ); остальные свипы этот бит не ставят.
+			if ((logAxisMask >> (UCUDA_SYMLOG_SHIFT + i)) & 1)
+				localX[indicesOfMutVars[i]] = getValueByIdx_symlog(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+			else
 			localX[indicesOfMutVars[i]] = isLog ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
 			                                     : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
 		}
@@ -357,9 +565,16 @@ __device__ __forceinline__ bool ucudaSetupSweepPoint(
 		localValues[indicesOfMutVars[1]] = ((logAxisMask >> 1) & 1) ? getValueByIdx_log(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1)
 		                                                             : getValueByIdx(amountOfCalculatedPoints + idx, nPts, ranges[2], ranges[3], 1);
 	}
+#ifdef UCUDA_LYAP_NX
+	// ДАУ (этап 7): связь g(x, z; p) = 0 зависит от параметров точки, поэтому z согласуется здесь, для
+	// каждой точки: шаг метода ДАУ при h = 0 — Ньютон по z при фиксированном x (индекс 1; на индексе >= 2
+	// пусто). Старт — z из настроек: это и есть правило выбора ветви при нескольких корнях.
+	calculateDiscreteModel(localX, UCUDA_TA((numb)0) localValues, (numb)0);
+#endif
 	return true;
 }
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelCUDA)
 __global__ void calculateDiscreteModelCUDA(
 	const int		nPts, 
 	const int		nPtsLimiter, 
@@ -429,15 +644,16 @@ __global__ void calculateDiscreteModelCUDA(
 	// flag — REGIME_* из configCUDA.h: 1 = OSCILLATION, -1 = FIXED_POINT,
 	// 0 = UNBOUND. (Раньше здесь был комментарий с перепутанными 0 и -1.)
 	int ticks = 0;
+	UCUDA_NVAR(ucudaStep, 0)   // номер шага траектории: t = n*h (UCUDA_NONAUTONOMOUS)
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
 		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, (size_t)idx * sizeOfBlock, 1,
-		cancelFlag, progressCounter, progressStride, &ticks);
+		cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	// Теперь уже по-взрослому моделируем систему
 	if (flag == 1 || flag == -1)
 		flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, iters_local,
 			amountOfInitialConditions, preScaller, writableVar, maxValue, data, (size_t)idx * sizeOfBlock, 1,
-			cancelFlag, progressCounter, progressStride, &ticks);
+			cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	// Если функция моделирования выдала false - значит мы даже не будем смотреть на эту систему в дальнейшем анализе
 
@@ -449,6 +665,7 @@ __global__ void calculateDiscreteModelCUDA(
 	//delete[] localValues;
 	return;
 }
+#endif
 
 // calculateDiscreteModelPeaksCUDA -- calculateDiscreteModelCUDA fused with
 // peakFinderCUDA. Same sweep point (shared ucudaSetupSweepPoint), same
@@ -459,6 +676,7 @@ __global__ void calculateDiscreteModelCUDA(
 //
 // Inter-peak intervals are scaled by h_local, not by the launch-wide h the
 // split path could only pass: under a dt-sweep every point has its own step.
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelPeaksCUDA)
 __global__ void calculateDiscreteModelPeaksCUDA(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -516,9 +734,10 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 		return;
 	}
 
+	UCUDA_NVAR(ucudaStep, 0)
 	int flag = loopCalculateDiscreteModel_int(localX, localValues, h_local, skip_local,
 		amountOfInitialConditions, preScaller, writableVar, maxValue, nullptr, 0, 1,
-		cancelFlag, progressCounter, progressStride, &ticks);
+		cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 	if (flag == REGIME_OSCILLATION || flag == REGIME_FIXED_POINT) {
 		PeakStream peaks;
@@ -527,7 +746,7 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 
 		flag = loopCalculateDiscreteModelPeaks_int(localX, localValues, h_local, iters_local,
 			amountOfInitialConditions, preScaller, writableVar, maxValue, peaks,
-			cancelFlag, progressCounter, progressStride, &ticks);
+			cancelFlag, progressCounter, progressStride, &ticks UCUDA_NA(&ucudaStep));
 
 		// peakFinderCUDA leaves FP and UNBOUND codes in the array untouched and
 		// only replaces OSCILLATION with the peak count -- same rule here.
@@ -559,7 +778,9 @@ __global__ void calculateDiscreteModelPeaksCUDA(
 		if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
 	}
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelCUDA_H)
 __global__ void calculateDiscreteModelCUDA_H(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -624,7 +845,9 @@ __global__ void calculateDiscreteModelCUDA_H(
 
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelICCUDA)
 __global__ void calculateDiscreteModelICCUDA(
 	const int		nPts, 
 	const int		nPtsLimiter, 
@@ -722,7 +945,9 @@ __global__ void calculateDiscreteModelICCUDA(
 
 	return;
 }
+#endif
 
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelICCUDA_logAxes)
 __global__ void calculateDiscreteModelICCUDA_logAxes(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -789,6 +1014,7 @@ __global__ void calculateDiscreteModelICCUDA_logAxes(
 	}
 	return;
 }
+#endif
 
 // Функция, которая находит индекс в последовательности значений
 
@@ -878,6 +1104,15 @@ __device__ __host__ __forceinline__ numb getValueByIdx_log(const int idx, const 
 {
 	const int n = (int)((int64_t)((int64_t)idx / pow((numb)nPts, (numb)valueNumber)) % nPts);
 	return ucuda_node_value_log(n, nPts, startRange, finishRange);
+}
+
+// getValueByIdx для симметричной лог-сетки бассейнов (±log): узел — ucuda_node_value_symlog
+// (configCUDA.h), извлечение индекса — как у getValueByIdx_log.
+__device__ __host__ __forceinline__ numb getValueByIdx_symlog(const int idx, const int nPts,
+	const numb startRange, const numb finishRange, const int valueNumber)
+{
+	const int n = (int)((int64_t)((int64_t)idx / pow((numb)nPts, (numb)valueNumber)) % nPts);
+	return ucuda_node_value_symlog(n, nPts, startRange, finishRange);
 }
 
 // Находит пики в интервале [startDataIndex; startDataIndex + amountOfPoints] в "data" массиве

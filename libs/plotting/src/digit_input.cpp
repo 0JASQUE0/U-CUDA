@@ -20,6 +20,24 @@ bool ComputeStep(const std::string& text, int cursor, int direction,
     if (text.empty()) return false;
     if (direction != +1 && direction != -1) return false;
 
+    // Приставка СИ в конце (4.7k, 10u, 2.2µ, 1meg — см. si_prefix в num_parse.h): шагаем число,
+    // приставку не трогаем. До диспатча по 'e': в "1meg" тоже есть 'e'.
+    {
+        size_t k = text.size();
+        auto low = [&](size_t i) { return (char)std::tolower(static_cast<unsigned char>(text[i])); };
+        if (k > 3 && low(k - 3) == 'm' && low(k - 2) == 'e' && low(k - 1) == 'g') k -= 3;
+        else if (k > 2 && (unsigned char)text[k - 2] == 0xC2 && (unsigned char)text[k - 1] == 0xB5) k -= 2;
+        else if (k > 1 && std::string("fpnumkMGT").find(text[k - 1]) != std::string::npos) k -= 1;
+        if (k < text.size() && (std::isdigit(static_cast<unsigned char>(text[k - 1])) || text[k - 1] == '.')) {
+            std::string ns;
+            int nc = 0;
+            if (!ComputeStep(text.substr(0, k), cursor < (int)k ? cursor : (int)k, direction, ns, nc)) return false;
+            new_text = ns + text.substr(k);
+            new_cursor = nc;
+            return true;
+        }
+    }
+
     // Диспатч: сначала научная нотация (e/E), затем дробь (/). После диспатча
     // управление ушло в ComputeStepSplit → рекурсия в ComputeStep для куска,
     // где 'e' / '/' уже отсутствует.

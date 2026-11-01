@@ -1,6 +1,11 @@
 ﻿#include "gui_internal.h"
 using namespace ucuda::ui_detail;
+
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
+    set_field_latex(model.field_latex);
+    set_field_labels(&model.field_labels);
+    set_field_library(&lib);
+    set_scheme_masks(&model);
     // полноэкранный dockspace-хост
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
@@ -226,6 +231,79 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     }
     }   // область видимости ссылок на сессии
 
+    // Оценка времени счёта траекторий (time_estimate.h). Пока идёт расчёт — его собственная,
+    // снятая один раз на старте: правка настроек под следующий прогон её не трогает. В простое —
+    // по настройкам открытой вкладки.
+    TrajTimeEstimator::Result est;
+    bool show_est = false;
+    {
+        // Время завершённого расчёта уточняет поправку оценщика на настоящие ядра. Смотрим саму
+        // сессию, а не плашку Done: очередь запускает следующий элемент в том же кадре, и кадра
+        // простоя между ними может не быть.
+        if (model.traj_learn_pending) {
+            auto learn_from = [&](const auto& s) {
+                if (s.last_run_completed_at <= model.traj_running_start) return;   // ещё идёт
+                if (s.last_run_succeeded)
+                    model.traj_estimator.learn(model.traj_running_work, s.last_run_seconds);
+                model.traj_learn_pending = false;
+            };
+            switch ((BusyKind)model.traj_running_kind) {
+            case BusyKind::LLE:    learn_from(model.lle_session);    break;
+            case BusyKind::LS:     learn_from(model.ls_session);     break;
+            case BusyKind::Basins: learn_from(model.basins_session); break;
+            default:               model.traj_learn_pending = false; break;
+            }
+        }
+        const bool running = busy.kind != BusyKind::None && !show_done;
+        if (running) {
+            if (model.traj_running_start != busy.start) {
+                model.traj_running_start = busy.start;
+                model.traj_running_work  = running_traj_work(model);
+                model.traj_running_kind  = (int)busy.kind;
+                model.traj_learn_pending = model.traj_running_work.valid;
+            }
+            est = model.traj_estimator.estimate(model.traj_running_work, false);
+            show_est = model.traj_running_work.valid || !model.traj_running_work.why.empty();
+        } else {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - model.traj_idle_at > std::chrono::milliseconds(300)) {
+                model.traj_idle_at   = now;
+                model.traj_idle_work = current_tab_traj_work(model);
+            }
+            est = model.traj_estimator.estimate(model.traj_idle_work, true);
+            show_est = model.traj_idle_work.valid || !model.traj_idle_work.why.empty();
+        }
+    }
+    char   est_text[64] = "";
+    ImVec4 est_col(0.55f, 0.55f, 0.55f, 1.0f);
+    if (show_est) {
+        if (est.state == TrajTimeEstimator::State::Ready) {
+            std::snprintf(est_text, sizeof(est_text), "est. %s%s", est.rough ? "~" : "",
+                          traj_format_seconds(est.seconds).c_str());
+            est_col = ImVec4(0.55f, 0.78f, 1.0f, 1.0f);
+        } else if (est.state == TrajTimeEstimator::State::Pending) {
+            std::snprintf(est_text, sizeof(est_text), "est. ...");
+        } else {
+            std::snprintf(est_text, sizeof(est_text), "est. n/a");
+        }
+    }
+    auto draw_est = [&]() {
+        ImGui::TextColored(est_col, "%s", est_text);
+        if (ImGui::IsItemHovered() && !est.detail.empty())
+            ImGui::SetTooltip("Estimated trajectory integration time\n%s\nRight-click: recalibrate the GPU.",
+                              est.detail.c_str());
+        if (ImGui::BeginPopupContextItem("##traj_est_ctx")) {
+            if (ImGui::MenuItem("Recalibrate GPU")) model.traj_estimator.recalibrate();
+            ImGui::EndPopup();
+        }
+    };
+
+    if (busy.kind == BusyKind::None && show_est) {
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(ImGui::GetWindowSize().x - ImGui::CalcTextSize(est_text).x - 12.0f);
+        draw_est();
+    }
+
     if (busy.kind != BusyKind::None) {
         char text[200];
         // Phase suffix appears only for basins while running (not on "Cancelling"
@@ -278,6 +356,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         float total_w = text_w + 12.0f;
         if (show_bar)  total_w += bar_w + pad;
         if (show_stop) total_w += stop_w + pad;
+        if (show_est)  total_w += ImGui::CalcTextSize(est_text).x + pad;
 
         ImGui::SameLine();
         ImGui::SetCursorPosX(ImGui::GetWindowSize().x - total_w);
@@ -295,6 +374,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::SameLine();
             const float f = std::clamp(busy.progress, 0.0f, 1.0f);
             ImGui::ProgressBar(f, ImVec2(bar_w, bar_h), "");
+        }
+        if (show_est) {
+            ImGui::SameLine();
+            draw_est();
         }
         if (show_stop) {
             ImGui::SameLine();
@@ -356,15 +439,28 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::SetCursorPosX(cx);
         ImGui::SetNextItemWidth(combo_w);
         if (any_in_flight) ImGui::BeginDisabled();
-        if (ImGui::BeginCombo("##topsyssel", preview.c_str())) {
+        if (ImGui::BeginCombo("##topsyssel", preview.c_str(), ImGuiComboFlags_HeightLarge)) {
+            // Группы по вкладкам Library: ODE, DAE, MAP. ДАУ считает пока только
+            // Analysis (схемы DAE BDF1 / Trapezoidal); другие вкладки откажут при Run.
+            const LibraryListCache& cache = library_list_cached(lib);
             int listed = 0;
-            for (const auto& nm : lib.list()) {
-                // Ticked off in the Library tab. The active system stays listed
-                // regardless, so the combo never previews a name it can't show.
-                if (model.system_hidden(nm) && model.name != nm) continue;
-                ++listed;
-                if (ImGui::Selectable(nm.c_str(), model.name == nm))
-                    apply_system_switch(model, lib, nm);
+            for (int group = 0; group < kLibTabCount; ++group) {
+                const bool dae = (LibTab)group == LibTab::Dae;
+                bool header = false;
+                for (size_t i = 0; i < cache.names.size(); ++i) {
+                    const std::string& nm = cache.names[i];
+                    if (cache.tab[i] != group) continue;
+                    // Ticked off in the Library tab. The active system stays listed
+                    // regardless, so the combo never previews a name it can't show.
+                    if (model.system_hidden(nm) && model.name != nm) continue;
+                    if (!header) { ImGui::SeparatorText(kLibTabName[group]); header = true; }
+                    ++listed;
+                    if (ImGui::Selectable(nm.c_str(), model.name == nm))
+                        apply_system_switch(model, lib, nm);
+                    if (dae && ImGui::IsItemHovered())
+                        ImGui::SetTooltip("DAE: DAE methods in Analysis on the GPU;\n"
+                                          "with 'Solve as ODE' (Library -> DAE) — every tab and ODE scheme");
+                }
             }
             if (listed == 0) ImGui::TextDisabled("(all systems hidden in Library)");
             ImGui::EndCombo();
@@ -561,13 +657,27 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // Save/Cancel) after Edit or Add new. Switching top-level tabs during edit is safe — the
         // editor works on model.library_edit_buffer, a scratch AppModel, so it never touches the
         // system active in Parametric/Phase/Basins/FastSync.
-        if (ImGui::Begin("Editor")) {
-            if (model.library_edit_mode == AppModel::LibraryEditMode::None)
-                draw_library_list(model, lib);
-            else
-                draw_library_editor(model, lib, cb);
+        //
+        // Две вкладки: ODE (бывшая Editor — "###Editor" сохраняет её место в
+        // imgui.ini) и DAE. Редактор открывается в той вкладке, к которой
+        // относится черновик; вторая в это время показывает свой список.
+        // Три вкладки: ODE (бывшая Editor), DAE, MAP.
+        const bool editing = model.library_edit_mode != AppModel::LibraryEditMode::None;
+        const LibTab edit_tab = lib_tab_of(model.library_edit_buffer->is_dae,
+                                           model.library_edit_buffer->is_map);
+        static const char* const kLibWindow[kLibTabCount] =
+            { "ODE###Editor", "DAE###LibraryDAE", "MAP###LibraryMAP" };
+        ImGuiID ode_dock = 0;
+        for (int t = 0; t < kLibTabCount; ++t) {
+            // Впервые — в тот же узел дока, что и ODE, чтобы встать рядом вкладкой.
+            if (t > 0 && ode_dock != 0) ImGui::SetNextWindowDockID(ode_dock, ImGuiCond_FirstUseEver);
+            if (ImGui::Begin(kLibWindow[t])) {
+                if (editing && edit_tab == (LibTab)t) draw_library_editor(model, lib, cb);
+                else                                  draw_library_list(model, lib, (LibTab)t);
+            }
+            if (t == 0) ode_dock = ImGui::GetWindowDockID();
+            ImGui::End();
         }
-        ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Analysis) {
         // режим анализа: панель настроек + окна проекций (докаются пользователем)
@@ -639,9 +749,14 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // Окна фиксированные (в отличие от Order): собирать из них
         // произвольные комбинации пока незачем, а смотреть на сеть сразу в
         // трёх разрезах нужно всегда.
-        auto& net_renderers = ui_resource<std::map<int, std::unique_ptr<PlotRenderer>>, 501>();
-        auto& net_series_view = ui_resource<Plot2DView, 502>();
-        auto& net_raster_view = ui_resource<HeatmapView, 503>();
+        auto& net_renderers = ui_resource<std::map<int, std::unique_ptr<PlotRenderer>>, 3011>();
+        auto& net_series_view = ui_resource<Plot2DView, 3012>();
+        auto& net_raster_view = ui_resource<HeatmapView, 3013>();
+        static int seen_epoch = 0;
+        if (session_reloaded(model, AppModel::AppMode::Network, seen_epoch)) {
+            invalidate_view(net_series_view);
+            invalidate_view(net_raster_view);
+        }
         auto& rnd_series = net_renderers[0];
         if (!rnd_series) rnd_series = std::make_unique<PlotRenderer>();
         auto& rnd_raster = net_renderers[1];
@@ -682,6 +797,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.ui_scale_override      = m.ui_scale_override;
             cfg.use_builtin_font       = m.use_builtin_font;
             cfg.plot_math_font         = m.plot_math_font;
+            cfg.field_latex            = m.field_latex;
+            cfg.show_alg_ic            = m.show_alg_ic;
             cfg.plot_font_scale        = m.plot_font_scale;
             cfg.heatmap_colormap       = m.heatmap_colormap;
             cfg.basins_colormap        = m.basins_colormap;
@@ -697,6 +814,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.gpu_block_size         = m.gpu_block_size;
             cfg.hidden_tabs            = m.hidden_tabs;
             cfg.hidden_schemes         = m.hidden_schemes;
+            cfg.hidden_dae_methods     = m.hidden_dae_methods;
             cfg.hidden_systems         = m.hidden_systems;
             save_app_config(get_exe_dir_with_sep(), cfg);
         };
@@ -763,6 +881,24 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::TextDisabled("variables go italic, 1e-05 becomes a power of ten.");
             ImGui::TextDisabled("Computer Modern (the TeX face) is picked up from fonts\\ if");
             ImGui::TextDisabled("present; otherwise Times New Roman. Off: plain UI font.");
+
+            bool field_tex = model.field_latex;
+            if (ImGui::Checkbox("Use LaTeX for parameters and variables", &field_tex)) {
+                model.field_latex = field_tex;
+                persist_settings(model);
+            }
+            ImGui::TextDisabled("On: names next to the parameter and initial-condition fields and in the");
+            ImGui::TextDisabled("projection lists are typeset as formulas (vc_c1 -> vc with subscript C1,");
+            ImGui::TextDisabled("sigma -> greek), or with the labels set in Groups.... Off: the plain names.");
+
+            bool alg_ic = model.show_alg_ic;
+            if (ImGui::Checkbox("Initial conditions of algebraic variables (DAE)", &alg_ic)) {
+                model.show_alg_ic = alg_ic;
+                persist_settings(model);
+            }
+            ImGui::TextDisabled("Off: the tabs show initial conditions of the state variables x only. The algebraic");
+            ImGui::TextDisabled("z are recomputed anyway (DC operating point / projection onto g = 0), their fields");
+            ImGui::TextDisabled("are only Newton's starting guess. The library editor always shows all of them.");
 
             ImGui::Separator();
             ImGui::Text("Axes");
@@ -851,6 +987,37 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     }
                     ImGui::PopID();
                     if (b.tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", b.tooltip);
+                }
+            }
+
+            // То же для методов ДАУ: список "DAE methods to generate" редактора ДАУ.
+            ImGui::Separator();
+            ImGui::Text("DAE methods");
+            ImGui::TextDisabled("Which DAE methods are offered in the DAE editor. Unticking one");
+            ImGui::TextDisabled("only hides the checkbox, as for the integration schemes.");
+            {
+                const std::vector<std::string> dae = dae_method_list();
+                auto set_all_dae = [&](bool shown) {
+                    for (const auto& n : dae) AppModel::set_name_hidden(model.hidden_dae_methods, n, !shown);
+                    persist_settings(model);
+                };
+                if (ImGui::Button("Show all##dae_methods")) set_all_dae(true);
+                ImGui::SameLine();
+                if (ImGui::Button("Hide all##dae_methods")) set_all_dae(false);
+                ImGui::SameLine();
+                int n_on = 0;
+                for (const auto& n : dae)
+                    if (!model.dae_method_hidden(n)) ++n_on;
+                ImGui::Text("%d / %d shown", n_on, (int)dae.size());
+                for (size_t i = 0; i < dae.size(); ++i) {
+                    if (i % 4 != 0) ImGui::SameLine();
+                    bool on = !model.dae_method_hidden(dae[i]);
+                    ImGui::PushID(("dae_m_" + dae[i]).c_str());
+                    if (ImGui::Checkbox(dae[i].c_str(), &on)) {
+                        AppModel::set_name_hidden(model.hidden_dae_methods, dae[i], !on);
+                        persist_settings(model);
+                    }
+                    ImGui::PopID();
                 }
             }
 
@@ -1099,9 +1266,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
                     "disagree in the last digits on such schemes.");
             } else {
-                ImGui::TextDisabled("Off: every kernel is built as one translation unit, library");
-                ImGui::TextDisabled("included, exactly as before. Slow on a scheme change, but the");
-                ImGui::TextDisabled("step is inlined and results stay bit-comparable with older runs.");
+                ImGui::TextDisabled("Off: every kernel is built as one translation unit with only");
+                ImGui::TextDisabled("the library kernels the analysis launches (the rest are cut,");
+                ImGui::TextDisabled("same code as the full build). The step is inlined and results");
+                ImGui::TextDisabled("stay bit-comparable with older runs; a scheme change costs a");
+                ImGui::TextDisabled("few seconds (Lorenz, 11 analyses: 14 s instead of 95 s).");
             }
 
             // GPU launch width. В отличие от FMA и peak-knobs, на результат не влияет вовсе:

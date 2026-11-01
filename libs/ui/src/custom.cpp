@@ -1,16 +1,7 @@
 ﻿#include "gui_internal.h"
+using namespace ucuda::ui_detail;
 
 namespace ucuda::ui_detail {
-
-
-// Custom-tab plot windows: minimal renderer for the pipeline output. Full-featured versions
-// with colormap toolbars, colorbar controls and colored-1D density are TODO; this MVP shows
-// results and wires drill-down clicks / crosshairs.
-
-
-// Helper: bind slider fix_x/fix_y as crosshair on the given heatmap view,
-// and install a drill-down click callback that updates shared.param_values
-// + fix_x/y and optionally enqueues a Phase/Basins run.
 void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
                                  std::deque<CustomQueueItem>& q) {
     hv.crosshair_x = cs.shared.level_1d_enabled ? cs.shared.fix_x_value
@@ -62,42 +53,67 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
         }
     };
 }
+}
 
-
- // namespace
-
-// Custom Workspace — split-region layout for Custom AppMode.
-//
-// Per frame: AppMode radios on top (MainHost); below, Custom Controls panel | splitter |
-// tab bar [ Tab 1 | Tab 2 | + ] over a per-tab DockSpace that hosts the plot windows.
-//
-// Docking model:
-//   - Each tab owns one DockSpace with a STABLE id from tab.id via ws_dock_id() — deliberately
-//     NOT ImGui::GetID(str), which hashes with the current window-ID stack and would differ
-//     inside BeginTabItem vs outside; we submit the same dockspace both ways (KeepAliveOnly
-//     before BeginTabBar, real inside BeginTabItem of the active tab).
-//   - ALL per-tab dockspaces are submitted every frame with ImGuiDockNodeFlags_KeepAliveOnly so
-//     ImGui keeps the nodes alive and windows docked in inactive tabs don't orphan to floating.
-//   - Plot windows are docked via DockBuilderDockWindow on first appearance; imgui.ini persists
-//     the internal split layout across sessions.
-//   - Cross-tab drag&drop: BeginDragDropSource on each plot title bar + BeginDragDropTarget on
-//     each tab item → drop calls DockBuilderDockWindow(name, target_ds) and switches tab.
-
-// Stable dockspace ID for a workspace tab: independent of ImGui's ID-stack scope (same id
-// inside or outside a window) and unlikely to collide with other IDs. Includes a hash of the
-// loaded system name so imgui.ini keeps a separate dock layout per system — otherwise switching
-// systems leaked one system's plot placement into another's tabs.
+namespace ucuda::ui_detail {
 [[nodiscard]] ImGuiID ws_dock_id(int tab_id, const std::string& sys) {
     ImGuiID sys_hash = sys.empty() ? 0u : ImHashStr(sys.c_str());
     return (ImGuiID)0xD5000000u ^ (ImGuiID)tab_id ^ sys_hash;
 }
+}
 
-
-// Suffix appended to every Custom-mode plot window title so imgui.ini keys
-// its dock state per system. Empty when no system is loaded (edge case;
-// windows behave as before). "##sys_<name>" — the "##" makes ImGui strip
-// the suffix from the visible title while including it in the hashed ID.
+namespace ucuda::ui_detail {
 [[nodiscard]] std::string custom_win_suffix(const std::string& sys) {
     return sys.empty() ? std::string{} : ("##sys_" + sys);
+}
+}
+
+namespace ucuda::ui_detail {
+
+}
+
+namespace ucuda::ui_detail {
+static void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb);
+}
+
+namespace ucuda::ui_detail {
+
+}
+
+namespace ucuda::ui_detail {
+[[nodiscard]] TrajWork running_traj_work(const AppModel& m) {
+    const CustomSession& cus = m.custom_session;
+    if (m.bifurcation_session.in_flight)
+        return m.bifurcation_session.traj_work(m.bifurcation_session.running_diagram_index);
+    if (m.lle_session.in_flight)     return m.lle_session.traj_work(m.lle_session.running_curve_index);
+    if (m.ls_session.in_flight)      return m.ls_session.traj_work(m.ls_session.running_curve_index);
+    if (m.metrics_session.in_flight) return m.metrics_session.traj_work(m.metrics_session.running_config_index);
+    if (m.dft1d_session.in_flight)   return m.dft1d_session.traj_work(m.dft1d_session.running_config_index);
+    if (m.phase_session.in_flight)   return {};
+    if (m.basins_session.in_flight)  return m.basins_session.traj_work(m.basins_session.running_config_index);
+    if (m.fastsync_session.in_flight || m.order_session.in_flight) return {};
+    if (cus.bif_session.in_flight)    return cus.bif_session.traj_work(cus.bif_session.running_diagram_index);
+    if (cus.lle_session.in_flight)    return cus.lle_session.traj_work(cus.lle_session.running_curve_index);
+    if (cus.ls_session.in_flight)     return cus.ls_session.traj_work(cus.ls_session.running_curve_index);
+    if (cus.basins_session.in_flight) return cus.basins_session.traj_work(cus.basins_session.running_config_index);
+    return {};
+}
+}
+
+namespace ucuda::ui_detail {
+[[nodiscard]] TrajWork current_tab_traj_work(const AppModel& m) {
+    switch (m.app_mode) {
+    case AppModel::AppMode::Parametric:
+        switch (m.parametric_active_analysis) {
+        case 0:  return m.bifurcation_session.traj_work(m.bifurcation_session.active_diagram_index);
+        case 1:  return m.lle_session.traj_work(m.lle_session.active_curve_index);
+        case 2:  return m.ls_session.traj_work(m.ls_session.active_curve_index);
+        case 3:  return m.metrics_session.traj_work(m.metrics_session.active_config_index);
+        default: return {};
+        }
+    case AppModel::AppMode::Dft1D:  return m.dft1d_session.traj_work(m.dft1d_session.active_config_index);
+    case AppModel::AppMode::Basins: return m.basins_session.traj_work(m.basins_session.active_config_index);
+    default: return {};
+    }
 }
 }

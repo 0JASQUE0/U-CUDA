@@ -14,49 +14,122 @@ struct ParametricEngine::Impl {
     int        cc_minor = 0;
 
 
-    // Сигнальная страница расчёта: [0] — запрос отмены, [1] — тики прогресса.
+    // Сигналы расчёта: запрос отмены и тики прогресса.
     //
-    // Mapped host memory, а НЕ память устройства. На WDDM любой cudaMemcpy,
-    // выданный пока работает ядро, встаёт за ним в очередь и блокирует хост:
-    // цикл опроса делал ровно одну итерацию, и ни прогресс, ни Cancel не
-    // работали. Через mapped-страницу хост читает и пишет обычными load/store,
-    // без единого вызова CUDA.
+    // Отмена — в mapped host memory: на WDDM синхронный cudaMemcpy, выданный пока работает
+    // ядро, встаёт за ним в очередь и блокирует хост, а через mapped-страницу хост пишет
+    // флаг обычным store, без вызовов CUDA.
+    //
+    // Тики — в памяти устройства. Раньше они тоже лежали в mapped-странице, но атомарные
+    // операции туда идут через PCIe строго по одной (~1.1 мкс): во float-сборке это стоило
+    // больше самого счёта (БД 2D, Лоренц, 600x600, Эйлер: 0.98 с против 0.18 с без прогресса),
+    // и все схемы шли одинаково. Хост читает счётчик асинхронной копией в pinned-память из
+    // своего неблокирующего потока: она идёт параллельно с ядром (проверено на WDDM — значения
+    // приходят каждые ~60 мс, пока ядро работает), в отличие от синхронного cudaMemcpy.
     struct RunSignals {
-        int* host = nullptr;   // страница на хосте
-        int* dev  = nullptr;   // её же device-проекция для ядра
+        int* host = nullptr;          // mapped-страница: [0] — отмена
+        int* dev  = nullptr;          // её device-проекция для ядра
+        int* devTicks  = nullptr;     // счётчик тиков в памяти устройства (его прибавляют ядра)
+        int* hostTicks = nullptr;     // pinned-копия для опроса
+        cudaStream_t pollStream = nullptr;
+        bool copyPending = false;
+        int  lastTicks   = 0;
 
         bool alloc(std::string& err) {
-            CUresult r = cuMemHostAlloc((void**)&host, 2 * sizeof(int), CU_MEMHOSTALLOC_DEVICEMAP);
+            CUresult r = cuMemHostAlloc((void**)&host, sizeof(int), CU_MEMHOSTALLOC_DEVICEMAP);
             if (r != CUDA_SUCCESS) { err = "cuMemHostAlloc(signals): " + cu_err(r); return false; }
             r = cuMemHostGetDevicePointer((CUdeviceptr*)&dev, host, 0);
             if (r != CUDA_SUCCESS) { err = "cuMemHostGetDevicePointer: " + cu_err(r); release(); return false; }
-            host[0] = 0; host[1] = 0;
+            host[0] = 0;
+            // Неблокирующий: ядра идут в legacy-поток 0, и обычный поток ждал бы их.
+            cudaError_t e = cudaStreamCreateWithFlags(&pollStream, cudaStreamNonBlocking);
+            if (e == cudaSuccess) e = cudaMalloc((void**)&devTicks, sizeof(int));
+            if (e == cudaSuccess) e = cudaMallocHost((void**)&hostTicks, sizeof(int));
+            if (e != cudaSuccess) { err = std::string("progress counter: ") + cudaGetErrorString(e); release(); return false; }
+            resetTicks();
             return true;
         }
-        void release()          { if (host) { cuMemFreeHost(host); host = nullptr; dev = nullptr; } }
+        void release() {
+            if (pollStream) { cudaStreamSynchronize(pollStream); cudaStreamDestroy(pollStream); pollStream = nullptr; }
+            if (devTicks)   { cudaFree(devTicks); devTicks = nullptr; }
+            if (hostTicks)  { cudaFreeHost(hostTicks); hostTicks = nullptr; }
+            if (host) { cuMemFreeHost(host); host = nullptr; dev = nullptr; }
+            copyPending = false; lastTicks = 0;
+        }
         int* cancelArg()  const { return dev; }
-        int* progressArg()const { return dev ? dev + 1 : nullptr; }
-        void resetTicks()       { if (host) ((volatile int*)host)[1] = 0; }
-        int  ticks()      const { return host ? ((volatile int*)host)[1] : 0; }
+        int* progressArg()const { return devTicks; }
+        // Перед запуском, когда ядер нет: обнуление идёт в потоке опроса и дожидается конца,
+        // поэтому ни недочитанная копия, ни старое значение до нового ядра не доживут.
+        void resetTicks() {
+            lastTicks = 0;
+            if (!devTicks) return;
+            cudaStreamSynchronize(pollStream);
+            cudaMemsetAsync(devTicks, 0, sizeof(int), pollStream);
+            cudaStreamSynchronize(pollStream);
+            copyPending = false;
+        }
+        // Забрать пришедшую копию и выдать следующую; final — дождаться точного значения
+        // (ядро уже закончилось).
+        void pollTicks(bool final) {
+            if (!devTicks) return;
+            if (final) {
+                cudaStreamSynchronize(pollStream);
+                cudaMemcpyAsync(hostTicks, devTicks, sizeof(int), cudaMemcpyDeviceToHost, pollStream);
+                cudaStreamSynchronize(pollStream);
+                lastTicks = *hostTicks;
+                copyPending = false;
+                return;
+            }
+            if (copyPending && cudaStreamQuery(pollStream) == cudaSuccess) {
+                lastTicks = *hostTicks;
+                copyPending = false;
+            }
+            if (!copyPending) {
+                cudaMemcpyAsync(hostTicks, devTicks, sizeof(int), cudaMemcpyDeviceToHost, pollStream);
+                cudaStreamQuery(pollStream);   // WDDM: вытолкнуть копию драйверу сразу
+                copyPending = true;
+            }
+        }
+        int  ticks()      const { return lastTicks; }
         void raiseCancel()      { if (host) ((volatile int*)host)[0] = 1; }
     };
 
 
-    // Шаг тика прогресса. Кратен CHECK_INTERVAL, потому что тики ставятся в уже
-    // существующей проверке расходимости, и подобран так, чтобы точка отчиталась
-    // около 64 раз за свою работу: этого хватает на гладкий бар и не создаёт
-    // давки на одном адресе.
+    // Шаг тика прогресса. Кратен шагу проверки, потому что тики ставятся в уже
+    // существующей проверке расходимости: kLoopCheckBlock (1000) кратен и ему, и
+    // CHECK_INTERVAL циклов с записью траектории. Подобран так, чтобы точка отчиталась
+    // около 64 раз за свою работу: этого хватает на гладкий бар.
     static int progress_stride_for(size_t stepsPerPoint) ;
 
 
     // Ждём, пока отданная в stream работа закончится, обновляя прогресс из тиков
-    // и передавая Cancel в ядро. В теле цикла не должно быть вызовов CUDA, кроме
-    // cudaStreamQuery — см. комментарий к RunSignals.
+    // и передавая Cancel в ядро. В теле цикла не должно быть синхронных вызовов CUDA:
+    // только cudaStreamQuery и асинхронная копия тиков в своём потоке (RunSignals).
     bool wait_with_signals(cudaStream_t stream, RunSignals& sig,
                            const std::shared_ptr<std::atomic<bool>>& cancel,
                            const std::shared_ptr<std::atomic<float>>& progress,
-                           double ticksBefore, double ticksTotal, std::string& err) const
+                           double ticksBefore, double ticksTotal, std::string& err)
     ;
+
+
+    // Зеркало флага отмены (g_ucudaCancelMirror, cudaLibrary.cu: ядра читают его вместо
+    // mapped-страницы) после отменённого запуска остаётся 1 в том модуле, где его подняли, и
+    // следующий запуск этого модуля сразу «отменился» бы. Какой модуль работал, здесь не известно,
+    // поэтому сброс во всех: это раз на отмену, а модули без переменной (не из cudaLibrary.cu)
+    // пропускаются. Ядро к этому моменту закончилось, так что memset не встаёт в очередь за ним.
+    template <class T>
+    static void reset_cancel_mirror_pool(const ModuleLru<T>& pool) {
+        pool.for_each([](const T& e) {
+            if (!e.module) return;
+            CUdeviceptr p = 0;
+            size_t      sz = 0;
+            if (cuModuleGetGlobal(&p, &sz, e.module, "g_ucudaCancelMirror") == CUDA_SUCCESS && sz == sizeof(int))
+                cuMemsetD32(p, 0, 1);
+        });
+    }
+
+
+    void reset_cancel_mirrors() ;
 
 
     // Закэшированные тексты NonLinAnal headers (читаются один раз)
@@ -68,6 +141,8 @@ struct ParametricEngine::Impl {
 
     std::string src_ucuda_adaptive_cuh;
    // драйвер адаптивного шага (kernels/ucuda_adaptive.cuh)
+    std::string src_ucuda_bdf_cuh;
+        // BDF 1-5 в форме DASSL (kernels/ucuda_bdf.cuh): свипы на BDF
     std::string src_adaptive_part;
         // адаптивные ядра свипов (kernels/adaptive_part.cu)
     std::string src_metrics_adaptive_part;
@@ -128,7 +203,7 @@ struct ParametricEngine::Impl {
         CUfunction  kernel_traj = nullptr;  // calculateDiscreteModelCUDA
         CUfunction  kernel_peak = nullptr;  // peakFinderCUDA
         CUfunction  kernel_fused = nullptr; // calculateDiscreteModelPeaksCUDA
-        CUfunction  kernel_dft  = nullptr;  // DFT_custom (used by run_dft_1d classical branch)
+        CUfunction  kernel_dft  = nullptr;  // DFT_custom_pf (used by run_dft_1d classical branch)
     };
 
     CachedModule cached;
@@ -169,7 +244,7 @@ struct ParametricEngine::Impl {
         CUmodule    module     = nullptr;
         CUfunction  kernel_cont = nullptr;  // bifurcation1dContinuationKernel
         CUfunction  kernel_peak = nullptr;  // peakFinderCUDA
-        CUfunction  kernel_dft  = nullptr;  // DFT_custom (used by run_dft_1d continuation branch)
+        CUfunction  kernel_dft  = nullptr;  // DFT_custom_pf (used by run_dft_1d continuation branch)
     };
 
     CachedContModule cached_cont;
@@ -203,19 +278,19 @@ struct ParametricEngine::Impl {
         CUmodule     module        = nullptr;
         CUfunction   kernel_fused  = nullptr;   // calculateDiscreteModelPeaksCUDA
         CUfunction   kernel_dbscan = nullptr;   // dbscanCUDA
+        CUfunction   kernel_dbscan_warp = nullptr;   // dbscanWarpCUDA (одномерная ветка)
+        CUfunction   kernel_dbscan_warp2d = nullptr; // dbscanWarp2DCUDA (двумерная ветка)
+        CUfunction   kernel_max_peaks   = nullptr;   // ucudaMaxPeaksCUDA
     };
 
     CachedBif2dModule cached_bif2d;
 
 
-    // Basins — отдельный шаблон, пять kernel'ов (трое для DBSCAN host-цикла).
+    // Basins — отдельный шаблон: траектории и признаки. DBSCAN — на CPU (basins_dbscan_host).
     struct CachedBasinsModule {
         std::string  key;
         CUmodule     module                  = nullptr;
         CUfunction   kernel_fused            = nullptr;  // calculateDiscreteModelAvgPeaksCUDA
-        CUfunction   kernel_dbscan           = nullptr;  // CUDA_dbscan_kernel
-        CUfunction   kernel_search_fixed     = nullptr;  // CUDA_dbscan_search_fixed_points_kernel
-        CUfunction   kernel_search_clear     = nullptr;  // CUDA_dbscan_search_clear_points_kernel
     };
 
     CachedBasinsModule cached_basins;
@@ -230,9 +305,9 @@ struct ParametricEngine::Impl {
         CUfunction   kernel_peaks        = nullptr;  // calculateDiscreteModelPeaksAdCUDA
         CUfunction   kernel_avg          = nullptr;  // calculateDiscreteModelAvgPeaksAdCUDA
         CUfunction   kernel_dbscan       = nullptr;  // dbscanCUDA (БД 2D)
-        CUfunction   kernel_cdbscan      = nullptr;  // CUDA_dbscan_kernel (бассейны)
-        CUfunction   kernel_search_fixed = nullptr;  // CUDA_dbscan_search_fixed_points_kernel
-        CUfunction   kernel_search_clear = nullptr;  // CUDA_dbscan_search_clear_points_kernel
+        CUfunction   kernel_dbscan_warp  = nullptr;  // dbscanWarpCUDA (БД 2D, одномерная ветка)
+        CUfunction   kernel_dbscan_warp2d = nullptr; // dbscanWarp2DCUDA (БД 2D, двумерная ветка)
+        CUfunction   kernel_max_peaks    = nullptr;  // ucudaMaxPeaksCUDA
     };
 
     CachedAdModule cached_ad;
@@ -375,13 +450,21 @@ struct ParametricEngine::Impl {
 
     // Activates the module already built for this key, if the pool still holds it.
     template <class T>
-    bool cache_activate(ModuleLru<T>& pool, const std::string& key, T& active) ;
+    bool cache_activate(ModuleLru<T>& pool, const std::string& key, T& active) {
+        if (active.module && active.key == key) return true;
+        return pool.take(key, active);
+    }
 
 
     // Prewarm path: park the module in the pool WITHOUT touching the active slot -- a running
     // task reads that slot from its own thread and must not see it change under it.
     template <class T>
-    void cache_store(ModuleLru<T>& pool, const T& fresh, const std::string& pinned) ;
+    void cache_store(ModuleLru<T>& pool, const T& fresh, const std::string& pinned) {
+        std::vector<T> evicted;
+        pool.insert(fresh, pinned, evicted);
+        for (const T& e : evicted)
+            if (e.module) cuModuleUnload(e.module);
+    }
 
 
     // Keys being compiled right now, so two threads asking for the same module (a prewarm and the
@@ -396,17 +479,52 @@ struct ParametricEngine::Impl {
     // slot) from a prewarm (pool only).
     template <class T, class Build>
     bool compile_into(ModuleLru<T>& pool, const std::string& key, T& active,
-                      bool activate, Build&& build, std::string& err) ;
+                      bool activate, Build&& build, std::string& err) {
+        std::unique_lock<std::recursive_mutex> lk(cache_mu);
+        for (;;) {
+            if (activate ? cache_activate(pool, key, active) : pool.contains(key)) return true;
+            if (in_flight_keys.insert(key).second) break;   // nobody else is building it: we do
+            // wait() drops ONE level of a recursive_mutex, so compile_* must never be reached
+            // with cache_mu already held -- it would wait here holding the lock and deadlock.
+            compile_done.wait(lk);                          // someone is: take their result
+        }
+        if (!load_sources(err)) {
+            in_flight_keys.erase(key);
+            compile_done.notify_all();
+            return false;
+        }
+
+        T fresh;
+        lk.unlock();
+        const bool ok = build(fresh);   // seconds of NVRTC, lock released
+        lk.lock();
+
+        in_flight_keys.erase(key);
+        compile_done.notify_all();
+        if (!ok) return false;
+        if (activate) cache_publish(pool, fresh, active);
+        else          cache_store(pool, fresh, active.key);
+        return true;
+    }
 
 
     // Pins the PREVIOUS active entry while inserting: a running task may still hold its kernels,
     // and evicting it would unload code from under a live launch.
     template <class T>
-    void cache_publish(ModuleLru<T>& pool, const T& fresh, T& active) ;
+    void cache_publish(ModuleLru<T>& pool, const T& fresh, T& active) {
+        std::vector<T> evicted;
+        pool.insert(fresh, active.key, evicted);
+        for (const T& e : evicted)
+            if (e.module) cuModuleUnload(e.module);
+        active = fresh;
+    }
 
 
     template <class T>
-    void drain_pool(ModuleLru<T>& pool) ;
+    void drain_pool(ModuleLru<T>& pool) {
+        for (const T& e : pool.drain())
+            if (e.module) cuModuleUnload(e.module);
+    }
 
 
     ~Impl() ;
@@ -433,7 +551,7 @@ struct ParametricEngine::Impl {
     // load_sources() rewrites configCUDA.h whenever the peak settings change, and reading a
     // std::string while another thread assigns it is a race no matter how rare.
     struct SrcSnapshot {
-        std::string tmpl, lib_cu, lib_cuh, macros_cuh, config_h, adaptive_cuh;
+        std::string tmpl, lib_cu, lib_cuh, macros_cuh, config_h, adaptive_cuh, bdf_cuh;
     };
 
 
@@ -463,6 +581,24 @@ struct ParametricEngine::Impl {
 
     static const KrsFn* krs_fn(const std::string& ph) ;
 
+    // Шаг неавтономной системы (модуль с UCUDA_NONAUTONOMOUS): время — вторым аргументом, как у
+    // calculateDiscreteModel в шаблоне (UCUDA_TP). Своё имя — PTX шага с временем и без не путаются.
+    // Так же функции адаптивного шага: время перед a, как у UcudaKrsFns с UCUDA_NONAUTONOMOUS.
+    static constexpr KrsFn kKrsFnsT[] = {
+        { "{{KRS_BODY}}", "krs_step_t", "numb* X, const numb ucuda_t, const numb* a, const numb h",
+          "    krs_step_t(X, ucuda_t, a, h);" },
+        { "{{KRS_RHS_BODY}}", "krs_rhs_t", "const numb* X, const numb ucuda_t, const numb* a, numb* F",
+          "    krs_rhs_t(X, ucuda_t, a, F);" },
+        { "{{KRS_EMB_BODY}}", "krs_emb_t",
+          "const numb* X, const numb* F0, const numb ucuda_t, const numb* a, const numb h, numb* Y, numb* E, numb* F1, numb* W",
+          "    krs_emb_t(X, F0, ucuda_t, a, h, Y, E, F1, W);" },
+        { "{{KRS_DPREP_BODY}}", "krs_dprep_t",
+          "const numb* X, const numb* Y, const numb* F0, const numb* F1, const numb ucuda_t, const numb* a, const numb h, numb* W, numb* D",
+          "    krs_dprep_t(X, Y, F0, F1, ucuda_t, a, h, W, D);" },
+    };
+
+    static const KrsFn* krs_fn(const std::string& ph, bool nonauto) ;
+
 
     // Кэш PTX библиотечной половины: ключ — всё, кроме КРС. Именно это и есть смысл затеи:
     // при смене схемы 1.2 МБ PTX библиотеки переиспользуются, а заново собирается только шаг.
@@ -491,7 +627,7 @@ struct ParametricEngine::Impl {
     ModuleLru<CachedKrsPtx>     pool_krs_ptx{ 8 };
    // ~50 КБ на запись
 
-    // Компиляция одной единицы трансляции в PTX. rdc=true — для половинок раздельной сборки.
+    // Компиляция одной единицы трансляции в PTX (см. nvrtc_compile_ptx).
     bool compile_ptx(const std::string& src, const char* src_name,
                      const std::vector<const char*>& headers_src,
                      const std::vector<const char*>& headers_name,
@@ -501,7 +637,7 @@ struct ParametricEngine::Impl {
 
 
     // Библиотечная половина: тот же шаблон, но вместо тела шага — вызов внешнего krs_step.
-    // Объявление вставляется сразу после #include "cudaLibrary.cuh" (он тянет numb из
+    // Объявление вставляется сразу после #include "ucuda/cuda/cudaLibrary.cuh" (он тянет numb из
     // configCUDA.h, а сам КРС определяется четырьмя строками ниже — структура одинакова у всех
     // 15 шаблонов).
     bool lib_ptx_for(const SrcSnapshot& snap, const char* src_name, const std::string& lib_key,
@@ -534,7 +670,7 @@ struct ParametricEngine::Impl {
     // Требует выставленного контекста и уже загруженных источников (load_sources). При успехе
     // out_module загружен, а lowered содержит по одному имени на каждый вход name_exprs в том же
     // порядке. Символы, объявленные extern "C", в name_exprs передавать не нужно.
-    bool build_module(const SrcSnapshot& snap,
+    bool build_module(const SrcSnapshot& snap_in,
                       const char* src_name,
                       const std::vector<std::pair<std::string, std::string>>& subs,
                       const std::vector<const char*>& name_exprs,
@@ -578,11 +714,168 @@ struct ParametricEngine::Impl {
 
     // LLE (ls = false) / LS (ls = true) 1D с адаптивным шагом одной цепочкой точек: continuation
     // на GPU (одна нить, ucuda_lyap_chain) или любой режим на CPU (AdaptiveCpuModule — те же
-    // функции раздела UCUDA_AD_LYAPUNOV, собранные cl.exe). out[nPts * NC] (NaN — разлёт),
-    // stats[nPts * 4]. Возвращает false с текстом в err; отмена — cancelled = true.
+    // функции раздела UCUDA_AD_LYAPUNOV, собранные cl.exe). out[nPts * NC] (NaN — разлёт,
+    // UCUDA_CANCELLED_VALUE — точка, до которой не дошёл Stop), stats[nPts * 4]. Возвращает false с
+    // текстом в err. Stop — true и cancelled = true: посчитанное в out остаётся.
     template <class Req>
     bool run_lyap_ad_seq(bool ls, const Req& req, std::vector<double>& out, std::vector<double>& stats,
-                         std::string& err, bool& cancelled) ;
+                         std::string& err, bool& cancelled) {
+        cancelled = false;
+        const AdaptiveRequest& ad = req.adaptive;
+        const int n = req.amountOfX, nPts = req.n_pts, NC = ls ? n : 1;
+        if (req.sweep_over_var) { err = "the adaptive step on this path supports a param sweep only"; return false; }
+        if (n <= 0 || n > kMaxAmountOfX) { err = "amountOfX out of range"; return false; }
+        if ((int)req.initial_conditions.size() != n) { err = "initial_conditions.size() != amountOfX"; return false; }
+        if ((int)req.base_values.size() > 64) { err = "too many base_values"; return false; }
+        const bool ad_axis = ad.axis_kind[0] != kAdAxisSystem;
+        if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size())) {
+            err = "param_index out of range"; return false;
+        }
+        const int    nBlocks = (int)(req.t_max / req.NT);
+        const int    nWarm   = lyap_warm_blocks(req.vector_transient, req.NT);
+        if (nBlocks <= 0) { err = "t_max / NT < 1"; return false; }
+        // Точки, которых Stop не дал начать, так и останутся с меткой отмены.
+        out.assign((size_t)nPts * NC, (double)UCUDA_CANCELLED_VALUE);
+        stats.assign((size_t)nPts * 4, 0.0);
+        const int continuation = req.continuation ? 1 : 0;
+
+        if (req.use_cpu) {
+            AdaptiveCpuModule mod;
+            std::vector<KrsCpuDiag> diags;
+            // Те же аргументы, что у БД 1D (run_bif1d_cpu_ad), — одна DLL на все адаптивные CPU-ветки.
+            if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, n, ad.prefix + peak_config_defines(), diags)) {
+                err = "CPU adaptive module:";
+                for (const KrsCpuDiag& d : diags)
+                    err += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
+                return false;
+            }
+            // Stop до запуска — прежний отказ, а не пустой частичный результат.
+            if (cancel_requested(req.cancel)) { cancelled = true; err = "Cancelled by user"; return false; }
+            // Второй поток переносит отмену во флаг DLL и число готовых точек в прогресс.
+            volatile int cancelFlag = 0;
+            int progressCount = 0;                  // цепочка: счётчик DLL (точки)
+            std::atomic<int> donePts{ 0 };          // классика: точки готовых кусков
+            std::atomic<bool> done{ false };
+            std::thread watcher([&]() {
+                while (!done.load(std::memory_order_relaxed)) {
+                    if (req.cancel && req.cancel->load(std::memory_order_relaxed)) cancelFlag = 1;
+                    const int got = continuation ? *(volatile int*)&progressCount
+                                                 : donePts.load(std::memory_order_relaxed);
+                    if (req.progress)
+                        req.progress->store((float)got / (float)(nPts > 0 ? nPts : 1), std::memory_order_relaxed);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+            });
+            if (continuation || !mod.lyap_range()) {
+                // Цепочка continuation — одна, в этом потоке.
+                mod.lyap()(ls ? 1 : 0, continuation, nPts, req.param_lo, req.param_hi, req.continuation_reverse ? 1 : 0,
+                           req.log_scale ? 1 : 0, ad_axis ? 0 : req.param_index, req.base_values.data(),
+                           (int)req.base_values.size(), req.initial_conditions.data(), &ad.params, ad.axis_kind[0],
+                           ad.tol_ratio, req.transient_time, req.NT, nBlocks, nWarm, req.eps, ad.lyap_renorm,
+                           req.max_value, out.data(), stats.data(), &cancelFlag, &progressCount);
+            } else {
+                // Классика: точки независимы — куски раздаются потокам по мере освобождения (цена
+                // точки с адаптивным шагом сильно разная). Тот же код точки, что у цепочки при
+                // continuation = 0 (ucuda_lyap_classic_range), поэтому результат от раздачи не зависит.
+                constexpr int kChunk = 2;
+                unsigned hw = std::thread::hardware_concurrency();
+                if (hw == 0) hw = 1;
+                const int nChunks  = (nPts + kChunk - 1) / kChunk;
+                const int nWorkers = (int)std::min<unsigned>(hw, (unsigned)(nChunks > 0 ? nChunks : 1));
+                std::atomic<int> nextChunk{ 0 };
+                auto worker = [&]() {
+                    for (;;) {
+                        const int c = nextChunk.fetch_add(1, std::memory_order_relaxed);
+                        if (c >= nChunks || cancelFlag) return;
+                        const int i0 = c * kChunk, i1 = (std::min)(nPts, i0 + kChunk);
+                        int prog = 0;
+                        mod.lyap_range()(ls ? 1 : 0, i0, i1, nPts, req.param_lo, req.param_hi, req.log_scale ? 1 : 0,
+                                         ad_axis ? 0 : req.param_index, req.base_values.data(),
+                                         (int)req.base_values.size(), req.initial_conditions.data(), &ad.params,
+                                         ad.axis_kind[0], ad.tol_ratio, req.transient_time, req.NT, nBlocks, nWarm,
+                                         req.eps, ad.lyap_renorm, req.max_value, out.data() + (size_t)i0 * NC,
+                                         stats.data() + (size_t)i0 * 4, &cancelFlag, &prog);
+                        donePts.fetch_add(i1 - i0, std::memory_order_relaxed);
+                    }
+                };
+                std::vector<std::thread> pool;
+                for (int w = 0; w < nWorkers; ++w) pool.emplace_back(worker);
+                for (std::thread& t : pool) t.join();
+            }
+            done.store(true, std::memory_order_relaxed);
+            watcher.join();
+            cancelled = cancelFlag != 0;
+            return true;
+        }
+
+        if (cancel_requested(req.cancel)) { cancelled = true; err = "Cancelled by user"; return false; }
+        // GPU: однопоточное ядро цепочки.
+        if (!ensure_init(err)) return false;
+        cuCtxSetCurrent(context);
+        if (!compile_lyap_ad_cont_if_needed(ad, req.krs_body, n, err)) return false;
+        numb* d_baseValues = nullptr;
+        numb* d_baseX      = nullptr;
+        numb* d_result     = nullptr;
+        AdDeviceArgs adArgs;
+        RunSignals sig;
+        auto cleanup = [&]() {
+            adArgs.release();
+            if (d_baseValues) cudaFree(d_baseValues);
+            if (d_baseX)      cudaFree(d_baseX);
+            if (d_result)     cudaFree(d_result);
+            sig.release();
+        };
+        auto cuda_ok = [&](cudaError_t e, const char* where) {
+            if (e == cudaSuccess) return true;
+            err = std::string("CUDA ") + where + ": " + cudaGetErrorString(e);
+            cleanup();
+            return false;
+        };
+        if (!cuda_ok(cudaMalloc((void**)&d_baseValues, (req.base_values.empty() ? 1 : req.base_values.size()) * sizeof(numb)), "malloc baseValues")
+            || !cuda_ok(cudaMalloc((void**)&d_baseX, (size_t)n * sizeof(numb)), "malloc baseX")
+            || !cuda_ok(cudaMalloc((void**)&d_result, (size_t)nPts * NC * sizeof(numb)), "malloc result"))
+            return false;
+        {
+            const int kinds[2] = { ad.axis_kind[0], kAdAxisSystem };
+            if (!adArgs.alloc(ad, kinds, (size_t)nPts, err)) { cleanup(); return false; }
+        }
+        if (!sig.alloc(err)) { cleanup(); return false; }
+        const std::vector<numb> vals = to_numb(req.base_values), x0 = to_numb(req.initial_conditions);
+        if (!vals.empty() && !cuda_ok(cudaMemcpy(d_baseValues, vals.data(), vals.size() * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseValues"))
+            return false;
+        if (!cuda_ok(cudaMemcpy(d_baseX, x0.data(), (size_t)n * sizeof(numb), cudaMemcpyHostToDevice), "memcpy baseX"))
+            return false;
+        int    nPts_a = nPts, reverse_a = req.continuation_reverse ? 1 : 0, logScale_a = req.log_scale ? 1 : 0;
+        int    mut_a = ad_axis ? 0 : req.param_index, nv_a = (int)req.base_values.size(), axis_a = ad.axis_kind[0];
+        numb   lo_a = (numb)req.param_lo, hi_a = (numb)req.param_hi, tol_a = (numb)ad.tol_ratio;
+        numb   tTr_a = (numb)req.transient_time, NT_a = (numb)req.NT, eps_a = (numb)req.eps, max_a = (numb)req.max_value;
+        int    nBlocks_a = nBlocks, nWarm_a = nWarm, renorm_a = ad.lyap_renorm;
+        UcudaAdaptParams* dP = adArgs.params;
+        numb*  dSt = adArgs.stats;
+        int*   d_cancel = sig.cancelArg();
+        int*   d_prog   = sig.progressArg();
+        void* args[] = { &nPts_a, &lo_a, &hi_a, &reverse_a, &logScale_a, &mut_a, &d_baseValues, &nv_a, &d_baseX,
+                         &dP, &axis_a, &tol_a, &tTr_a, &NT_a, &nBlocks_a, &nWarm_a, &eps_a, &renorm_a, &max_a,
+                         &d_result, &dSt, &d_cancel, &d_prog };
+        CUresult r = cuLaunchKernel(ls ? cached_lyap_ad_cont.kernel_ls : cached_lyap_ad_cont.kernel_lle,
+                                    1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr);
+        if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(lyapunov adaptive continuation): " + cu_err(r); cleanup(); return false; }
+        if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, err)) {
+            cancelled = req.cancel && req.cancel->load(std::memory_order_relaxed);
+            cleanup();
+            return false;
+        }
+        if (!cuda_ok(cudaDeviceSynchronize(), "sync after lyapunov adaptive continuation")) return false;
+        std::vector<numb> h_res((size_t)nPts * NC), h_st((size_t)nPts * 4);
+        if (!cuda_ok(cudaMemcpy(h_res.data(), d_result, h_res.size() * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result")
+            || !cuda_ok(cudaMemcpy(h_st.data(), adArgs.stats, h_st.size() * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy stats"))
+            return false;
+        cleanup();
+        out.assign(h_res.begin(), h_res.end());
+        stats.assign(h_st.begin(), h_st.end());
+        cancelled = cancel_requested(req.cancel);
+        return true;
+    }
 
 
     // БД 1D с адаптивным шагом на CPU: AdaptiveCpuModule (cl.exe) собирает адаптивные тела,
@@ -898,24 +1191,56 @@ struct ParametricEngine::Impl {
     SignalMetricsResult run_metrics_continuation_ad(const SignalMetricsRequest& req) ;
 
 
-    // compile_basins_if_needed — отдельный шаблон basins.template.cu, регистрирует 5 kernel'ов:
-    // calculateDiscreteModelCUDA, avgPeakFinderCUDA и три DBSCAN-kernel'а (cluster,
-    // search_fixed_points, search_clear_points). Cache-ключ помечен `:basins`; par_or_var=0
-    // захардкожен в шаблоне, поэтому ключа не требует — только хэш krs_body/amountOfX.
+    // compile_basins_if_needed — отдельный шаблон basins.template.cu: ядро траекторий и
+    // признаков (DBSCAN — на CPU, см. basins_dbscan_host).
+    // Cache-ключ помечен `:basins`; par_or_var=0 захардкожен в шаблоне, поэтому ключа не
+    // требует — только хэш krs_body/amountOfX.
     bool compile_basins_if_needed(const std::string& krs_body, int amountOfX,
                                   std::string& err, bool activate = true) ;
 
 
+    // DBSCAN бассейнов (фаза 2 run_basins и run_basins_recluster) на CPU, сеткой в пространстве
+    // признаков. Разбиение и метки — те же, что давал прежний обход в ширину на GPU:
+    //   - кластер — компонента связности по отношению distance2 <= eps² среди точек с
+    //     helpful != REGIME_UNBOUND (Unbound остаются 0);
+    //   - компоненты, где есть REGIME_FIXED_POINT, получают -1, -2, ... по возрастанию своего
+    //     наименьшего индекса FP; остальные — 1, 2, ... по наименьшему индексу REGIME_OSCILLATION;
+    //     компонента без FP и Osc (иные коды helpful) остаётся 0.
+    // Зачем: обход в ширину был O(N²). У бассейнов признаки ячеек одного аттрактора почти равны,
+    // первый уровень от seed'а захватывает почти весь кластер, и каждая точка ДРУГОГО аттрактора
+    // затем просматривает весь этот фронт без попадания. 600x600: 5.3 с из 24.7 с расчёта.
+    // Здесь точки раскладываются по ячейкам со стороной чуть меньше eps/√2: любые две точки одной
+    // ячейки заведомо соседи, так что ячейка — один узел union-find, а соседей ищем только в окне
+    // 5x5 ячеек (пара в пределах eps отстоит не больше чем на 2 ячейки по каждой оси).
+    // Предикат соседства — ровно GPU-шный: distance2 на numb, при --fmad NVRTC сворачивает его в
+    // fma(dx, dx, dy*dy) (проверено по PTX), без него — отдельные округления; MSVC без
+    // /fp:contract выражений не сворачивает. Поэтому и граничные пары решаются так же, как на GPU.
+    // Сетка — только отсев кандидатов с запасом: на результат она не влияет. Считает fmad
+    // текущей настройки (get_nvrtc_fmad), как считало бы ядро, собранное с ней.
+    // labels — n ячеек, Unbound получают 0. false = отмена.
+    static bool basins_dbscan_host(const numb* X, const numb* Y, const int* H, size_t n, double eps,
+                                   const std::shared_ptr<std::atomic<bool>>& cancel,
+                                   const std::shared_ptr<std::atomic<float>>& progress,
+                                   int* labels, int& n_pos, int& n_neg) ;
+
+
+    // То же для признаков, лежащих на устройстве (run_basins): D2H, basins_dbscan_host, метки
+    // обратно в d_labels. false + err пустой = отмена.
+    bool basins_dbscan_grid(const numb* d_X, const numb* d_Y, const int* d_helpful, int* d_labels,
+                            size_t total_cells, double eps,
+                            const std::shared_ptr<std::atomic<bool>>& cancel,
+                            const std::shared_ptr<std::atomic<float>>& progress,
+                            int& n_pos, int& n_neg, std::string& err) ;
+
+
     // run_basins — порт NonLinAnal::basinsOfAttraction + CUDA_dbscan host-loop (hostLibrary.cu).
-    // Структура: 1) traj+avg_peak chunked loop по ячейкам; 2) host-DBSCAN — цикл по точкам, на
-    // каждой итерации search_fixed/search_clear + cluster_kernel с расширением через
-    // neighbors-список. Возвращает basin_idx (cluster IDs), avg_peaks, avg_intervals, helpful_array.
+    // Структура: 1) traj+avg_peak chunked loop по ячейкам; 2) DBSCAN обходом в ширину на GPU
+    // (basins_dbscan_grid, на CPU). Возвращает basin_idx (cluster IDs), avg_peaks, avg_intervals, helpful_array.
     BasinsResult run_basins(const BasinsRequest& req) ;
 
 
-    // run_basins_recluster — DBSCAN-only прогон поверх кэшированных фич. Зеркалит фазу 2
-    // (host-DBSCAN) из run_basins, но пропускает sim-фазу: d_avgPeaks/d_avgIntervals/d_helpfulArray
-    // заливаются из request'а вместо повторного прогона avgPeakFinderCUDA. Мульты уже применены к
+    // run_basins_recluster — DBSCAN-only прогон поверх кэшированных фич: та же фаза 2, что в
+    // run_basins (basins_dbscan_host), без sim-фазы и без GPU. Мульты уже применены к
     // загруженным фичам (run_basins, фаза 1), поэтому здесь не нужны.
     BasinsReclusterResult run_basins_recluster(const BasinsReclusterRequest& req) ;
 

@@ -92,12 +92,22 @@ public:
         return fn_ != nullptr || fn_dd_ != nullptr || fn_qd_ != nullptr;
     }
 
+    // Явное время t (тело ссылается на ucuda_t): шаг сам берёт t = n*h из номера шага n
+    // (thread_local в DLL) и продвигает его, поэтому циклы CPU-путей не меняются — как на GPU,
+    // где номер ведут циклы cudaLibrary.cu. Вызывающий ставит n в начале траектории (0) и
+    // возвращает его клонам LLE/LS перед их блоком. step_index(v): v >= 0 — поставить;
+    // возвращает прежнее значение. У автономного тела — 0 и ничего не делает.
+    bool      has_time() const { return idx_ != nullptr; }
+    long long step_index(long long v = -1) const { return idx_ ? idx_(v) : 0; }
+
 private:
+    using IndexFn = long long (*)(long long);
     void     release();
     void*    module_ = nullptr;   // HMODULE
     StepFn   fn_     = nullptr;
     StepFnDD fn_dd_  = nullptr;
     StepFnQD fn_qd_  = nullptr;
+    IndexFn  idx_    = nullptr;
 };
 
 // Пользовательский регулятор шага (C body из библиотеки регуляторов, adaptive_settings.h)
@@ -110,7 +120,7 @@ struct UcudaCtlOut;
 class CtrlCpuFn {
 public:
     using Fn     = void (*)(const UcudaCtlIn*, UcudaCtlMem*, UcudaCtlOut*);
-    using PrepFn = void (*)(const double* c, int q, double* k);   // раздел подготовки (numb = double)
+    using PrepFn = void (*)(const numb* c, int q, numb* k);   // раздел подготовки (DLL собрана с numb из configCUDA.h)
     CtrlCpuFn() = default;
     ~CtrlCpuFn();
     CtrlCpuFn(const CtrlCpuFn&) = delete;

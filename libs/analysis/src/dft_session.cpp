@@ -1,73 +1,4 @@
 ﻿#include "session_internal.h"
-
-namespace ucuda::analysis_detail {
-
-
-Dft1DRequest build_dft1d_request(const Dft1DAnalysisSession& s,
-                                        const Dft1DConfig& c) {
-    Dft1DRequest req;
-    req.sweep_over_h = c.sweep_over_h;
-    req.log_scale    = c.log_scale;
-    req.use_cpu      = !c.use_gpu;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
-    req.amountOfX = (int)s.vars.size();
-
-    req.initial_conditions.resize(req.amountOfX);
-    for (int i = 0; i < req.amountOfX; ++i) {
-        auto it = c.initial_conditions.find(s.vars[i]);
-        req.initial_conditions[i] = (it != c.initial_conditions.end()) ? parse_d(it->second, 0.0) : 0.0;
-    }
-
-    int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
-    req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
-    for (int i = 0; i < nparams; ++i) {
-        auto it = c.param_values.find(s.params[i]);
-        req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
-    }
-    req.param_index = sweep_param_slot(c.param_index, nparams);
-    req.sweep_over_var = c.sweep_over_var;
-    req.var_sweep_index = (c.var_sweep_index >= 0 && c.var_sweep_index < req.amountOfX)
-                          ? c.var_sweep_index : 0;
-    req.continuation = c.continuation;
-    req.continuation_reverse = c.continuation_reverse;
-
-    req.param_lo = parse_d(c.param_lo_text, 0.0);
-    req.param_hi = parse_d(c.param_hi_text, 1.0);
-    if (req.param_hi < req.param_lo) std::swap(req.param_lo, req.param_hi);
-    req.n_pts        = parse_i(c.n_pts_text, 500);
-    // -1 — combination (см. build_bif1d_request / loopCalculateDiscreteModel_int).
-    req.writable_var = (c.writable_var >= -1 && c.writable_var < req.amountOfX) ? c.writable_var : 0;
-
-    req.n_freq  = parse_i(c.n_freq_text, 200);
-    req.freq_lo = parse_d(c.freq_lo_text, 0.0);
-    req.freq_hi = parse_d(c.freq_hi_text, 10.0);
-    if (req.freq_hi < req.freq_lo) std::swap(req.freq_lo, req.freq_hi);
-    req.freq_log_scale = c.freq_log_scale;
-    req.window_type = c.window_type;
-
-    req.h              = parse_d(c.h_text, 0.01);
-    req.t_max          = parse_d(c.t_max_text, 100.0);
-    req.transient_time = parse_d(c.transient_text, 100.0);
-    req.pre_scaller    = std::max(1, parse_i(c.pre_scaller_text, 1));
-    req.max_value      = parse_d(c.max_value_text, 1.0e6);
-    req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
-    return req;
-}
-
-
-void apply_dft1d_result(Dft1DConfig& c, Dft1DResult&& r) {
-    c.result = std::move(r);
-    c.last_run_ok = c.result.ok;
-    if (!c.result.ok) c.last_error = c.result.error;
-    c.data_generation++;
-    c.fit_request = true;
-    // Инвалидируем display-кэш явно (staleness-check в draw_dft1d_plot и так
-    // поймает смену data_generation, но display_built_from=-1 форсит rebuild
-    // немедленно, а не на следующий кадр после сравнения полей).
-    c.display_built_from = -1;
-}
-}
 using namespace ucuda::analysis_detail;
 
 
@@ -89,6 +20,8 @@ void Dft1DAnalysisSession::load_from_record(const SystemRecord& r,
     c.h_text = default_h_from_record(r);
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -139,6 +72,79 @@ void Dft1DAnalysisSession::remove_config(int i) {
     if (active_config_index >= (int)configs.size())
         active_config_index = (int)configs.size() - 1;
     if (active_config_index < 0) active_config_index = 0;
+}
+
+namespace ucuda::analysis_detail {
+
+
+Dft1DRequest build_dft1d_request(const Dft1DAnalysisSession& s,
+                                        const Dft1DConfig& c) {
+    Dft1DRequest req;
+    req.sweep_over_h = c.sweep_over_h;
+    req.log_scale    = c.log_scale;
+    req.use_cpu      = !c.use_gpu;
+    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
+    req.amountOfX = (int)s.vars.size();
+
+    req.initial_conditions.resize(req.amountOfX);
+    for (int i = 0; i < req.amountOfX; ++i) {
+        auto it = c.initial_conditions.find(s.vars[i]);
+        req.initial_conditions[i] = (it != c.initial_conditions.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+
+    int nparams = (int)s.params.size();
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
+    req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    scheme_fill_tail(req.base_values.data() + nparams + 1, c.cd_fp_iters, c.newton); // a[M+1..M+4]: CD FP n, Newton
+    for (int i = 0; i < nparams; ++i) {
+        auto it = c.param_values.find(s.params[i]);
+        req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+    req.param_index = sweep_param_slot(c.param_index, nparams);
+    req.sweep_over_var = c.sweep_over_var;
+    req.var_sweep_index = (c.var_sweep_index >= 0 && c.var_sweep_index < req.amountOfX)
+                          ? c.var_sweep_index : 0;
+    req.continuation = c.continuation;
+    req.continuation_reverse = c.continuation_reverse;
+
+    req.param_lo = parse_d(c.param_lo_text, 0.0);
+    req.param_hi = parse_d(c.param_hi_text, 1.0);
+    if (req.param_hi < req.param_lo) std::swap(req.param_lo, req.param_hi);
+    req.n_pts        = parse_i(c.n_pts_text, 500);
+    // -1 — combination (см. build_bif1d_request / loopCalculateDiscreteModel_int).
+    req.writable_var = (c.writable_var >= -1 && c.writable_var < req.amountOfX) ? c.writable_var : 0;
+
+    req.n_freq  = parse_i(c.n_freq_text, 200);
+    req.freq_lo = parse_d(c.freq_lo_text, 0.0);
+    req.freq_hi = parse_d(c.freq_hi_text, 10.0);
+    if (req.freq_hi < req.freq_lo) std::swap(req.freq_lo, req.freq_hi);
+    req.freq_log_scale = c.freq_log_scale;
+    req.window_type = c.window_type;
+
+    req.h              = parse_d(c.h_text, 0.01);
+    req.t_max          = parse_d(c.t_max_text, 100.0);
+    req.transient_time = parse_d(c.transient_text, 100.0);
+    req.pre_scaller    = std::max(1, parse_i(c.pre_scaller_text, 1));
+    req.max_value      = parse_d(c.max_value_text, 1.0e6);
+    req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
+    return req;
+}
+}
+
+namespace ucuda::analysis_detail {
+
+
+void apply_dft1d_result(Dft1DConfig& c, Dft1DResult&& r) {
+    c.result = std::move(r);
+    c.last_run_ok = c.result.ok;
+    if (!c.result.ok) c.last_error = c.result.error;
+    c.data_generation++;
+    c.fit_request = true;
+    // Инвалидируем display-кэш явно (staleness-check в draw_dft1d_plot и так
+    // поймает смену data_generation, но display_built_from=-1 форсит rebuild
+    // немедленно, а не на следующий кадр после сравнения полей).
+    c.display_built_from = -1;
+}
 }
 
 
@@ -206,15 +212,17 @@ bool Dft1DAnalysisSession::poll() {
 
     Dft1DResult r = run_future.get();
     bool cancelled = r.cancelled;
+    const std::string stop_note = stop_note_for(r.cancelled, r.ok, r.flags);
     int idx = running_config_index;
     std::string label = (idx >= 0 && idx < (int)configs.size() && !configs[idx].label.empty())
                             ? configs[idx].label : std::string("dft1d");
-    if (!cancelled && idx >= 0 && idx < (int)configs.size()) {
+    if ((!cancelled || partial_result_worth_showing(r.ok, r.flags)) && idx >= 0 && idx < (int)configs.size()) {
         apply_dft1d_result(configs[idx], std::move(r));
     }
     last_run_completed_at = std::chrono::steady_clock::now();
     last_run_seconds = std::chrono::duration<double>(last_run_completed_at - compute_start_time).count();
     last_run_label = label;
+    last_run_label += stop_note;
     last_run_succeeded = !cancelled;
     log_run_completed(last_run_label.c_str(), last_run_succeeded, last_run_seconds);
     in_flight = false;

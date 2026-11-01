@@ -2,6 +2,7 @@
 #include "ucuda/storage/system_library.h"
 #include "ucuda/storage/session_io.h"
 #include "ucuda/domain/num_parse.h"
+#include "ucuda/equations/codegen.hpp"
 #include <algorithm>
 static void basins_phase_tick(AppModel& model) {
     BasinsAnalysisSession& s = model.basins_session;
@@ -105,6 +106,24 @@ void AppModel::tick(SystemLibrary& lib) {
     model.custom_session.ls_session.wrapper_schemes     = model.enabled_wrapper_schemes();
     model.custom_session.phase_session.wrapper_schemes  = model.enabled_wrapper_schemes();
     model.custom_session.basins_session.wrapper_schemes = model.enabled_wrapper_schemes();
+
+    auto enabled = enabled_builtins_from_record(model.to_record());
+    if (!model.dae_native() && enabled.size() == 1 && scheme_is_multistep(enabled.front()))
+        enabled.clear();
+    std::vector<std::string> fixed;
+    for (const auto& name : enabled) if (!scheme_is_multistep(name)) fixed.push_back(name);
+    for (auto* destination : {&model.phase_session.enabled_builtin_schemes,
+             &model.bifurcation_session.enabled_builtin_schemes, &model.lle_session.enabled_builtin_schemes,
+             &model.ls_session.enabled_builtin_schemes, &model.metrics_session.enabled_builtin_schemes,
+             &model.basins_session.enabled_builtin_schemes, &model.custom_session.enabled_builtin_schemes,
+             &model.custom_session.bif_session.enabled_builtin_schemes, &model.custom_session.lle_session.enabled_builtin_schemes,
+             &model.custom_session.ls_session.enabled_builtin_schemes, &model.custom_session.phase_session.enabled_builtin_schemes,
+             &model.custom_session.basins_session.enabled_builtin_schemes})
+        *destination = enabled;
+    for (auto* destination : {&model.dft1d_session.enabled_builtin_schemes,
+             &model.fastsync_session.enabled_builtin_schemes, &model.order_session.enabled_builtin_schemes,
+             &model.network_session.enabled_builtin_schemes})
+        *destination = fixed;
 
     // Auto-labels: pre-frame refresh so all label-consumers (tab-bar names,
     // plot legend, window title, Plot windows section) see the same value.

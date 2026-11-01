@@ -1,9 +1,7 @@
 ﻿#include "gui_internal.h"
+using namespace ucuda::ui_detail;
 
 namespace ucuda::ui_detail {
-
-
-// Plot Fast Synchro: либо colored trajectory (mode 0), либо heatmap (mode 1).
 void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
     FastSyncAnalysisSession& s = model.fastsync_session;
     if (s.configs.empty()) {
@@ -19,6 +17,11 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
     auto& hm_map = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 11>();
     auto& traj_map = ui_resource<std::map<unsigned, std::unique_ptr<Plot2DView>>, 12>();
     if (!renderer) renderer = std::make_unique<PlotRenderer>();
+    static int seen_epoch = 0;
+    if (session_reloaded(model, AppModel::AppMode::FastSync, seen_epoch)) {
+        invalidate_views(hm_map);
+        invalidate_views(traj_map);
+    }
 
     // Visualization toolbar — общая реализация (draw_heatmap_toolbar). Цветовая шкала
     // FastSync держится в HeatmapView даже в mode 0 (colored trajectory, где хитмапы нет),
@@ -125,8 +128,11 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         if (c.plot_3d && nX >= 3) {
             // 3D: та же окраска по ошибке синхронизации, но в GL (draw_line_3d_cmap): цвет
             // интерполируется вдоль сегмента, глубина — depth test, а не сортировка сегментов.
-            auto& traj3d_map = ui_resource<std::map<unsigned, std::unique_ptr<Plot3DView>>, 504>();
-            int vz = (c.axis_z_var >= 0 && c.axis_z_var < nX) ? c.axis_z_var : 2;
+            auto& traj3d_map = ui_resource<std::map<unsigned, std::unique_ptr<Plot3DView>>, 3008>();
+            static int seen_epoch_3d = 0;
+            if (session_reloaded(model, AppModel::AppMode::FastSync, seen_epoch_3d))
+                invalidate_views(traj3d_map);
+            int vz =(c.axis_z_var >= 0 && c.axis_z_var < nX) ? c.axis_z_var : 2;
             auto& slot3 = traj3d_map[base_oid];
             if (!slot3) {
                 slot3 = std::make_unique<Plot3DView>();
@@ -140,7 +146,7 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
             v3.screenshot_extra_right = shot_extra;
 
             // Смена осей — новый bbox: перезаливка (токен) и автоподгонка.
-            static std::map<unsigned, int> last_axes3;
+            auto& last_axes3 = ui_resource<std::map<unsigned, int>, 3009>();
             const int axes_key = (vx * 64 + vy) * 64 + vz;
             auto it3 = last_axes3.find(base_oid);
             if (it3 == last_axes3.end() || it3->second != axes_key) {
@@ -212,7 +218,7 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         // Если поменялись axes — форсим (a) fit, чтобы view нашёл новый bbox;
         // (b) re-upload GPU-кэша точек, иначе series_cache_.bbox() даст старый
         // диапазон. Поэтому передаём генерационный токен, зависящий от (vx,vy).
-        static std::map<unsigned, std::pair<int,int>> last_axes;
+        auto& last_axes = ui_resource<std::map<unsigned, std::pair<int,int>>, 3010>();
         auto it_ax = last_axes.find(base_oid);
         if (it_ax == last_axes.end() || it_ax->second.first != vx || it_ax->second.second != vy) {
             v.view_valid = false;     // force autofit
@@ -354,28 +360,17 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
                                h.swap_axes, &model);
     }
 }
+}
 
-
-// Parametric Controls dispatcher — верхние табы Bif / LLE / LS.
-// ===========================================================================
-// Order — оценка порядка точности схемы.
-//
-// Расчёт: kernels/order.template.cu, три решения шагами h, h/2, h/4 и
-// p = log2(E1/E2) по Эйткену/Ричардсону (см. order_session.h).
-// Три диаграммы вкладки различаются только выбором осей, поэтому UI один.
-
-// Паспортный порядок встроенной схемы (0 = не встроенная / неизвестно).
+namespace ucuda::ui_detail {
 int builtin_scheme_order(const std::string& name) {
     for (const auto& b : kBuiltinSchemes)
         if (name == b.name) return b.order;
     return 0;
 }
+}
 
-
-// Селектор мишени свипа: единый список "h + все элементы a[]". Параметры
-// метода отдельной сущностью не являются — они объявляются обычными
-// параметрами системы и читаются телом кастомной КРС как a[k], поэтому и
-// попадают сюда наравне с остальными.
+namespace ucuda::ui_detail {
 void draw_order_target_combo(const char* label, int& target,
                                     const OrderAnalysisSession& s) {
     const std::vector<std::string> names = s.axis_target_names();
@@ -393,11 +388,9 @@ void draw_order_target_combo(const char* label, int& target,
         ImGui::EndCombo();
     }
 }
+}
 
-
-// Блок настроек одной оси. Возвращает ничего: всё пишется прямо в конфиг.
-// n_text == nullptr — ось не владеет числом узлов (в 2D оно общее и живёт на
-// X): поле не рисуется, вместо него подпись, откуда берётся разрешение.
+namespace ucuda::ui_detail {
 void draw_order_axis_block(const char* id, const char* title,
                                   const OrderAnalysisSession& s,
                                   int& target, std::string& lo, std::string& hi,
@@ -426,16 +419,9 @@ void draw_order_axis_block(const char* id, const char* title,
     if (!enabled) ImGui::EndDisabled();
     ImGui::PopID();
 }
+}
 
-
-// Индикатор числа шагов + предупреждение о нецелом t_max/h.
-//
-// Почему это не косметика: без snap число грубых шагов = floor(t_max/h), и
-// фактическое конечное время N*h отличается от t_max на величину до h. Оно
-// разное у соседних узлов сетки, так что на кривую ошибки садится вклад
-// порядка O(h) — для схем порядка выше первого он полностью забивает
-// измеряемую величину. На лог-сетке по h нецелым оказывается почти каждый
-// узел, поэтому счётчик показывает, сколько именно узлов задеты.
+namespace ucuda::ui_detail {
 void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSession& s) {
     const double tmax = parse_ratio_or(c.t_max_text, 0.0);
     if (!(tmax > 0.0)) { ImGui::TextDisabled("computing time must be > 0"); return; }
@@ -532,18 +518,9 @@ void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSession& s) 
                 "\"snap h -> t_max/N\" removes this by shifting the step itself slightly.");
     }
 }
+}
 
-
-// ---------------------------------------------------------------------------
-// Блок настроек области устойчивости.
-//
-// Элементы тестовой матрицы здесь НЕ вводятся — вводятся k, r и h, а a, b, c, d
-// пересчитываются в каждом узле сетки так, чтобы спектр был ровно
-// sigma +- i*omega (формулы в kernels/order.template.cu). Поэтому поля матрицы
-// в этом блоке отсутствуют, а вместо них стоят селекторы «в какой a[] класть
-// какой элемент»: пресет library/Dahlquist 2D даёт 1..4, но переименовать или
-// переставить параметры системы пользователю никто не запрещает, и молча
-// промахнуться мимо индекса — это неверная картинка без единого сообщения.
+namespace ucuda::ui_detail {
 void draw_order_stability_block(AppModel& model, const OrderAnalysisSession& s,
                                        OrderConfig& c) {
     if (!ImGui::CollapsingHeader("Stability region", ImGuiTreeNodeFlags_DefaultOpen)) return;
@@ -662,32 +639,18 @@ void draw_order_stability_block(AppModel& model, const OrderAnalysisSession& s,
 
     (void)model;
 }
+}
 
-
-// Вид окна, в котором конфигу место по его текущим настройкам.
+namespace ucuda::ui_detail {
 OrderPlotWindow::Kind order_kind_for(const OrderConfig& c) {
     if (c.calc_kind == kOrderCalcPerf) return OrderPlotWindow::Kind::Perf;
     // Область устойчивости — карта по построению: сетка всегда (sigma, omega).
     if (c.calc_kind == kOrderCalcStab) return OrderPlotWindow::Kind::Map;
     return c.two_d ? OrderPlotWindow::Kind::Map : OrderPlotWindow::Kind::P;
 }
+}
 
-
-// Конфиг сменил вид расчёта (или размерность сетки) — перевесить его на окно,
-// которое такое умеет показывать. Без этого переключение на performance
-// вынимало вкладку из всех окон, и Run выглядел как «ничего не произошло».
-//
-// Новое окно заводится только в крайнем случае. Раньше карта (а с ней и
-// область устойчивости) ВСЕГДА получала своё окно, а окно, из которого
-// конфиг ушёл, оставалось пустым, — и каждое переключение Order p /
-// Performance / Stability плодило по окну. Теперь порядок такой:
-//   1) конфиг уже лежит в подходящем окне — ничего не делать;
-//   2) есть окно нужного вида: для одномерных — любое (оверлей), для карты —
-//      только пустое (хитмапа одиночна);
-//   3) иначе окно, которое опустело от этого ухода, просто меняет вид;
-//   4) иначе — новое окно.
-// Окно, опустевшее от ухода и не пригодившееся в 3), убирается: пустым оно
-// лишь занимает место в раскладке. Окна с ручной подписью не трогаются.
+namespace ucuda::ui_detail {
 void order_rehome_config(AppModel& model, int idx) {
     OrderAnalysisSession& s = model.order_session;
     if (idx < 0 || idx >= (int)s.configs.size()) return;
@@ -736,8 +699,9 @@ void order_rehome_config(AppModel& model, int idx) {
                }), wins.end());
     model.order_plot_windows_dirty = true;
 }
+}
 
-
+namespace ucuda::ui_detail {
 void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     OrderAnalysisSession& s = model.order_session;
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
@@ -910,6 +874,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             "The same KRS body is rebuilt with numb = ucuda::dd / ucuda::qd;\n"
             "each build is cached separately, so switching does not recompile.");
     if (c.use_gpu) ImGui::EndDisabled();
+    if (!c.use_gpu && c.cpu_precision > 0) order_float_build_warning();
 
     if (!c.use_gpu) {
         std::string why;
@@ -922,8 +887,9 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         // вкладке считается иначе, чем на остальных.
         const double ntol = order_newton_tol_for_precision(c.cpu_precision);
         if (ntol > 0.0) {
-            ImGui::TextDisabled("Implicit schemes: Newton tolerance %.0e instead of the "
-                                "system setting (%s)", ntol, model.newton_tol.c_str());
+            ImGui::TextDisabled("Implicit schemes: Newton tolerance at most %.0e, at least 12 "
+                                "iterations (Integration: %s, %s)", ntol, c.newton.tol.c_str(),
+                                c.newton.max_iters.c_str());
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(
                     "Newton stops at ||dX|| < tol, so the system-wide setting would\n"
@@ -951,6 +917,12 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                           &model, model.is_map, &s.wrapper_schemes);
         if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
             InputNumStr("symmetry s", c.symmetry_s, kFieldW);
+        if (scheme_uses_cd_fp_iters(c.scheme)) {
+            InputNumStr("FP iterations n", c.cd_fp_iters, kFieldW);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
+        }
+        if (scheme_uses_newton(c.scheme))
+            draw_newton_fields(c.newton, kFieldW, "order_newton");
         // Область устойчивости берёт из этого блока только схему и s: она
         // делает ОДИН шаг, поэтому ни времени счёта, ни порога расхождения,
         // ни подгонки числа шагов у неё нет, а собственный шаг живёт в своём
@@ -1064,6 +1036,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                     "(X: E(T) in the Performance window). Needs \"fit h to t_max\": a node\n"
                     "that ends at N*h != t_max has no E(T). Computed after the timing and\n"
                     "not part of it. none: E(T) is Eref at t_max (\"endpoint only\").");
+            if (c.perf_end_ref == 1 || c.perf_end_ref == 2) order_float_build_warning();
         } else {
             // Эталон адаптивного шага: y*(T) высокой точности — его единственная ошибка E(T).
             const char* refs[] = { "DOP853 in dd (CPU)", "DOP853 in qd (CPU)" };
@@ -1077,6 +1050,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                     "(~62 digits) arithmetic on the CPU. Its step count doubles until two\n"
                     "successive answers agree, so y* is exact to far below any error on\n"
                     "the plot. The adaptive step has no h grid, so E(T) is its only error.");
+            order_float_build_warning();
         }
         ImGui::Separator();
         // Реплики — понятие ядра: столько одинаковых нитей грузят GPU. На CPU

@@ -1,59 +1,7 @@
 ﻿#include "gui_internal.h"
+using namespace ucuda::ui_detail;
 
 namespace ucuda::ui_detail {
-
-
-
-
-
-// Значение переменной var узла node в точке p.
-double net_value_at(const NetworkResult& r, int p, int node, int var) {
-    if (p < 0 || p >= r.n_points || node < 0 || node >= r.n_nodes
-        || var < 0 || var >= r.n_vars) return std::numeric_limits<double>::quiet_NaN();
-    return r.data[((size_t)p * (size_t)r.n_nodes + (size_t)node) * (size_t)r.n_vars + (size_t)var];
-}
-
-
-
-
-
-// Степень узла по рёбрам конфига (для таблицы узлов). Считается по рёбрам, а
-// не по CSR: CSR строится под расчёт и знать про него редактору незачем.
-int net_degree(const NetworkConfig& c, int node) {
-    int d = 0;
-    for (const NetEdge& e : c.edges) {
-        if (e.to == node) ++d;
-        if (e.bidirectional && e.from == node) ++d;
-    }
-    return d;
-}
-
-
-
-
-
-// Любая ручная правка топологии переводит конфиг в Custom: иначе следующее
-// нажатие Generate молча стёрло бы правку.
-void net_mark_custom(NetworkConfig& c) { c.topology = NetTopology::Custom; }
-
-
-
-
-
-// Проверка выражений связи без запуска расчёта: тот же путь, что у Run.
-std::string net_validate_laws(const NetworkSession& s, const NetworkConfig& c) {
-    try {
-        net_coupling_body(s.sys, c.laws);
-    } catch (const std::exception& e) {
-        return e.what();
-    }
-    return {};
-}
-
-
-
-
-
 void draw_network_topology_block(AppModel& model, NetworkSession& s, NetworkConfig& c) {
     if (!ImGui::CollapsingHeader("Topology", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
@@ -111,11 +59,9 @@ void draw_network_topology_block(AppModel& model, NetworkSession& s, NetworkConf
         ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
                            "over the %d-node cap: the run will be refused", kMaxNetworkNodes);
 }
+}
 
-
-
-
-
+namespace ucuda::ui_detail {
 void draw_network_coupling_block(AppModel& model, NetworkSession& s, NetworkConfig& c) {
     if (!ImGui::CollapsingHeader("Coupling", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
@@ -222,11 +168,9 @@ void draw_network_coupling_block(AppModel& model, NetworkSession& s, NetworkConf
     }
     (void)model;
 }
+}
 
-
-
-
-
+namespace ucuda::ui_detail {
 void draw_network_nodes_table(AppModel& model, NetworkSession& s, NetworkConfig& c) {
     if (!ImGui::CollapsingHeader("Nodes")) return;
     if (c.nodes.empty()) { ImGui::TextDisabled("No nodes."); return; }
@@ -323,11 +267,9 @@ void draw_network_nodes_table(AppModel& model, NetworkSession& s, NetworkConfig&
         }
     }
 }
+}
 
-
-
-
-
+namespace ucuda::ui_detail {
 void draw_network_edges_table(AppModel& model, NetworkSession& s, NetworkConfig& c) {
     if (!ImGui::CollapsingHeader("Edges")) return;
 
@@ -420,11 +362,9 @@ void draw_network_edges_table(AppModel& model, NetworkSession& s, NetworkConfig&
     ImGui::TextDisabled("or drag from node to node in the graph window");
     (void)s;
 }
+}
 
-
-
-
-
+namespace ucuda::ui_detail {
 void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/) {
     NetworkSession& s = model.network_session;
     if (s.configs.empty()) {
@@ -481,6 +421,8 @@ void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/) {
     IntegrationFields f;
     f.h           = &c.h_text;
     f.symmetry_s  = &c.symmetry_s;
+    f.cd_fp_iters = &c.cd_fp_iters;
+    f.newton      = &c.newton;
     f.t_max       = &c.t_max_text;
     f.transient   = &c.transient_text;
     f.pre_scaller = &c.pre_scaller_text;
@@ -526,13 +468,9 @@ void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/) {
         draw_error_box("##net_err", c.last_error);
     }
 }
+}
 
-
-
-
-
-// --- Окно графа ------------------------------------------------------------
-
+namespace ucuda::ui_detail {
 void draw_network_graph_window(AppModel& model) {
     NetworkSession& s = model.network_session;
     if (s.configs.empty()) { ImGui::TextDisabled("No system loaded."); return; }
@@ -830,13 +768,9 @@ void draw_network_graph_window(AppModel& model) {
         ImGui::TextDisabled("double click node = start edge, double click empty = new node, "
                             "drag = move, right click = delete");
 }
+}
 
-
-
-
-
-// --- Кривые узлов ----------------------------------------------------------
-
+namespace ucuda::ui_detail {
 void draw_network_series_window(AppModel& model, PlotRenderer& renderer, Plot2DView& view) {
     NetworkSession& s = model.network_session;
     if (s.configs.empty()) { ImGui::TextDisabled("No system loaded."); return; }
@@ -953,13 +887,9 @@ void draw_network_series_window(AppModel& model, PlotRenderer& renderer, Plot2DV
     view.render(renderer, origin, avail, /*owner_id*/ 0xBE7001, series_gen,
                 series, vis, vis, false);
 }
+}
 
-
-
-
-
-// --- Растр узел x время ----------------------------------------------------
-
+namespace ucuda::ui_detail {
 void draw_network_raster_window(AppModel& model, PlotRenderer& renderer, HeatmapView& view) {
     NetworkSession& s = model.network_session;
     if (s.configs.empty()) { ImGui::TextDisabled("No system loaded."); return; }
@@ -1017,5 +947,38 @@ void draw_network_raster_window(AppModel& model, PlotRenderer& renderer, Heatmap
                 0.0, (double)(r.n_nodes - 1),
                 vlo, vhi, false);
 }
+}
 
+namespace ucuda::ui_detail {
+double net_value_at(const NetworkResult& r, int p, int node, int var) {
+    if (p < 0 || p >= r.n_points || node < 0 || node >= r.n_nodes
+        || var < 0 || var >= r.n_vars) return std::numeric_limits<double>::quiet_NaN();
+    return r.data[((size_t)p * (size_t)r.n_nodes + (size_t)node) * (size_t)r.n_vars + (size_t)var];
+}
+}
+
+namespace ucuda::ui_detail {
+int net_degree(const NetworkConfig& c, int node) {
+    int d = 0;
+    for (const NetEdge& e : c.edges) {
+        if (e.to == node) ++d;
+        if (e.bidirectional && e.from == node) ++d;
+    }
+    return d;
+}
+}
+
+namespace ucuda::ui_detail {
+void net_mark_custom(NetworkConfig& c) { c.topology = NetTopology::Custom; }
+}
+
+namespace ucuda::ui_detail {
+std::string net_validate_laws(const NetworkSession& s, const NetworkConfig& c) {
+    try {
+        net_coupling_body(s.sys, c.laws);
+    } catch (const std::exception& e) {
+        return e.what();
+    }
+    return {};
+}
 }

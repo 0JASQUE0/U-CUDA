@@ -1,12 +1,15 @@
-#include "ucuda/application/app_model.h"
+﻿#include "ucuda/application/app_model.h"
 #include "ucuda/platform/platform_paths.h"
 #include "ucuda/storage/session_io.h"
+#include "ucuda/storage/system_library.h"
 
 #include <atomic>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <filesystem>
+#include <chrono>
 
 std::string exe_dir() { return platform::executable_dir(); }
 
@@ -79,6 +82,30 @@ void cancellation() {
     session.in_flight = false;
 }
 
+void headless_method_availability() {
+    const auto parent = std::filesystem::temp_directory_path();
+    const auto root = parent / ("ucuda-tick-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    require(std::filesystem::create_directory(root), "cannot create private tick fixture");
+    struct Cleanup {
+        std::filesystem::path root, parent;
+        ~Cleanup() { std::error_code ec; if (root.parent_path() == parent && root.filename().string().rfind("ucuda-tick-test-", 0) == 0) std::filesystem::remove_all(root, ec); }
+    } cleanup{root, parent};
+    SystemLibrary library(root.string());
+    AppModel model([](const std::vector<unsigned char>&) { return std::string{}; });
+    model.scheme_rk4 = true;
+    model.tick(library);
+    const auto has = [](const auto& names, const std::string& name) { return std::find(names.begin(), names.end(), name) != names.end(); };
+    require(has(model.phase_session.enabled_builtin_schemes, "RK4"), "headless tick lost ODE method selection");
+    model.is_dae = true; model.dae_as_ode = false;
+    model.dae_schemes_off = {"DAE RK4"};
+    model.tick(library);
+    require(!has(model.phase_session.enabled_builtin_schemes, "DAE RK4"), "disabled DAE method escaped to analysis");
+    require(has(model.phase_session.enabled_builtin_schemes, kBdfSchemeDae), "headless DAE analysis lost BDF");
+    for (const auto* names : {&model.dft1d_session.enabled_builtin_schemes, &model.fastsync_session.enabled_builtin_schemes,
+        &model.order_session.enabled_builtin_schemes, &model.network_session.enabled_builtin_schemes})
+        require(!has(*names, kBdfSchemeDae), "fixed-step-only session received BDF");
+}
+
 } // namespace
 
 int main() {
@@ -86,6 +113,7 @@ int main() {
         session_compatibility();
         queue_cleanup();
         cancellation();
+        headless_method_availability();
         std::cout << "Architecture, session and queue checks passed\n";
         return 0;
     } catch (const std::exception& e) {

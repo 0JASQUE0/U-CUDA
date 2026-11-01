@@ -1,12 +1,7 @@
 ﻿#include "engine_impl.h"
+using namespace ucuda::cuda_detail;
 
-
-
-    // run_dft1d_continuation_gpu — выделенное ядро (dft1d_cont.template.cu),
-    // а не связка bifurcation1dContinuationKernel + DFT_custom: под h-свипом у
-    // каждой точки своя длина блока, свой шаг и своё окно, чего DFT_custom
-    // выразить не может (у него один sizeOfBlock/h/window на запуск).
-    Dft1DResult ParametricEngine::Impl::run_dft1d_continuation_gpu(const Dft1DRequest& req) {
+Dft1DResult ParametricEngine::Impl::run_dft1d_continuation_gpu(const Dft1DRequest& req) {
         Dft1DResult res;
         auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
 
@@ -97,9 +92,7 @@
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         DC_CHECK(cudaDeviceSynchronize(), "sync after dft cont");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED, начало цело.
 
         std::vector<numb> ak_host(freqCells), bk_host(freqCells);
         res.flags.assign(nPts, 0);
@@ -119,22 +112,20 @@
         res.freq_lo  = req.freq_lo;
         res.freq_hi  = req.freq_hi;
         res.continuation_reverse = req.continuation_reverse;
+        // Строки, до которых не дошёл Stop, ядро не писало: в них мусор cudaMalloc.
+        for (int j = 0; j < nPts; ++j)
+            if (res.flags[j] == REGIME_CANCELLED)
+                for (int f = 0; f < nFreq; ++f) {
+                    res.ak_cos[(size_t)j * nFreq + f] = std::numeric_limits<double>::quiet_NaN();
+                    res.bk_sin[(size_t)j * nFreq + f] = std::numeric_limits<double>::quiet_NaN();
+                }
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
-
-    // run_dft1d_hsweep_gpu — классический (без continuation) свип по шагу h. Отдельно от
-    // run_dft1d_classical, потому что связка calculateDiscreteModelCUDA + DFT_custom тут
-    // неприменима: DFT_custom берёт одну длину блока, одно готовое окно и один шаг дискретизации
-    // на весь запуск, а под h-свипом все три — per-point. Ядро dft1dHSweepKernel делает траекторию
-    // и DFT в одном месте, поток на точку (в отличие от однопоточного dft1dContinuationKernel:
-    // здесь точки независимы).
-    // Буферы считаются по worst case — наименьшему h диапазона, дающему больше всего сэмплов; так
-    // же поступают run_dft1d_cpu и run_dft1d_continuation_gpu. Chunking по nPtsLimiter — как в
-    // run_dft1d_classical / run_bif1d.
-    Dft1DResult ParametricEngine::Impl::run_dft1d_hsweep_gpu(const Dft1DRequest& req) {
+Dft1DResult ParametricEngine::Impl::run_dft1d_hsweep_gpu(const Dft1DRequest& req) {
         Dft1DResult res;
         auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
 
@@ -303,13 +294,15 @@
         res.param_hi = req.param_hi;
         res.freq_lo  = req.freq_lo;
         res.freq_hi  = req.freq_hi;
-        res.flags.assign(nPts, 0);
-        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, 0.0);
-        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, 0.0);
+        // Точки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.flags.assign(nPts, REGIME_CANCELLED);
+        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, std::numeric_limits<double>::quiet_NaN());
+        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, std::numeric_limits<double>::quiet_NaN());
 
         const size_t amountOfIteration = (size_t)std::ceil((double)nPts / (double)nPtsLimiter);
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             DH_CANCEL_CHECK();
             if (req.progress) req.progress->store(float(iter) / float(amountOfIteration), std::memory_order_relaxed);
             if (iter == amountOfIteration - 1)
@@ -393,14 +386,11 @@
         #undef DH_CANCEL_CHECK
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
-
-    // run_dft_1d — 1D DFT (порт bifurcation_DFT_1D из hostLibrary.cu:4900-5315).
-    // Диспетчер: continuation требует param-sweep (та же причина, что и у
-    // run_bif1d) — делегирует в run_dft1d_continuation, иначе classical.
-    Dft1DResult ParametricEngine::Impl::run_dft_1d(const Dft1DRequest& req) {
+Dft1DResult ParametricEngine::Impl::run_dft_1d(const Dft1DRequest& req) {
         // Ограничения и порядок — как у Bif/LLE/LS 1D: continuation требует
         // param- или h-свипа (цепочка по IC бессмысленна), log-сетка по
         // параметру требует положительных границ. CPU-ветки не трогают CUDA,
@@ -436,21 +426,11 @@
         return run_dft1d_classical(req);
     }
 
-
-    // Общая для classical/continuation: строит оконную функцию длиной sizeOfBlock. DFT_custom
-    // принимает готовое окно аргументом и НЕ считает его сам. Формулы и нумерация типов — в
-    // cpu_build_window выше (была отдельная копия тех же формул; после добавления Blackman и
-    // Blackman-Harris держать две копии в одном файле смысла нет).
-    void ParametricEngine::Impl::build_window(std::vector<numb>& out, int sizeOfBlock, int window_type) {
+void ParametricEngine::Impl::build_window(std::vector<numb>& out, int sizeOfBlock, int window_type) {
         cpu_build_window(out, sizeOfBlock, window_type);
     }
 
-
-    // run_dft1d_classical — порт classical-ветки bifurcation_DFT_1D. Реюзает
-    // cached.kernel_traj (calculateDiscreteModelCUDA, тот же PTX-кэш что и
-    // run_bif1d) для генерации сырых траекторий, затем cached.kernel_dft
-    // (DFT_custom) вместо peakFinderCUDA. Chunked по nPtsLimiter как run_bif1d.
-    Dft1DResult ParametricEngine::Impl::run_dft1d_classical(const Dft1DRequest& req) {
+Dft1DResult ParametricEngine::Impl::run_dft1d_classical(const Dft1DRequest& req) {
         Dft1DResult res;
         auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
 
@@ -462,6 +442,7 @@
         if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else {
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index out of range");
@@ -663,11 +644,13 @@
         res.param_hi = ranges[1];
         res.freq_lo  = rangesFreq[0];
         res.freq_hi  = rangesFreq[1];
-        res.flags.assign(nPts, 0);
-        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, 0.0);
-        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, 0.0);
+        // Точки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.flags.assign(nPts, REGIME_CANCELLED);
+        res.ak_cos.assign((size_t)nPts * (size_t)nFreq, std::numeric_limits<double>::quiet_NaN());
+        res.bk_sin.assign((size_t)nPts * (size_t)nFreq, std::numeric_limits<double>::quiet_NaN());
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             DFT_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -751,9 +734,9 @@
                                    (double)(originalNPtsLimiter * iter) * ticksPerPoint,
                                    ticksTotal, res.error)) { cleanup(); return res; }
             DFT_CHECK(cudaDeviceSynchronize(), "sync after traj");
-            DFT_CANCEL_CHECK();
+            // Stop посреди чанка: прерванные точки помечены REGIME_CANCELLED, DFT их пропускает.
 
-            // DFT_custom(data, sizeOfBlock, amountOfBlocks, checkerArray, AkCOS,
+            // DFT_custom_pf(data, sizeOfBlock, amountOfBlocks, checkerArray, AkCOS,
             // BkSIN, rangesFreq, window, nFreq, h, logFreqAxis) — h здесь ШАГ
             // МЕЖДУ decimated сэмплами (h*preScaller), как и у peakFinderCUDA
             // (см. run_bif1d).
@@ -773,8 +756,12 @@
                 &timeStep_arg,
                 &logFreqAxis_arg
             };
+            // DFT_custom_pf — поток на пару (точка, частота), сетка nPtsLimiter * nFreq потоков.
+            // Блок свой: shared ядру не нужна, а ширина на результат не влияет.
+            const int    dftBlock = 128;
+            const size_t dftGrid  = (nPtsLimiter * (size_t)nFreq + dftBlock - 1) / dftBlock;
             DFT_CHECK_CU(cuLaunchKernel(cached.kernel_dft,
-                                        gridSize, 1, 1, blockSize, 1, 1,
+                                        (unsigned)dftGrid, 1, 1, dftBlock, 1, 1,
                                         0, nullptr, args_dft, nullptr),
                          "cuLaunchKernel(dft)");
             DFT_CHECK(cudaDeviceSynchronize(), "sync after dft");
@@ -816,15 +803,11 @@
         #undef DFT_CHECK_CU
         #undef DFT_CANCEL_CHECK
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
-
-    // run_dft1d_continuation — реюзает bifurcation1dContinuationKernel как есть: он уже пишет
-    // полную decimated-траекторию в d_data и флаги в d_amountOfPeaks для ВСЕГО nPts за один
-    // монолитный запуск (kernels/bifurcation1d_cont.template.cu). Второй проход — DFT_custom вместо
-    // peakFinderCUDA над теми же буферами. Монолитно, без chunking, как run_bif1d_continuation.
-    Dft1DResult ParametricEngine::Impl::run_dft1d_continuation(const Dft1DRequest& req) {
+Dft1DResult ParametricEngine::Impl::run_dft1d_continuation(const Dft1DRequest& req) {
         Dft1DResult res;
         auto fail = [&](const std::string& msg) -> Dft1DResult& { res.error = msg; return res; };
 
@@ -964,9 +947,7 @@
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         DFTC_CHECK(cudaDeviceSynchronize(), "sync after cont kernel");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED, DFT его пропускает.
         if (req.progress) req.progress->store(0.5f, std::memory_order_relaxed);
 
         // DFT_custom вместо peakFinderCUDA, над теми же d_data/d_amountOfPeaks
@@ -981,10 +962,11 @@
             &d_amountOfPeaks, &d_AkCOS, &d_BkSIN, &d_rangesFreq, &d_window,
             &nFreq_int, &timeStep, &logFreqAxis_arg
         };
-        int    dftBlock = 32;
-        int    dftGrid  = (nPts + dftBlock - 1) / dftBlock;
+        // DFT_custom_pf — поток на пару (точка, частота), см. run_dft1d_classical.
+        const int    dftBlock = 128;
+        const size_t dftGrid  = ((size_t)nPts * (size_t)nFreq + dftBlock - 1) / dftBlock;
         DFTC_CHECK_CU(cuLaunchKernel(cached_cont.kernel_dft,
-                                  dftGrid, 1, 1, dftBlock, 1, 1,
+                                  (unsigned)dftGrid, 1, 1, dftBlock, 1, 1,
                                   0, nullptr, dft_args, nullptr),
                    "cuLaunchKernel(dft)");
         DFTC_CHECK(cudaDeviceSynchronize(), "sync after dft");
@@ -1048,5 +1030,6 @@
         #undef DFTC_CHECK_CU
         #undef DFTC_CANCEL_CHECK
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }

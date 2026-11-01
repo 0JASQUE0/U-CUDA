@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include "ucuda/domain/param_groups.h"
 
 // Именованная пользовательская КРС. Это "ещё один scheme" — встаёт в scheme
 // combo рядом с Euler/Cromer/Midpoint/RK4. Имя не должно совпадать с built-in.
@@ -42,7 +43,30 @@ struct SystemRecord {
     // ввод (для редактирования)
     // Discrete map x_{n+1} = f(x_n): no integration scheme, h is pinned to 1.
     bool        is_map = false;
-    std::string mode;            // "Image" | "LaTeX" | "Plain"
+    // DAE: x' = f(x,z,t), 0 = g(x,z,t). vars_text — x, alg_text — z.
+    // В system.json это "kind": "dae"; нет поля или "ode"/"map" — не ДАУ.
+    bool        is_dae = false;
+    std::string alg_text;
+    // Индексы переменных ДАУ, "x=1, lambda=3" (как nind1/2/3 в RADAU5); не
+    // названные — по умолчанию (см. parse_dae в dae_ir.h).
+    std::string dae_index_text;
+    // Решать как ОДУ (этап 3, уровень A): z выражается из связей и подставляется в f —
+    // система идёт во все вкладки со схемами ОДУ. Только если сведение удаётся.
+    bool        dae_as_ode = false;
+    // Уровень C (индекс 2-3 при dae_as_ode): связи дифференцируются и стабилизируются
+    // (d/dt + alpha)^m g = 0 — alpha здесь (см. dae_stabilized_index1).
+    std::string dae_stab_alpha = "10";
+    // ДАУ из схемы (этап 8): путь к .kicad_sch / .cir и копия netlist'а на момент
+    // импорта — запись воспроизводится и без исходного файла. Пусто — уравнения введены руками.
+    std::string circuit_source;
+    std::string circuit_netlist;
+    bool        circuit_ideal_opamps = false;   // ОУ — идеальные нуллоры, а не их .subckt (копия на идеальных)
+    // Упрощения приборов при импорте (SpiceImportOptions): без ёмкостей переходов, идеальные диоды / LED,
+    // идеальные биполярные транзисторы.
+    bool        circuit_no_jcaps = false;
+    bool        circuit_ideal_diodes = false;
+    bool        circuit_ideal_bjts = false;
+    std::string mode;        // "Image" | "LaTeX" | "Plain"
     std::string latex_text;
     std::string plain_text;
     std::string alphabet_text;       // legacy: один список (vars + params вперемешку)
@@ -66,6 +90,10 @@ struct SystemRecord {
     bool scheme_rk45     = false;         // RK45 — Dormand-Prince 5(4)
     bool scheme_dop853   = false;         // DOP853 — Хайрер 8(5,3)
     bool scheme_cd       = false;
+    bool scheme_cdfast   = false;   // CD fast (CD с предрасчётом констант шага)
+    // CD FP, CD fast FP: неявная половина простыми итерациями (cd_fp_iters)
+    bool scheme_cdfp     = false;
+    bool scheme_cdfastfp = false;
     bool scheme_ccd      = false;   // Complex CD (комплексные полушаги)
     bool scheme_ccd4     = false;   // Complex CD4 (два CD с шагами gamma*h / conj)
     bool scheme_ccd4s3   = false;   // CCD4 (o4s3) — симметричная тройка (a, 1-2a, a)
@@ -101,6 +129,8 @@ struct SystemRecord {
     bool        newton_full      = false;
     std::string newton_tol       = "1e-10";
     std::string newton_max_iters = "8";
+    // Число простых итераций CD FP / CD fast FP.
+    std::string cd_fp_iters      = "4";
 
     // Коэффициент симметрии s для CD-методов (передаётся в kernel как a[0]).
     // 0.5 = классический симметричный CD. Читается схемами "CD" и "Complex CD"
@@ -121,6 +151,9 @@ struct SystemRecord {
     // не сбрасывает. Хранится список выключенных, а не включённых, чтобы у
     // старых system.json все обёртки остались включены.
     std::vector<std::string> disabled_wrappers;
+    // ДАУ: выключенные методы ДАУ (имена dae_scheme_names). Тоже список выключенных — у старых
+    // записей ДАУ включены все. При dae_as_ode действуют обычные scheme_* (схемы ОДУ).
+    std::vector<std::string> dae_schemes_off;
 
     // значения по умолчанию (всё опционально, пустое = не задано)
     std::string step_h;          // шаг дискретизации (строка, пустая = не задано)
@@ -130,4 +163,11 @@ struct SystemRecord {
 
     // значения параметров по имени: "sigma" -> "10" (пустое = не задано)
     std::map<std::string, std::string> param_values;
+
+    // Группы параметров в полях вкладок (только интерфейс, см. param_groups.h).
+    ParamGroups param_groups;
+    // То же для начальных условий (импорт схемы: конденсаторы, приборы, алгебраические z).
+    ParamGroups ic_groups;
+    // Свои подписи полей параметров и НУ: имя -> LaTeX (пусто — автоматическая, см. param_groups.h).
+    FieldLabels field_labels;
 };

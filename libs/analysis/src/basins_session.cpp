@@ -1,122 +1,4 @@
 ﻿#include "session_internal.h"
-
-namespace ucuda::analysis_detail {
-
-
-BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
-                                          const BasinsConfig& c) {
-    BasinsRequest req;
-    req.krs_body  = compute_krs_for_scheme(s.custom_schemes, s.sys, c.scheme);
-    req.amountOfX = (int)s.vars.size();
-
-    req.initial_conditions.resize(req.amountOfX);
-    for (int i = 0; i < req.amountOfX; ++i) {
-        auto it = c.initial_conditions.find(s.vars[i]);
-        req.initial_conditions[i] = (it != c.initial_conditions.end()) ? parse_d(it->second, 0.0) : 0.0;
-    }
-
-    int nparams = (int)s.params.size();
-    req.base_values.assign((size_t)nparams + 1, 0.0);
-    req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
-    for (int i = 0; i < nparams; ++i) {
-        auto it = c.param_values.find(s.params[i]);
-        req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
-    }
-
-    req.axis_x_var      = (c.axis_x_var >= 0 && c.axis_x_var < req.amountOfX) ? c.axis_x_var : 0;
-    req.axis_y_var      = (c.axis_y_var >= 0 && c.axis_y_var < req.amountOfX) ? c.axis_y_var : (req.amountOfX > 1 ? 1 : 0);
-    req.axis_x_lo       = parse_d(c.axis_x_lo_text, -10.0);
-    req.axis_x_hi       = parse_d(c.axis_x_hi_text,  10.0);
-    req.axis_y_lo       = parse_d(c.axis_y_lo_text, -10.0);
-    req.axis_y_hi       = parse_d(c.axis_y_hi_text,  10.0);
-    if (req.axis_x_hi < req.axis_x_lo) std::swap(req.axis_x_lo, req.axis_x_hi);
-    if (req.axis_y_hi < req.axis_y_lo) std::swap(req.axis_y_lo, req.axis_y_hi);
-    req.n_pts           = parse_i(c.n_pts_text, 200);
-    // -1 — combination (см. loopCalculateDiscreteModel_int / draw_writable_var_combo).
-    req.writable_var    = (c.writable_var >= -1 && c.writable_var < req.amountOfX) ? c.writable_var : 0;
-    req.h               = parse_d(c.h_text, 0.01);
-    req.t_max           = parse_d(c.t_max_text, 1000.0);
-    req.transient_time  = parse_d(c.transient_text, 10000.0);
-    req.pre_scaller     = std::max(1, parse_i(c.pre_scaller_text, 1));
-    req.max_value       = parse_d(c.max_value_text, 1.0e6);
-    req.eps_dbscan      = parse_d(c.eps_dbscan_text, 0.5);
-    req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
-
-    // Feature dispatch для avgPeakFinderCUDA. Кэшируем сейчас, чтобы worker
-    // не зависел от GUI-state. Кламп в валидный диапазон на случай ручного
-    // редактирования сессии.
-    int f1 = c.feature1, f2 = c.feature2;
-    if (f1 < 0 || f1 >= BF_FEATURE_COUNT) f1 = BF_FEATURE1_DEFAULT;
-    if (f2 < 0 || f2 >= BF_FEATURE_COUNT) f2 = BF_FEATURE2_DEFAULT;
-    req.feature1 = f1;
-    req.feature2 = f2;
-    req.mult1    = (numb)parse_d(c.mult_feature1_text, 1.0);
-    req.mult2    = (numb)parse_d(c.mult_feature2_text, 1.0);
-    fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
-                          req.transient_time + req.t_max, 0, 0, req.adaptive);
-    return req;
-}
-
-
-void apply_basins_result(BasinsConfig& c, BasinsResult&& r) {
-    c.result = std::move(r);
-    c.last_run_ok = c.result.ok;
-    if (!c.result.ok) c.last_error = c.result.error;
-    c.data_generation++;
-    c.fit_request = true;
-}
-
-
-
-
-
-
-
-
-// Значение узла сетки — зеркало getValueByIdx (cudaLibrary.cu): та же
-// lerp-форма и те же вырожденные случаи, иначе восстановленное НУ не совпадёт
-// с тем, что реально считало ядро для этой ячейки.
-double basins_grid_value(int point_idx, int n_pts, double lo, double hi) {
-    if (n_pts <= 0) return lo;
-    if (n_pts == 1) return hi;
-    const double t = (double)point_idx / (double)(n_pts - 1);
-    return (1.0 - t) * lo + t * hi;
-}
-
-
-std::string basins_fmt_num(double v) {
-    char buf[40];
-    std::snprintf(buf, sizeof(buf), "%.17g", v);
-    return std::string(buf);
-}
-
-
-// Перенос настроек basins-config'а в фазовую подсессию. Зовётся ровно перед
-// запуском (не каждый кадр), как apply_shared_to_* в Custom-табе.
-void apply_basins_config_to_phase(const BasinsAnalysisSession& s,
-                                         const BasinsConfig& c,
-                                         PhaseAnalysisSession& ph) {
-    ph.vars           = s.vars;
-    ph.params         = s.params;
-    ph.sys            = s.sys;
-    ph.custom_schemes = s.custom_schemes;
-    // Схема и шаг ОБЯЗАНЫ совпадать с расчётом карты — иначе траектория не
-    // обязана прийти в тот же аттрактор, что и ячейка сетки.
-    ph.scheme       = c.scheme;
-    ph.symmetry_s   = c.symmetry_s;
-    ph.step_h       = c.h_text;
-    ph.adaptive     = c.adaptive;   // и шаг, и регулятор — как у карты
-    ph.param_values = c.param_values;
-    // Своё время — единственное, чем портрет отличается от карты.
-    ph.sim_time   = c.pp_t_max_text;
-    ph.skip_time  = c.pp_transient_text;
-    ph.decimation = c.pp_prescaller_text;
-    ph.use_gpu    = c.pp_use_gpu;
-    // Автозапуском рулит слой Basins (pp_autorun + очередь), собственный
-    // auto_recompute подсессии должен молчать.
-    ph.auto_recompute = false;
-}
-}
 using namespace ucuda::analysis_detail;
 
 
@@ -137,6 +19,8 @@ void BasinsAnalysisSession::load_from_record(const SystemRecord& r,
     c.h_text = default_h_from_record(r);
     c.scheme = default_scheme_from_record(r, c.scheme);
     c.symmetry_s = r.symmetry_s.empty() ? std::string("0.5") : r.symmetry_s;
+    c.cd_fp_iters = r.cd_fp_iters.empty() ? std::string("4") : r.cd_fp_iters;
+    c.newton = newton_from_record(r);
 
     for (const auto& p : params) {
         auto it = r.param_values.find(p);
@@ -204,11 +88,108 @@ void BasinsAnalysisSession::remove_config(int i) {
     if (active_config_index < 0) active_config_index = 0;
 }
 
+namespace ucuda::analysis_detail {
 
-// Сама таблица kBasinFeatureNames и её проверки (длина, только-ASCII) живут в
-// analysis_session.h рядом с enum BasinFeature: static_assert'у нужен constexpr-массив, а
-// constexpr в namespace scope несовместим с extern-объявлением.
 
+BasinsRequest build_basins_request(const BasinsAnalysisSession& s,
+                                          const BasinsConfig& c) {
+    BasinsRequest req;
+    req.krs_body  = sweep_krs(s.custom_schemes, s.sys, c.scheme, c.adaptive);
+    req.amountOfX = (int)s.vars.size();
+
+    req.initial_conditions.resize(req.amountOfX);
+    for (int i = 0; i < req.amountOfX; ++i) {
+        auto it = c.initial_conditions.find(s.vars[i]);
+        req.initial_conditions[i] = (it != c.initial_conditions.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+
+    int nparams = (int)s.params.size();
+    req.base_values.assign((size_t)nparams + 1 + kSchemeTailSlots, 0.0);   // [s, p_1..p_M, n, Newton]
+    req.base_values[0] = parse_d(c.symmetry_s, 0.5); // CD: коэф. симметрии (a[0])
+    scheme_fill_tail(req.base_values.data() + nparams + 1, c.cd_fp_iters, c.newton); // a[M+1..M+4]: CD FP n, Newton
+    for (int i = 0; i < nparams; ++i) {
+        auto it = c.param_values.find(s.params[i]);
+        req.base_values[i + 1] = (it != c.param_values.end()) ? parse_d(it->second, 0.0) : 0.0;
+    }
+
+    req.axis_x_var      = (c.axis_x_var >= 0 && c.axis_x_var < req.amountOfX) ? c.axis_x_var : 0;
+    req.axis_y_var      = (c.axis_y_var >= 0 && c.axis_y_var < req.amountOfX) ? c.axis_y_var : (req.amountOfX > 1 ? 1 : 0);
+    req.axis_x_lo       = parse_d(c.axis_x_lo_text, -10.0);
+    req.axis_x_hi       = parse_d(c.axis_x_hi_text,  10.0);
+    req.axis_y_lo       = parse_d(c.axis_y_lo_text, -10.0);
+    req.axis_y_hi       = parse_d(c.axis_y_hi_text,  10.0);
+    if (req.axis_x_hi < req.axis_x_lo) std::swap(req.axis_x_lo, req.axis_x_hi);
+    if (req.axis_y_hi < req.axis_y_lo) std::swap(req.axis_y_lo, req.axis_y_hi);
+    req.axis_x_symlog   = c.axis_x_symlog;
+    req.axis_y_symlog   = c.axis_y_symlog;
+    req.n_pts           = parse_i(c.n_pts_text, 200);
+    // -1 — combination (см. loopCalculateDiscreteModel_int / draw_writable_var_combo).
+    req.writable_var    = (c.writable_var >= -1 && c.writable_var < req.amountOfX) ? c.writable_var : 0;
+    req.h               = parse_d(c.h_text, 0.01);
+    req.t_max           = parse_d(c.t_max_text, 1000.0);
+    req.transient_time  = parse_d(c.transient_text, 10000.0);
+    req.pre_scaller     = std::max(1, parse_i(c.pre_scaller_text, 1));
+    req.max_value       = parse_d(c.max_value_text, 1.0e6);
+    req.eps_dbscan      = parse_d(c.eps_dbscan_text, 0.5);
+    req.csv_output_path = c.csv_save_enabled ? c.csv_output_path : std::string{};
+
+    // Feature dispatch для avgPeakFinderCUDA. Кэшируем сейчас, чтобы worker
+    // не зависел от GUI-state. Кламп в валидный диапазон на случай ручного
+    // редактирования сессии.
+    int f1 = c.feature1, f2 = c.feature2;
+    if (f1 < 0 || f1 >= BF_FEATURE_COUNT) f1 = BF_FEATURE1_DEFAULT;
+    if (f2 < 0 || f2 >= BF_FEATURE_COUNT) f2 = BF_FEATURE2_DEFAULT;
+    req.feature1 = f1;
+    req.feature2 = f2;
+    req.mult1    = (numb)parse_d(c.mult_feature1_text, 1.0);
+    req.mult2    = (numb)parse_d(c.mult_feature2_text, 1.0);
+    fill_adaptive_request(s.custom_schemes, s.sys, c.scheme, c.adaptive, req.amountOfX,
+                          req.transient_time + req.t_max, 0, 0, req.adaptive, req.h);
+    sweep_extend_state(req);
+    return req;
+}
+}
+
+
+// Гарантия синка enum class BasinFeature ↔ BF_* кодов из configCUDA.h.
+// Если кто-то изменит одну сторону без второй — фейл компиляции, а не runtime.
+static_assert((int)BasinFeature::AvgPeaks            == BF_AVG_PEAKS,            "BasinFeature drift: AvgPeaks");
+
+static_assert((int)BasinFeature::AvgIntervals        == BF_AVG_INTERVALS,        "BasinFeature drift: AvgIntervals");
+
+static_assert((int)BasinFeature::RMSPeaks            == BF_RMS_PEAKS,            "BasinFeature drift: RMSPeaks");
+
+static_assert((int)BasinFeature::RMSIntervals        == BF_RMS_INTERVALS,        "BasinFeature drift: RMSIntervals");
+
+static_assert((int)BasinFeature::StDevPeaks          == BF_STDEV_PEAKS,          "BasinFeature drift: StDevPeaks");
+
+static_assert((int)BasinFeature::StDevIntervals      == BF_STDEV_INTERVALS,      "BasinFeature drift: StDevIntervals");
+
+static_assert((int)BasinFeature::LogAvgPeaks         == BF_LOG_AVG_PEAKS,        "BasinFeature drift: LogAvgPeaks");
+
+static_assert((int)BasinFeature::LogAvgIntervals     == BF_LOG_AVG_INTERVALS,    "BasinFeature drift: LogAvgIntervals");
+
+static_assert((int)BasinFeature::LogRMSPeaks         == BF_LOG_RMS_PEAKS,        "BasinFeature drift: LogRMSPeaks");
+
+static_assert((int)BasinFeature::LogRMSIntervals     == BF_LOG_RMS_INTERVALS,    "BasinFeature drift: LogRMSIntervals");
+
+static_assert((int)BasinFeature::LogStDevPeaks       == BF_LOG_STDEV_PEAKS,      "BasinFeature drift: LogStDevPeaks");
+
+static_assert((int)BasinFeature::LogStDevIntervals   == BF_LOG_STDEV_INTERVALS,  "BasinFeature drift: LogStDevIntervals");
+
+static_assert((int)BasinFeature::SLogAvgPeaks        == BF_SLOG_AVG_PEAKS,       "BasinFeature drift: SLogAvgPeaks");
+
+namespace ucuda::analysis_detail {
+
+
+void apply_basins_result(BasinsConfig& c, BasinsResult&& r) {
+    c.result = std::move(r);
+    c.last_run_ok = c.result.ok;
+    if (!c.result.ok) c.last_error = c.result.error;
+    c.data_generation++;
+    c.fit_request = true;
+}
+}
 
 
 bool BasinsAnalysisSession::run(ParametricEngine& engine, int config_idx) {
@@ -398,6 +379,28 @@ std::vector<int> renumber_basins_spiral(const std::vector<int>& src, int N,
 }
 
 
+void ensure_basins_spiral_cache(BasinsConfig& c) {
+    if (c.basin_idx_spiral_gen == c.data_generation
+        && c.basin_idx_spiral.size() == c.result.basin_idx.size()) return;
+    int n_pos = 0, n_neg = 0;
+    c.basin_idx_spiral = renumber_basins_spiral(c.result.basin_idx, c.result.n_pts,
+                                                n_pos, n_neg);
+    c.n_clusters_spiral      = n_pos;
+    c.min_cluster_idx_spiral = -n_neg;
+    c.basin_idx_spiral_gen   = c.data_generation;
+}
+
+
+const int* basins_display_ids(BasinsConfig& c) {
+    if (c.result.basin_idx.empty()) return nullptr;
+    if (!c.renumber_spiral) return c.result.basin_idx.data();
+    ensure_basins_spiral_cache(c);
+    if (c.basin_idx_spiral.size() != c.result.basin_idx.size())
+        return c.result.basin_idx.data();
+    return c.basin_idx_spiral.data();
+}
+
+
 std::string build_basins_phase_run_signature(const BasinsConfig& c) {
     std::string o;
     o.reserve(256);
@@ -408,6 +411,8 @@ std::string build_basins_phase_run_signature(const BasinsConfig& c) {
     add(c.pp_use_gpu ? "1" : "0");
     add(c.scheme);
     add(c.symmetry_s);
+    add(c.cd_fp_iters);
+    add(c.newton.tol); add(c.newton.max_iters); add(c.newton.full ? "1" : "0");
     add(c.h_text);
     for (const auto& kv : c.param_values)       { o += kv.first; o += '='; o += kv.second; o += ';'; }
     o += '|';
@@ -428,7 +433,31 @@ std::string build_basins_phase_signature(const BasinsConfig& c) {
     return o;
 }
 
+namespace ucuda::analysis_detail {
 
+
+// Значение узла сетки — зеркало getValueByIdx (cudaLibrary.cu): та же
+// lerp-форма и те же вырожденные случаи, иначе восстановленное НУ не совпадёт
+// с тем, что реально считало ядро для этой ячейки.
+// ±log-ось — та же ucuda_node_value_symlog, что у getValueByIdx_symlog в ядре.
+double basins_grid_value(int point_idx, int n_pts, double lo, double hi, bool symlog) {
+    if (symlog) return (double)ucuda_node_value_symlog(point_idx, n_pts, (numb)lo, (numb)hi);
+    if (n_pts <= 0) return lo;
+    if (n_pts == 1) return hi;
+    const double t = (double)point_idx / (double)(n_pts - 1);
+    return (1.0 - t) * lo + t * hi;
+}
+}
+
+namespace ucuda::analysis_detail {
+
+
+std::string basins_fmt_num(double v) {
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%.17g", v);
+    return std::string(buf);
+}
+}
 
 
 BasinsPhaseSlot& BasinsAnalysisSession::phase_slot(int i) {
@@ -535,10 +564,12 @@ bool BasinsAnalysisSession::rebuild_phase_ics(int config_idx) {
         // Осевые переменные перекрываем координатами узла сетки.
         if (c.result.axis_x_var >= 0 && c.result.axis_x_var < (int)vars.size())
             ic.values[vars[(size_t)c.result.axis_x_var]] =
-                basins_fmt_num(basins_grid_value(ix, n, c.result.axis_x_lo, c.result.axis_x_hi));
+                basins_fmt_num(basins_grid_value(ix, n, c.result.axis_x_lo, c.result.axis_x_hi,
+                                                 c.result.axis_x_symlog));
         if (c.result.axis_y_var >= 0 && c.result.axis_y_var < (int)vars.size())
             ic.values[vars[(size_t)c.result.axis_y_var]] =
-                basins_fmt_num(basins_grid_value(iy, n, c.result.axis_y_lo, c.result.axis_y_hi));
+                basins_fmt_num(basins_grid_value(iy, n, c.result.axis_y_lo, c.result.axis_y_hi,
+                                                 c.result.axis_y_symlog));
 
         auto pv = prev_visible.find(cell);
         ic.visible = (pv != prev_visible.end()) ? pv->second : true;
@@ -573,6 +604,38 @@ bool BasinsAnalysisSession::rebuild_phase_ics(int config_idx) {
         sl.phase.data_generation++;
     }
     return cells_changed;
+}
+
+namespace ucuda::analysis_detail {
+
+
+// Перенос настроек basins-config'а в фазовую подсессию. Зовётся ровно перед
+// запуском (не каждый кадр), как apply_shared_to_* в Custom-табе.
+void apply_basins_config_to_phase(const BasinsAnalysisSession& s,
+                                         const BasinsConfig& c,
+                                         PhaseAnalysisSession& ph) {
+    ph.vars           = s.vars;
+    ph.params         = s.params;
+    ph.sys            = s.sys;
+    ph.custom_schemes = s.custom_schemes;
+    // Схема и шаг ОБЯЗАНЫ совпадать с расчётом карты — иначе траектория не
+    // обязана прийти в тот же аттрактор, что и ячейка сетки.
+    ph.scheme       = c.scheme;
+    ph.symmetry_s   = c.symmetry_s;
+    ph.cd_fp_iters  = c.cd_fp_iters;
+    ph.newton  = c.newton;
+    ph.step_h       = c.h_text;
+    ph.adaptive     = c.adaptive;   // и шаг, и регулятор — как у карты
+    ph.param_values = c.param_values;
+    // Своё время — единственное, чем портрет отличается от карты.
+    ph.sim_time   = c.pp_t_max_text;
+    ph.skip_time  = c.pp_transient_text;
+    ph.decimation = c.pp_prescaller_text;
+    ph.use_gpu    = c.pp_use_gpu;
+    // Автозапуском рулит слой Basins (pp_autorun + очередь), собственный
+    // auto_recompute подсессии должен молчать.
+    ph.auto_recompute = false;
+}
 }
 
 
@@ -643,23 +706,4 @@ bool BasinsAnalysisSession::poll_phase() {
         }
     }
     return any;
-}
-
-void ensure_basins_spiral_cache(BasinsConfig& c) {
-    if (c.basin_idx_spiral_gen == c.data_generation
-        && c.basin_idx_spiral.size() == c.result.basin_idx.size()) return;
-    int n_pos = 0, n_neg = 0;
-    c.basin_idx_spiral = renumber_basins_spiral(c.result.basin_idx, c.result.n_pts,
-                                                n_pos, n_neg);
-    c.n_clusters_spiral      = n_pos;
-    c.min_cluster_idx_spiral = -n_neg;
-    c.basin_idx_spiral_gen   = c.data_generation;
-}
-const int* basins_display_ids(BasinsConfig& c) {
-    if (c.result.basin_idx.empty()) return nullptr;
-    if (!c.renumber_spiral) return c.result.basin_idx.data();
-    ensure_basins_spiral_cache(c);
-    if (c.basin_idx_spiral.size() != c.result.basin_idx.size())
-        return c.result.basin_idx.data();
-    return c.basin_idx_spiral.data();
 }

@@ -39,6 +39,9 @@ void prewarmPhasePortraitsAdaptiveNVRTC(const PhaseAdaptiveRequest& rq);
 bool computePhasePortraitsAdaptiveNVRTC(const PhaseAdaptiveRequest& rq, PhaseAdaptiveResult& out,
                                         std::string* err = nullptr);
 
+// BDF 1-5 (многошаговый, kernels/ucuda_bdf.cuh): тот же движок и кэш, ядро bdf_phase_kernel.
+bool computePhasePortraitsBdfNVRTC(const BdfGpuRequest& rq, PhaseAdaptiveResult& out, std::string* err = nullptr);
+
 // Замер адаптивного шага до T (Order -> Performance), тот же движок и кэш.
 bool computeAdaptiveEndpointNVRTC(const AdaptiveEndpointRequest& rq, AdaptiveEndpointResult& out,
                                   std::string* err = nullptr);

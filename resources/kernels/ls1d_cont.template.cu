@@ -1,4 +1,4 @@
-// ls1d_cont.template.cu
+﻿// ls1d_cont.template.cu
 //
 // NVRTC template for the 1D Lyapunov spectrum in continuation mode. Same shape
 // as lle1d_cont.template.cu, but the tangent space is N-dimensional: N probes
@@ -46,7 +46,7 @@ __device__ __forceinline__ float curand_uniform(curandState_t* s) {
 #include "cudaLibrary.cuh"
 
 __device__ __host__ __forceinline__
-void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
+void calculateDiscreteModel(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h) {
 {{KRS_BODY}}
 }
 
@@ -91,17 +91,21 @@ extern "C" __global__ void ls1dContinuationKernel(
 
     for (int i = 0; i < amountOfX; ++i)      x[i] = baseX[i];
     for (int i = 0; i < amountOfValues; ++i) a[i] = baseValues[i];
+    UCUDA_NVAR(ucudaStep, 0)   // время идёт по всей цепочке, как и x; клоны начинают блок с ним же
 
     curandState_t rng;
     curand_init(1234567891ULL, 0ULL, 0ULL, &rng);
 
-    // Fresh random basis of N unit vectors.
-    for (int k = 0; k < amountOfX; ++k) {
+    // Fresh random basis of N unit vectors (DAE: K = UCUDA_LYAP_NX vectors in x).
+    for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) {
         numb zp = 0;
-        for (int i = 0; i < amountOfX; ++i) {
+        for (int i = 0; i < UCUDA_LYAP_K(amountOfX); ++i) {
             y[k * amountOfX + i] = curand_uniform(&rng) - (numb)0.5;
             zp += y[k * amountOfX + i] * y[k * amountOfX + i];
         }
+#ifdef UCUDA_LYAP_NX
+        for (int i = UCUDA_LYAP_NX; i < amountOfX; ++i) y[k * amountOfX + i] = 0;
+#endif
         zp = sqrt(zp);
         for (int i = 0; i < amountOfX; ++i)
             y[k * amountOfX + i] = (zp == 0) ? (numb)0 : y[k * amountOfX + i] / zp;
@@ -113,7 +117,12 @@ extern "C" __global__ void ls1dContinuationKernel(
     const int nWarm   = vectorTransient > 0 ? (int)ucuda_steps_per_block(vectorTransient, NT) : 0;
 
     for (int j = 0; j < nPts; ++j) {
-        if (cancelFlag != nullptr && *cancelFlag != 0) return;
+        // Stop: недосчитанный хвост цепочки помечаем — хост покажет посчитанное.
+        if (cancelFlag != nullptr && *cancelFlag != 0) {
+            for (int r = j; r < nPts; ++r)
+                for (int k = 0; k < amountOfX; ++k) result[r * amountOfX + k] = (numb)UCUDA_CANCELLED_VALUE;
+            return;
+        }
         if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
         // Общая с host'ом функция, см. configCUDA.h (была третьей копией).
         const numb p = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, reverse);
@@ -130,6 +139,10 @@ extern "C" __global__ void ls1dContinuationKernel(
             for (int k = 0; k < amountOfX; ++k) result[j * amountOfX + k] = nan("");
             continue;
         }
+#ifdef UCUDA_LYAP_NX
+        // ДАУ (этап 7): z — на связь при новом параметре; старт — z прошлой точки (та же ветвь).
+        calculateDiscreteModel(x, UCUDA_TA((numb)ucudaStep * hLocal) a, (numb)0);
+#endif
         // The loop adds one more step after its iterations (see ucuda_steps_per_block).
         const int blockIters = ntSteps - 1;
 
@@ -139,13 +152,17 @@ extern "C" __global__ void ls1dContinuationKernel(
             settleBlocks = 0;
             // Exactly skipSteps steps: the loop adds one more after its iterations.
             if (skipSteps > 0 && loopCalculateDiscreteModel_int(x, a, hLocal, skipSteps - 1, amountOfX,
-                                               1, 0, maxValue, nullptr, 0, 1) == 0) {
+                                               1, 0, maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaStep)) == 0) {
                 alive = 0;
             } else {
                 // Orthonormalise the random basis, then place the probes at
                 // distance eps around the current trajectory point.
+#ifdef UCUDA_LYAP_NX
+                ucudaGramSchmidtDae(y, z, amountOfX);
+#else
                 gramSchmidtProcess(y, z, amountOfX);
-                for (int k = 0; k < amountOfX; ++k)
+#endif
+                for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k)
                     for (int i = 0; i < amountOfX; ++i)
                         y[k * amountOfX + i] = z[k * amountOfX + i] * eps + x[i];
                 probesAttached = 1;
@@ -155,44 +172,67 @@ extern "C" __global__ void ls1dContinuationKernel(
         // Tangent-vector transient: a fresh probe gets nWarm unsummed blocks too, a carried
         // one the larger of its settle blocks and nWarm.
         if (settleBlocks < nWarm) settleBlocks = nWarm;
+#ifdef UCUDA_LYAP_NX
+        // z клонов — на связь при новом параметре (и после постановки щупов).
+        if (alive)
+            for (int k = 0; k < UCUDA_LYAP_NX; ++k)
+                ucudaDaeProject(y + k * amountOfX, x, UCUDA_TA((numb)ucudaStep * hLocal) a, amountOfX);
+#endif
         for (int k = 0; k < amountOfX; ++k) sum[k] = 0;
 
         const int totalBlocks = settleBlocks + nBlocks;
         for (int b = 0; alive && b < totalBlocks; ++b) {
+            UCUDA_NVAR(ucudaBlock0, ucudaStep)
             if (loopCalculateDiscreteModel_int(x, a, hLocal, blockIters, amountOfX,
-                                               1, 0, maxValue, nullptr, 0, 1) == 0) { alive = 0; break; }
-            for (int k = 0; k < amountOfX; ++k)
+                                               1, 0, maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaStep)) == 0) { alive = 0; break; }
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) {
+                UCUDA_NVAR(ucudaClone, ucudaBlock0)
                 if (loopCalculateDiscreteModel_int(y + k * amountOfX, a, hLocal, blockIters, amountOfX,
-                                                   1, 0, maxValue, nullptr, 0, 1) == 0) { alive = 0; break; }
+                                                   1, 0, maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaClone)) == 0) { alive = 0; break; }
+            }
             if (!alive) break;
 
-            for (int k = 0; k < amountOfX; ++k)
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k)
                 for (int l = 0; l < amountOfX; ++l)
                     y[k * amountOfX + l] -= x[l];
 
+#ifdef UCUDA_LYAP_NX
+            ucudaGramSchmidtDae(y, z, amountOfX, denominators);
+#else
             gramSchmidtProcess(y, z, amountOfX, denominators);
+#endif
 
-            for (int k = 0; k < amountOfX; ++k) {
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) {
                 if (b >= settleBlocks) sum[k] += log(denominators[k] / eps);
                 for (int i = 0; i < amountOfX; ++i)
                     y[k * amountOfX + i] = x[i] + z[k * amountOfX + i] * eps;
+#ifdef UCUDA_LYAP_NX
+                ucudaDaeProject(y + k * amountOfX, x, UCUDA_TA((numb)ucudaStep * hLocal) a, amountOfX);
+#endif
             }
         }
 
         if (alive) {
             const numb tIntegrated = (numb)nBlocks * (numb)ntSteps * hLocal;
-            for (int k = 0; k < amountOfX; ++k) result[j * amountOfX + k] = sum[k] / tIntegrated;
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) result[j * amountOfX + k] = sum[k] / tIntegrated;
+#ifdef UCUDA_LYAP_NX
+            for (int k = UCUDA_LYAP_NX; k < amountOfX; ++k) result[j * amountOfX + k] = nan("");   // хост обрезает
+#endif
         } else {
             for (int k = 0; k < amountOfX; ++k) result[j * amountOfX + k] = nan("");
             probesAttached = 0;
             for (int i = 0; i < amountOfX; ++i) x[i] = baseX[i];
+            UCUDA_NSET(ucudaStep, 0)
             curand_init(1234567891ULL, (unsigned long long)j + 1ULL, 0ULL, &rng);
-            for (int k = 0; k < amountOfX; ++k) {
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) {
                 numb zp = 0;
-                for (int i = 0; i < amountOfX; ++i) {
+                for (int i = 0; i < UCUDA_LYAP_K(amountOfX); ++i) {
                     y[k * amountOfX + i] = curand_uniform(&rng) - (numb)0.5;
                     zp += y[k * amountOfX + i] * y[k * amountOfX + i];
                 }
+#ifdef UCUDA_LYAP_NX
+                for (int i = UCUDA_LYAP_NX; i < amountOfX; ++i) y[k * amountOfX + i] = 0;
+#endif
                 zp = sqrt(zp);
                 for (int i = 0; i < amountOfX; ++i)
                     y[k * amountOfX + i] = (zp == 0) ? (numb)0 : y[k * amountOfX + i] / zp;

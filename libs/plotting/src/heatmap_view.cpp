@@ -95,12 +95,13 @@ void HeatmapView::ensure_tex(int w, int h) {
     tex_w_ = w; tex_h_ = h;
 }
 
-void HeatmapView::upload_data(int nx, int ny, const double* values) {
+void HeatmapView::upload_data(int nx, int ny, const double* values,
+                              const std::function<bool(int, int)>& not_computed) {
     if (!data_tex_) return;
     upload_buf_.resize((size_t)nx * (size_t)ny);
     // diverged/spec-значения engine помечает как ±999; заменяем на FLT_MAX,
     // шейдер увидит >=1e30 и нарисует тёмно-серым (а не верхним концом
-    // colormap'а).
+    // colormap'а). Недосчитанные по Stop — -FLT_MAX: шейдер рисует их средне-серым.
     const double DIV_MARK = 999.0;
     for (size_t k = 0; k < upload_buf_.size(); ++k) {
         double v = values[k];
@@ -110,6 +111,11 @@ void HeatmapView::upload_data(int nx, int ny, const double* values) {
             upload_buf_[k] = (float)v;
         }
     }
+    if (not_computed)
+        for (int iy = 0; iy < ny; ++iy)
+            for (int ix = 0; ix < nx; ++ix)
+                if (not_computed(ix, iy))
+                    upload_buf_[(size_t)iy * (size_t)nx + (size_t)ix] = -std::numeric_limits<float>::max();
     glBindTexture(GL_TEXTURE_2D, data_tex_);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, nx, ny, GL_RED, GL_FLOAT,
@@ -246,9 +252,11 @@ void HeatmapView::render(PlotRenderer& renderer,
 {
     // Одноразовый (см. heatmap_view.h): забираем сразу, чтобы он не пережил вызов ни на одном пути.
     const std::function<const char*(int, int)> regime_of = std::move(cell_regime);
+    const std::function<bool(int, int)> not_computed_data = std::move(cell_not_computed);
     const char* const value_nm   = value_name ? value_name : "lambda";
     const bool        value_code = value_is_regime_code;
     cell_regime          = nullptr;
+    cell_not_computed    = nullptr;
     value_name           = nullptr;
     value_is_regime_code = false;
     if (nx <= 0 || ny <= 0 || !values) {
@@ -267,15 +275,10 @@ void HeatmapView::render(PlotRenderer& renderer,
         view_valid = false;
         swap_axes_cached_ = swap_axes;
     }
-    std::vector<double> swap_buf;
-    const double* eff_values = values;
+    // Транспонированная копия values строится только при заливке текстуры (ниже), не на каждом
+    // кадре: на 10000² это ~1 с на кадр. Подсказка читает одну ячейку прямо из values.
+    const int data_nx = nx, data_ny = ny;
     if (swap_axes) {
-        swap_buf.resize((size_t)nx * (size_t)ny);
-        for (int j = 0; j < ny; ++j)
-            for (int i = 0; i < nx; ++i)
-                swap_buf[(size_t)i * (size_t)ny + (size_t)j]
-                    = values[(size_t)j * (size_t)nx + (size_t)i];
-        eff_values = swap_buf.data();
         std::swap(nx, ny);
         std::swap(param_lo_x, param_lo_y);
         std::swap(param_hi_x, param_hi_y);
@@ -290,13 +293,30 @@ void HeatmapView::render(PlotRenderer& renderer,
     // и остаются на месте. Раньше swap переставлял диапазоны, а флаги лога нет: на лог-оси после
     // swap тики, tooltip, снап курсора и крест считались линейной формулой по лог-сетке, т.е.
     // показывали узлы, которых движок не считал.
-    const bool vis_log_x = swap_axes ? y_axis.log_scale : x_axis.log_scale;
-    const bool vis_log_y = swap_axes ? x_axis.log_scale : y_axis.log_scale;
+    // Вид сетки оси: 0 — линейная, 1 — log, 2 — ±log бассейнов (AxisInfo::symlog). Свапается так же.
+    auto axis_kind = [](const AxisInfo& a) { return a.symlog ? 2 : (a.log_scale ? 1 : 0); };
+    const int vis_log_x = swap_axes ? axis_kind(y_axis) : axis_kind(x_axis);
+    const int vis_log_y = swap_axes ? axis_kind(x_axis) : axis_kind(y_axis);
 
     // 1. Текстура из снапшота (lazy upload по generation).
     if (data_generation != data_gen_cached) {
         ensure_tex(nx, ny);
-        upload_data(nx, ny, eff_values);
+        std::vector<double> swap_buf;
+        const double* eff_values = values;
+        if (swap_axes) {
+            swap_buf.resize((size_t)data_nx * (size_t)data_ny);
+            for (int j = 0; j < data_ny; ++j)
+                for (int i = 0; i < data_nx; ++i)
+                    swap_buf[(size_t)i * (size_t)data_ny + (size_t)j]
+                        = values[(size_t)j * (size_t)data_nx + (size_t)i];
+            eff_values = swap_buf.data();
+        }
+        // Маска — в координатах данных, а сетка здесь уже пост-swap: (ix, iy) после swap — это (iy, ix).
+        std::function<bool(int, int)> not_computed;
+        if (not_computed_data)
+            not_computed = swap_axes ? std::function<bool(int, int)>([&](int ix, int iy) { return not_computed_data(iy, ix); })
+                                     : not_computed_data;
+        upload_data(nx, ny, eff_values, not_computed);
         data_gen_cached = data_generation;
     }
 
@@ -413,8 +433,20 @@ void HeatmapView::render(PlotRenderer& renderer,
     // индекс, а уже он — в линейную vis-координату. Без этого оверлеи (крест) ставились по прямому
     // линейному маппингу и уезжали относительно своей же ячейки: на оси 0.1..14 значение 1.09868
     // попадало в 7% высоты вместо ~50%. Не-лог путь — тождество, линейные карты не меняются.
-    auto vis_pos = [](double v, int n, double lo, double hi, bool log_scale, double step) {
-        if (log_scale && lo > 0.0 && hi > 0.0 && n > 1 && v > 0.0) {
+    // ±log (kind 2): узел k — ucuda_node_value_symlog, m = n/2 узлов на полуось, первая половина
+    // -hi..-lo, вторая +lo..+hi. Дробный индекс отрицательного значения — по первой половине,
+    // положительного — по второй; ноль сетке не принадлежит и ставится на стык половин.
+    auto symlog_ok = [](int n, double lo, double hi) { return lo > 0.0 && hi > 0.0 && n >= 4; };
+    auto vis_pos = [&symlog_ok](double v, int n, double lo, double hi, int kind, double step) {
+        if (kind == 2 && symlog_ok(n, lo, hi) && std::isfinite(v)) {
+            const int m = n / 2;
+            const double l0 = std::log10(lo), l1 = std::log10(hi);
+            double kf = (double)m - 0.5;
+            if (v < 0.0)      kf = (std::log10(-v) - l1) * (double)(m - 1) / (l0 - l1);
+            else if (v > 0.0) kf = (double)m + (std::log10(v) - l0) * (double)(m - 1) / (l1 - l0);
+            return lo + kf * step;
+        }
+        if (kind == 1 && lo > 0.0 && hi > 0.0 && n > 1 && v > 0.0) {
             const double l0 = std::log10(lo), l1 = std::log10(hi);
             const double kf = (std::log10(v) - l0) / ((l1 - l0) / (double)(n - 1));
             return lo + kf * step;
@@ -424,8 +456,10 @@ void HeatmapView::render(PlotRenderer& renderer,
 
     // Обратное к vis_pos: мировое значение по позиции в визуальном домене. Нужно тикам лог-оси —
     // view_min/max хранятся в node-координатах, а подписывать надо параметр.
-    auto vis_world = [](double p, int n, double lo, double hi, bool log_scale, double step) {
-        if (log_scale && lo > 0.0 && hi > 0.0 && n > 1 && step > 0.0) {
+    auto vis_world = [&symlog_ok](double p, int n, double lo, double hi, int kind, double step) {
+        if (kind == 2 && symlog_ok(n, lo, hi) && step > 0.0)
+            return ucuda_node_symlog_d((p - lo) / step, n, lo, hi);
+        if (kind == 1 && lo > 0.0 && hi > 0.0 && n > 1 && step > 0.0) {
             const double l0 = std::log10(lo), l1 = std::log10(hi);
             const double kf = (p - lo) / step;
             return std::pow(10.0, l0 + kf * (l1 - l0) / (double)(n - 1));
@@ -438,11 +472,39 @@ void HeatmapView::render(PlotRenderer& renderer,
     // другое расходилось с getValueByIdx в последних битах, а на правом конце оси заметнее.
     // `step` больше не участвует: параметр оставлен, чтобы не трогать четыре места вызова
     // (crosshair-drag, drill-down, tooltip).
-    auto node_value = [](int k, int n, double lo, double hi, bool log_scale, double step) {
+    auto node_value = [&symlog_ok](int k, int n, double lo, double hi, int kind, double step) {
         (void)step;
-        if (log_scale && lo > 0.0 && hi > 0.0 && n > 1)
+        if (kind == 2 && symlog_ok(n, lo, hi))
+            return (double)ucuda_node_value_symlog(k, n, (numb)lo, (numb)hi);
+        if (kind == 1 && lo > 0.0 && hi > 0.0 && n > 1)
             return (double)ucuda_node_value_log(k, n, (numb)lo, (numb)hi);
         return (double)ucuda_node_value(k, n, (numb)lo, (numb)hi);
+    };
+
+    // Тики ±log-оси: на каждой половине — декадные тики модуля (log_axis_ticks) по ВИДИМОЙ части
+    // половины, со своим знаком. Возвращает (позиция в vis-домене, тик со знаковым значением).
+    // e0, e1 — видимые границы vis-домена, px — длина оси в пикселях.
+    auto symlog_ticks = [&](double e0, double e1, int n, double lo, double hi, double step,
+                            float px, bool horizontal) {
+        std::vector<std::pair<double, LogAxisTick>> out;
+        if (!symlog_ok(n, lo, hi) || step <= 0.0) return out;
+        const int m = n / 2;
+        const double k0 = (std::min(e0, e1) - lo) / step, k1 = (std::max(e0, e1) - lo) / step;
+        const double half = (double)m - 0.5;          // стык половин
+        const double ktot = std::max(k1 - k0, 1e-12);
+        for (int side = 0; side < 2; ++side) {
+            const double a = side == 0 ? std::max(k0, -0.5) : std::max(k0, half);
+            const double b = side == 0 ? std::min(k1, half) : std::min(k1, (double)n - 0.5);
+            if (!(b > a)) continue;
+            const double wa = std::abs(ucuda_node_symlog_d(a, n, lo, hi));
+            const double wb = std::abs(ucuda_node_symlog_d(b, n, lo, hi));
+            const float  span_px = (float)((b - a) / ktot) * px;
+            for (LogAxisTick t : log_axis_ticks(std::min(wa, wb), std::max(wa, wb), span_px, horizontal)) {
+                if (side == 0) t.value = -t.value;
+                out.emplace_back(vis_pos(t.value, n, lo, hi, 2, step), t);
+            }
+        }
+        return out;
     };
 
     // Эффективные визуальные границы с учётом AxisInfo::invert: evis_x0 — значение у ЛЕВОГО края
@@ -952,14 +1014,27 @@ void HeatmapView::render(PlotRenderer& renderer,
         // подписывались только концы view, причём прямо в node-координатах: под зумом это уже не
         // параметр, а линейная позиция ячейки. Здесь и значения, и позиции идут через vis_world /
         // vis_pos — те же формулы, по которым ставится крест.
-        if (vis_log_x && param_lo_x > 0.0 && param_hi_x > 0.0 && nx > 1 &&
+        const bool sym_x = vis_log_x == 2 && symlog_ok(nx, param_lo_x, param_hi_x);
+        if ((sym_x || (vis_log_x == 1 && param_lo_x > 0.0 && param_hi_x > 0.0 && nx > 1)) &&
             std::abs(evis_x1 - evis_x0) > 1e-30) {
-            const double w0 = vis_world(evis_x0, nx, param_lo_x, param_hi_x, true, step_x);
-            const double w1 = vis_world(evis_x1, nx, param_lo_x, param_hi_x, true, step_x);
+            std::vector<std::pair<double, LogAxisTick>> lt;
+            if (sym_x) {
+                lt = symlog_ticks(evis_x0, evis_x1, nx, param_lo_x, param_hi_x, step_x, (float)plot_w, true);
+            } else {
+                const double w0 = vis_world(evis_x0, nx, param_lo_x, param_hi_x, 1, step_x);
+                const double w1 = vis_world(evis_x1, nx, param_lo_x, param_hi_x, 1, step_x);
+                for (const LogAxisTick& t : log_axis_ticks(std::min(w0, w1), std::max(w0, w1),
+                                                           (float)plot_w, true))
+                    lt.emplace_back(vis_pos(t.value, nx, param_lo_x, param_hi_x, 1, step_x), t);
+            }
             const ImU32 col_minor = dim_grid_col(col_axis);
-            for (const LogAxisTick& t : log_axis_ticks(std::min(w0, w1), std::max(w0, w1),
-                                                       (float)plot_w, true)) {
-                const double vp = vis_pos(t.value, nx, param_lo_x, param_hi_x, true, step_x);
+            // У ±log две половины прорежены порознь, и на стыке и у краёв подписи сталкиваются:
+            // идём слева направо и пропускаем подпись, налезающую на предыдущую (засечка остаётся).
+            if (sym_x)
+                std::sort(lt.begin(), lt.end(), [&](const auto& p, const auto& q) {
+                    return (p.first - evis_x0) / (evis_x1 - evis_x0) < (q.first - evis_x0) / (evis_x1 - evis_x0); });
+            float last_right = -1e30f;
+            for (const auto& [vp, t] : lt) {
                 float px = axis_px(img_pos.x + (float)((vp - evis_x0) / (evis_x1 - evis_x0)) * plot_w,
                                    img_pos.x, (float)plot_w);
                 fill_col_px(dl, px, img_pos.y + plot_h,
@@ -968,8 +1043,12 @@ void HeatmapView::render(PlotRenderer& renderer,
                 if (!t.major) continue;
                 std::string lbl = fmt_tick(t.value);
                 ImVec2 ts = plot_text_size(lbl.c_str());
-                plot_text(dl, ImVec2(px_center(px) - ts.x * 0.5f, img_pos.y + plot_h + 7.0f),
-                          col_text, lbl.c_str());
+                const float left = px_center(px) - ts.x * 0.5f;
+                if (sym_x) {
+                    if (left < last_right + 6.0f) continue;
+                    last_right = left + ts.x;
+                }
+                plot_text(dl, ImVec2(left, img_pos.y + plot_h + 7.0f), col_text, lbl.c_str());
             }
             return;
         }
@@ -995,14 +1074,26 @@ void HeatmapView::render(PlotRenderer& renderer,
     };
     auto draw_y_ticks = [&]() {
         // См. draw_x_ticks выше про vis_view-паддинг и log-масштаб.
-        if (vis_log_y && param_lo_y > 0.0 && param_hi_y > 0.0 && ny > 1 &&
+        const bool sym_y = vis_log_y == 2 && symlog_ok(ny, param_lo_y, param_hi_y);
+        if ((sym_y || (vis_log_y == 1 && param_lo_y > 0.0 && param_hi_y > 0.0 && ny > 1)) &&
             std::abs(evis_y1 - evis_y0) > 1e-30) {
-            const double w0 = vis_world(evis_y0, ny, param_lo_y, param_hi_y, true, step_y);
-            const double w1 = vis_world(evis_y1, ny, param_lo_y, param_hi_y, true, step_y);
+            std::vector<std::pair<double, LogAxisTick>> lt;
+            if (sym_y) {
+                lt = symlog_ticks(evis_y0, evis_y1, ny, param_lo_y, param_hi_y, step_y, (float)plot_h, false);
+            } else {
+                const double w0 = vis_world(evis_y0, ny, param_lo_y, param_hi_y, 1, step_y);
+                const double w1 = vis_world(evis_y1, ny, param_lo_y, param_hi_y, 1, step_y);
+                for (const LogAxisTick& t : log_axis_ticks(std::min(w0, w1), std::max(w0, w1),
+                                                           (float)plot_h, false))
+                    lt.emplace_back(vis_pos(t.value, ny, param_lo_y, param_hi_y, 1, step_y), t);
+            }
             const ImU32 col_minor = dim_grid_col(col_axis);
-            for (const LogAxisTick& t : log_axis_ticks(std::min(w0, w1), std::max(w0, w1),
-                                                       (float)plot_h, false)) {
-                const double vp = vis_pos(t.value, ny, param_lo_y, param_hi_y, true, step_y);
+            // См. draw_x_ticks: у ±log подписи идут сверху вниз и не налезают друг на друга.
+            if (sym_y)
+                std::sort(lt.begin(), lt.end(), [&](const auto& p, const auto& q) {
+                    return (evis_y1 - p.first) / (evis_y1 - evis_y0) < (evis_y1 - q.first) / (evis_y1 - evis_y0); });
+            float last_bottom = -1e30f;
+            for (const auto& [vp, t] : lt) {
                 float py = axis_px(img_pos.y + (float)((evis_y1 - vp) / (evis_y1 - evis_y0)) * plot_h,
                                    img_pos.y, (float)plot_h);
                 fill_row_px(dl, py, img_pos.x - (t.major ? 5.0f : 3.0f), img_pos.x,
@@ -1010,9 +1101,13 @@ void HeatmapView::render(PlotRenderer& renderer,
                 if (!t.major) continue;
                 std::string lbl = fmt_tick(t.value);
                 ImVec2 ts = plot_text_size(lbl.c_str());
+                const float top = px_center(py) - ts.y * 0.5f;
+                if (sym_y) {
+                    if (top < last_bottom + 2.0f) continue;
+                    last_bottom = top + ts.y;
+                }
                 y_tick_w_max = std::max(y_tick_w_max, ts.x);
-                plot_text(dl, ImVec2(img_pos.x - 8.0f - ts.x, px_center(py) - ts.y * 0.5f),
-                          col_text, lbl.c_str());
+                plot_text(dl, ImVec2(img_pos.x - 8.0f - ts.x, top), col_text, lbl.c_str());
             }
             return;
         }
@@ -1201,7 +1296,9 @@ void HeatmapView::render(PlotRenderer& renderer,
             // определение) — иначе подсказка и записанное значение расходятся.
             double snap_x = node_value(ix, nx, param_lo_x, param_hi_x, vis_log_x, step_x);
             double snap_y = node_value(iy, ny, param_lo_y, param_hi_y, vis_log_y, step_y);
-            double v = eff_values[(size_t)iy * (size_t)nx + (size_t)ix];
+            // values — в раскладке данных: после swap визуальный (ix, iy) — это ячейка (iy, ix).
+            double v = swap_axes ? values[(size_t)ix * (size_t)data_nx + (size_t)iy]
+                                 : values[(size_t)iy * (size_t)nx + (size_t)ix];
             const char* xn = vis_x_name.empty() ? "x" : vis_x_name.c_str();
             const char* yn = vis_y_name.empty() ? "y" : vis_y_name.c_str();
             // Режим — по индексам ДАННЫХ: после swap визуальный (ix, iy) — это (iy, ix).

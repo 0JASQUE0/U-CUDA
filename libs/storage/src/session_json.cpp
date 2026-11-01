@@ -344,6 +344,8 @@ void write_diagram(std::ostringstream& o, const BifurcationDiagramConfig& bd) {
     o << ",\"label_is_manual\":"  << (bd.label_is_manual ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, bd.scheme);
     o << ",\"symmetry_s\":";      jstr(o, bd.symmetry_s);
+    o << ",\"cd_fp_iters\":";      jstr(o, bd.cd_fp_iters);
+    o << ",\"newton_tol\":"; jstr(o, bd.newton.tol); o << ",\"newton_max_iters\":"; jstr(o, bd.newton.max_iters); o << ",\"newton_full\":" << (bd.newton.full ? "true" : "false");
     o << ",\"param_index\":"      << bd.param_index;
     o << ",\"sweep_over_var\":"   << (bd.sweep_over_var ? "true" : "false");
     o << ",\"sweep_over_h\":"     << (bd.sweep_over_h ? "true" : "false");
@@ -405,6 +407,10 @@ bool read_diagram_field(JP& p, BifurcationDiagramConfig& bd, const std::string& 
     else if (key == "label_is_manual")    bd.label_is_manual   = p.boolean();
     else if (key == "scheme")             bd.scheme            = p.str();
     else if (key == "symmetry_s")         bd.symmetry_s        = p.str();
+    else if (key == "cd_fp_iters")         bd.cd_fp_iters        = p.str();
+    else if (key == "newton_tol")          bd.newton.tol       = p.str();
+    else if (key == "newton_max_iters")    bd.newton.max_iters = p.str();
+    else if (key == "newton_full")         bd.newton.full      = p.boolean();
     else if (key == "param_index")        bd.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     bd.sweep_over_var    = p.boolean();
     else if (key == "sweep_over_h")       bd.sweep_over_h      = p.boolean();
@@ -478,6 +484,8 @@ void write_lle_curve(std::ostringstream& o, const LLECurveConfig& c) {
     o << ",\"label_is_manual\":"  << (c.label_is_manual ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
     o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
+    o << ",\"cd_fp_iters\":";      jstr(o, c.cd_fp_iters);
+    o << ",\"newton_tol\":"; jstr(o, c.newton.tol); o << ",\"newton_max_iters\":"; jstr(o, c.newton.max_iters); o << ",\"newton_full\":" << (c.newton.full ? "true" : "false");
     o << ",\"param_index\":"      << c.param_index;
     o << ",\"sweep_over_var\":"   << (c.sweep_over_var ? "true" : "false");
     o << ",\"sweep_over_h\":"     << (c.sweep_over_h ? "true" : "false");
@@ -524,6 +532,10 @@ bool read_lle_curve_field(JP& p, LLECurveConfig& c, const std::string& key) {
     else if (key == "label_is_manual")    c.label_is_manual   = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
+    else if (key == "cd_fp_iters")         c.cd_fp_iters        = p.str();
+    else if (key == "newton_tol")          c.newton.tol       = p.str();
+    else if (key == "newton_max_iters")    c.newton.max_iters = p.str();
+    else if (key == "newton_full")         c.newton.full      = p.boolean();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     c.sweep_over_var    = p.boolean();
     else if (key == "sweep_over_h")       c.sweep_over_h      = p.boolean();
@@ -579,6 +591,8 @@ void write_ls_curve(std::ostringstream& o, const LSCurveConfig& c) {
     o << ",\"label_is_manual\":"  << (c.label_is_manual ? "true" : "false");
     o << ",\"scheme\":";          jstr(o, c.scheme);
     o << ",\"symmetry_s\":";      jstr(o, c.symmetry_s);
+    o << ",\"cd_fp_iters\":";      jstr(o, c.cd_fp_iters);
+    o << ",\"newton_tol\":"; jstr(o, c.newton.tol); o << ",\"newton_max_iters\":"; jstr(o, c.newton.max_iters); o << ",\"newton_full\":" << (c.newton.full ? "true" : "false");
     o << ",\"param_index\":"      << c.param_index;
     o << ",\"sweep_over_var\":"   << (c.sweep_over_var ? "true" : "false");
     o << ",\"sweep_over_h\":"     << (c.sweep_over_h ? "true" : "false");
@@ -624,6 +638,10 @@ bool read_ls_curve_field(JP& p, LSCurveConfig& c, const std::string& key) {
     else if (key == "label_is_manual")    c.label_is_manual   = p.boolean();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
+    else if (key == "cd_fp_iters")         c.cd_fp_iters        = p.str();
+    else if (key == "newton_tol")          c.newton.tol       = p.str();
+    else if (key == "newton_max_iters")    c.newton.max_iters = p.str();
+    else if (key == "newton_full")         c.newton.full      = p.boolean();
     else if (key == "param_index")        c.param_index       = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")     c.sweep_over_var    = p.boolean();
     else if (key == "sweep_over_h")       c.sweep_over_h      = p.boolean();
@@ -676,6 +694,8 @@ void write_dft1d_config(std::ostringstream& o, const Dft1DConfig& c) {
     o << "\"label_is_manual\":"     << (c.label_is_manual ? "true" : "false") << ",";
     o << "\"scheme\":";             jstr(o, c.scheme);             o << ",";
     o << "\"symmetry_s\":";         jstr(o, c.symmetry_s);         o << ",";
+    o << "\"cd_fp_iters\":";         jstr(o, c.cd_fp_iters);         o << ",";
+    o << "\"newton_tol\":"; jstr(o, c.newton.tol); o << ",\"newton_max_iters\":"; jstr(o, c.newton.max_iters); o << ",\"newton_full\":" << (c.newton.full ? "true" : "false") << ",";
     o << "\"param_index\":"         << c.param_index              << ",";
     o << "\"sweep_over_var\":"      << (c.sweep_over_var ? "true" : "false") << ",";
     o << "\"var_sweep_index\":"     << c.var_sweep_index          << ",";
@@ -716,6 +736,10 @@ bool read_dft1d_field(JP& p, Dft1DConfig& c, const std::string& key) {
     else if (key == "label_is_manual")     c.label_is_manual     = p.boolean();
     else if (key == "scheme")              c.scheme              = p.str();
     else if (key == "symmetry_s")          c.symmetry_s          = p.str();
+    else if (key == "cd_fp_iters")          c.cd_fp_iters          = p.str();
+    else if (key == "newton_tol")          c.newton.tol       = p.str();
+    else if (key == "newton_max_iters")    c.newton.max_iters = p.str();
+    else if (key == "newton_full")         c.newton.full      = p.boolean();
     else if (key == "param_index")         c.param_index         = std::stoi(p.str_or_num());
     else if (key == "sweep_over_var")      c.sweep_over_var      = p.boolean();
     else if (key == "var_sweep_index")     c.var_sweep_index     = std::stoi(p.str_or_num());
@@ -831,12 +855,16 @@ void write_basins_config(std::ostringstream& o, const BasinsConfig& c,
     o << "\"label\":";            jstr(o, c.label);            o << ",";
     o << "\"scheme\":";           jstr(o, c.scheme);           o << ",";
     o << "\"symmetry_s\":";       jstr(o, c.symmetry_s);       o << ",";
+    o << "\"cd_fp_iters\":";       jstr(o, c.cd_fp_iters);       o << ",";
+    o << "\"newton_tol\":"; jstr(o, c.newton.tol); o << ",\"newton_max_iters\":"; jstr(o, c.newton.max_iters); o << ",\"newton_full\":" << (c.newton.full ? "true" : "false") << ",";
     o << "\"axis_x_var\":"        << c.axis_x_var            << ",";
     o << "\"axis_y_var\":"        << c.axis_y_var            << ",";
     o << "\"axis_x_lo_text\":";   jstr(o, c.axis_x_lo_text);   o << ",";
     o << "\"axis_x_hi_text\":";   jstr(o, c.axis_x_hi_text);   o << ",";
     o << "\"axis_y_lo_text\":";   jstr(o, c.axis_y_lo_text);   o << ",";
     o << "\"axis_y_hi_text\":";   jstr(o, c.axis_y_hi_text);   o << ",";
+    o << "\"axis_x_symlog\":"     << (c.axis_x_symlog ? "true" : "false") << ",";
+    o << "\"axis_y_symlog\":"     << (c.axis_y_symlog ? "true" : "false") << ",";
     o << "\"n_pts_text\":";       jstr(o, c.n_pts_text);       o << ",";
     o << "\"writable_var\":"      << c.writable_var          << ",";
     o << "\"h_text\":";           jstr(o, c.h_text);           o << ",";
@@ -871,6 +899,10 @@ void write_basins_config(std::ostringstream& o, const BasinsConfig& c,
     o << "\"pp_use_gpu\":"     << (c.pp_use_gpu ? "true" : "false") << ",";
     o << "\"pp_autorun\":"     << (c.pp_autorun ? "true" : "false") << ",";
     o << "\"pp_marker_size\":" << c.pp_marker_size << ",";
+    o << "\"scatter_custom_style\":" << (c.scatter_custom_style ? "true" : "false") << ",";
+    o << "\"scatter_marker\":"       << c.scatter_marker       << ",";
+    o << "\"scatter_point_size\":"   << c.scatter_point_size   << ",";
+    o << "\"scatter_alpha\":"        << c.scatter_alpha        << ",";
     o << "\"phase_projections\":";
     if (phase_slot) write_basins_phase_projections(o, phase_slot->phase.projections);
     else            o << "[]";
@@ -886,12 +918,18 @@ bool read_basins_field(JP& p, BasinsConfig& c, const std::string& key) {
     if      (key == "label")              c.label             = p.str();
     else if (key == "scheme")             c.scheme            = p.str();
     else if (key == "symmetry_s")         c.symmetry_s        = p.str();
+    else if (key == "cd_fp_iters")         c.cd_fp_iters        = p.str();
+    else if (key == "newton_tol")          c.newton.tol       = p.str();
+    else if (key == "newton_max_iters")    c.newton.max_iters = p.str();
+    else if (key == "newton_full")         c.newton.full      = p.boolean();
     else if (key == "axis_x_var")         c.axis_x_var        = std::stoi(p.str_or_num());
     else if (key == "axis_y_var")         c.axis_y_var        = std::stoi(p.str_or_num());
     else if (key == "axis_x_lo_text")     c.axis_x_lo_text    = p.str();
     else if (key == "axis_x_hi_text")     c.axis_x_hi_text    = p.str();
     else if (key == "axis_y_lo_text")     c.axis_y_lo_text    = p.str();
     else if (key == "axis_y_hi_text")     c.axis_y_hi_text    = p.str();
+    else if (key == "axis_x_symlog")      c.axis_x_symlog     = p.boolean();
+    else if (key == "axis_y_symlog")      c.axis_y_symlog     = p.boolean();
     else if (key == "n_pts_text")         c.n_pts_text        = p.str();
     else if (key == "writable_var")       c.writable_var      = std::stoi(p.str_or_num());
     else if (key == "h_text")             c.h_text            = p.str();
@@ -922,6 +960,10 @@ bool read_basins_field(JP& p, BasinsConfig& c, const std::string& key) {
     else if (key == "pp_use_gpu")             c.pp_use_gpu             = p.boolean();
     else if (key == "pp_autorun")             c.pp_autorun             = p.boolean();
     else if (key == "pp_marker_size")         c.pp_marker_size         = (float)std::stod(p.str_or_num());
+    else if (key == "scatter_custom_style")   c.scatter_custom_style   = p.boolean();
+    else if (key == "scatter_marker")         c.scatter_marker         = std::stoi(p.str_or_num());
+    else if (key == "scatter_point_size")     c.scatter_point_size     = (float)std::stod(p.str_or_num());
+    else if (key == "scatter_alpha")          c.scatter_alpha          = (float)std::stod(p.str_or_num());
     else return false;
     return true;
 }
@@ -933,6 +975,8 @@ void write_fastsync_config(std::ostringstream& o, const FastSyncConfig& c) {
     o << "\"label\":";            jstr(o, c.label);            o << ",";
     o << "\"scheme\":";           jstr(o, c.scheme);           o << ",";
     o << "\"symmetry_s\":";       jstr(o, c.symmetry_s);       o << ",";
+    o << "\"cd_fp_iters\":";       jstr(o, c.cd_fp_iters);       o << ",";
+    o << "\"newton_tol\":"; jstr(o, c.newton.tol); o << ",\"newton_max_iters\":"; jstr(o, c.newton.max_iters); o << ",\"newton_full\":" << (c.newton.full ? "true" : "false") << ",";
     o << "\"mode\":"              << c.mode                  << ",";
     o << "\"h_text\":";           jstr(o, c.h_text);           o << ",";
     o << "\"iter_of_synchr_text\":"; jstr(o, c.iter_of_synchr_text); o << ",";
@@ -982,6 +1026,10 @@ bool read_fastsync_field(JP& p, FastSyncConfig& c, const std::string& key) {
     if      (key == "label")               c.label               = p.str();
     else if (key == "scheme")              c.scheme              = p.str();
     else if (key == "symmetry_s")          c.symmetry_s          = p.str();
+    else if (key == "cd_fp_iters")          c.cd_fp_iters          = p.str();
+    else if (key == "newton_tol")          c.newton.tol       = p.str();
+    else if (key == "newton_max_iters")    c.newton.max_iters = p.str();
+    else if (key == "newton_full")         c.newton.full      = p.boolean();
     else if (key == "mode")                c.mode                = std::stoi(p.str_or_num());
     else if (key == "h_text")              c.h_text              = p.str();
     else if (key == "iter_of_synchr_text") c.iter_of_synchr_text = p.str();
@@ -1060,6 +1108,10 @@ void write_shared_config(std::ostringstream& o, const CustomTabSharedConfig& c) 
     B("level_phase_enabled", c.level_phase_enabled);
     S("scheme",              c.scheme);
     S("symmetry_s",          c.symmetry_s);
+    S("cd_fp_iters",         c.cd_fp_iters);
+    S("newton_tol",          c.newton.tol);
+    S("newton_max_iters",    c.newton.max_iters);
+    B("newton_full",         c.newton.full);
     S("h_text",              c.h_text);
     S("t_max_text",          c.t_max_text);
     S("transient_text",      c.transient_text);

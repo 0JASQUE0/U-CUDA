@@ -351,6 +351,12 @@ void main() {
         return;
     }
     float v = texture(u_tex, uv).r;
+    // <= -1e30 — ячейку не досчитал Stop (HeatmapView::cell_not_computed): сплошной средне-серый,
+    // заметно светлее тёмного «нет данных» (u_nodata) и фона, чтобы не путать с расходимостью.
+    if (v <= -1.0e30 && !isinf(v)) {
+        frag_color = vec4(0.40, 0.40, 0.42, 1.0);
+        return;
+    }
     if (v >= 1.0e30 || isnan(v) || isinf(v)) {
         frag_color = vec4(u_nodata, 1.0);
         return;

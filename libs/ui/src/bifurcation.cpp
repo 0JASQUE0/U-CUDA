@@ -1,11 +1,7 @@
 ﻿#include "gui_internal.h"
+using namespace ucuda::ui_detail;
 
 namespace ucuda::ui_detail {
-
-
-// Parametric: контролы + scatter-plot 1D-бифуркации через наш GL-renderer
-// Рисует контролы одной БД внутри её таба. Возвращает true, если пользователь
-// нажал Run для этой БД (внешний код может также взвести Run через Ctrl+R).
 void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s, int idx) {
     BifurcationDiagramConfig& bd = s.diagrams[idx];
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
@@ -141,6 +137,8 @@ void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s, int i
         IntegrationFields f;
         f.h           = &bd.h_text;
         f.symmetry_s  = &bd.symmetry_s;
+        f.cd_fp_iters = &bd.cd_fp_iters;
+        f.newton      = &bd.newton;
         f.t_max       = &bd.t_max_text;
         f.transient   = &bd.transient_text;
         f.pre_scaller = &bd.pre_scaller_text;
@@ -167,7 +165,7 @@ void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s, int i
                 "OK: %dx%d heatmap, period(min..max) = %.0f..%.0f",
                 bd.result_2d.n_pts, bd.result_2d.n_pts,
                 bd.result_2d.min_val, bd.result_2d.max_val);
-            draw_regime_summary(bd.result_2d.flags);
+            draw_regime_summary(bd.result_2d.flags, &bd.regime_counts_2d, bd.data_generation_2d);
             draw_adaptive_stats(bd.result_2d.ad_stats);
         }
         else if (!bd.last_error.empty()) {
@@ -193,8 +191,9 @@ void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s, int i
         }
     }
 }
+}
 
-
+namespace ucuda::ui_detail {
 void draw_bifurcation_controls(AppModel& model, SystemLibrary& /*lib*/) {
     BifurcationAnalysisSession& s = model.bifurcation_session;
 
@@ -214,11 +213,9 @@ void draw_bifurcation_controls(AppModel& model, SystemLibrary& /*lib*/) {
     if (tabs.active    >= 0) s.active_diagram_index = tabs.active;
     if (tabs.to_remove >= 0) model.remove_bifurcation_diagram(tabs.to_remove);
 }
+}
 
-
-// Маппинг window-kind → нейтральный ParamPlotKind. Сама конфигурация живёт в
-// configure_param_plot_view (см. блок общих хелперов вверху файла), чтобы
-// Parametric и Custom настраивали одинаковые 1D-графики одним и тем же кодом.
+namespace ucuda::ui_detail {
 ParamPlotKind to_param_plot_kind(ParametricPlotWindow::Kind kind) {
     switch (kind) {
     case ParametricPlotWindow::Kind::LLE: return ParamPlotKind::LLE;
@@ -228,21 +225,15 @@ ParamPlotKind to_param_plot_kind(ParametricPlotWindow::Kind kind) {
     default:                              return ParamPlotKind::Bifurcation;
     }
 }
+}
 
-
-// One-time Plot2DView setup per kind — called by draw_parametric_plot_windows
-// when it lazily constructs a fresh Plot2DView for a newly opened window
-// (Plot2DView is now owned per-window there, not a function-shared by
-// every window of a kind, so this replaces the old `if (!view) {...}` inits).
+namespace ucuda::ui_detail {
 void configure_plot_view(Plot2DView& view, ParametricPlotWindow::Kind kind) {
     configure_param_plot_view(view, to_param_plot_kind(kind));
 }
+}
 
-
-// Plots one Parametric plot window of kind Bifurcation. `win` supplies
-// mode_2d and the diagram indices to show (`members`); `renderer`/`view`/
-// `heatmap_map` are this window's own render-state instances, owned and
-// cached by draw_parametric_plot_windows (keyed by win.id).
+namespace ucuda::ui_detail {
 void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
                                    ParametricPlotWindow& win,
                                    PlotRenderer& renderer, Plot2DView& view,
@@ -371,6 +362,7 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
 
             // Значение ячейки — сырой выход DBSCAN: число кластеров пиков, -1 / 0 — коды режима.
             hb.cell_regime = regime_cell_label(bdact.result_2d.flags, bdact.result_2d.n_pts);
+            hb.cell_not_computed = cancelled_cell_mask(bdact.result_2d.flags, bdact.result_2d.n_pts);
             hb.value_name = "period";
             hb.value_is_regime_code = true;
             ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -545,6 +537,7 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
             double x1 = rev ? lo : hi;
 
             hc.cell_regime = regime_cell_label(bdact.result.flags, 0);   // флаг на колонку
+            hc.cell_not_computed = cancelled_cell_mask(bdact.result.flags, 0);
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImVec2 origin = ImGui::GetCursorScreenPos();
             hc.render(renderer, origin, avail,
@@ -585,13 +578,7 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
         if (shared_var_idx == -2) shared_var_idx = bd.writable_var;
         else if (shared_var_idx != bd.writable_var) var_idx_mixed = true;
     }
-    // continuation сохраняет реальные lo/hi в result, иначе — из текстов.
-    configure_sweep_x_axis_from(view, win.members, s.diagrams, s.params, s.vars,
-        [](const BifurcationDiagramConfig& bd, double& lo, double& hi) {
-            const bool from_result = bd.continuation && bd.result.param_hi != bd.result.param_lo;
-            lo = from_result ? bd.result.param_lo : parse_ratio_or(bd.param_lo_text, 0.0);
-            hi = from_result ? bd.result.param_hi : parse_ratio_or(bd.param_hi_text, 1.0);
-        });
+    configure_sweep_x_axis_from(view, win.members, s.diagrams, s.params, s.vars);
     // Y-label: combination (-1) -> "x0+pi*x1+e*x2"; single var -> имя переменной;
     // mixed / нет данных -> generic "X".
     if (var_idx_mixed || shared_var_idx == -2) {
@@ -641,12 +628,9 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
         if (bd.last_run_ok && !bd.result.bifurcation_points.empty()) {
             const auto& source = bd.plot_inter_peaks ? bd.result.peak_times
                                                      : bd.result.bifurcation_points;
-            // Continuation result хранит param_lo/hi-снапшот. Classical путь
-            // его не заполняет — fallback на текущие текстовые поля.
-            double lo = (bd.continuation && bd.result.param_hi != bd.result.param_lo)
-                        ? bd.result.param_lo : parse_ratio_or(bd.param_lo_text, 0.0);
-            double hi = (bd.continuation && bd.result.param_hi != bd.result.param_lo)
-                        ? bd.result.param_hi : parse_ratio_or(bd.param_hi_text, 1.0);
+            // Диапазон прогона (run_bifurcation_1d), не текстовые поля: их правка до Run
+            // не должна переносить посчитанные точки на другую сетку.
+            const double lo = bd.result.param_lo, hi = bd.result.param_hi;
             bool rev = bd.result.continuation_reverse;
             int npts = bd.result.n_pts;
             // Сетка снапа — ровно та, по которой строятся точки ниже. Раньше
@@ -729,12 +713,9 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
                 series_in, init_vis, glob_vis, any_fit);
     handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
 }
+}
 
-
-// LLE: контролы (per-curve в табе) + line-plot λ(param)
-
-// Контролы одной LLE-кривой. Возвращает true, если пользователь нажал Run
-// для этой кривой.
+namespace ucuda::ui_detail {
 void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int idx) {
     LLECurveConfig& c = s.curves[idx];
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
@@ -808,6 +789,8 @@ void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int idx) {
         IntegrationFields f;
         f.h          = &c.h_text;
         f.symmetry_s = &c.symmetry_s;
+        f.cd_fp_iters = &c.cd_fp_iters;
+        f.newton      = &c.newton;
         f.t_max      = &c.t_max_text;
         f.transient  = &c.transient_text;
         f.max_value  = &c.max_value_text;   // decimator'а у LLE нет
@@ -854,7 +837,7 @@ void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int idx) {
                 "OK: %dx%d heatmap, lambda(min..max) = %.4g..%.4g",
                 c.result_2d.n_pts, c.result_2d.n_pts,
                 c.result_2d.min_val, c.result_2d.max_val);
-            draw_regime_summary(c.result_2d.flags);
+            draw_regime_summary(c.result_2d.flags, &c.regime_counts_2d, c.data_generation_2d);
             draw_adaptive_stats(c.result_2d.ad_stats);
         }
         else if (!c.last_error.empty()) {
@@ -872,4 +855,8 @@ void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int idx) {
         }
     }
 }
+}
+
+namespace ucuda::ui_detail {
+
 }

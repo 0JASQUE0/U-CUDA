@@ -24,6 +24,10 @@ struct AppConfig {
     // греческими буквами и индексами (см. plot_text в plot_axis.h). false →
     // прежний вид: те же строки текущим UI-шрифтом. Чекбокс в Settings.
     bool plot_math_font = true;
+    // Имена параметров и переменных в полях вкладок — формулами (draw_field_name). Чекбокс в Settings.
+    bool field_latex = true;
+    // Поля НУ алгебраических переменных ДАУ (их значения всё равно пересчитываются). Чекбокс в Settings.
+    bool show_alg_ic = false;
 
     // Последний выбранный colormap для HeatmapView (LLE-2D и пр.).
     // 1001..1200 — карта slanCM; 0..8 — легаси, мигрируют при чтении (см.
@@ -82,14 +86,23 @@ struct AppConfig {
     // галочкой в Settings -> Tabs. Ключ в существующем конфиге перекрывает
     // его целиком, поэтому у того, кто вкладку уже включил, ничего не
     // изменится. Тот же дефолт продублирован в AppModel::hidden_tabs — туда
-    // конфиг не доезжает, когда файла нет вовсе.
-    std::vector<std::string> hidden_tabs { "Network" };
+    // конфиг не доезжает, когда файла нет вовсе. На свежей установке видны
+    // Phase analysis, Parametric, Basins и Custom.
+    std::vector<std::string> hidden_tabs { "Dft1D", "FastSync", "Order", "Network" };
 
     // Встроенные схемы, СКРЫТЫЕ из списка "Schemes to generate" (Settings ->
     // Integration schemes). Элементы — имена из kBuiltinSchemes в gui.cpp
     // ("RK4", "Complex CD4", ...). Логика та же, что у hidden_tabs: пусто =
-    // показываем все.
+    // показываем все. Ключа нет (has_hidden_schemes = false) — app_main берёт
+    // default_hidden_schemes() (gui.h).
     std::vector<std::string> hidden_schemes;
+    bool has_hidden_schemes = false;
+
+    // То же для методов ДАУ (Settings -> DAE methods, список редактора ДАУ):
+    // имена из dae_scheme_names() и "DAE BDF 1-5". Ключа нет —
+    // default_hidden_dae_methods().
+    std::vector<std::string> hidden_dae_methods;
+    bool has_hidden_dae_methods = false;
 
     // Системы библиотеки, СКРЫТЫЕ из глобального выпадающего списка (галочки
     // во вкладке Library). Логика та же, что у hidden_tabs: пусто = видны все,

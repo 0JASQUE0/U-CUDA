@@ -1,14 +1,10 @@
 ﻿#include "engine_impl.h"
+using namespace ucuda::cuda_detail;
 
-
-
-    // Ждём, пока отданная в stream работа закончится, обновляя прогресс из тиков
-    // и передавая Cancel в ядро. В теле цикла не должно быть вызовов CUDA, кроме
-    // cudaStreamQuery — см. комментарий к RunSignals.
-    bool ParametricEngine::Impl::wait_with_signals(cudaStream_t stream, RunSignals& sig,
+bool ParametricEngine::Impl::wait_with_signals(cudaStream_t stream, RunSignals& sig,
                            const std::shared_ptr<std::atomic<bool>>& cancel,
                            const std::shared_ptr<std::atomic<float>>& progress,
-                           double ticksBefore, double ticksTotal, std::string& err) const
+                           double ticksBefore, double ticksTotal, std::string& err)
     {
         bool cancelSent = false;
         // Публикуем долю и ДО первого опроса, и ПЕРЕД выходом. Раньше обновление стояло
@@ -19,16 +15,17 @@
         //     оставалось предыдущее значение.
         // Пока чанк считался секундами, оба окна были незаметны; после ускорения dbscan
         // (в 20-100 раз) чанки стали короткими, и стыки полезли наружу.
-        auto publish = [&]() {
+        auto publish = [&](bool final) {
             if (!progress || ticksTotal <= 0.0) return;
+            sig.pollTicks(final);
             double f = (ticksBefore + (double)sig.ticks()) / ticksTotal;
             if (f > 1.0) f = 1.0;
             progress->store((float)f, std::memory_order_relaxed);
         };
         for (;;) {
-            publish();
+            publish(false);
             cudaError_t q = cudaStreamQuery(stream);
-            if (q == cudaSuccess) { publish(); break; }
+            if (q == cudaSuccess) { publish(true); break; }
             if (q != cudaErrorNotReady) {
                 err = std::string("CUDA stream query: ") + cudaGetErrorString(q);
                 return false;
@@ -37,13 +34,41 @@
                 sig.raiseCancel();
                 cancelSent = true;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            // 2 мс, а не 16: GPU простаивает, пока хост не заметит конец работы и не выдаст
+            // следующую, а у БД 2D таких ожиданий два на чанк (интегрирование, DBSCAN).
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
+        if (cancelSent) reset_cancel_mirrors();
         return true;
     }
 
+void ParametricEngine::Impl::reset_cancel_mirrors() {
+        std::lock_guard<std::recursive_mutex> lk(cache_mu);
+        reset_cancel_mirror_pool(pool_bif1d);
+        reset_cancel_mirror_pool(pool_lle);
+        reset_cancel_mirror_pool(pool_lle_2d);
+        reset_cancel_mirror_pool(pool_ls);
+        reset_cancel_mirror_pool(pool_ls_2d);
+        reset_cancel_mirror_pool(pool_cont);
+        reset_cancel_mirror_pool(pool_lle_cont);
+        reset_cancel_mirror_pool(pool_ls_cont);
+        reset_cancel_mirror_pool(pool_dft_cont);
+        reset_cancel_mirror_pool(pool_dft_hsweep);
+        reset_cancel_mirror_pool(pool_bif2d);
+        reset_cancel_mirror_pool(pool_basins);
+        reset_cancel_mirror_pool(pool_ad);
+        reset_cancel_mirror_pool(pool_ad_cont);
+        reset_cancel_mirror_pool(pool_lyap_ad);
+        reset_cancel_mirror_pool(pool_lyap_ad_cont);
+        reset_cancel_mirror_pool(pool_metrics_ad);
+        reset_cancel_mirror_pool(pool_fs_attr);
+        reset_cancel_mirror_pool(pool_fs_grid);
+        reset_cancel_mirror_pool(pool_order);
+        reset_cancel_mirror_pool(pool_network);
+        reset_cancel_mirror_pool(pool_metrics);
+    }
 
-    LS1DResult ParametricEngine::Impl::run_ls1d_ad_seq(const LS1DRequest& req) {
+LS1DResult ParametricEngine::Impl::run_ls1d_ad_seq(const LS1DRequest& req) {
         LS1DResult res;
         std::vector<double> out, st;
         bool cancelled = false;
@@ -57,6 +82,11 @@
         res.spectrum.assign((size_t)req.n_pts, std::vector<double>((size_t)N, 0.0));
         res.flags.assign((size_t)req.n_pts, 0);
         for (int j = 0; j < req.n_pts; ++j) {
+            if (N > 0 && out[(size_t)j * N] == (double)UCUDA_CANCELLED_VALUE) {   // Stop
+                fill_nan_tail(res.spectrum[(size_t)j], 0);
+                res.flags[(size_t)j] = REGIME_CANCELLED;
+                continue;
+            }
             bool fin = true;
             for (int k = 0; k < N; ++k) {
                 res.spectrum[(size_t)j][(size_t)k] = out[(size_t)j * N + k];
@@ -67,17 +97,13 @@
         res.ad_stats = st;
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         fill_curve1d_snapshot(res.snapshot, req, req.continuation, req.use_cpu);
-        write_curve1d_csv(res, req.csv_output_path);
+        write_curve1d_csv(res, req.csv_output_path, lyap_dim(req.krs_body, req.amountOfX));
         res.ok = true;
+        res.cancelled = cancelled;
         return res;
     }
 
-
-    // run_ls_1d — порт NonLinAnal::LS1D той же стратегией, что run_bif1d / run_lle_1d.
-    // Per-system результат — вектор длины amountOfX (один Ляпунов на переменную).
-    // Memory budget на поток у LS значительно больше: shared = (3*N + 2*N^2 + nValues) *
-    // sizeof(numb) * blockSize, и blockSize подбирается из 32K shared-лимита (как в NonLinAnal).
-    LS1DResult ParametricEngine::Impl::run_ls_1d(const LS1DRequest& req) {
+LS1DResult ParametricEngine::Impl::run_ls_1d(const LS1DRequest& req) {
         LS1DResult res;
         auto fail = [&](const std::string& msg) -> LS1DResult& { res.error = msg; return res; };
 
@@ -91,6 +117,7 @@
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else if (!(req.adaptive.enabled && req.adaptive.axis_kind[0] != kAdAxisSystem)) {
             // Ось настройки шага (rtol, atol, ...) параметр системы не трогает — как в run_bif1d.
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
@@ -280,11 +307,13 @@
         res.n_exponents = amountOfInitialConditions;
         res.param_lo    = ranges[0];
         res.param_hi    = ranges[1];
-        res.spectrum.assign(nPts, std::vector<double>(amountOfInitialConditions, 0.0));
-        res.flags.assign(nPts, 0);
+        // Точки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.spectrum.assign(nPts, std::vector<double>(amountOfInitialConditions, std::numeric_limits<double>::quiet_NaN()));
+        res.flags.assign(nPts, REGIME_CANCELLED);
         if (ad) res.ad_stats.assign((size_t)nPts * 4, 0.0);
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             LS_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -386,6 +415,8 @@
 
                 // первая экспонента используется как ground-truth для флага
                 double first = h_lsResult[k * (size_t)amountOfInitialConditions + 0];
+                // Прерванную Stop точку (UCUDA_CANCELLED_VALUE) оставляем пустой.
+                if (first == (double)UCUDA_CANCELLED_VALUE) continue;
                 // 999/-999 — kernel-sentinel расходимости; FP LS не различает.
                 res.flags[global_idx] = (first == 999.0 || first == -999.0) ? REGIME_UNBOUND
                                                                             : REGIME_OSCILLATION;
@@ -395,9 +426,9 @@
                     row[j] = h_lsResult[k * (size_t)amountOfInitialConditions + j];
                 }
 
-                if (out.is_open())
+                if (out.is_open())   // ДАУ: только nx показателей, как в результате (trim_ls_spectrum)
                     data_export::write_ls1d_row(out, param_val, row.data(),
-                                                amountOfInitialConditions);
+                                                lyap_dim(req.krs_body, amountOfInitialConditions));
             }
             if (out.is_open()) out.close();
         }
@@ -406,15 +437,11 @@
         #undef LS_CHECK
         #undef LS_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
-
-    // run_ls_2d — спектр Ляпунова на сетке n_pts × n_pts: гибрид run_ls_1d (per-system буфер на N
-    // экспонент) и run_lle_2d (swap_xy, chunking по ячейкам). Kernel возвращает N значений на
-    // ячейку; D2H копирует cur_limiter * N doubles, host распаковывает по плоскостям —
-    // values[k*n*n + iy*n + ix] = k-я экспонента в ячейке (ix, iy).
-    LS2DResult ParametricEngine::Impl::run_ls_2d(const LS2DRequest& req) {
+LS2DResult ParametricEngine::Impl::run_ls_2d(const LS2DRequest& req) {
         LS2DResult res;
         auto fail = [&](const std::string& msg) -> LS2DResult& { res.error = msg; return res; };
 
@@ -436,6 +463,8 @@
         auto check_var = [&](int v0based) -> bool {
             return v0based >= 0 && v0based < req.amountOfX;
         };
+        if ((req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) ||
+            (req.sweep_over_var_2 && dae_z_axis(req.krs_body, req.var_sweep_index_2))) return fail(kDaeZAxisMsg);
 
         int par_or_var;
         int  idx_axis_x, idx_axis_y;
@@ -671,8 +700,9 @@
         res.param_hi    = req.param_hi;
         res.param_lo_2  = req.param_lo_2;
         res.param_hi_2  = req.param_hi_2;
-        res.values.assign((size_t)N * total_cells, 0.0);
-        res.flags.assign(total_cells, 0);
+        // Ячейки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.values.assign((size_t)N * total_cells, std::numeric_limits<double>::quiet_NaN());
+        res.flags.assign(total_cells, REGIME_CANCELLED);
         if (ad) res.ad_stats.assign(total_cells * 4, 0.0);
 
         res.snapshot.values.assign(values, values + amountOfValues);
@@ -702,6 +732,7 @@
         }
 
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             LS2_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -802,6 +833,8 @@
                 }
                 // Первая экспонента — ground-truth для флага (как в run_ls_1d).
                 double first = h_lsResult[k * (size_t)N + 0];
+                // Прерванную Stop ячейку (UCUDA_CANCELLED_VALUE) оставляем пустой.
+                if (first == (double)UCUDA_CANCELLED_VALUE) continue;
                 int flag = (first == 999.0 || first == -999.0) ? REGIME_UNBOUND
                                                                : REGIME_OSCILLATION;
                 res.flags[out_idx] = flag;
@@ -818,7 +851,8 @@
             std::ofstream out(OUT_FILE_PATH);
             if (out.is_open()) {
                 out << std::setprecision(set_precision);
-                data_export::write_ls2d_cells(out, nPts, N, res.values.data());
+                // ДАУ: первые nx плоскостей (trim_ls_spectrum) — хвост ядра NaN.
+                data_export::write_ls2d_cells(out, nPts, lyap_dim(req.krs_body, N), res.values.data());
             }
         }
 
@@ -848,11 +882,11 @@
         #undef LS2_CHECK
         #undef LS2_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
-
-    LS1DResult ParametricEngine::Impl::run_ls1d_continuation_gpu(const LS1DRequest& req) {
+LS1DResult ParametricEngine::Impl::run_ls1d_continuation_gpu(const LS1DRequest& req) {
         LS1DResult res;
         auto fail = [&](const std::string& msg) -> LS1DResult& { res.error = msg; return res; };
 
@@ -920,9 +954,7 @@
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         SC_CHECK(cudaDeviceSynchronize(), "sync after ls cont");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост UCUDA_CANCELLED_VALUE, начало цело.
 
         std::vector<numb> host((size_t)nPts * N);
         SC_CHECK(cudaMemcpy(host.data(), d_result, host.size() * sizeof(numb), cudaMemcpyDeviceToHost), "memcpy result");
@@ -938,6 +970,12 @@
         res.spectrum.assign(nPts, std::vector<double>((size_t)N, 0.0));
         res.flags.assign(nPts, 0);
         for (int j = 0; j < nPts; ++j) {
+            // Хвост, до которого не дошёл Stop (UCUDA_CANCELLED_VALUE), — пустой.
+            if (N > 0 && host[(size_t)j * N] == (numb)UCUDA_CANCELLED_VALUE) {
+                for (int k = 0; k < N; ++k) res.spectrum[j][k] = std::numeric_limits<double>::quiet_NaN();
+                res.flags[j] = REGIME_CANCELLED;
+                continue;
+            }
             bool ok = true;
             for (int k = 0; k < N; ++k) {
                 const double v = host[(size_t)j * N + k];
@@ -949,12 +987,13 @@
         }
         if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
         fill_curve1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
-        write_curve1d_csv(res, req.csv_output_path);
+        write_curve1d_csv(res, req.csv_output_path, lyap_dim(req.krs_body, req.amountOfX));
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
-    void ParametricEngine::Impl::prewarm_ls1d(const LS1DRequest& req) {
+void ParametricEngine::Impl::prewarm_ls1d(const LS1DRequest& req) {
         if (req.adaptive.enabled && req.use_cpu) { prewarm_ad_cpu(req.adaptive, req.amountOfX); return; }
         std::string err;
         if (!ensure_init(err)) return;
@@ -965,7 +1004,7 @@
         else compile_ls_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
     }
 
-    void ParametricEngine::Impl::prewarm_ls2d(const LS2DRequest& req) {
+void ParametricEngine::Impl::prewarm_ls2d(const LS2DRequest& req) {
         std::string err;
         if (!ensure_init(err)) return;
         cuCtxSetCurrent(context);

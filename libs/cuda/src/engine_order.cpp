@@ -1,10 +1,7 @@
 ﻿#include "engine_impl.h"
+using namespace ucuda::cuda_detail;
 
-
-
-    // Узлы одной оси. Лог-сетка требует строго положительных границ: по шагу
-    // это всегда так, по параметру — нет, поэтому проверка, а не clamp.
-    bool ParametricEngine::Impl::order_axis_nodes(const OrderAxis& ax, const char* what,
+bool ParametricEngine::Impl::order_axis_nodes(const OrderAxis& ax, const char* what,
                                  std::vector<double>& out, std::string& err)
     {
         const int n = (ax.kind == OrderAxisKind::None) ? 1 : ax.n_pts;
@@ -27,19 +24,13 @@
         return true;
     }
 
-
-    // Число грубых шагов ячейки — ТА ЖЕ формула, что в ядре. Хосту она нужна,
-    // чтобы посчитать полную работу для прогресс-бара: при свипе по h она
-    // отличается от узла к узлу на порядки, и «среднее по сетке» давало бы
-    // бар, который стоит на месте, а потом прыгает в конец.
-    long long ParametricEngine::Impl::order_steps_for(double h, double tMax, bool snap) {
+long long ParametricEngine::Impl::order_steps_for(double h, double tMax, bool snap) {
         if (!(h > 0.0)) return 1;
         long long N = snap ? (long long)(tMax / h + 0.5) : (long long)(tMax / h);
         return N < 1 ? 1 : N;
     }
 
-
-    OrderResult ParametricEngine::Impl::run_order(const OrderRequest& req) {
+OrderResult ParametricEngine::Impl::run_order(const OrderRequest& req) {
         OrderResult res;
         res.axis_x = req.axis_x;
         res.axis_y = req.axis_y;

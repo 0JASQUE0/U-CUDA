@@ -528,6 +528,10 @@ void write_basins_config(std::ofstream& out, const BasinsSnapshot& s)
     out << "indexVar for estimation = " << s.axis_x_var << ", " << s.axis_y_var << "\n";
     out << "start value_1 = " << s.axis_x_lo << ", stop value_1 = " << s.axis_x_hi << "\n";
     out << "start value_2 = " << s.axis_y_lo << ", stop value_2 = " << s.axis_y_hi << "\n";
+    // ±log-ось: start/stop выше — границы |x|, узлы -hi..-lo, +lo..+hi (сетка легаси
+    // basinsOfAttraction_logAxes). Строка только для такой оси — линейные конфиги прежние.
+    if (s.axis_x_symlog) out << "scale_1 = symlog (|x| log-spaced on both sides of 0: -hi..-lo, +lo..+hi)\n";
+    if (s.axis_y_symlog) out << "scale_2 = symlog (|x| log-spaced on both sides of 0: -hi..-lo, +lo..+hi)\n";
     write_fmad_line(out, s.gpu_fmad);
 }
 
@@ -1034,13 +1038,18 @@ static void write_order_config(std::ofstream& out, const OrderSnapshot& s, bool 
     }
     out << "\n";
 
-    // values[0] — коэффициент симметрии s, values[1..M] — параметры системы
-    // (та же раскладка a[], что во всех вкладках).
+    // values[0] — коэффициент симметрии s, values[1..M] — параметры системы,
+    // values[M+1] — число итераций CD FP, values[M+2..M+4] — Ньютон (та же раскладка a[], что во
+    // всех вкладках, см. NewtonSettings в codegen.hpp).
     out << "params: ";
     for (size_t i = 0; i < s.values.size(); ++i) {
         if (i) out << ", ";
         if (i == 0) out << "s = ";
         else if (i - 1 < s.param_names.size()) out << s.param_names[i - 1] << " = ";
+        else if (i - 1 == s.param_names.size()) out << "n_fp = ";
+        else if (i - 2 == s.param_names.size()) out << "newton_tol = ";
+        else if (i - 3 == s.param_names.size()) out << "newton_max_iters = ";
+        else if (i - 4 == s.param_names.size()) out << "newton_full = ";
         out << s.values[i];
     }
     out << "\n";
@@ -1139,6 +1148,10 @@ static void write_stability_config(std::ofstream& out, const StabilityResult& r,
         if (i) out << ", ";
         if (i == 0) out << "s = ";
         else if (i - 1 < s.param_names.size()) out << s.param_names[i - 1] << " = ";
+        else if (i - 1 == s.param_names.size()) out << "n_fp = ";
+        else if (i - 2 == s.param_names.size()) out << "newton_tol = ";
+        else if (i - 3 == s.param_names.size()) out << "newton_max_iters = ";
+        else if (i - 4 == s.param_names.size()) out << "newton_full = ";
         out << s.values[i];
     }
     out << "\n";

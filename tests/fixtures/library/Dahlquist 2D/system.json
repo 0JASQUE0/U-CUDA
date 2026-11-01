@@ -1,0 +1,16 @@
+{
+  "name": "Dahlquist 2D",
+  "kind": "ode",
+  "mode": "LaTeX",
+  "latex_text": "\\dot{x} = a*x + b*y \\\\ \\dot{y} = c*x + d*y",
+  "plain_text": "",
+  "vars_text": "x, y",
+  "params_text": "a, b, c, d",
+  "param_order": "AsInAlphabet",
+  "scheme_euler": true,
+  "scheme_rk4": true,
+  "symmetry_s": "0.5",
+  "step_h": "0.01",
+  "init_conditions": {"x": "1", "y": "0"},
+  "param_values": {"a": "0", "b": "1", "c": "-1", "d": "0"}
+}

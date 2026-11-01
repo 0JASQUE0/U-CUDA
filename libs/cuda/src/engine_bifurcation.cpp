@@ -1,15 +1,7 @@
 ﻿#include "engine_impl.h"
+using namespace ucuda::cuda_detail;
 
-
-
-    // БД 1D с адаптивным шагом на CPU: AdaptiveCpuModule (cl.exe) собирает адаптивные тела,
-    // kernels/adaptive_part.cu и PeakStream в DLL, её вход ucuda_cpu_ad_bif — построчная копия
-    // calculateDiscreteModelPeaksAdCUDA (классика) и ...AdContCUDA (continuation). Раскладка
-    // пиков, флагов и статистики — как у GPU-путей, результат собирается так же. Классика
-    // раздаётся потокам по кускам точек (точки независимы, порядок результата не зависит
-    // от раздачи); continuation — одна цепочка в этом потоке. Валидация общая с GPU-путями:
-    // классика приходит из run_bif1d после проверок, continuation — из диспетчера.
-    Bifurcation1DResult ParametricEngine::Impl::run_bif1d_cpu_ad(const Bifurcation1DRequest& req) {
+Bifurcation1DResult ParametricEngine::Impl::run_bif1d_cpu_ad(const Bifurcation1DRequest& req) {
         Bifurcation1DResult res;
         auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
         const AdaptiveRequest& ad = req.adaptive;
@@ -25,6 +17,7 @@
             if (cont) return fail("continuation requires a param sweep, not an IC sweep");
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else if (!ad_axis && (req.param_index < 0 || req.param_index >= (int)req.base_values.size()))
             return fail("param_index out of range");
         if (req.writable_var < -1 || req.writable_var >= req.amountOfX)
@@ -39,7 +32,7 @@
         {
             std::vector<KrsCpuDiag> diags;
             if (!mod.compile(ad.rhs, ad.emb, ad.dprep, ad.deval, ad.ctrl_body, req.amountOfX,
-                             peak_config_defines(), diags) || !mod.bif()) {
+                             ad.prefix + peak_config_defines(), diags) || !mod.bif()) {
                 std::string e = "CPU adaptive module:";
                 for (const KrsCpuDiag& d : diags)
                     e += "\n" + (d.line > 0 ? "line " + std::to_string(d.line) + ": " : std::string()) + d.message;
@@ -61,7 +54,7 @@
 
         res.n_pts        = nPts;
         res.record_steps = (int)peakStride;
-        res.flags.assign((size_t)nPts, 0);
+        res.flags.assign((size_t)nPts, REGIME_CANCELLED);   // точки, до которых не дошёл Stop
         res.bifurcation_points.assign((size_t)nPts, {});
         res.peak_times.assign((size_t)nPts, {});
         res.ad_stats.assign((size_t)nPts * 4, 0.0);
@@ -87,6 +80,8 @@
             }
         };
 
+        // Stop до запуска — прежний отказ, а не пустой частичный результат.
+        if (cancel_requested(req.cancel)) { res.cancelled = true; return fail("Cancelled by user"); }
         volatile int cancelFlag = 0;
         std::atomic<int> donePts{ 0 };
         std::atomic<bool> finished{ false };
@@ -113,7 +108,7 @@
         if (cont) {
             // Цепочка: прогресс DLL (точки) читается наблюдателем через donePts.
             std::vector<double> pk((size_t)nPts * peakStride), tm((size_t)nPts * peakStride), st((size_t)nPts * 4);
-            std::vector<int> fl((size_t)nPts);
+            std::vector<int> fl((size_t)nPts, REGIME_CANCELLED);   // хвост, до которого не дошёл Stop
             int prog = 0;
             std::thread pump([&]() {
                 while (!finished.load(std::memory_order_relaxed)) {
@@ -125,7 +120,7 @@
             finished.store(true, std::memory_order_relaxed);
             pump.join();
             watcher.join();
-            if (!ok || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+            res.cancelled = !ok || cancelFlag;   // Stop: посчитанное начало цепочки остаётся
             collect(0, nPts, pk, tm, fl, st);
         } else {
             // Классика: куски по kChunk точек раздаются потокам по мере освобождения —
@@ -145,8 +140,11 @@
                     if (c >= nChunks || aborted.load(std::memory_order_relaxed)) return;
                     const int i0 = c * kChunk, i1 = (std::min)(nPts, i0 + kChunk);
                     int prog = 0;
-                    if (!call(i0, i1, pk, tm, fl, st, &prog)) { aborted.store(true); return; }
+                    // Stop рвёт кусок: строки, до которых он не дошёл, остаются с меткой отмены.
+                    std::fill(fl.begin(), fl.end(), REGIME_CANCELLED);
+                    const bool whole = call(i0, i1, pk, tm, fl, st, &prog) != 0;
                     collect(i0, i1, pk, tm, fl, st);   // строки чанков не пересекаются
+                    if (!whole) { aborted.store(true); return; }
                     donePts.fetch_add(i1 - i0, std::memory_order_relaxed);
                 }
             };
@@ -155,7 +153,7 @@
             for (std::thread& t : pool) t.join();
             finished.store(true, std::memory_order_relaxed);
             watcher.join();
-            if (aborted.load() || cancelFlag) { res.cancelled = true; return fail("Cancelled by user"); }
+            res.cancelled = aborted.load() || cancelFlag;   // Stop: посчитанные куски остаются
         }
         fill_bif1d_snapshot(res.snapshot, req, cont, /*on_cpu*/ true);
         if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
@@ -164,21 +162,7 @@
         return res;
     }
 
-
-    // run_bif1d — порт NonLinAnal::bifurcation1D из hostLibrary.cu. Идея: брать оригинальный код
-    // почти как есть, чтобы при обновлениях NonLinAnal перенос был механическим diff → patch.
-    // ОБЯЗАТЕЛЬНЫЕ изменения (помечены комментарием [ADAPT]):
-    //   - <<<grid, block, shared>>>(...) → cuLaunchKernel(CUfunction, ...): наш kernel-модуль
-    //     скомпилирован NVRTC'ом во время работы и недоступен по compile-time символу
-    //   - gpuErrorCheck(...) у NonLinAnal зовёт exit(); здесь локальный BIF_CHECK, который пишет
-    //     в res.error и возвращает результат с cleanup'ом
-    //   - OUT_FILE_PATH приходит из req.csv_output_path (пусто = CSV не пишем)
-    //   - ветка continuation_bif1D == 1 отключена: она использует host-side
-    //     calculateDiscreteModel (default Lorenz), а не user's KRS
-    //   - calculate_mean_med_freq / calculate_mean_and_variance отключены — их kernel-ы не входят
-    //     в NVRTC-bundle
-    //   - результат пишется в Bifurcation1DResult (память + CSV), не в файл
-    Bifurcation1DResult ParametricEngine::Impl::run_bif1d(const Bifurcation1DRequest& req) {
+Bifurcation1DResult ParametricEngine::Impl::run_bif1d(const Bifurcation1DRequest& req) {
         // Ось rtol / atol / tol — только положительные значения. Проверка — до всех веток
         // (continuation и CPU уходят из диспетчера раньше общей валидации ниже).
         if (req.adaptive.enabled && req.adaptive.setup_error.empty()) {
@@ -236,6 +220,7 @@
         } else if (req.sweep_over_var) {
             if (req.var_sweep_index < 0 || req.var_sweep_index >= req.amountOfX)
                 return fail("var_sweep_index out of range");
+            if (dae_z_axis(req.krs_body, req.var_sweep_index)) return fail(kDaeZAxisMsg);
         } else if (!ad_axis) {
             if (req.param_index < 0 || req.param_index >= (int)req.base_values.size())
                 return fail("param_index out of range");
@@ -477,12 +462,13 @@
         // результат-аккумулятор (для GUI)
         res.n_pts        = nPts;
         res.record_steps = (int)peakStride;   // ёмкость строки пиков, а не длина траектории
-        res.flags.assign(nPts, 0);
+        res.flags.assign(nPts, REGIME_CANCELLED);   // чанки, до которых не дошёл Stop
         res.bifurcation_points.assign(nPts, {});
         res.peak_times.assign(nPts, {});
 
         // Главный цикл (порт строк 396-630 NL)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             BIF_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerPoint / ticksTotal), std::memory_order_relaxed);
@@ -572,7 +558,7 @@
                                    (double)(originalNPtsLimiter * iter) * ticksPerPoint,
                                    ticksTotal, res.error)) { cleanup(); return res; }
             BIF_CHECK(cudaDeviceSynchronize(), "sync after traj+peaks");
-            BIF_CANCEL_CHECK();
+            // Stop посреди чанка: прерванные точки ядро пометило REGIME_CANCELLED, остальные целы.
 
             // D2H (порт строк 538-540 NL)
             BIF_CHECK(cudaMemcpy(h_outPeaks.data(),       d_outPeaks,       nPtsLimiter * peakStride * sizeof(numb),                    cudaMemcpyDeviceToHost), "memcpy h_outPeaks");
@@ -642,14 +628,11 @@
         #undef BIF_CHECK
         #undef BIF_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
-
-    // run_bif1d_continuation — single-thread sequential. Каждый параметр
-    // стартует с конечного x[] предыдущего. Direction (forward/reverse)
-    // обрабатывается в kernel'е. PeakFinderCUDA вызывается из того же модуля.
-    Bifurcation1DResult ParametricEngine::Impl::run_bif1d_continuation(const Bifurcation1DRequest& req) {
+Bifurcation1DResult ParametricEngine::Impl::run_bif1d_continuation(const Bifurcation1DRequest& req) {
         Bifurcation1DResult res;
         auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
 
@@ -779,9 +762,8 @@
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         C_CHECK(cudaDeviceSynchronize(), "sync after cont kernel");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED, peakFinderCUDA
+        // проносит код как есть.
         if (req.progress) req.progress->store(0.5f, std::memory_order_relaxed);
 
         // Launch peakFinderCUDA на полученные данные
@@ -864,15 +846,11 @@
         fill_bif1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
         if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
-
-    // run_bif1d_continuation_ad — continuation с адаптивным шагом. Одна нить идёт по
-    // точкам цепочки (calculateDiscreteModelPeaksAdContCUDA) и переносит из точки в точку
-    // X, предложенный шаг и память регулятора; пики пишутся сразу в короткие строки, как
-    // у адаптивного ядра обычного свипа, поэтому отдельного прохода peakFinderCUDA нет.
-    Bifurcation1DResult ParametricEngine::Impl::run_bif1d_continuation_ad(const Bifurcation1DRequest& req) {
+Bifurcation1DResult ParametricEngine::Impl::run_bif1d_continuation_ad(const Bifurcation1DRequest& req) {
         Bifurcation1DResult res;
         auto fail = [&](const std::string& msg) -> Bifurcation1DResult& { res.error = msg; return res; };
 
@@ -991,9 +969,7 @@
         if (!wait_with_signals(0, sig, req.cancel, req.progress, 0.0, (double)nPts, res.error))
             { cleanup(); return res; }
         CA_CHECK(cudaDeviceSynchronize(), "sync after adaptive continuation");
-        if (req.cancel && req.cancel->load(std::memory_order_relaxed)) {
-            res.cancelled = true; res.error = "Cancelled by user"; cleanup(); return res;
-        }
+        // Stop посреди цепочки: ядро пометило хвост REGIME_CANCELLED, начало цело.
 
         std::vector<numb> h_outPeaks((size_t)nPts * peakStride), h_timeOfPeaks((size_t)nPts * peakStride);
         std::vector<int>  h_flags((size_t)nPts);
@@ -1030,15 +1006,11 @@
         fill_bif1d_snapshot(res.snapshot, req, /*continuation*/ true, /*on_cpu*/ false);
         if (!req.csv_output_path.empty()) data_export::export_bif1d(res, req.csv_output_path);
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
-
-    // run_bif2d — порт NonLinAnal::bifurcation2D (hostLibrary.cu:898-1724).
-    // Три kernel'а: calculateDiscreteModelCUDA → peakFinderCUDA → dbscanCUDA.
-    // Результат: число DBSCAN-кластеров на ячейку = период системы.
-    // [ADAPT]: те же адаптации, что у run_bif1d + run_lle_2d (см. их комментарии).
-    Bifurcation2DResult ParametricEngine::Impl::run_bif2d(const Bifurcation2DRequest& req) {
+Bifurcation2DResult ParametricEngine::Impl::run_bif2d(const Bifurcation2DRequest& req) {
         Bifurcation2DResult res;
         auto fail = [&](const std::string& msg) -> Bifurcation2DResult& { res.error = msg; return res; };
         if (req.adaptive.enabled && !req.adaptive.setup_error.empty()) return fail(req.adaptive.setup_error);
@@ -1063,6 +1035,8 @@
         auto check_var = [&](int v0based) -> bool {
             return v0based >= 0 && v0based < req.amountOfX;
         };
+        if ((req.sweep_over_var && dae_z_axis(req.krs_body, req.var_sweep_index)) ||
+            (req.sweep_over_var_2 && dae_z_axis(req.krs_body, req.var_sweep_index_2))) return fail(kDaeZAxisMsg);
 
         int par_or_var;
         int    idx_axis_x, idx_axis_y;
@@ -1244,11 +1218,27 @@
         size_t freeMemory = 0;
         if (!gpu_free_budget(0.92, freeMemory)) return fail("cudaMemGetInfo failed");
 
+        // helpfulArray нужен DBSCAN только запасным путём — когда строка ячейки не влезает в
+        // shared (P > cap). Худший случай известен заранее: одномерной ветке хватает всегда
+        // (строка растёт до 4096 >= peakStride), двумерной — если строка из peakStride пиков
+        // помещается в shared блока с opt-in. Тогда буфер в бюджет не входит, и чанки вдвое
+        // крупнее: на каждый чанк приходятся хвост последней волны и ожидания хоста.
+        const bool dbscan1d_req = (req.mult_peak == 0 || req.mult_interval == 0);
+        bool needHelpful = false;
+        if (!dbscan1d_req) {
+            const size_t capWorst  = (peakStride + 31) & ~(size_t)31;
+            const size_t perWarp   = capWorst * (2 * sizeof(numb) + sizeof(int));
+            int optin = 0;
+            cuDeviceGetAttribute(&optin, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, device);
+            const size_t shLimit = (size_t)optin > (size_t)48 * 1024 ? (size_t)optin : (size_t)48 * 1024;
+            needHelpful = perWarp > shLimit;
+        }
+
         // Бюджет больше не зависит от длины траектории вообще: сэмплы
         // потребляются на лету (PeakStream), в памяти остаются только пики.
         // tMax/h теперь влияет на время счёта, но не на число ячеек в чанке.
         size_t baseMemPerSystem = peakStride * 2 * sizeof(numb)                  // d_outPeaks + d_intervals
-                                + helpfulStride * sizeof(numb)                   // d_helpfulArray
+                                + (needHelpful ? helpfulStride * sizeof(numb) : 0) // d_helpfulArray
                                 + 2 * sizeof(int);                               // d_amountOfPeaks + d_dbscanResult
         size_t memConstants     = (4 + (size_t)amountOfInitialConditions + (size_t)amountOfValues) * sizeof(numb) + 2 * sizeof(int);
         if (memConstants >= freeMemory) return fail("not enough GPU memory for constants");
@@ -1289,6 +1279,7 @@
         numb* d_intervals         = nullptr;
         numb* d_helpfulArray      = nullptr;
         int*    d_dbscanResult      = nullptr;
+        int*    d_maxPeaks          = nullptr;   // max числа пиков в куске (для dbscanWarpCUDA)
         RunSignals sig;   // прогресс и отмена в mapped-памяти
 
         // Dedicated stream for traj→peak→dbscan within each chunk. Avoids
@@ -1309,6 +1300,7 @@
             if (d_intervals)         cudaFree(d_intervals);
             if (d_helpfulArray)      cudaFree(d_helpfulArray);
             if (d_dbscanResult)      cudaFree(d_dbscanResult);
+            if (d_maxPeaks)          cudaFree(d_maxPeaks);
             sig.release();
             if (stream)              cuStreamDestroy(stream);
         };
@@ -1342,8 +1334,10 @@
         BIF2D_CHECK(cudaMalloc((void**)&d_amountOfPeaks,     nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_amountOfPeaks");
         BIF2D_CHECK(cudaMalloc((void**)&d_outPeaks,          nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_outPeaks");
         BIF2D_CHECK(cudaMalloc((void**)&d_intervals,         nPtsLimiter * peakStride * sizeof(numb)),                    "cudaMalloc d_intervals");
-        BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      nPtsLimiter * helpfulStride * sizeof(numb)),                 "cudaMalloc d_helpfulArray");
+        // Без запасного пути DBSCAN буфер не читается — заглушка на один элемент.
+        BIF2D_CHECK(cudaMalloc((void**)&d_helpfulArray,      (needHelpful ? nPtsLimiter * helpfulStride : 1) * sizeof(numb)), "cudaMalloc d_helpfulArray");
         BIF2D_CHECK(cudaMalloc((void**)&d_dbscanResult,      nPtsLimiter * sizeof(int)),                                    "cudaMalloc d_dbscanResult");
+        BIF2D_CHECK(cudaMalloc((void**)&d_maxPeaks,          sizeof(int)),                                                  "cudaMalloc d_maxPeaks");
         if (!sig.alloc(res.error)) { cleanup(); return res; }
         if (ad) {
             // swap_xy бывает только при двух системных осях, поэтому коды осей идут как есть.
@@ -1367,8 +1361,9 @@
         res.param_hi   = req.param_hi;
         res.param_lo_2 = req.param_lo_2;
         res.param_hi_2 = req.param_hi_2;
-        res.values.assign(total_cells, 0.0);
-        res.flags.assign(total_cells,  0);
+        // Ячейки чанков, до которых не дошёл Stop, остаются пустыми.
+        res.values.assign(total_cells, std::numeric_limits<double>::quiet_NaN());
+        res.flags.assign(total_cells,  REGIME_CANCELLED);
 
         res.snapshot.values.assign(values, values + amountOfValues);
         res.snapshot.initial_conditions.assign(initialConditions,
@@ -1399,6 +1394,7 @@
 
         // Главный цикл по чанкам (порт hostLibrary.cu:1212-1692)
         for (size_t iter = 0; iter < amountOfIteration; ++iter) {
+            if (iter > 0 && cancel_requested(req.cancel)) break;   // Stop: отдаём посчитанное
             BIF2D_CANCEL_CHECK();
             // Тик-шкала, а не доля чанков: иначе на стыке бар дёргается назад (см. wait_with_signals).
             if (req.progress) req.progress->store((float)((double)(originalNPtsLimiter * iter) * ticksPerCell / ticksTotal), std::memory_order_relaxed);
@@ -1511,26 +1507,71 @@
             numb mult_pk_arg  = mult_peak_arg;
             numb mult_int_arg = mult_interval_arg;
             size_t helpfulStride_arg = helpfulStride;
-            // sizeOfBlock у dbscanCUDA остаётся ради legacy-вызовов; здесь раскладку
-            // задают peakStride/helpfulStride, и этот аргумент не читается.
-            size_t sizeOfBlock_s = peakStride;
-            void* args_dbscan[] = {
-                &d_outPeaks,          // кластеризуем пики, а не сырую траекторию
-                &sizeOfBlock_s,
-                &nPtsLimiter_int,
-                &d_amountOfPeaks,
-                &d_intervals,
-                &d_helpfulArray,
-                &eps_arg,
-                &d_dbscanResult,
-                &mult_pk_arg,
-                &mult_int_arg,
-                &peakStride_arg,
-                &helpfulStride_arg
+
+            // DBSCAN — по варпу на ячейку, данные ячейки в shared (dbscanWarpCUDA для одномерной
+            // ветки, dbscanWarp2DCUDA для двумерной; см. cudaLibrary.cu). Прежний dbscanCUDA вёл
+            // ячейку одним потоком по глобальной памяти и стоял на ней (БД 2D 512x512 float:
+            // 1.3 с против 17 мс). Ёмкость строки shared берём по реальному максимуму пиков в
+            // куске: «под потолок» max_amount_of_peaks одномерное ядро в 3-4 раза медленнее.
+            // Максимум считает ucudaMaxPeaksCUDA, и чтобы прочитать его, ждём конца
+            // интегрирования тем же wait_with_signals — прогресс и отмена живы.
+            const bool dbscan1d = (mult_pk_arg == 0 || mult_int_arg == 0);
+            const CUfunction k_max  = ad ? cached_ad.kernel_max_peaks : cached_bif2d.kernel_max_peaks;
+            const CUfunction k_warp = dbscan1d ? (ad ? cached_ad.kernel_dbscan_warp   : cached_bif2d.kernel_dbscan_warp)
+                                               : (ad ? cached_ad.kernel_dbscan_warp2d : cached_bif2d.kernel_dbscan_warp2d);
+            BIF2D_CHECK_CU(cuMemsetD32Async((CUdeviceptr)d_maxPeaks, 0, 1, stream), "memset d_maxPeaks");
+            void* args_max[] = { &d_amountOfPeaks, &nPtsLimiter_int, &d_maxPeaks };
+            BIF2D_CHECK_CU(cuLaunchKernel(k_max, 120, 1, 1, 256, 1, 1, 0, stream, args_max, nullptr),
+                           "cuLaunchKernel(bif2d max peaks)");
+            if (!wait_with_signals(stream, sig, req.cancel, req.progress,
+                                   (double)(originalNPtsLimiter * iter) * ticksPerCell,
+                                   ticksTotal, res.error)) { cleanup(); return res; }
+            // Stop посреди чанка: прерванные ячейки помечены REGIME_CANCELLED, DBSCAN их
+            // пропускает, остальные досчитываются.
+            int maxPeaks = 0;
+            BIF2D_CHECK(cudaMemcpy(&maxPeaks, d_maxPeaks, sizeof(int), cudaMemcpyDeviceToHost), "memcpy d_maxPeaks");
+
+            int    cap = 0, wpb = 1;
+            size_t shBytes = 0;
+            if (dbscan1d) {
+                // Строка — степень двойки (битоническая сеть с добивкой +inf).
+                cap = 32;
+                while (cap < maxPeaks && cap < 4096) cap <<= 1;
+                // Варпов на блок — чтобы блок держал не больше 32 КБ shared; 4 варпа на малых
+                // строках оказались быстрее 8 (замер на синтетике).
+                wpb = (int)(32768 / ((size_t)cap * sizeof(numb)));
+                if (wpb > 4) wpb = 4;
+                if (wpb < 1) wpb = 1;
+                shBytes = (size_t)wpb * cap * sizeof(numb);
+            } else {
+                // Строка — x, y (numb) и par (int) на пик, без добивки. Double при ~2500 пиках
+                // это ~50 КБ: выше 48 КБ нужен opt-in; если и его не хватает — cap = 0, ядро
+                // идёт по глобальной памяти (те же шаги, медленнее, но без потолка).
+                cap = (maxPeaks + 31) & ~31;
+                if (cap < 32) cap = 32;
+                const size_t perWarp = (size_t)cap * (2 * sizeof(numb) + sizeof(int));
+                wpb = (int)(32768 / perWarp);
+                if (wpb > 4) wpb = 4;
+                if (wpb < 1) wpb = 1;
+                shBytes = (size_t)wpb * perWarp;
+                int optin = 0;
+                cuDeviceGetAttribute(&optin, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, device);
+                if (shBytes > (size_t)48 * 1024) {
+                    if (shBytes <= (size_t)optin)
+                        BIF2D_CHECK_CU(cuFuncSetAttribute(k_warp, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, (int)shBytes),
+                                       "cuFuncSetAttribute(dbscan warp2d shared)");
+                    else { cap = 0; shBytes = 0; }
+                }
+            }
+            int capArg = cap;
+            void* args_warp[] = {
+                &d_outPeaks, &nPtsLimiter_int, &d_amountOfPeaks, &d_intervals, &d_helpfulArray,
+                &eps_arg, &d_dbscanResult, &mult_pk_arg, &mult_int_arg,
+                &peakStride_arg, &helpfulStride_arg, &capArg
             };
-            BIF2D_CHECK_CU(cuLaunchKernel(ad ? cached_ad.kernel_dbscan : cached_bif2d.kernel_dbscan,
-                                          gridSize, 1, 1, blockSize, 1, 1,
-                                          0, stream, args_dbscan, nullptr),
+            const unsigned gridWarp = (unsigned)((cur_limiter + (size_t)wpb - 1) / (size_t)wpb);
+            BIF2D_CHECK_CU(cuLaunchKernel(k_warp, gridWarp, 1, 1, 32 * wpb, 1, 1,
+                                          (unsigned)shBytes, stream, args_warp, nullptr),
                            "cuLaunchKernel(bif2d dbscan)");
 
             // D2H: только d_dbscanResult (число кластеров = период).
@@ -1540,7 +1581,6 @@
                                    (double)(originalNPtsLimiter * iter) * ticksPerCell,
                                    ticksTotal, res.error)) { cleanup(); return res; }
             BIF2D_CHECK(cudaStreamSynchronize(stream), "sync stream before host loop");
-            BIF2D_CANCEL_CHECK();
 
             // Копируем ПОСЛЕ опроса, а не до него: device -> pageable копирование
             // асинхронным не бывает (h_dbscanResult — std::vector), драйвер возвращает
@@ -1569,7 +1609,8 @@
                 // point, 0 = unbound, N > 0 = число кластеров пиков. Раньше
                 // unbound (0) получал flag 1, т.е. считался валидной ячейкой и
                 // попадал в автошкалу colormap'а как «период 0».
-                res.values[out_idx] = (double)period;
+                res.values[out_idx] = period == REGIME_CANCELLED ? std::numeric_limits<double>::quiet_NaN()
+                                                                 : (double)period;
                 res.flags[out_idx]  = period;
                 if (ad)
                     for (int q = 0; q < 4; ++q)
@@ -1616,11 +1657,11 @@
         #undef BIF2D_CHECK
         #undef BIF2D_CHECK_CU
         res.ok = true;
+        res.cancelled = cancel_requested(req.cancel);
         return res;
     }
 
-
-    void ParametricEngine::Impl::prewarm_bif1d(const Bifurcation1DRequest& req) {
+void ParametricEngine::Impl::prewarm_bif1d(const Bifurcation1DRequest& req) {
         if (req.adaptive.enabled && req.use_cpu) { prewarm_ad_cpu(req.adaptive, req.amountOfX); return; }
         std::string err;
         if (!ensure_init(err)) return;
@@ -1633,7 +1674,7 @@
         else compile_if_needed(req.krs_body, req.amountOfX, req.sweep_over_var ? 0 : 1, err, false);
     }
 
-    void ParametricEngine::Impl::prewarm_bif2d(const Bifurcation2DRequest& req) {
+void ParametricEngine::Impl::prewarm_bif2d(const Bifurcation2DRequest& req) {
         std::string err;
         if (!ensure_init(err)) return;
         cuCtxSetCurrent(context);

@@ -57,4 +57,6 @@ ctest --preset windows-release
 
 `adaptive_gpu` and `gpu_smoke` require a working NVIDIA GPU. A skipped GPU test does not validate GPU calculations. Linux additionally builds the `platform` test.
 
+Initial baseline acceptance, CPU/GPU selection and persistent history are documented in [tests/README.md](tests/README.md). Every objectively testable new behavior requires tests in the same change.
+
 Fixed and upstream adaptive integration are documented in [INTEGRATION.md](INTEGRATION.md).

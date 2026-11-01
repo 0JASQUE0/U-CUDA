@@ -58,7 +58,8 @@ __device__ __forceinline__ void ucudaLyapAdKernel(
 	numb res[NC];
 	const int ok = ucuda_lyap_point<NC>(S, K, localValues, P, cl, false, transientTime, NT, nBlocks, nWarm, eps,
 		renorm, maxValue, idx, res, cancelFlag);
-	for (int m = 0; m < NC; ++m) resultArray[(size_t)idx * NC + m] = ok ? res[m] : (numb)999;
+	for (int m = 0; m < NC; ++m)
+		resultArray[(size_t)idx * NC + m] = ok > 0 ? res[m] : (ok < 0 ? (numb)UCUDA_CANCELLED_VALUE : (numb)999);
 	ucudaAdWriteStats(adStats, idx, S);
 	ucudaProgressTopUp(progressCounter, progressStride, progressUnits, 0);
 }

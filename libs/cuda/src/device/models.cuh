@@ -118,6 +118,21 @@ __device__ __host__ __forceinline__ void calculateDiscreteModel(numb* X, const n
 }
 #endif // __CUDACC_RTC__
 
+// Стадия предрасчёта КРС (codegen.hpp, krs_split_prep). Схема с предрасчётом
+// ("CD fast") приходит со своими UcudaKrsPre / ucudaKrsPrep / calculateDiscreteModelP
+// и UCUDA_KRS_HAS_PREP — их вставляет движок перед #include "cudaLibrary.cu".
+// У прочих схем структура пустая, а шаг — прямой вызов calculateDiscreteModel:
+// после инлайна код тот же, что был до введения предрасчёта.
+// Горячие циклы зовут ucudaKrsPrep один раз до траектории — a[] и h в них не меняются.
+#ifndef UCUDA_KRS_HAS_PREP
+struct UcudaKrsPre {};
+__device__ __host__ __forceinline__ void ucudaKrsPrep(UcudaKrsPre&, const numb*, const numb) {}
+__device__ __host__ __forceinline__
+void calculateDiscreteModelP(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h, const UcudaKrsPre&) {
+	calculateDiscreteModel(X, UCUDA_TA(ucuda_t) a, h);
+}
+#endif
+
 __device__ __host__ numb sign(numb x) {
 	if (x > 0)
 		return 1.0;
@@ -138,7 +153,7 @@ __device__ __host__ numb chua_inner(numb x, numb m, numb d, numb kslope, numb mu
 
 	while (iter < MAX_ITER) {
 		// Базовый случай: масштаб стал слишком маленьким
-		if (d < 1e-14) {
+		if (d < (numb)1e-14) {
 			return sg_prod * (-x) - offset;
 		}
 
@@ -247,7 +262,7 @@ __device__ __host__ numb chua_multistep_extended(numb x, numb m, numb d, numb ks
 
 	while (iter < MAX_ITER) {
 		// Базовый случай рекурсии
-		if (abs(d) < 1e-14) {
+		if (abs(d) < (numb)1e-14) {
 			return sg_prod * (-x) - offset;
 		}
 

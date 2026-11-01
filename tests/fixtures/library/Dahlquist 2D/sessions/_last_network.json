@@ -1,0 +1,4 @@
+{
+  "active_config_index": 0,
+  "configs": [{"label": "legacy network", "scheme": "RK4", "h_text": "0.025", "t_max_text": "2", "gen_n_text": "2", "nodes": [{"label": "A", "x": 0, "y": 0}, {"label": "B", "x": 1, "y": 0}], "laws": [{"name": "diffusive", "expr": ["x_j-x_i", "0"]}], "edges": []}]
+}

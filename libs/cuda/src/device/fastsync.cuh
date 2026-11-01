@@ -22,7 +22,9 @@
 	for (int i = 0; i < AMOUNTOFX; ++i)
 		N[i] = K[i] * (S1[i] - X[i]);
 
-	calculateDiscreteModel(X, a, eff_h);
+	// FastSync с явным t не поддерживается (движок отказывает раньше); t = 0 — только чтобы
+	// модуль неавтономной системы собирался: cudaLibrary.cu входит в каждый модуль целиком.
+	calculateDiscreteModel(X, UCUDA_TA((numb)0) a, eff_h);
 
 	for (int i = 0; i < AMOUNTOFX; ++i)
 		X[i] += h * N[i];
@@ -86,6 +88,40 @@ numb fsRandSymmetric(unsigned long long seed, unsigned long long cell, int comp)
 	return (numb)2 * u - (numb)1;
 }
 
+// Опрос флага отмены. Флаг лежит в mapped host memory (RunSignals): каждое его чтение —
+// некэшируемый LDG.STRONG.SYS через PCIe (~2 мкс). Пока его читал каждый варп на каждой
+// проверке, ядра стояли на нём (LLE 2D: 94% простоя, ядро в 3.3 раза медленнее). Поэтому хост
+// опрашивают только блоки с номером, кратным 64; увидев отмену, блок поднимает зеркало в памяти
+// устройства, а его читают все (L2, без PCIe). Опрашивающий блок сам идёт в ~3 раза медленнее,
+// поэтому хвост сетки им НЕ отдан: последние блоки — критический путь ядра, и с ними LLE 2D
+// проигрывал 1.5 раза. Цена — в последней неполной волне отмена может дождаться конца её блоков.
+// Зеркало после отмены остаётся 1 — хост сбрасывает его во всех модулях
+// (ParametricEngine::Impl::reset_cancel_mirrors), иначе следующий запуск модуля сразу «отменится».
+extern "C" { __device__ volatile int g_ucudaCancelMirror = 0; }
+
+__device__ __host__ __forceinline__ bool ucudaCancelRequested(const volatile int* cancelFlag)
+{
+	if (cancelFlag == nullptr) return false;
+#ifdef __CUDA_ARCH__
+	if (g_ucudaCancelMirror != 0) return true;
+	if ((blockIdx.x & 63u) != 0) return false;
+	if (*cancelFlag == 0) return false;
+	g_ucudaCancelMirror = 1;
+	return true;
+#else
+	return *cancelFlag != 0;
+#endif
+}
+// Для ucuda_adaptive.cuh / adaptive_part.cu: в модулях с cudaLibrary.cu Stop идёт через зеркало.
+#define UCUDA_HAVE_CANCEL_MIRROR 1
+
+// Число вместо результата точки, у которой его нет: 999 — разошлась, UCUDA_CANCELLED_VALUE —
+// прервана Stop (flag — код режима из loopCalculateDiscreteModel_int).
+__device__ __host__ __forceinline__ numb ucudaNoDataValue(int flag)
+{
+	return flag == REGIME_CANCELLED ? (numb)UCUDA_CANCELLED_VALUE : (numb)999;
+}
+
 // Добивка тиков прогресса перед выходом из ядра: точка, ушедшая
 // с дистанции раньше срока (расходимость, отмена), иначе недосчитала бы
 // свою долю, и бар застрял бы не дойдя до ста.
@@ -97,6 +133,40 @@ __device__ __forceinline__ void ucudaProgressTopUp(int* progressCounter, int pro
 	if (expected > ticks) atomicAdd(progressCounter, expected - ticks);
 }
 
+// Отсечённая монолитная сборка (UCUDA_PRUNE_KERNELS, см. nvrtc_prune_kernels в parametric_engine.cpp):
+// каждое ядро ниже обёрнуто в #if и остаётся, только если движок попросил его (UCUDA_KEEP_<имя>).
+// Обёртки цикла (loopCalculateDiscreteModel_int / ...Peaks_int) на большом теле шага не встраиваются, и NVVM
+// подстраивает их под ВСЕ вызовы: аргумент, константный во всех вызовах, сворачивается, у указателя
+// выводится адресное пространство. В полной сборке вызовы разнообразны; у одного-двух оставшихся ядер —
+// нет (у LLE preScaller всегда 1 и data = nullptr), и код обёртки, а с ним FMA в шаге, меняется. Поэтому,
+// если обёртку зовёт хоть что-то оставшееся (ядро библиотеки из списка или шаблон: UCUDA_KEEP_LOOP /
+// UCUDA_KEEP_PEAKS_LOOP ставит движок по тексту шаблона), остаются и два ядра полной сборки, которые
+// вместе дают все виды её аргументов (calculateDiscreteModelCUDA: data и флаги из параметров, локальный
+// &ticks; LLEKernelCUDA: константы, nullptr). Синтетический держатель с такими вызовами не годится:
+// NVVM встраивает их в него самого, и в модуле остаётся не тот набор вызовов. Новое ядро библиотеки,
+// зовущее обёртку, — добавить в список.
+#ifdef UCUDA_PRUNE_KERNELS
+#if defined(UCUDA_KEEP_PEAKS_LOOP) || defined(UCUDA_KEEP_calculateDiscreteModelAvgPeaksCUDA)
+#ifndef UCUDA_KEEP_calculateDiscreteModelPeaksCUDA
+#define UCUDA_KEEP_calculateDiscreteModelPeaksCUDA
+#endif
+#endif
+#if defined(UCUDA_KEEP_LOOP) || defined(UCUDA_KEEP_calculateDiscreteModelCUDA) \
+	|| defined(UCUDA_KEEP_calculateDiscreteModelPeaksCUDA) || defined(UCUDA_KEEP_calculateDiscreteModelAvgPeaksCUDA) \
+	|| defined(UCUDA_KEEP_calculateDiscreteModelICCUDA) || defined(UCUDA_KEEP_calculateDiscreteModelICCUDA_logAxes) \
+	|| defined(UCUDA_KEEP_LLEKernelCUDA) || defined(UCUDA_KEEP_LLEKernelICCUDA) \
+	|| defined(UCUDA_KEEP_LSKernelCUDA) || defined(UCUDA_KEEP_LSKernelICCUDA) \
+	|| defined(UCUDA_KEEP_calculateDiscreteModelICCforFastSynchro) || defined(UCUDA_KEEP_calculateDiscreteModelforFastSynchroCUDA)
+#ifndef UCUDA_KEEP_calculateDiscreteModelCUDA
+#define UCUDA_KEEP_calculateDiscreteModelCUDA
+#endif
+#ifndef UCUDA_KEEP_LLEKernelCUDA
+#define UCUDA_KEEP_LLEKernelCUDA
+#endif
+#endif
+#endif
+
+#if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_calculateDiscreteModelICCforFastSynchro)
 __global__ void calculateDiscreteModelICCforFastSynchro(
 	const int		nPts,
 	const int		nPtsLimiter,
@@ -260,6 +330,7 @@ __global__ void calculateDiscreteModelICCforFastSynchro(
 
 	return;
 }
+#endif
 
 __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	numb* x,
@@ -347,7 +418,7 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 				}
 				// Отмена отдаёт тот же sentinel, что и разлёт: результат
 				// отменённого прогона хост выбрасывает целиком.
-				if (cancelFlag != nullptr && *cancelFlag != 0) return fsDivergedError();
+				if (ucudaCancelRequested(cancelFlag)) return fsDivergedError();
 			}
 			calculateDiscreteModelforFastSynchro(Xm, arrayZeros, arrayZeros, values, h, 1);
 
@@ -515,8 +586,8 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 	if (error_estim == 2)
 		rms_error = sqrt(rms_error);
 
-	if (rms_error <= FS_error_trs)
-		rms_error = log10(FS_error_trs);
+	if (rms_error <= (numb)FS_error_trs)   // FS_error_trs из шаблона — литерал double
+		rms_error = log10((numb)FS_error_trs);
 	else
 		rms_error = log10(rms_error);
 
@@ -552,9 +623,9 @@ __device__ numb loopCalculateDiscreteModelForFastSynchro_2(
 // move when the buffer goes away -- so the correspondence is spelled out here:
 //
 //   batch                                   stream
-//   outer loop index i (from 2, i < L-2)    j_or_i = n-1, gated by nextI
+//   outer loop index i (from 2, i < L-2)    j_or_i = n-1, gated by `skip`
 //   inner plateau walk over j               `walking` state, same window test
-//   i = j + 1; break;  then ++i             nextI = j + 2
+//   i = j + 1; break;  then ++i             skip = 1 (nextI = j + 2)
 //   second pass: inter-peak interval filter emitInterval(), anchor carried live
 //
 // Index convention is the batch one: samples numbered from 0 inside the block,
@@ -577,10 +648,12 @@ struct PeakStream
 	int    capacity;      // cap on RAW peaks; 0 = uncapped (peakFinder's peakCapacity)
 
 	numb   w0, w1, w2;    // rolling window x[n-2], x[n-1], x[n]
+	numb   d21;           // w2 - w1; on the next sample it is w1 - w0, so one difference per sample
 	size_t n;             // samples consumed
-	size_t nextI;         // smallest outer index still to be tested
-	bool   walking;       // inside a plateau walk
-	bool   done;          // capacity reached or tail exhausted
+	size_t endN;          // sample index at which the batch bound j + 2 >= L ends the scan
+	int    skip;          // samples still to skip: the history (i < 2) and j < nextI after a walk
+	int    walking;       // inside a plateau walk (int, not bool: bools cost byte packing per sample)
+	int    done;          // capacity reached or tail exhausted
 	int    raw;           // raw peaks seen
 	int    emitted;       // peaks written after the interval filter
 	numb   anchorTime;    // time (in samples) of the current anchor peak
@@ -605,8 +678,10 @@ struct PeakStream
 		outPeaks = peaks; timeOfPeaks = times; peakBase = base;
 		sampleStep = step; scanLen = len; capacity = cap;
 		emitAll = all || !doCalculatePeaks;
-		w0 = w1 = w2 = (numb)0;
-		n = 0; nextI = 2; walking = false; done = false;
+		w0 = w1 = w2 = (numb)0; d21 = (numb)0;
+		// The batch scans i = 2 .. L-3: samples 0..1 are history, sample 2 (j = 1) is below the
+		// initial nextI = 2, and the sample with j + 2 == L stops the scan.
+		n = 0; endN = (len < 3) ? 2 : len - 1; skip = 3; walking = 0; done = 0;
 		raw = 0; emitted = 0; anchorTime = (numb)0; haveAnchor = false;
 		sumP = sumP2 = sumI = sumI2 = (numb)0;
 		last = (numb)0;
@@ -643,10 +718,12 @@ struct PeakStream
 		numb value, time;
 		if (doInterpolatePeaks) {
 			const numb denom = w0 - (numb)2.0 * w1 + w2;
-			numb delta = 0.0;
-			if (fabs(denom) > 1e-12)
-				delta = 0.5 * (w0 - w2) / denom;
-			value = w1 - 0.25 * (w0 - w2) * delta;
+			// Literals through (numb): a bare 0.5 pulled the float build into FP64 (division included)
+			// on every peak of every lane.
+			numb delta = (numb)0;
+			if (fabs(denom) > (numb)1e-12)
+				delta = (numb)0.5 * (w0 - w2) / denom;
+			value = w1 - (numb)0.25 * (w0 - w2) * delta;
 			time  = (numb)(j - 1) + delta;
 		}
 		else {
@@ -662,35 +739,70 @@ struct PeakStream
 	}
 
 	// Feed one trajectory sample.
-	__device__ __host__ void push(numb x)
+	__device__ __host__ void push(numb x) { pushAt(x, n); }
+
+	// Same, with the sample index supplied by the caller: the fixed-step loop already counts
+	// its samples, so the stream does not need a second 64-bit counter per sample.
+	//
+	// The batch walk, with j = idxSample - 1 the outer i (or the walk's j):
+	//   not walking: skip while j < nextI; start a walk where x[j]-x[j-1] > eps, x[j] above
+	//                the threshold and x[j] >= x[j+1];
+	//   walking:     a rise ends it (no peak), a fall > eps ends it with a peak at j, a plateau
+	//                keeps walking; either end sets nextI = j + 2, i.e. skips one sample.
+	// Written as predicates rather than branches: lanes of a warp sit in different states, and
+	// the branchy version cost more than an RK4 step in float.
+	//
+	// One new difference per sample: w1 - w0 is the previous sample's w2 - w1 (same operands,
+	// same result), and w1 - w2 is exactly -(w2 - w1).
+	//
+	// In double the comparisons go through ordKey() on the integer ALU: DSETP runs on the FP64
+	// pipe (1/32 of FP32 on GeForce), and five of them per sample made the peak phase twice as
+	// slow as the transient for Euler. For finite values the answers are the same bit for bit
+	// (w1 >= w2 <=> w2 - w1 <= 0 under gradual underflow); they differ only on NaN, i.e. on a
+	// trajectory that the next divergence check discards anyway.
+	static __device__ __host__ __forceinline__ long long ordKey(double v)
+	{
+		union { double d; long long b; } u;
+		u.d = v;
+		long long b = u.b;
+		if (b == (long long)0x8000000000000000ULL) b = 0;   // -0 orders like +0
+		return b ^ ((b >> 63) & 0x7fffffffffffffffLL);      // integer order == numeric order
+	}
+
+	__device__ __host__ void pushAt(numb x, size_t idxSample)
 	{
 		last = x;   // before the done check: the scan stops short of the block end
 		if (done) return;
 
 		w0 = w1; w1 = w2; w2 = x;
-		const size_t idxSample = n;   // index of the sample just pushed
-		++n;
-		if (idxSample < 2) return;    // history only; batch starts at i = 2
+		const numb d10 = d21;   // w1 - w0
+		d21 = w2 - w1;
+		n = idxSample + 1;
+		if (idxSample == endN) { done = 1; return; }   // batch bound: j < L-2
 
-		const size_t j = idxSample - 1;          // outer i, or the walk's j
-		if (scanLen < 3 || j + 2 >= scanLen) { done = true; return; }  // batch bound: j < L-2
-
-		if (!walking) {
-			if (j < nextI) return;
-			if (!(w1 - w0 > eps_peak_delta && w1 > peak_threshold && w1 >= w2))
-				return;
-			walking = true;   // batch enters the inner loop with j = i
+		bool up, top, ge, lt, fallBig;   // w1-w0 > eps, w1 > threshold, w1 >= w2, w1 < w2, w1-w2 > eps
+		if constexpr (sizeof(numb) == 8) {
+			const long long k21 = ordKey((double)d21);
+			up      = ordKey((double)d10) > ordKey((double)eps_peak_delta);
+			top     = ordKey((double)w1) > ordKey((double)peak_threshold);
+			ge      = k21 <= 0;
+			lt      = !ge;
+			fallBig = k21 < ordKey(-(double)eps_peak_delta);
+		} else {
+			up      = d10 > eps_peak_delta;
+			top     = w1 > peak_threshold;
+			ge      = w1 >= w2;
+			lt      = w1 < w2;
+			fallBig = -d21 > eps_peak_delta;
 		}
-
-		// Inner-loop body at j.
-		if (w1 < w2) {                       // rise -> it was not a peak
-			walking = false; nextI = j + 2; return;
-		}
-		if (w1 - w2 > eps_peak_delta) {      // fall -> peak at j
-			recordPeak(j);
-			walking = false; nextI = j + 2; return;
-		}
-		// plateau: keep walking
+		const bool sk    = skip != 0;
+		const bool start = !walking & !sk & up & top & ge;
+		const bool act   = (walking != 0) | start;
+		const bool rise  = act & lt;                                       // it was not a peak
+		const bool fall  = act & !rise & fallBig;                          // peak at j
+		skip    = sk ? skip - 1 : (int)(rise | fall);
+		walking = act & !rise & !fall;                                     // plateau: keep walking
+		if (fall) recordPeak(idxSample - 1);
 	}
 
 	// Value peakFinder() would have returned.

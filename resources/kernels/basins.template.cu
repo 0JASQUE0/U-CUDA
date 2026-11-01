@@ -7,8 +7,8 @@
 //      helpfulArray flag (-1=FP / 0=Unbound / 1=Osc) в `maxValueCheckerArray`.
 //   2. avgPeakFinderCUDA — d_data перезаписывается пиками, d_intervals —
 //      межпиковыми; d_avgPeaks / d_avgIntervals — агрегаты.
-//   3. CUDA_dbscan_* (три kernel'а: search_fixed_points / search_clear_points
-//      / kernel-cluster-expand) — host-цикл из hostLibrary.cu::CUDA_dbscan.
+//   3. DBSCAN — на CPU, сеткой в пространстве признаков
+//      (parametric_engine.cpp::basins_dbscan_host); в этом модуле его нет.
 //
 // Плейсхолдеры:
 //   AMOUNT_OF_X — размерность системы (число переменных, int)
@@ -50,7 +50,7 @@ __device__ __forceinline__ float curand_uniform(curandState_t* s) {
 #include "cudaLibrary.cuh"
 
 __device__ __host__ __forceinline__
-void calculateDiscreteModel(numb* X, const numb* a, const numb h) {
+void calculateDiscreteModel(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h) {
 {{KRS_BODY}}
 }
 

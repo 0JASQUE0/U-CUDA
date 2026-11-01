@@ -63,6 +63,12 @@ public:
         return all;
     }
 
+    // Visits every entry without changing the order (resetting per-module device state).
+    template <class F>
+    void for_each(F&& f) const {
+        for (const T& e : items_) f(e);
+    }
+
     std::size_t size() const { return items_.size(); }
     std::size_t capacity() const { return cap_; }
 
