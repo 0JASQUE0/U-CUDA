@@ -10,6 +10,7 @@
 //   1 post:  X += h C(X), затем Phi: один обмен, порядок 1, порог смещён на -h K^2
 //   2 heun:  то же с подшагом Хойна для связи: два обмена, порядок 1, порог почти точный
 //   3 stage: RK4 со связью в каждой стадии: четыре обмена, порядок 4
+//   4 spike: импульсная сеть, свой шаг neuralSpikeKernel: связь только спайками с задержкой
 //
 // NEURAL_INST 1: несвязные экземпляры. status[node] = шаг разлёта, узел с ненулевым status замирает, хост
 // замораживает весь экземпляр на границе чанка; при 0 текст ядра шага прежний.
@@ -22,6 +23,7 @@
 #define NEURAL_SCHED {{NEURAL_SCHED}}
 #define NEURAL_LAWS {{NEURAL_LAWS}}
 #define NEURAL_INST {{NEURAL_INST}}
+#define NEURAL_REC {{NEURAL_REC}}
 
 // Шаблон не зовёт свип-ядра cudaLibrary.cu, но configCUDA.h внутри
 // cudaLibrary.cuh требует par_or_var определённым.
@@ -141,6 +143,7 @@ __device__ __forceinline__ void neuralCheck(const NeuralStepArgs& A, const int n
     }
 }
 
+#if NEURAL_SCHED != 4
 extern "C" __global__ void neuralStepKernel(const NeuralStepArgs A) {
     const int node = blockIdx.x * blockDim.x + threadIdx.x;
     if (node >= A.nRun) return;
@@ -218,6 +221,132 @@ extern "C" __global__ void neuralStepKernel(const NeuralStepArgs A) {
     neuralCheck(A, node, X);
 #endif
 }
+
+#endif
+
+#if NEURAL_SCHED == 4
+// Импульсный шаг. Порядок фаз одного шага: доставка, шаг, порог и сброс, регистрация и рассылка спайка.
+// Шаг узла локален, соседи видны только через кольцо. Спайк пишет в слот шага n + задержка >= n + window, а узел
+// читает слот своего шага, поэтому запуск на window шагов не требует обмена. Веса в кольце целые: сумма
+// atomicAdd не зависит от порядка потоков, и результат повторяется побитово.
+// Переменные X: сначала NEURAL_NV переменных узла, затем NEURAL_REC синапсов; синапс идёт по точной экспоненте.
+#define NEURAL_NV (AMOUNTOFX - NEURAL_REC)
+#define NEURAL_REC_MAX 8
+
+struct NeuralSpikeArgs {
+    const numb* values;
+    numb* state;
+    const int*  outStart;     // [nNodes + 1], исходящие дуги
+    const int*  outDst;
+    const int*  outPack;      // задержка * NEURAL_REC + синапс
+    const unsigned long long* outW;
+    unsigned long long* ring; // [slots][NEURAL_REC][nNodes]
+    const int*  refrSteps;
+    int*  refr;               // сколько шагов ещё держать узел
+    int*  spikes;             // счётчик узла: точен и при переполнении журнала
+    int*  logCount;
+    int*  logNode;
+    int*  logStep;            // от logBase
+    const numb* srcP;         // вероятность за шаг, < 0 = обычный узел; nullptr = источников нет
+    const int*  srcFrom;
+    const int*  srcTo;
+    int*  badFlag;
+    numb  decay[NEURAL_REC_MAX];
+    numb  decayHalf[NEURAL_REC_MAX];
+    numb  h;
+    numb  invW;
+    numb  maxValue;
+    unsigned long long seed;
+    long long step0;
+    long long logBase;
+    int   nNodes;
+    int   slots;
+    int   steps;
+    int   logCap;
+};
+
+__device__ __forceinline__ unsigned long long neuralMix(unsigned long long z) {
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+// Число от узла и шага: не зависит от разбиения на запуски.
+__device__ __forceinline__ numb neuralUniform(unsigned long long seed, int node, long long step) {
+    const unsigned long long z = neuralMix(neuralMix(seed + 0x9E3779B97F4A7C15ULL) ^ ((unsigned long long)node + 1ULL) * 0xC2B2AE3D27D4EB4FULL);
+    return (numb)(neuralMix(z ^ ((unsigned long long)step + 1ULL) * 0x165667B19E3779F9ULL) >> 11) * (numb)1.1102230246251565e-16;
+}
+
+__device__ __forceinline__ void neuralSpikeRule(numb* X, const numb* a, bool& spiked) {
+{{SPIKE_BODY}}
+}
+
+__device__ __forceinline__ void neuralSpikeRk4(numb* X, const numb* ai, const NeuralSpikeArgs& A) {
+    const numb h = A.h;
+    numb Y[AMOUNTOFX], F[AMOUNTOFX], acc[AMOUNTOFX];
+    for (int k = 0; k < AMOUNTOFX; ++k) Y[k] = X[k];
+    neuralRhs(Y, ai, F);
+    for (int k = 0; k < NEURAL_NV; ++k) { acc[k] = F[k]; Y[k] = X[k] + (numb)0.5 * h * F[k]; }
+    for (int r = 0; r < NEURAL_REC; ++r) Y[NEURAL_NV + r] = X[NEURAL_NV + r] * A.decayHalf[r];
+    neuralRhs(Y, ai, F);
+    for (int k = 0; k < NEURAL_NV; ++k) { acc[k] += (numb)2 * F[k]; Y[k] = X[k] + (numb)0.5 * h * F[k]; }
+    neuralRhs(Y, ai, F);
+    for (int k = 0; k < NEURAL_NV; ++k) { acc[k] += (numb)2 * F[k]; Y[k] = X[k] + h * F[k]; }
+    for (int r = 0; r < NEURAL_REC; ++r) Y[NEURAL_NV + r] = X[NEURAL_NV + r] * A.decay[r];
+    neuralRhs(Y, ai, F);
+    const numb q = h / (numb)6;
+    for (int k = 0; k < NEURAL_NV; ++k) X[k] += q * (acc[k] + F[k]);
+}
+
+extern "C" __global__ void neuralSpikeKernel(const NeuralSpikeArgs A) {
+    const int node = blockIdx.x * blockDim.x + threadIdx.x;
+    const int N = A.nNodes;
+    if (node >= N) return;
+    const numb* ai = A.values + (size_t)node * AMOUNTOFVALUES;
+    const bool source = A.srcP != nullptr && A.srcP[node] >= (numb)0;
+    numb X[AMOUNTOFX];
+    neuralRead(A.state, N, node, X);
+    int refr = A.refr[node], fired = 0;
+    const int period = A.slots * NEURAL_REC;
+
+    for (int j = 0; j < A.steps; ++j) {
+        const long long step = A.step0 + j;
+        const int base = (int)(step % A.slots) * NEURAL_REC;
+        bool spiked = false;
+        if (source) {
+            spiked = step >= A.srcFrom[node] && step < A.srcTo[node] && neuralUniform(A.seed, node, step) < A.srcP[node];
+        } else {
+            for (int r = 0; r < NEURAL_REC; ++r) {
+                unsigned long long* cell = A.ring + (size_t)(base + r) * N + node;
+                const unsigned long long w = *cell;
+                if (w != 0ULL) { X[NEURAL_NV + r] += (numb)(long long)w * A.invW; *cell = 0ULL; }
+            }
+            if (refr > 0) --refr;
+            else {
+                neuralSpikeRk4(X, ai, A);
+                neuralSpikeRule(X, ai, spiked);
+                if (spiked) refr = A.refrSteps[node];
+            }
+            for (int r = 0; r < NEURAL_REC; ++r) X[NEURAL_NV + r] *= A.decay[r];
+        }
+        if (!spiked) continue;
+        ++fired;
+        const int at = atomicAdd(A.logCount, 1);
+        if (at < A.logCap) { A.logNode[at] = node; A.logStep[at] = (int)(step - A.logBase); }
+        const int e1 = __ldg(A.outStart + node + 1);
+        for (int e = __ldg(A.outStart + node); e < e1; ++e) {
+            int idx = base + __ldg(A.outPack + e);
+            if (idx >= period) idx -= period;
+            atomicAdd(A.ring + (size_t)idx * N + __ldg(A.outDst + e), __ldg(A.outW + e));
+        }
+    }
+    neuralWrite(A.state, N, node, X);
+    A.refr[node] = refr;
+    if (fired != 0) A.spikes[node] += fired;
+    numb acc = (numb)0;
+    for (int k = 0; k < NEURAL_NV; ++k) acc += fabs(X[k]);
+    if (isnan(acc) || isinf(acc) || (A.maxValue != (numb)0 && acc > A.maxValue)) *A.badFlag = 1;
+}
+#endif
 
 struct NeuralObserveArgs {
     const numb* state;

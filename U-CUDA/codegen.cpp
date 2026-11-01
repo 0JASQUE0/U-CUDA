@@ -5639,6 +5639,21 @@ std::string codegen_coupling(const System& s, const std::vector<std::string>& ex
     return o.str();
 }
 
+std::string codegen_spike_body(const System& s, int var, const std::string& threshold, const std::vector<std::string>& reset) {
+    if (var < 0 || var >= (int)s.vars.size()) throw std::runtime_error("spike: threshold variable out of range");
+    if (reset.size() != s.vars.size()) throw std::runtime_error("spike: reset count != number of variables");
+    std::vector<std::string> thr(s.vars.size());
+    thr[(size_t)var] = threshold;
+    std::ostringstream o;
+    o << "    numb T[AMOUNTOFX] = { (numb)0 };\n" << codegen_coupling(s, thr, "X", "X", "a", "a", "(numb)0", "T", "    ");
+    o << "    if (!(X[" << var << "] >= T[" << var << "])) return;\n    spiked = true;\n";
+    // Сброс одновременный: правые части читают состояние до него.
+    o << "    numb R[AMOUNTOFX] = { (numb)0 };\n" << codegen_coupling(s, reset, "X", "X", "a", "a", "(numb)0", "R", "    ");
+    for (size_t i = 0; i < reset.size(); ++i)
+        if (!reset[i].empty()) o << "    X[" << i << "] = R[" << i << "];\n";
+    return o.str();
+}
+
 Scheme scheme_from_name(const std::string& name) {
     if (name == "Euler-Cromer")      return Scheme::EulerCromer;
     if (name == "Explicit Midpoint") return Scheme::ExplicitMidpoint;

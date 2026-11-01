@@ -530,6 +530,10 @@ std::string codegen_coupling(const System& s,
                              const std::string& dst        = "C",
                              const std::string& indent     = "        ");
 
+// Правило спайка импульсной сети: X[var] >= threshold, затем сброс. reset[i] = новое значение переменной i, пусто = не
+// меняется. Имена как у codegen_coupling, синтаксис обычный. Тело функции neuralSpikeRule шаблона neural.template.cu.
+std::string codegen_spike_body(const System& s, int var, const std::string& threshold, const std::vector<std::string>& reset);
+
 // Maps UI scheme name ("Euler" / "RK4" / "CD" / ...) to the Scheme enum.
 // Unknown names fall back to Scheme::Euler.
 Scheme scheme_from_name(const std::string& name);

@@ -214,6 +214,8 @@ constexpr int    kNeuralObserveBlock = 64;
 constexpr int    kNeuralMeanGroup    = 256;
 constexpr double kNeuralWorkPerSync  = 2.0e8;
 constexpr size_t kNeuralFlushBytes   = 64u * 1024u * 1024u;
+constexpr int    kNeuralMaxReceptors = 8;    // NEURAL_REC_MAX в шаблоне
+constexpr int    kNeuralSpikeMaxWindow = 64; // запуск не должен расти до watchdog и задерживать запись
 
 // Возмущение клона: число от номера узла внутри экземпляра, поэтому значение свипа = отдельный запуск.
 double neural_lyap_normal(uint64_t seed, uint64_t node, uint64_t var) {
@@ -11774,7 +11776,9 @@ struct ParametricEngine::Impl {
                               + ":l" + std::to_string(req.n_laws)
                               + ":i" + std::to_string(inst)
                               + ":c" + std::to_string(std::hash<std::string>{}(req.coupling_body))
-                              + ":r" + std::to_string(std::hash<std::string>{}(req.rhs_body));
+                              + ":r" + std::to_string(std::hash<std::string>{}(req.rhs_body))
+                              + ":p" + std::to_string(req.spike.receptors) + ":" + std::to_string(std::hash<std::string>{}(req.spike.spike_body));
+        const bool spike = req.schedule == NeuralSchedule::Spike;
         return compile_into(pool_neural, key, cached_neural, activate, [&](CachedNeuralModule& fresh) {
             CUmodule mod = nullptr;
             std::vector<std::string> lowered;
@@ -11784,6 +11788,8 @@ struct ParametricEngine::Impl {
                                 { "{{NEURAL_SCHED}}",     std::to_string(sched) },
                                 { "{{NEURAL_LAWS}}",      std::to_string(req.n_laws) },
                                 { "{{NEURAL_INST}}",      std::to_string(inst) },
+                                { "{{NEURAL_REC}}",       std::to_string(req.spike.receptors) },
+                                { "{{SPIKE_BODY}}",       req.spike.spike_body },
                                 { "{{KRS_BODY}}",         req.krs_body },
                                 { "{{KRS_RHS_BODY}}",     req.rhs_body },
                                 { "{{COUPLING_BODY}}",    req.coupling_body } },
@@ -11791,7 +11797,7 @@ struct ParametricEngine::Impl {
                 return false;
             fresh.key = key;
             fresh.module = mod;
-            if (!module_fn(mod, "neuralStepKernel", fresh.step, err)
+            if (!module_fn(mod, spike ? "neuralSpikeKernel" : "neuralStepKernel", fresh.step, err)
                 || !module_fn(mod, "neuralObserveKernel", fresh.observe, err)
                 || !module_fn(mod, "neuralMeanKernel", fresh.mean, err)
                 || !module_fn(mod, "neuralOrderKernel", fresh.order, err)
@@ -11800,7 +11806,333 @@ struct ParametricEngine::Impl {
         }, err);
     }
 
+    // Импульсная сеть: свой цикл, общие с непрерывными только наблюдения и сборка модуля.
+    NeuralResult run_neural_spike(const NeuralRequest& req) {
+        // Раскладки совпадают с шаблоном.
+        struct SpikeArgs {
+            const numb* values; numb* state;
+            const int* outStart; const int* outDst; const int* outPack; const unsigned long long* outW;
+            unsigned long long* ring; const int* refrSteps; int* refr; int* spikes;
+            int* logCount; int* logNode; int* logStep;
+            const numb* srcP; const int* srcFrom; const int* srcTo; int* badFlag;
+            numb decay[kNeuralMaxReceptors]; numb decayHalf[kNeuralMaxReceptors]; numb h; numb invW; numb maxValue;
+            unsigned long long seed; long long step0; long long logBase;
+            int nNodes; int slots; int steps; int logCap;
+        };
+        struct ObserveArgs { const numb* state; const int* nodes; const int* vars; numb* out; int nNodes, nSel, nVars, pad; };
+        struct MeanArgs { const numb* state; const int* groupStart; const int* groupPop; const int* vars; numb* out; numb* out2; int nNodes, nGroups, nVars, pad; };
+
+        NeuralResult res;
+        auto fail = [&](const std::string& msg) -> NeuralResult& { res.error = msg; return res; };
+        const auto wall0 = std::chrono::steady_clock::now();
+
+        const NeuralSpiking& sp = req.spike;
+        const int N = req.n_nodes, nx = req.amountOfX, R = sp.receptors;
+        if (N <= 0) return fail("the network has no nodes");
+        if (nx <= 0 || nx > kMaxAmountOfX) return fail("amountOfX out of range");
+        if (req.amountOfValues <= 0 || req.amountOfValues > kMaxAmountOfValues) return fail("amountOfValues out of range");
+        if (R < 0 || R > kNeuralMaxReceptors || R >= nx) return fail("receptors out of range");
+        if ((int)sp.tau.size() != R) return fail("tau needs one value per receptor");
+        for (double t : sp.tau) if (!(t > 0.0)) return fail("a synaptic time constant must be positive");
+        if (req.values.size() != (size_t)N * (size_t)req.amountOfValues) return fail("values.size() != n_nodes * amountOfValues");
+        if (req.initial_conditions.size() != (size_t)N * nx) return fail("initial_conditions.size() != n_nodes * amountOfX");
+        if (req.edge_start.size() != (size_t)N + 1) return fail("edge_start.size() != n_nodes + 1");
+        const int n_arcs = req.edge_start.back();
+        if (n_arcs < 0 || (int)req.edge_src.size() != n_arcs || (int)req.edge_w.size() != n_arcs) return fail("the CSR arrays disagree on the number of arcs");
+        if (n_arcs > 0 && R == 0) return fail("arcs need a receptor");
+        if ((int)sp.edge_delay.size() != n_arcs) return fail("edge_delay needs one delay per arc");
+        if (n_arcs > 0 && (int)req.edge_law.size() != n_arcs) return fail("edge_law must give the receptor of every arc");
+        if (req.rhs_body.empty() || sp.spike_body.empty()) return fail("a spiking network needs rhs_body and spike_body");
+        if (!(req.h > 0.0) || !(req.t_max > 0.0) || req.transient < 0.0 || req.pre_scaller < 1) return fail("bad time settings");
+        if (step_body_uses_time(req.rhs_body)) return fail("explicit time t is not supported in the large network engine yet");
+        if (req.input.channels > 0) return fail("a spiking network has no input channels yet");
+        if (!req.reset_at.empty() || req.lyapunov.enabled || req.instance_start.size() > 2) return fail("resets, instances and the Lyapunov exponent do not work on a spiking network yet");
+        if (req.observe.order_var >= 0 || req.observe.spread) return fail("R and the spread do not work on a spiking network");
+        if (!sp.refractory_steps.empty() && sp.refractory_steps.size() != (size_t)N) return fail("refractory_steps needs one value per node");
+        const bool sources = !sp.source_p.empty();
+        if (sources && (sp.source_p.size() != (size_t)N || sp.source_from.size() != (size_t)N || sp.source_to.size() != (size_t)N)) return fail("source arrays need one value per node");
+        for (int i = 0; i < N; ++i)
+            if (req.edge_start[(size_t)i] > req.edge_start[(size_t)i + 1]) return fail("edge_start is not monotonic");
+
+        // Приёмники хранят входящие дуги, рассылке нужны исходящие.
+        std::vector<int> outStart((size_t)N + 1, 0), outDst((size_t)n_arcs), outPack((size_t)n_arcs);
+        std::vector<unsigned long long> outW((size_t)n_arcs);
+        int minDelay = (std::numeric_limits<int>::max)(), maxDelay = 0;
+        double maxW = 0.0;
+        for (int e = 0; e < n_arcs; ++e) {
+            const int src = req.edge_src[(size_t)e], d = sp.edge_delay[(size_t)e], rec = req.edge_law[(size_t)e];
+            if (src < 0 || src >= N) return fail("an arc points outside the node list");
+            if (d < 1) return fail("a delay must be at least one step");
+            if (rec < 0 || rec >= R) return fail("an arc points to a missing receptor");
+            ++outStart[(size_t)src + 1];
+            minDelay = (std::min)(minDelay, d); maxDelay = (std::max)(maxDelay, d);
+            maxW = (std::max)(maxW, std::fabs(req.edge_w[(size_t)e]));
+        }
+        // Запас 2^22 наибольших весов в один слот, точность 2^-40 наибольшего.
+        const int wExp = maxW > 0.0 ? 40 - std::ilogb(maxW) - 1 : 0;
+        for (int i = 0; i < N; ++i) outStart[(size_t)i + 1] += outStart[(size_t)i];
+        {
+            std::vector<int> put(outStart.begin(), outStart.end() - 1);
+            for (int dst = 0; dst < N; ++dst)
+                for (int e = req.edge_start[(size_t)dst]; e < req.edge_start[(size_t)dst + 1]; ++e) {
+                    const int at = put[(size_t)req.edge_src[(size_t)e]]++;
+                    outDst[(size_t)at] = dst;
+                    outPack[(size_t)at] = sp.edge_delay[(size_t)e] * R + req.edge_law[(size_t)e];
+                    outW[(size_t)at] = (unsigned long long)std::llround(std::ldexp(req.edge_w[(size_t)e], wExp));
+                }
+        }
+
+        int window = n_arcs > 0 ? (std::min)(minDelay, kNeuralSpikeMaxWindow) : kNeuralSpikeMaxWindow;
+        if (sp.window > 0) {
+            if (n_arcs > 0 && sp.window > minDelay) return fail("the window cannot exceed the shortest delay");
+            window = sp.window;
+        }
+        // Запуск идёт без согласования шагов: спайк конца окна не должен попасть в слот, который сосед ещё не прочёл.
+        const int slots = maxDelay + window;
+        if (R > 0 && (double)slots * R > (double)(std::numeric_limits<int>::max)()) return fail("delays are too long");
+        const size_t ringBytes = (size_t)slots * R * (size_t)N * sizeof(unsigned long long);
+
+        const NeuralObservation& ob = req.observe;
+        for (int v : ob.vars) if (v < 0 || v >= nx) return fail("observed variable out of range");
+        for (int i : ob.nodes) if (i < 0 || i >= N) return fail("observed node out of range");
+        const int nPops = ob.pop_start.empty() ? 0 : (int)ob.pop_start.size() - 1;
+        if (nPops > 0 && (ob.pop_start.front() != 0 || ob.pop_start.back() != N)) return fail("populations must cover all nodes");
+
+        const long long skipSteps = (long long)steps_from_time_size_t(req.transient, req.h);
+        const long long workSteps = (long long)steps_from_time_size_t(req.t_max, req.h);
+        const long long totalSteps = skipSteps + workSteps;
+        if (totalSteps <= 0) return fail("t_max / h gives no steps");
+
+        const int nVars = (int)ob.vars.size(), nSel = nVars ? (int)ob.nodes.size() : 0, nMean = nVars ? nPops : 0;
+        const long long nPointsLL = (nSel + nMean > 0) ? workSteps / req.pre_scaller + 1 : 0;
+        const size_t rowElems = ((size_t)nSel + (size_t)nMean) * (size_t)nVars;
+        if ((double)nPointsLL * (double)rowElems * sizeof(double) > (double)req.max_output_bytes)
+            return fail("the recorded output is above max_output_bytes: raise the decimation or select less");
+        const int nPoints = (int)nPointsLL;
+
+        std::string err;
+        if (!ensure_init(err)) return fail(err);
+        cuCtxSetCurrent(context);
+        cudaGetLastError();   // сброс sticky-ошибки прошлого прогона, см. run_fastsync
+        if (!compile_neural_module(true, req, err)) return fail(err);
+
+        const int flushRows = nPoints > 0 ? (int)std::min<long long>(nPoints, std::max<long long>(1, (long long)(kNeuralFlushBytes / std::max<size_t>(1, rowElems * sizeof(numb))))) : 0;
+        const int logCap = sp.log_capacity > 0 ? sp.log_capacity : (int)std::clamp((long long)N * 64, 1LL << 20, 1LL << 24);
+        const size_t logLimit = req.max_output_bytes / (sizeof(long long) + sizeof(int));
+
+        OrderDevBuf d_values, d_state, d_oStart, d_oDst, d_oPack, d_oW, d_ring, d_refrSteps, d_refr, d_spikes,
+                    d_logCount, d_logNode, d_logStep, d_srcP, d_srcFrom, d_srcTo, d_bad,
+                    d_sel, d_vars, d_gStart, d_gPop, d_out;
+        auto dev = [&](OrderDevBuf& b, size_t bytes, const char* what) {
+            res.device_bytes += bytes;
+            return b.alloc(std::max<size_t>(bytes, sizeof(numb)), what, err);
+        };
+        auto up = [&](OrderDevBuf& b, const void* src, size_t bytes, const char* what) {
+            if (bytes == 0) return true;
+            if (cudaMemcpy(b.p, src, bytes, cudaMemcpyHostToDevice) == cudaSuccess) return true;
+            err = std::string("memcpy ") + what; return false;
+        };
+        {
+            const std::vector<numb> hv = to_numb(req.values);
+            std::vector<numb> soa((size_t)N * nx);
+            for (int i = 0; i < N; ++i) for (int k = 0; k < nx; ++k)
+                soa[(size_t)k * N + i] = (numb)req.initial_conditions[(size_t)i * nx + k];
+            std::vector<int> refrSteps = sp.refractory_steps;
+            refrSteps.resize((size_t)N, 0);
+            if (!dev(d_values, hv.size() * sizeof(numb), "values") || !up(d_values, hv.data(), hv.size() * sizeof(numb), "values")
+                || !dev(d_state, soa.size() * sizeof(numb), "state") || !up(d_state, soa.data(), soa.size() * sizeof(numb), "state")
+                || !dev(d_oStart, outStart.size() * sizeof(int), "outStart") || !up(d_oStart, outStart.data(), outStart.size() * sizeof(int), "outStart")
+                || !dev(d_oDst, outDst.size() * sizeof(int), "outDst") || !up(d_oDst, outDst.data(), outDst.size() * sizeof(int), "outDst")
+                || !dev(d_oPack, outPack.size() * sizeof(int), "outPack") || !up(d_oPack, outPack.data(), outPack.size() * sizeof(int), "outPack")
+                || !dev(d_oW, outW.size() * sizeof(unsigned long long), "outW") || !up(d_oW, outW.data(), outW.size() * sizeof(unsigned long long), "outW")
+                || !dev(d_refrSteps, (size_t)N * sizeof(int), "refrSteps") || !up(d_refrSteps, refrSteps.data(), (size_t)N * sizeof(int), "refrSteps")
+                || !dev(d_ring, ringBytes, "ring") || !dev(d_refr, (size_t)N * sizeof(int), "refr") || !dev(d_spikes, (size_t)N * sizeof(int), "spikes")
+                || !dev(d_logCount, sizeof(int), "logCount") || !dev(d_logNode, (size_t)logCap * sizeof(int), "logNode")
+                || !dev(d_logStep, (size_t)logCap * sizeof(int), "logStep") || !dev(d_bad, sizeof(int), "badFlag")) return fail(err);
+            if (sources) {
+                const std::vector<numb> p = to_numb(sp.source_p);
+                if (!dev(d_srcP, p.size() * sizeof(numb), "srcP") || !up(d_srcP, p.data(), p.size() * sizeof(numb), "srcP")
+                    || !dev(d_srcFrom, (size_t)N * sizeof(int), "srcFrom") || !up(d_srcFrom, sp.source_from.data(), (size_t)N * sizeof(int), "srcFrom")
+                    || !dev(d_srcTo, (size_t)N * sizeof(int), "srcTo") || !up(d_srcTo, sp.source_to.data(), (size_t)N * sizeof(int), "srcTo")) return fail(err);
+            }
+        }
+        if ((ringBytes > 0 && cudaMemset(d_ring.p, 0, ringBytes) != cudaSuccess) || cudaMemset(d_refr.p, 0, (size_t)N * sizeof(int)) != cudaSuccess
+            || cudaMemset(d_spikes.p, 0, (size_t)N * sizeof(int)) != cudaSuccess || cudaMemset(d_logCount.p, 0, sizeof(int)) != cudaSuccess
+            || cudaMemset(d_bad.p, 0, sizeof(int)) != cudaSuccess) return fail("memset spike buffers");
+
+        std::vector<int> gStart, gPop;
+        if (nMean > 0) {
+            for (int p = 0; p < nPops; ++p)
+                for (int i = ob.pop_start[(size_t)p]; i < ob.pop_start[(size_t)p + 1]; i += kNeuralMeanGroup) { gStart.push_back(i); gPop.push_back(p); }
+            gStart.push_back(N);
+            if (!dev(d_gStart, gStart.size() * sizeof(int), "groupStart") || !dev(d_gPop, gPop.size() * sizeof(int), "groupPop")
+                || !up(d_gStart, gStart.data(), gStart.size() * sizeof(int), "groupStart") || !up(d_gPop, gPop.data(), gPop.size() * sizeof(int), "groupPop")) return fail(err);
+        }
+        if (nVars > 0 && (!dev(d_vars, (size_t)nVars * sizeof(int), "vars") || !up(d_vars, ob.vars.data(), (size_t)nVars * sizeof(int), "vars"))) return fail(err);
+        if (nSel > 0 && (!dev(d_sel, (size_t)nSel * sizeof(int), "selected") || !up(d_sel, ob.nodes.data(), (size_t)nSel * sizeof(int), "selected"))) return fail(err);
+        if (flushRows > 0 && !dev(d_out, (size_t)flushRows * rowElems * sizeof(numb), "out")) return fail(err);
+
+        std::vector<double> traces, means;
+        if (nSel > 0) traces.assign((size_t)nPoints * nSel * nVars, std::numeric_limits<double>::quiet_NaN());
+        if (nMean > 0) means.assign((size_t)nPoints * nMean * nVars, std::numeric_limits<double>::quiet_NaN());
+        std::vector<numb> hostRows((size_t)flushRows * rowElems);
+        int rowsOnDevice = 0, rowsFlushed = 0;
+        const auto flush = [&]() {
+            if (rowsOnDevice == 0) return true;
+            if (cudaMemcpy(hostRows.data(), d_out.p, (size_t)rowsOnDevice * rowElems * sizeof(numb), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+            for (int r = 0; r < rowsOnDevice; ++r) {
+                const numb* row = hostRows.data() + (size_t)r * rowElems;
+                const size_t p = (size_t)rowsFlushed + r;
+                for (size_t e = 0; e < (size_t)nSel * nVars; ++e) traces[p * nSel * nVars + e] = (double)row[e];
+                const numb* pops = row + (size_t)nSel * nVars;
+                for (int q = 0; q < nMean; ++q) {
+                    const double size = (double)(ob.pop_start[(size_t)q + 1] - ob.pop_start[(size_t)q]);
+                    for (int v = 0; v < nVars; ++v) means[(p * nMean + q) * nVars + v] = (double)pops[(size_t)q * nVars + v] / size;
+                }
+            }
+            rowsFlushed += rowsOnDevice;
+            rowsOnDevice = 0;
+            return true;
+        };
+        const auto record = [&]() -> bool {
+            numb* row = d_out.as<numb>() + (size_t)rowsOnDevice * rowElems;
+            if (nSel > 0) {
+                ObserveArgs oa{ d_state.as<numb>(), d_sel.as<int>(), d_vars.as<int>(), row, N, nSel, nVars, 0 };
+                void* args[] = { &oa };
+                const unsigned b = (unsigned)((nSel + kNeuralObserveBlock - 1) / kNeuralObserveBlock);
+                CUresult r = cuLaunchKernel(cached_neural.observe, b, 1, 1, kNeuralObserveBlock, 1, 1, 0, nullptr, args, nullptr);
+                if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(neural observe): " + cu_err(r); return false; }
+                ++res.launches;
+            }
+            if (nMean > 0) {
+                numb* sums = row + (size_t)nSel * nVars;
+                if (cudaMemsetAsync(sums, 0, (size_t)nMean * nVars * sizeof(numb), 0) != cudaSuccess) { err = "memset means"; return false; }
+                MeanArgs ma{ d_state.as<numb>(), d_gStart.as<int>(), d_gPop.as<int>(), d_vars.as<int>(), sums, nullptr, N, (int)gPop.size(), nVars, 0 };
+                void* args[] = { &ma };
+                const unsigned b = (unsigned)((gPop.size() + kNeuralObserveBlock - 1) / kNeuralObserveBlock);
+                CUresult r = cuLaunchKernel(cached_neural.mean, b, 1, 1, kNeuralObserveBlock, 1, 1, 0, nullptr, args, nullptr);
+                if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(neural mean): " + cu_err(r); return false; }
+                ++res.launches;
+            }
+            ++rowsOnDevice;
+            return true;
+        };
+
+        const int block = req.block_size > 0 ? req.block_size : kNeuralDefaultBlock;
+        const unsigned blocks = (unsigned)(((long long)N + block - 1) / block);
+        long long syncEvery = (std::max)(1LL, (long long)(kNeuralWorkPerSync / ((double)N * 4.0)));
+        if (req.steps_per_sync > 0 && req.steps_per_sync < syncEvery) syncEvery = req.steps_per_sync;
+        res.block_size = block;
+        res.steps_per_sync = syncEvery;
+
+        SpikeArgs sa{};
+        sa.values = d_values.as<numb>(); sa.state = d_state.as<numb>();
+        sa.outStart = d_oStart.as<int>(); sa.outDst = d_oDst.as<int>(); sa.outPack = d_oPack.as<int>();
+        sa.outW = d_oW.as<unsigned long long>(); sa.ring = d_ring.as<unsigned long long>();
+        sa.refrSteps = d_refrSteps.as<int>(); sa.refr = d_refr.as<int>(); sa.spikes = d_spikes.as<int>();
+        sa.logCount = d_logCount.as<int>(); sa.logNode = d_logNode.as<int>(); sa.logStep = d_logStep.as<int>();
+        sa.srcP = sources ? d_srcP.as<numb>() : nullptr; sa.srcFrom = sources ? d_srcFrom.as<int>() : nullptr; sa.srcTo = sources ? d_srcTo.as<int>() : nullptr;
+        sa.badFlag = d_bad.as<int>();
+        for (int r = 0; r < R; ++r) {
+            sa.decay[r] = (numb)std::exp(-req.h / sp.tau[(size_t)r]);
+            sa.decayHalf[r] = (numb)std::exp(-0.5 * req.h / sp.tau[(size_t)r]);
+        }
+        sa.h = (numb)req.h; sa.invW = (numb)std::ldexp(1.0, -wExp); sa.maxValue = (numb)req.max_value;
+        sa.seed = sp.seed; sa.nNodes = N; sa.slots = slots; sa.logCap = logCap;
+
+        // Журнал копится упакованным: сортировка по шагу и узлу убирает порядок потоков.
+        std::vector<unsigned long long> packed;
+        std::vector<int> hostNode, hostStep;
+        const auto drain_log = [&](long long base) -> bool {
+            int n = 0;
+            const int zero = 0;
+            if (cudaMemcpy(&n, d_logCount.p, sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+            const int kept = (std::min)(n, logCap);
+            if (base >= skipSteps) res.spikes_dropped += n - kept;
+            if (kept > 0 && base >= skipSteps) {
+                hostNode.resize((size_t)kept); hostStep.resize((size_t)kept);
+                if (cudaMemcpy(hostNode.data(), d_logNode.p, (size_t)kept * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess
+                    || cudaMemcpy(hostStep.data(), d_logStep.p, (size_t)kept * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+                for (int e = 0; e < kept; ++e) {
+                    if (packed.size() >= logLimit) { res.spikes_dropped += kept - e; break; }
+                    packed.push_back(((unsigned long long)(base + hostStep[(size_t)e]) << 32) | (unsigned)hostNode[(size_t)e]);
+                }
+            }
+            return cudaMemcpy(d_logCount.p, &zero, sizeof(int), cudaMemcpyHostToDevice) == cudaSuccess;
+        };
+
+        if (skipSteps == 0 && nPoints > 0 && !record()) return fail(err);
+
+        long long done = 0;
+        bool stopped = false;
+        while (done < totalSteps && !stopped) {
+            const long long chunk0 = done;
+            long long chunkEnd = (std::min)(done + syncEvery, totalSteps);
+            if (done < skipSteps) chunkEnd = (std::min)(chunkEnd, skipSteps);
+            sa.logBase = chunk0;
+            while (done < chunkEnd) {
+                long long to = chunkEnd;
+                if (nPoints > 0 && done >= skipSteps) to = (std::min)(to, skipSteps + ((done - skipSteps) / req.pre_scaller + 1) * req.pre_scaller);
+                sa.step0 = done;
+                sa.steps = (int)(std::min<long long>)(to - done, window);
+                void* args[] = { &sa };
+                CUresult r = cuLaunchKernel(cached_neural.step, blocks, 1, 1, block, 1, 1, 0, nullptr, args, nullptr);
+                if (r != CUDA_SUCCESS) return fail("cuLaunchKernel(neural spike): " + cu_err(r));
+                ++res.launches;
+                done += sa.steps;
+                if (nPoints > 0 && done >= skipSteps && (done - skipSteps) % req.pre_scaller == 0 && (done - skipSteps) / req.pre_scaller < nPoints) {
+                    if (!record()) return fail(err);
+                    if (rowsOnDevice == flushRows) {
+                        cudaDeviceSynchronize();
+                        if (!flush()) return fail("memcpy D2H out");
+                    }
+                }
+            }
+            cudaDeviceSynchronize();
+            ++res.syncs;
+            cudaError_t ce = cudaGetLastError();
+            if (ce != cudaSuccess) return fail(std::string("neural spike kernel: ") + cudaGetErrorString(ce));
+            if (!flush()) return fail("memcpy D2H out");
+            if (!drain_log(chunk0)) return fail("memcpy D2H spike log");
+            if (done == skipSteps && skipSteps > 0 && cudaMemset(d_spikes.p, 0, (size_t)N * sizeof(int)) != cudaSuccess) return fail("memset spikes");
+            if (req.progress) req.progress->store((float)((double)done / (double)totalSteps), std::memory_order_relaxed);
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { res.cancelled = true; stopped = true; break; }
+            int bad = 0;
+            if (cudaMemcpy(&bad, d_bad.p, sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return fail("memcpy D2H flag");
+            if (bad) { res.diverged = true; stopped = true; }
+        }
+        res.steps_done = done;
+
+        std::sort(packed.begin(), packed.end());
+        res.spike_step.resize(packed.size());
+        res.spike_node.resize(packed.size());
+        for (size_t e = 0; e < packed.size(); ++e) {
+            res.spike_step[e] = (long long)(packed[e] >> 32);
+            res.spike_node[e] = (int)(packed[e] & 0xFFFFFFFFULL);
+        }
+        res.spike_count.resize((size_t)N);
+        if (cudaMemcpy(res.spike_count.data(), d_spikes.p, (size_t)N * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) return fail("memcpy D2H spikes");
+
+        if (req.keep_final_state) {
+            std::vector<numb> soa((size_t)N * nx);
+            if (cudaMemcpy(soa.data(), d_state.p, soa.size() * sizeof(numb), cudaMemcpyDeviceToHost) != cudaSuccess) return fail("memcpy D2H state");
+            res.final_state.resize(soa.size());
+            for (int i = 0; i < N; ++i) for (int k = 0; k < nx; ++k) res.final_state[(size_t)i * nx + k] = (double)soa[(size_t)k * N + i];
+        }
+
+        res.n_nodes = N; res.n_vars = nVars; res.n_points = nPoints; res.h = req.h;
+        res.t0 = (double)skipSteps * req.h; res.dt = (double)req.pre_scaller * req.h;
+        res.observed = nSel > 0 ? ob.nodes : std::vector<int>();
+        res.observed_vars = ob.vars;
+        res.traces = std::move(traces);
+        res.means = std::move(means);
+        res.wall_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0).count();
+        res.ok = true;
+        return res;
+    }
+
     NeuralResult run_neural(const NeuralRequest& req) {
+        if (req.schedule == NeuralSchedule::Spike) return run_neural_spike(req);
         // Раскладки совпадают с шаблоном.
         struct StepArgs {
             const numb* values; numb* s0; numb* s1; numb* s2; numb* s3;

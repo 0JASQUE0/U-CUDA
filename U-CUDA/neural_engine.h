@@ -8,7 +8,7 @@
 #include <vector>
 
 // Номера совпадают с NEURAL_SCHED в шаблоне.
-enum class NeuralSchedule { Old = 0, Post = 1, Heun = 2, Stage = 3 };
+enum class NeuralSchedule { Old = 0, Post = 1, Heun = 2, Stage = 3, Spike = 4 };
 
 // Внешнее воздействие: отсчёты держатся hold_steps шагов, после конца держится последний.
 // Вход складывается со связью, поэтому попадает в каждую стадию stage. Границы удержания кратны шагу.
@@ -52,6 +52,27 @@ struct NeuralLyapunov {
     std::vector<unsigned long long> instance_seed;   // [instances], пусто = seed у всех
 };
 
+// Импульсная сеть, schedule = Spike. Шаг только RK4, связь только спайками. Последние receptors переменных X это
+// синапсы: дуга прибавляет к ним вес, а между спайками они спадают по точной экспоненте. Правая часть читает их как
+// обычные переменные, поэтому токовый и проводимостный синапс различаются только текстом правой части.
+// Спайк шага n (индекс с 0) это состояние времени (n + 1) h, а дуга с задержкой d даёт вклад в начале шага n + d.
+// Дуга: edge_law = номер синапса, edge_w = вес, delay в шагах >= 1.
+struct NeuralSpiking {
+    int receptors = 0;                // не больше 8
+    std::vector<double> tau;          // [receptors]
+    std::string spike_body;           // codegen_spike_body
+    std::vector<int> refractory_steps; // [n_nodes], столько шагов узел держится после сброса, синапсы спадают; пусто = 0
+    std::vector<int> edge_delay;      // [arcs]
+
+    // Источник спайков: узел без динамики, спайк с вероятностью p за шаг на шагах [from, to). p < 0 = обычный узел.
+    std::vector<double> source_p;     // [n_nodes], пусто = источников нет
+    std::vector<int> source_from, source_to;
+    unsigned long long seed = 1;
+
+    int window = 0;                   // шагов на запуск, 0 = авто; не больше наименьшей задержки
+    int log_capacity = 0;             // записей журнала на чанк, 0 = авто; лишние отбрасываются, счётчики узлов точны
+};
+
 struct NeuralRequest {
     NeuralSchedule schedule = NeuralSchedule::Stage;
     std::string krs_body;             // шаг узла; stage его не зовёт, но шаблону он нужен
@@ -86,6 +107,7 @@ struct NeuralRequest {
     NeuralInput       input;
     NeuralObservation observe;
     NeuralLyapunov    lyapunov;
+    NeuralSpiking     spike;
     size_t max_output_bytes = size_t(1) << 30;   // лимит записанного на хосте
 
     int block_size = 0;                // 0 = kNeuralDefaultBlock
@@ -122,6 +144,12 @@ struct NeuralResult {
     std::vector<double> lyap_log;      // [block][instance], log(d / d0) за блок записи
     double lyap_dt = 0.0;              // длина блока
     int    lyap_blocks = 0;
+
+    // Журнал спайков записи, по шагу и узлу. Переполнение чанка или лимит вывода режут журнал, но не динамику.
+    std::vector<long long> spike_step;
+    std::vector<int>       spike_node;
+    std::vector<int>       spike_count;    // [n_nodes], за запись, точно
+    long long spikes_dropped = 0;
 
     long long launches = 0, syncs = 0, steps_done = 0;
     int block_size = 0;
