@@ -508,6 +508,9 @@ const char* neural_source_name(NeuralSourceKind k) {
     return "?";
 }
 
+static constexpr int kNeuralWatched = 16;                 // дуг и устройств на сеть в окне Neural Weights
+static constexpr char kNeuralCheckpointMagic[9] = "UCUDACK1";
+
 // Время в целых шагах: событие стоит на сетке. floor_steps = наименьшее допустимое, 0 у задержки это один шаг.
 static int spike_steps(const std::string& text, double h, const char* what, int floor_steps) {
     const double t = num_or(text, 0.0);
@@ -538,14 +541,20 @@ NeuralGraph neural_build_graph(const NeuralConfig& c) {
     const double h = parse_num(c.h_text, 0.01);
 
     std::vector<Rows> rows(c.projections.size());
+    bool devices = false;
     for (size_t q = 0; q < c.projections.size(); ++q) {
         const NeuralProjection& p = c.projections[q];
         if (p.from < 0 || p.from >= nPops || p.to < 0 || p.to >= nPops) throw std::runtime_error("a projection points to a missing population");
         if (spike) {
             if (p.receptor < 0 || p.receptor >= (int)c.receptors.size()) throw std::runtime_error("a projection uses a missing synapse: add one in the Spiking block");
             if (c.populations[(size_t)p.to].spike_source) throw std::runtime_error("a spike source cannot receive arcs");
+            if (p.plastic < -1 || p.plastic >= (int)c.plastic_rules.size()) throw std::runtime_error("a projection uses a missing plasticity rule");
         }
-        else if (p.law < 0 || p.law >= (int)c.laws.size()) throw std::runtime_error("a projection uses a missing coupling law");
+        else if (!p.device && (p.law < 0 || p.law >= (int)c.laws.size())) throw std::runtime_error("a projection uses a missing coupling law");
+        if (p.device) {
+            if (c.schedule != NeuralSchedule::Stage) throw std::runtime_error("a device on a link needs the Stage schedule");
+            devices = true;
+        }
         rows[q] = build_rows(p, (int)q, seed, g.pop_start[(size_t)p.from + 1] - g.pop_start[(size_t)p.from],
                              g.pop_start[(size_t)p.to + 1] - g.pop_start[(size_t)p.to]);
     }
@@ -558,8 +567,10 @@ NeuralGraph neural_build_graph(const NeuralConfig& c) {
 
     g.start.assign((size_t)g.N + 1, 0);
     g.src.reserve((size_t)arcs); g.w.reserve((size_t)arcs); g.law.reserve((size_t)arcs);
-    struct Arc { int src, law, delay; double w; };
+    struct Arc { int src, law, delay, rule; double w; };
     std::vector<Arc> row;
+    struct Link { int a, b, proj; double gain; };
+    std::vector<Link> links;
     g.degree_min = std::numeric_limits<int>::max(); g.degree_max = 0;
     for (int pop = 0; pop < nPops; ++pop) {
         const int n = g.pop_start[(size_t)pop + 1] - g.pop_start[(size_t)pop];
@@ -585,18 +596,34 @@ NeuralGraph neural_build_graph(const NeuralConfig& c) {
                 const int law = spike ? p.receptor : p.law, delay = spike ? spike_steps(p.delay_text, h, "a delay", 1) : 0;
                 for (long long a = a0; a < a1; ++a) {
                     const double f = spread != 0.0 ? 1.0 + spread * (2.0 * gw.uni() - 1.0) : 1.0;
-                    row.push_back({ r.src[(size_t)a] + off, law, delay, base * f });
+                    if (p.device) links.push_back({ r.src[(size_t)a] + off, g.pop_start[(size_t)pop] + t, (int)q, base * f });
+                    else row.push_back({ r.src[(size_t)a] + off, law, delay, spike ? p.plastic : -1, base * f });
                 }
             }
             std::stable_sort(row.begin(), row.end(), [](const Arc& a, const Arc& b) { return a.src < b.src; });
             const int node = g.pop_start[(size_t)pop] + t;
             g.start[(size_t)node] = (int)g.src.size();
-            for (const Arc& a : row) { g.src.push_back(a.src); g.law.push_back(a.law); g.w.push_back(a.w); if (spike) g.delay.push_back(a.delay); }
+            for (const Arc& a : row) { g.src.push_back(a.src); g.law.push_back(a.law); g.w.push_back(a.w); if (spike) { g.delay.push_back(a.delay); g.rule.push_back(a.rule); } }
             g.degree_min = std::min(g.degree_min, (int)row.size());
             g.degree_max = std::max(g.degree_max, (int)row.size());
         }
     }
     g.start[(size_t)g.N] = (int)g.src.size();
+
+    // Один элемент: встречная дуга той же проекции уже описана первой, вторая отбрасывается.
+    if (devices) {
+        std::unordered_set<uint64_t> seen;
+        for (const Link& l : links) {
+            const NeuralProjection& p = c.projections[(size_t)l.proj];
+            if (p.one_element) {
+                const uint64_t back = ((uint64_t)(uint32_t)l.b << 32) | (uint32_t)l.a;
+                if (seen.count(back ^ ((uint64_t)l.proj << 60))) continue;
+                seen.insert((((uint64_t)(uint32_t)l.a << 32) | (uint32_t)l.b) ^ ((uint64_t)l.proj << 60));
+            }
+            g.dev_a.push_back(l.a); g.dev_b.push_back(l.b); g.dev_var.push_back(p.device_var);
+            g.dev_two_way.push_back(p.one_element ? 1 : 0); g.dev_gain.push_back(l.gain);
+        }
+    }
 
     Fnv f;
     f.add((uint64_t)g.N);
@@ -608,6 +635,13 @@ NeuralGraph neural_build_graph(const NeuralConfig& c) {
         f.add(((uint64_t)(uint32_t)g.src[e] << 8) | (uint64_t)(uint8_t)g.law[e]);
         f.add(bits);
         if (spike) f.add((uint64_t)(uint32_t)g.delay[e]);
+    }
+    for (size_t e = 0; e < g.dev_a.size(); ++e) {
+        uint64_t bits;
+        std::memcpy(&bits, &g.dev_gain[e], sizeof bits);
+        f.add(((uint64_t)(uint32_t)g.dev_a[e] << 32) | (uint32_t)g.dev_b[e]);
+        f.add(((uint64_t)(uint32_t)g.dev_var[e] << 1) | (uint64_t)g.dev_two_way[e]);
+        f.add(bits);
     }
     g.hash = hex64(f.h);
     return g;
@@ -624,6 +658,12 @@ std::string neural_graph_recipe(const NeuralConfig& c) {
     if (c.schedule == NeuralSchedule::Spike) {
         o << "|spike:h=" << c.h_text;
         for (const NeuralProjection& p : c.projections) o << ":" << p.receptor << "," << p.delay_text;
+    }
+    bool anyDevice = false;
+    for (const NeuralProjection& p : c.projections) anyDevice = anyDevice || p.device;
+    if (anyDevice) {
+        o << "|dev";
+        for (const NeuralProjection& p : c.projections) o << ":" << p.device << p.one_element << p.device_var;
     }
     const auto axis = [&o](const NeuralSweep& s, const char* tag) {
         o << tag << (int)s.kind << ":" << s.population << ":" << s.param << ":" << s.lo_text
@@ -657,6 +697,61 @@ NeuralPopulation neural_default_population(const SystemRecord* r, const std::vec
         p.ic_spread[name] = "0.1";   // из одинаковых НУ диффузионная сеть стартует синхронной
     }
     return p;
+}
+
+const char* neural_device_preset_name(NeuralDevicePreset p) {
+    return p == NeuralDevicePreset::Team ? "TEAM (current threshold)" : "VTEAM (voltage threshold)";
+}
+
+NeuralDeviceModel neural_device_preset(NeuralDevicePreset p) {
+    NeuralDeviceModel m;
+    m.current_text = "v/(Ron + (Roff - Ron)*m)";
+    if (p == NeuralDevicePreset::Vteam) {
+        m.rhs_text = "koff*max(v/voff - 1, 0)^aoff*exp(-exp((m - 0.9)/wc)) - kon*max(v/von - 1, 0)^aon*exp(-exp((0.1 - m)/wc))";
+        m.params_text = "koff = 0.02, kon = 0.02, aoff = 2, aon = 2, voff = 0.5, von = -0.5, Ron = 1, Roff = 10, wc = 0.05";
+    } else {
+        m.rhs_text = "koff*max(v/(Ron + (Roff - Ron)*m)/ioff - 1, 0)^aoff*exp(-exp((m - 0.9)/wc)) - kon*max(v/(Ron + (Roff - Ron)*m)/ion - 1, 0)^aon*exp(-exp((0.1 - m)/wc))";
+        m.params_text = "koff = 0.02, kon = 0.02, aoff = 2, aon = 2, ioff = 0.2, ion = -0.2, Ron = 1, Roff = 10, wc = 0.05";
+    }
+    return m;
+}
+
+// Модель устройства: правая часть и ток печатаются обычным кодгеном, параметры идут за v.
+static void fill_devices(const NeuralConfig& c, const NeuralGraph& g, NeuralRequest& r) {
+    const NeuralDeviceModel& m = c.device;
+    if (m.rhs_text.empty() || m.current_text.empty()) throw std::runtime_error("the device has no equations: pick a preset in the Device block");
+    System s;
+    s.vars = { m.state_name };
+    s.params = { "v" };
+    std::vector<double> values;
+    std::stringstream list(m.params_text);
+    std::string item;
+    while (std::getline(list, item, ',')) {
+        const size_t eq = item.find('=');
+        const auto trim = [](std::string t) {
+            const size_t a = t.find_first_not_of(" \t"), b = t.find_last_not_of(" \t");
+            return a == std::string::npos ? std::string() : t.substr(a, b - a + 1);
+        };
+        if (trim(item).empty()) continue;
+        if (eq == std::string::npos) throw std::runtime_error("device parameters must read name = value");
+        s.params.push_back(trim(item.substr(0, eq)));
+        values.push_back(num_or(trim(item.substr(eq + 1)), 0.0));
+    }
+    System cur = s;
+    s.rhs = { m.rhs_text };
+    cur.rhs = { m.current_text };
+    r.devices.states = 1;
+    r.devices.params = (int)values.size();
+    r.devices.rhs_body = codegen_rhs_body(s);
+    r.devices.current_body = codegen_rhs_body(cur);
+    r.devices.s_min = { num_or(m.min_text, 0.0) };
+    r.devices.s_max = { num_or(m.max_text, 1.0) };
+    r.devices.a = g.dev_a; r.devices.b = g.dev_b; r.devices.var = g.dev_var; r.devices.two_way = g.dev_two_way; r.devices.gain = g.dev_gain;
+    const double s0 = num_or(m.initial_text, 0.5);
+    r.devices.initial.assign(g.dev_a.size(), s0);
+    r.devices.values.reserve(g.dev_a.size() * values.size());
+    for (size_t d = 0; d < g.dev_a.size(); ++d) r.devices.values.insert(r.devices.values.end(), values.begin(), values.end());
+    for (int d = 0; d < (std::min)(kNeuralWatched, (int)g.dev_a.size()); ++d) r.devices.watch.push_back(d);
 }
 
 // Всё, чем импульсная сеть отличается от непрерывной: система с синапсами, правило спайка, источники, задержки.
@@ -694,6 +789,23 @@ static void fill_spiking(const System& sys, const std::vector<std::string>& vars
     r.amountOfX = (int)spk.vars.size();
     r.edge_law = g.law;
     if (c.input_var < 0 || c.input_var >= (int)vars.size()) throw std::runtime_error("the input variable is out of range");
+    if (std::any_of(g.rule.begin(), g.rule.end(), [](int q) { return q >= 0; })) {
+        for (const NeuralPlasticRule& q : c.plastic_rules) {
+            NeuralStdpRule o;
+            o.a_plus = num_or(q.a_plus_text, 0.0); o.a_minus = num_or(q.a_minus_text, 0.0);
+            o.tau_plus = num_or(q.tau_plus_text, 20.0); o.tau_minus = num_or(q.tau_minus_text, 20.0);
+            o.w_min = num_or(q.w_min_text, 0.0); o.w_max = num_or(q.w_max_text, 1.0);
+            o.mu_plus = num_or(q.mu_plus_text, 0.0); o.mu_minus = num_or(q.mu_minus_text, 0.0);
+            o.nearest = q.nearest;
+            r.spike.rules.push_back(o);
+        }
+        r.spike.edge_rule = g.rule;
+        // Несколько дуг на всю сеть, равномерно: показать динамику, а не хранить все веса во времени.
+        std::vector<int> plastic;
+        for (int e = 0; e < (int)g.rule.size(); ++e) if (g.rule[(size_t)e] >= 0) plastic.push_back(e);
+        const int m = (std::min)(kNeuralWatched, (int)plastic.size());
+        for (int k = 0; k < m; ++k) r.spike.watch_arcs.push_back(plastic[(size_t)((long long)k * (long long)plastic.size() / m)]);
+    }
 
     for (size_t pop = 0; pop < c.populations.size(); ++pop) {
         const NeuralPopulation& p = c.populations[pop];
@@ -740,6 +852,8 @@ NeuralRequest neural_build_request(const System& sys, const std::vector<CustomSc
     const uint64_t seed = (uint64_t)int_or(c.seed_text, 1);
     r.h = parse_num(c.h_text, 0.01);
     if (spike) fill_spiking(sys, vars, c, g, seed, r);
+    if (!g.dev_a.empty()) fill_devices(c, g, r);
+    r.keep_checkpoint = c.keep_checkpoint;
     r.values.assign((size_t)g.N * (size_t)r.amountOfValues, 0.0);
     r.initial_conditions.assign((size_t)g.N * (size_t)r.amountOfX, 0.0);
     const double s_default = num_or(c.symmetry_s, 0.5);
@@ -779,7 +893,8 @@ NeuralRequest neural_build_request(const System& sys, const std::vector<CustomSc
         if (std::find(c.obs_vars_off.begin(), c.obs_vars_off.end(), (int)k) == c.obs_vars_off.end()) r.observe.vars.push_back((int)k);
     r.observe.pop_start = g.pop_start;
     r.observe.spread = !spike;
-    r.observe.order_var = !spike && r.reset_at.empty() && c.order_var < (int)vars.size() ? c.order_var : -1;
+    // Пересечения порога в точку не входят, поэтому при контрольной точке R не считается.
+    r.observe.order_var = !spike && r.reset_at.empty() && !c.keep_checkpoint && c.order_var < (int)vars.size() ? c.order_var : -1;
     r.observe.order_threshold = num_or(c.order_threshold_text, 0.0);
     const double limit_mb = num_or(c.output_limit_text, 1024.0);
     if (!(limit_mb > 0.0)) throw std::runtime_error("the output limit must be positive");
@@ -851,6 +966,47 @@ NeuralConfig neural_sweep_instance(const NeuralConfig& c, int index, double valu
     return o;
 }
 
+void neural_checkpoint_save(const std::string& path, const NeuralCheckpoint& c) {
+    std::ofstream f(path, std::ios::binary);
+    const uint64_t step = (uint64_t)c.step, shape = c.shape.size(), size = c.data.size();
+    f.write(kNeuralCheckpointMagic, 8);
+    f.write((const char*)&step, 8); f.write((const char*)&shape, 8); f.write((const char*)&size, 8);
+    f.write(c.shape.data(), (std::streamsize)shape);
+    f.write(c.data.data(), (std::streamsize)size);
+    if (!f) throw std::runtime_error("could not write " + path);
+}
+
+std::shared_ptr<NeuralCheckpoint> neural_checkpoint_load(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    char magic[8] = {};
+    uint64_t step = 0, shape = 0, size = 0;
+    f.read(magic, 8);
+    f.read((char*)&step, 8); f.read((char*)&shape, 8); f.read((char*)&size, 8);
+    if (!f || std::memcmp(magic, kNeuralCheckpointMagic, 8) != 0) throw std::runtime_error(path + " is not a checkpoint");
+    auto c = std::make_shared<NeuralCheckpoint>();
+    c->step = (long long)step;
+    c->shape.resize((size_t)shape);
+    c->data.resize((size_t)size);
+    f.read(c->shape.data(), (std::streamsize)shape);
+    f.read(c->data.data(), (std::streamsize)size);
+    if (!f) throw std::runtime_error(path + " is cut short");
+    return c;
+}
+
+void neural_merge_resumed(const NeuralResult& before, NeuralResult& after) {
+    const auto fill = [](const std::vector<double>& from, std::vector<double>& to) {
+        for (size_t k = 0; k < from.size() && k < to.size(); ++k) if (std::isnan(to[k])) to[k] = from[k];
+    };
+    fill(before.traces, after.traces);
+    fill(before.means, after.means);
+    fill(before.spread, after.spread);
+    fill(before.weight_trace, after.weight_trace);
+    fill(before.device_trace, after.device_trace);
+    after.spike_step.insert(after.spike_step.begin(), before.spike_step.begin(), before.spike_step.end());
+    after.spike_node.insert(after.spike_node.begin(), before.spike_node.begin(), before.spike_node.end());
+    after.spikes_dropped += before.spikes_dropped;
+}
+
 std::string neural_spike_csv(const NeuralConfig& c) {
     std::ostringstream o;
     o.precision(17);
@@ -890,6 +1046,35 @@ std::string neural_sweep_csv(const NeuralConfig& c) {
     return o.str();
 }
 
+// Подписи кривых Neural Weights: дуга или устройство как популяция[номер], номера внутри популяции.
+static std::vector<std::string> neural_watch_labels(const NeuralConfig& c, const NeuralRequest& r) {
+    const std::vector<int>& ps = r.observe.pop_start;
+    const auto node = [&](int i) {
+        const int q = (int)(std::upper_bound(ps.begin(), ps.end(), i) - ps.begin()) - 1;
+        return c.populations[(size_t)q].name + "[" + std::to_string(i - ps[(size_t)q]) + "]";
+    };
+    std::vector<std::string> out;
+    for (int e : r.spike.watch_arcs) {
+        const int dst = (int)(std::upper_bound(r.edge_start.begin(), r.edge_start.end(), e) - r.edge_start.begin()) - 1;
+        out.push_back(node(r.edge_src[(size_t)e]) + " -> " + node(dst));
+    }
+    for (int d : r.devices.watch) out.push_back(node(r.devices.a[(size_t)d]) + " - " + node(r.devices.b[(size_t)d]));
+    return out;
+}
+
+// Вторая часть метки контрольной точки: продолжение пишет точки по этой же сетке, иначе склейка с прошлой записью неверна.
+static std::string neural_record_tag(const NeuralRequest& r) {
+    Fnv f;
+    for (int v : r.observe.nodes) f.add((uint64_t)(uint32_t)v);
+    for (int v : r.observe.vars) f.add((uint64_t)(uint32_t)v);
+    for (int v : r.spike.watch_arcs) f.add((uint64_t)(uint32_t)v);
+    for (int v : r.devices.watch) f.add((uint64_t)(uint32_t)v);
+    std::ostringstream o;
+    o.precision(17);
+    o << "|" << r.h << ":" << r.transient << ":" << r.pre_scaller << ":" << hex64(f.h);
+    return o.str();
+}
+
 NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custom_schemes,
                        const std::vector<std::string>& vars, const std::vector<std::string>& params,
                        const NeuralConfig& c) {
@@ -918,6 +1103,9 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
         plan.hash = g.hash;
         plan.arcs = (long long)g.src.size();
         plan.degree_min = g.degree_min; plan.degree_max = g.degree_max;
+        plan.watched_per_instance = (int)(plan.request.spike.watch_arcs.size() + plan.request.devices.watch.size() * (size_t)plan.request.devices.states);
+        plan.watch_labels = neural_watch_labels(c, plan.request);
+        plan.request.checkpoint_tag = plan.hash + neural_record_tag(plan.request);
         return plan;
     }
     // Экземпляры подряд: номера узлов и популяций сдвигаются, дуга наружу экземпляра появиться не может.
@@ -941,6 +1129,8 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
         plan.degree_max = (std::max)(plan.degree_max, g.degree_max);
         const unsigned long long lyap_seed = r.lyapunov.seed;
         if (i == 0) {
+            plan.watched_per_instance = (int)(r.spike.watch_arcs.size() + r.devices.watch.size() * (size_t)r.devices.states);
+            plan.watch_labels = neural_watch_labels(c, r);
             a = std::move(r);
             a.instance_start = { 0, a.n_nodes };
             a.lyapunov.instance_seed = { lyap_seed };
@@ -972,6 +1162,19 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
         append(a.spike.source_from, r.spike.source_from);
         append(a.spike.source_to, r.spike.source_to);
         append(a.spike.source_seed, r.spike.source_seed);
+        // У каждого экземпляра свои правила: значение свипа может их менять.
+        const int rule_off = (int)a.spike.rules.size(), dev_off = (int)a.devices.a.size();
+        append(a.spike.rules, r.spike.rules);
+        for (int v : r.spike.edge_rule) a.spike.edge_rule.push_back(v < 0 ? -1 : v + rule_off);
+        for (int v : r.spike.watch_arcs) a.spike.watch_arcs.push_back(v + arc_off);
+        for (int v : r.devices.a) a.devices.a.push_back(v + off);
+        for (int v : r.devices.b) a.devices.b.push_back(v + off);
+        append(a.devices.var, r.devices.var);
+        append(a.devices.two_way, r.devices.two_way);
+        append(a.devices.gain, r.devices.gain);
+        append(a.devices.values, r.devices.values);
+        append(a.devices.initial, r.devices.initial);
+        for (int v : r.devices.watch) a.devices.watch.push_back(v + dev_off);
         a.observe.pop_start.pop_back();
         for (int v : r.observe.pop_start) a.observe.pop_start.push_back(v + off);
         for (int v : r.observe.nodes) a.observe.nodes.push_back(v + off);
@@ -990,6 +1193,7 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
         a.input.channels = ch * K;
     }
     plan.hash = hex64(f.h);
+    plan.request.checkpoint_tag = plan.hash + neural_record_tag(plan.request);
     return plan;
 }
 
@@ -1021,7 +1225,8 @@ void NeuralSession::add_config() {
         c = configs.back();
         c.result = NeuralResult{};
         c.instance_start.clear(); c.sweep_values.clear(); c.sweep2_values.clear(); c.sweep_order.clear(); c.sweep_spread.clear();
-        c.sweep_lyap.clear(); c.input_view.clear(); c.pop_rate.clear();
+        c.sweep_lyap.clear(); c.input_view.clear(); c.pop_rate.clear(); c.weight_summary.clear();
+        c.checkpoint.reset();
         c.last_run_ok = false;
         c.last_error.clear();
         c.data_generation = 0;
@@ -1043,9 +1248,10 @@ void NeuralSession::remove_config(int i) {
     if (active_config_index >= (int)configs.size()) active_config_index = (int)configs.size() - 1;
 }
 
-bool NeuralSession::run_async(ParametricEngine& engine, int config_idx) {
+bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool resume) {
     if (in_flight || config_idx < 0 || config_idx >= (int)configs.size()) return false;
     NeuralConfig& c = configs[(size_t)config_idx];
+    if (resume && !c.checkpoint) return false;
     c.last_error.clear();
     c.hash_mismatch = false;
     last_run_label.clear();
@@ -1060,7 +1266,7 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx) {
 
     // Граф на 10 млн дуг строится секунды: всё это в рабочем потоке, а не в кадре.
     run_future = std::async(std::launch::async,
-        [&engine, snap = std::move(snap), sys_copy = sys, cs = custom_schemes, v = vars, q = params,
+        [&engine, snap = std::move(snap), sys_copy = sys, cs = custom_schemes, v = vars, q = params, resume,
          cancel = cancel_token, progress = progress_token]() {
         NeuralOutcome out;
         try {
@@ -1078,6 +1284,10 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx) {
                 return out;
             }
             plan.request.cancel = cancel; plan.request.progress = progress;
+            if (resume) { plan.request.resume = snap.checkpoint; plan.request.observe.order_var = -1; }
+            out.resumed = resume;
+            out.watched_per_instance = plan.watched_per_instance;
+            out.watch_labels = plan.watch_labels;
             out.result = engine.run_neural(plan.request);
             out.instance_start = plan.request.instance_start;
             if (out.instance_start.empty()) out.instance_start = { 0, plan.request.n_nodes };
@@ -1092,6 +1302,19 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx) {
                     const bool stopped = q < (int)out.result.instance_stop.size() && out.result.instance_stop[(size_t)q] >= 0;
                     out.pop_rate.push_back(stopped ? std::numeric_limits<double>::quiet_NaN()
                                                    : span > 0.0 ? (double)sum / (double)(out.pop_start[p + 1] - out.pop_start[p]) / span : 0.0);
+                }
+            }
+            if (out.result.ok && !plan.request.spike.edge_rule.empty()) {
+                const std::vector<int>& inst = out.instance_start;
+                for (size_t q2 = 0; q2 + 1 < inst.size(); ++q2) {
+                    double lo = std::numeric_limits<double>::infinity(), hi = -lo, sum = 0.0;
+                    long long n = 0;
+                    for (int e = plan.request.edge_start[(size_t)inst[q2]]; e < plan.request.edge_start[(size_t)inst[q2 + 1]]; ++e) {
+                        if (plan.request.spike.edge_rule[(size_t)e] < 0) continue;
+                        const double w = out.result.final_weights[(size_t)e];
+                        lo = (std::min)(lo, w); hi = (std::max)(hi, w); sum += w; ++n;
+                    }
+                    out.weight_summary.push_back(lo); out.weight_summary.push_back(n ? sum / (double)n : 0.0); out.weight_summary.push_back(hi);
                 }
             }
             out.sweep_values = std::move(plan.sweep_values);
@@ -1139,7 +1362,13 @@ bool NeuralSession::poll() {
             c.build_seconds = out.build_seconds;
         }
         if (out.result.ok) {
+            if (out.resumed) neural_merge_resumed(c.result, out.result);
             c.result = std::move(out.result);
+            c.checkpoint = c.result.checkpoint;
+            c.result.checkpoint.reset();
+            c.watched_per_instance = out.watched_per_instance;
+            c.watch_labels = std::move(out.watch_labels);
+            c.weight_summary = std::move(out.weight_summary);
             c.instance_start = std::move(out.instance_start);
             c.sweep_values = std::move(out.sweep_values);
             c.sweep2_values = std::move(out.sweep2_values);

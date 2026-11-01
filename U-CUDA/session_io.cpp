@@ -1970,6 +1970,8 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
         o << ",\"law\":" << p.law;
         // Импульсные поля пишутся только у импульсных сессий: старые файлы не меняются.
         if (c.schedule == NeuralSchedule::Spike) { o << ",\"receptor\":" << p.receptor << ",\"delay\":"; jstr(o, p.delay_text); }
+        if (p.plastic >= 0) o << ",\"plastic\":" << p.plastic;
+        if (p.device) o << ",\"device\":true,\"one_element\":" << (p.one_element ? "true" : "false") << ",\"device_var\":" << p.device_var;
         o << "}";
     }
     o << "]";
@@ -1992,6 +1994,36 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
         }
         o << "]";
     }
+    // Пишутся только при наличии: старые файлы не меняются.
+    if (!c.plastic_rules.empty()) {
+        o << ",\"plastic_rules\":[";
+        for (size_t i = 0; i < c.plastic_rules.size(); ++i) {
+            const NeuralPlasticRule& q = c.plastic_rules[i];
+            if (i) o << ",";
+            o << "{\"name\":"; jstr(o, q.name);
+            o << ",\"a_plus\":"; jstr(o, q.a_plus_text);
+            o << ",\"a_minus\":"; jstr(o, q.a_minus_text);
+            o << ",\"tau_plus\":"; jstr(o, q.tau_plus_text);
+            o << ",\"tau_minus\":"; jstr(o, q.tau_minus_text);
+            o << ",\"w_min\":"; jstr(o, q.w_min_text);
+            o << ",\"w_max\":"; jstr(o, q.w_max_text);
+            o << ",\"mu_plus\":"; jstr(o, q.mu_plus_text);
+            o << ",\"mu_minus\":"; jstr(o, q.mu_minus_text);
+            o << ",\"nearest\":" << (q.nearest ? "true" : "false") << "}";
+        }
+        o << "]";
+    }
+    if (!c.device.rhs_text.empty()) {
+        o << ",\"device_state\":"; jstr(o, c.device.state_name);
+        o << ",\"device_rhs\":"; jstr(o, c.device.rhs_text);
+        o << ",\"device_current\":"; jstr(o, c.device.current_text);
+        o << ",\"device_params\":"; jstr(o, c.device.params_text);
+        o << ",\"device_initial\":"; jstr(o, c.device.initial_text);
+        o << ",\"device_min\":"; jstr(o, c.device.min_text);
+        o << ",\"device_max\":"; jstr(o, c.device.max_text);
+    }
+    if (c.keep_checkpoint) o << ",\"keep_checkpoint\":true";
+    if (!c.checkpoint_path.empty()) { o << ",\"checkpoint_path\":"; jstr(o, c.checkpoint_path); }
     o << "}";
 }
 
@@ -2166,9 +2198,40 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
             else if (k == "law") q.law = std::stoi(p.str_or_num());
             else if (k == "receptor") q.receptor = std::stoi(p.str_or_num());
             else if (k == "delay") q.delay_text = p.str();
+            else if (k == "plastic") q.plastic = std::stoi(p.str_or_num());
+            else if (k == "device") q.device = p.boolean();
+            else if (k == "one_element") q.one_element = p.boolean();
+            else if (k == "device_var") q.device_var = std::stoi(p.str_or_num());
             else p.skip_value();
         });
     }
+    else if (key == "plastic_rules") {
+        c.plastic_rules.clear();
+        NeuralPlasticRule q;
+        read_neural_list(p, [&](const std::string& k) {
+            if (k.empty()) { c.plastic_rules.push_back(q); q = NeuralPlasticRule{}; }
+            else if (k == "name") q.name = p.str();
+            else if (k == "a_plus") q.a_plus_text = p.str();
+            else if (k == "a_minus") q.a_minus_text = p.str();
+            else if (k == "tau_plus") q.tau_plus_text = p.str();
+            else if (k == "tau_minus") q.tau_minus_text = p.str();
+            else if (k == "w_min") q.w_min_text = p.str();
+            else if (k == "w_max") q.w_max_text = p.str();
+            else if (k == "mu_plus") q.mu_plus_text = p.str();
+            else if (k == "mu_minus") q.mu_minus_text = p.str();
+            else if (k == "nearest") q.nearest = p.boolean();
+            else p.skip_value();
+        });
+    }
+    else if (key == "device_state")     c.device.state_name = p.str();
+    else if (key == "device_rhs")       c.device.rhs_text = p.str();
+    else if (key == "device_current")   c.device.current_text = p.str();
+    else if (key == "device_params")    c.device.params_text = p.str();
+    else if (key == "device_initial")   c.device.initial_text = p.str();
+    else if (key == "device_min")       c.device.min_text = p.str();
+    else if (key == "device_max")       c.device.max_text = p.str();
+    else if (key == "keep_checkpoint")  c.keep_checkpoint = p.boolean();
+    else if (key == "checkpoint_path")  c.checkpoint_path = p.str();
     else if (key == "threshold_var")    c.threshold_var = std::stoi(p.str_or_num());
     else if (key == "threshold")        c.threshold_text = p.str();
     else if (key == "refractory")       c.refractory_text = p.str();

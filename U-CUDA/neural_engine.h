@@ -52,11 +52,25 @@ struct NeuralLyapunov {
     std::vector<unsigned long long> instance_seed;   // [instances], пусто = seed у всех
 };
 
+// STDP на дуге: следы pre и post спадают точной экспонентой, вес ограничен [w_min, w_max] после каждого обновления.
+// mu = 0 аддитивное правило, mu = 1 мультипликативное. nearest: след равен 1 после спайка, а не копится.
+// gain: множитель обновления, место для третьего фактора.
+struct NeuralStdpRule {
+    double a_plus = 0.0, a_minus = 0.0;      // оба >= 0: потенциация и депрессия
+    double tau_plus = 20.0, tau_minus = 20.0;
+    double w_min = 0.0, w_max = 1.0;
+    double mu_plus = 0.0, mu_minus = 0.0;
+    double gain = 1.0;
+    bool   nearest = false;
+};
+
 // Импульсная сеть, schedule = Spike. Шаг только RK4, связь только спайками. Последние receptors переменных X это
 // синапсы: дуга прибавляет к ним вес, а между спайками они спадают по точной экспоненте. Правая часть читает их как
 // обычные переменные, поэтому токовый и проводимостный синапс различаются только текстом правой части.
 // Спайк шага n (индекс с 0) это состояние времени (n + 1) h, а дуга с задержкой d даёт вклад в начале шага n + d.
 // Дуга: edge_law = номер синапса, edge_w = вес, delay в шагах >= 1.
+// Пластичную дугу пишет только поток приёмника. Спайк приёмника конца шага m и приход начала шага m + 1 это один момент:
+// сначала спайк приёмника, затем приход, поэтому при равных временах дуга получает депрессию.
 struct NeuralSpiking {
     int receptors = 0;                // не больше 8
     std::vector<double> tau;          // [receptors]
@@ -69,6 +83,10 @@ struct NeuralSpiking {
     std::vector<int> source_from, source_to;
     unsigned long long seed = 1;
     std::vector<unsigned long long> source_seed;   // [n_nodes], neural_source_seed; пусто = от seed и номера узла
+
+    std::vector<NeuralStdpRule> rules;
+    std::vector<int> edge_rule;       // [arcs], -1 = статическая дуга; пусто = пластичности нет
+    std::vector<int> watch_arcs;      // номера дуг запроса, их веса пишутся на сетке записи
 
     int window = 0;                   // шагов на запуск, 0 = авто; не больше наименьшей задержки
     int log_capacity = 0;             // записей журнала на чанк, 0 = авто; лишние отбрасываются, счётчики узлов точны
@@ -83,6 +101,30 @@ inline unsigned long long neural_source_seed(unsigned long long seed, long long 
     };
     return mix(mix(seed + 0x9E3779B97F4A7C15ULL) ^ ((unsigned long long)node + 1ULL) * 0xC2B2AE3D27D4EB4FULL);
 }
+
+// Устройство на связи, только расписание stage: элемент между узлами a и b на переменной var, v = x_a - x_b, ток I уходит
+// из a и приходит в b, в правую часть он входит с gain. Состояния идут в тех же стадиях RK4, что и узлы. two_way = 0: ток только в b,
+// a не нагружен. Пишет только поток узла b. Тела печатает codegen_rhs_body по системе с параметрами [v, p...]:
+// rhs_body даёт производные состояний, current_body даёт F[0] = I. Переживает сброс попытки, как вес.
+struct NeuralDevices {
+    int states = 0;                   // состояний на устройство, 0 = устройств нет, не больше 4
+    int params = 0;
+    std::string rhs_body, current_body;
+    std::vector<int> a, b, var, two_way;   // [devices]
+    std::vector<double> gain;         // [devices]
+    std::vector<double> values;       // [devices * params]
+    std::vector<double> initial;      // [devices * states]
+    std::vector<double> s_min, s_max; // [states], жёсткие границы в конце шага
+    std::vector<int> watch;           // устройства, их состояния пишутся на сетке записи
+};
+
+// Снимок расчёта на границе чанка. Случайные числа и вход зависят только от шага и seed, поэтому своего состояния у них нет.
+// shape описывает форму запроса: другая форма отказывает. Параметры можно менять, например заморозить обучение.
+struct NeuralCheckpoint {
+    long long step = 0;
+    std::string shape;
+    std::vector<char> data;
+};
 
 struct NeuralRequest {
     NeuralSchedule schedule = NeuralSchedule::Stage;
@@ -119,6 +161,12 @@ struct NeuralRequest {
     NeuralObservation observe;
     NeuralLyapunov    lyapunov;
     NeuralSpiking     spike;
+    NeuralDevices     devices;
+    std::shared_ptr<const NeuralCheckpoint> resume;   // продолжить с этой точки; R и показатель Ляпунова несовместимы
+    // Входит в форму точки: хеш графа, сеть того же размера с другим графом отказывает. Часть после '|' описывает запись:
+    // сессия дополняет ею продолжение, и при другом прореживании склейка вышла бы неверной.
+    std::string checkpoint_tag;
+    bool keep_checkpoint = false;     // отдать снимок конца расчёта
     size_t max_output_bytes = size_t(1) << 30;   // лимит записанного на хосте
 
     int block_size = 0;                // 0 = kNeuralDefaultBlock
@@ -161,6 +209,13 @@ struct NeuralResult {
     std::vector<int>       spike_node;
     std::vector<int>       spike_count;    // [n_nodes], за запись, точно
     long long spikes_dropped = 0;
+    std::vector<double>    weight_trace;   // [point][watch], после остановки экземпляра NaN
+    std::vector<double>    final_weights;  // [arcs] в порядке запроса; пусто без пластичности
+
+    std::vector<double>    device_trace;   // [point][watch][state]
+    std::vector<double>    final_devices;  // [devices * states]
+    long long              device_clips = 0;   // сколько раз сработала граница состояния
+    std::shared_ptr<NeuralCheckpoint> checkpoint;
 
     long long launches = 0, syncs = 0, steps_done = 0;
     int block_size = 0;

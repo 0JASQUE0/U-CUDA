@@ -67,7 +67,7 @@ static bool neural_pop_combo(const char* label, int& index, const NeuralConfig& 
     return ImGui::Combo(label, &index, names.data(), (int)names.size());
 }
 
-static void draw_neural_projections(NeuralConfig& c) {
+static void draw_neural_projections(NeuralConfig& c, const std::vector<std::string>& vars) {
     if (!ImGui::CollapsingHeader("Projections", ImGuiTreeNodeFlags_DefaultOpen)) return;
     int remove = -1;
     for (size_t i = 0; i < c.projections.size(); ++i) {
@@ -108,12 +108,34 @@ static void draw_neural_projections(NeuralConfig& c) {
                 ImGui::Combo("synapse", &p.receptor, synapses.data(), (int)synapses.size());
                 InputNumStr("delay", p.delay_text, kFieldW);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("A multiple of h. 0 = one step, the shortest possible.");
+                std::vector<const char*> rules = { "constant weight" };
+                for (const NeuralPlasticRule& q : c.plastic_rules) rules.push_back(q.name.c_str());
+                int rule = p.plastic + 1;
+                if (rule < 0 || rule >= (int)rules.size()) rule = 0;
+                ImGui::SetNextItemWidth(kFieldW);
+                if (ImGui::Combo("plasticity", &rule, rules.data(), (int)rules.size())) p.plastic = rule - 1;
             }
             else {
-                std::vector<const char*> laws;
-                for (const NetCouplingLaw& l : c.laws) laws.push_back(l.name.c_str());
-                ImGui::SetNextItemWidth(kFieldW);
-                ImGui::Combo("coupling law", &p.law, laws.data(), (int)laws.size());
+                if (c.schedule == NeuralSchedule::Stage) {
+                    ImGui::Checkbox("device on the link", &p.device);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Instead of a coupling law: an element with its own state, see the Device block.\nThe arc weight is the gain of its current.");
+                }
+                if (p.device && c.schedule == NeuralSchedule::Stage) {
+                    ImGui::Checkbox("one physical element", &p.one_element);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("On: an arc and its opposite arc are one element, the current leaves the source and enters the receiver.\n"
+                                          "Off: every arc is its own element, the current only enters the receiver.");
+                    const std::vector<const char*> items = c_str_list(vars);
+                    if (p.device_var < 0 || p.device_var >= (int)items.size()) p.device_var = 0;
+                    ImGui::SetNextItemWidth(kFieldW);
+                    ImGui::Combo("device variable", &p.device_var, items.data(), (int)items.size());
+                }
+                else {
+                    std::vector<const char*> laws;
+                    for (const NetCouplingLaw& l : c.laws) laws.push_back(l.name.c_str());
+                    ImGui::SetNextItemWidth(kFieldW);
+                    ImGui::Combo("coupling law", &p.law, laws.data(), (int)laws.size());
+                }
             }
             if (ImGui::Button("Remove projection")) remove = (int)i;
             ImGui::TreePop();
@@ -169,9 +191,92 @@ static void draw_neural_spiking(NeuralSession& s, NeuralConfig& c) {
         q.name = "syn " + std::to_string(c.receptors.size() + 1);
         c.receptors.push_back(std::move(q));
     }
+
+    ImGui::SeparatorText("Plasticity");
+    int removeRule = -1;
+    for (size_t i = 0; i < c.plastic_rules.size(); ++i) {
+        NeuralPlasticRule& q = c.plastic_rules[i];
+        ImGui::PushID((int)i + 6000);
+        const std::string title = q.name + "###rule";
+        if (ImGui::TreeNodeEx(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+            InputTextStr("name", q.name, kFieldW);
+            InputNumStr("A+ (potentiation)", q.a_plus_text, kFieldW);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("In units of the arc weight. A spike of the receiver adds A+ * trace of the source.");
+            InputNumStr("A- (depression)", q.a_minus_text, kFieldW);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("In units of the arc weight. An arriving spike takes A- * trace of the receiver.\nAt equal times the receiver goes first, so the arc is depressed.");
+            InputNumStr("tau+", q.tau_plus_text, kFieldW);
+            InputNumStr("tau-", q.tau_minus_text, kFieldW);
+            InputNumStr("w min", q.w_min_text, kFieldW);
+            InputNumStr("w max", q.w_max_text, kFieldW);
+            InputNumStr("mu+", q.mu_plus_text, kFieldW);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("0: additive rule with hard bounds. 1: multiplicative rule, soft bounds.");
+            InputNumStr("mu-", q.mu_minus_text, kFieldW);
+            ImGui::Checkbox("nearest spike only", &q.nearest);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Off: all pairs count, the trace adds up.\nOn: the trace is 1 after a spike.");
+            if (ImGui::Button("Remove rule")) removeRule = (int)i;
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    if (removeRule >= 0) {
+        c.plastic_rules.erase(c.plastic_rules.begin() + removeRule);
+        for (NeuralProjection& p : c.projections) { if (p.plastic == removeRule) p.plastic = -1; else p.plastic -= p.plastic > removeRule; }
+    }
+    if (ImGui::Button("Add rule")) {
+        NeuralPlasticRule q;
+        q.name = "stdp " + std::to_string(c.plastic_rules.size() + 1);
+        c.plastic_rules.push_back(std::move(q));
+    }
     if (!c.sweep.enabled)
         draw_csv_output_block("CSV output##neural_spike_csv", "Save spikes to file", c.csv_save_enabled, "##neural_spike_csv_path", c.csv_output_path,
                               "One row per spike: step, time, node. Written after every run.");
+}
+
+static void draw_neural_device(NeuralConfig& c) {
+    if (!ImGui::CollapsingHeader("Device")) return;
+    ImGui::TextDisabled("State s, voltage v = x source - x receiver, current I enters the receiver. Stage schedule only.");
+    for (NeuralDevicePreset q : { NeuralDevicePreset::Vteam, NeuralDevicePreset::Team }) {
+        if (q != NeuralDevicePreset::Vteam) ImGui::SameLine();
+        if (ImGui::Button(neural_device_preset_name(q))) c.device = neural_device_preset(q);
+    }
+    InputTextStr("state", c.device.state_name, kFieldW);
+    InputTextStr("d state / dt", c.device.rhs_text, kFieldW + 240.0f);
+    InputTextStr("current I", c.device.current_text, kFieldW + 240.0f);
+    InputTextStr("parameters", c.device.params_text, kFieldW + 240.0f);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("name = value, separated by commas.");
+    InputNumStr("initial state", c.device.initial_text, kFieldW);
+    InputNumStr("state min", c.device.min_text, kFieldW);
+    InputNumStr("state max", c.device.max_text, kFieldW);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("A hard bound at the end of the step, on top of the window in the equation.\nEach time it acts is counted below the results.");
+}
+
+static void draw_neural_checkpoint(AppModel& model, NeuralSession& s, NeuralConfig& c) {
+    if (!ImGui::CollapsingHeader("Checkpoint")) return;
+    ImGui::Checkbox("keep a checkpoint at the end of the run", &c.keep_checkpoint);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("State, weights, traces, delayed spikes and the time. Does not work with R or the Lyapunov exponent.");
+    if (c.keep_checkpoint && c.schedule != NeuralSchedule::Spike && c.order_var >= 0) ImGui::TextDisabled("R is not computed while a checkpoint is kept.");
+    if (c.checkpoint) ImGui::Text("step %lld, %.1f MB", c.checkpoint->step, (double)c.checkpoint->data.size() / (1024.0 * 1024.0));
+    else ImGui::TextDisabled("No checkpoint yet.");
+    const bool can = c.checkpoint != nullptr && !s.in_flight;
+    if (!can) ImGui::BeginDisabled();
+    if (ImGui::Button("Continue")) {
+        if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
+        s.run_async(*model.parametric_engine, s.active_config_index, true);
+    }
+    if (!can) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Runs from the checkpoint to the computing time: raise it first.\nParameters may change. The graph, h, the decimation, the transient and the recorded nodes may not.");
+    InputTextStr("file", c.checkpoint_path, kFieldW + 240.0f);
+    if (!c.checkpoint) ImGui::BeginDisabled();
+    if (ImGui::Button("Save to file")) {
+        try { neural_checkpoint_save(c.checkpoint_path, *c.checkpoint); }
+        catch (const std::exception& e) { c.last_error = e.what(); }
+    }
+    if (!c.checkpoint) ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Load from file")) {
+        try { c.checkpoint = neural_checkpoint_load(c.checkpoint_path); }
+        catch (const std::exception& e) { c.last_error = e.what(); }
+    }
 }
 
 static void draw_neural_laws(NeuralSession& s, NeuralConfig& c) {
@@ -494,8 +599,10 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
     draw_neural_sweep(s, c);
     if (!spiking) draw_neural_lyapunov(c);
     draw_neural_populations(s, c);
-    draw_neural_projections(c);
+    draw_neural_projections(c, s.vars);
     if (!spiking) draw_neural_laws(s, c);
+    if (c.schedule == NeuralSchedule::Stage) draw_neural_device(c);
+    draw_neural_checkpoint(model, s, c);
 
     if (c.arcs > 0 || c.last_run_ok) {
         ImGui::Separator();
@@ -506,6 +613,8 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
         if (c.sweep_values.empty())
             for (size_t p = 0; p < c.pop_rate.size() && p < c.populations.size(); ++p)
                 ImGui::Text("%s: %.4g spikes per node per unit of time", c.populations[p].name.c_str(), c.pop_rate[p]);
+        if (c.result.device_clips > 0)
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "The device state bound acted %lld times.", c.result.device_clips);
         if (c.result.spikes_dropped > 0)
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "The spike log is cut: %lld spikes dropped, rates stay exact.", c.result.spikes_dropped);
         const int nInst = (int)c.result.instance_stop.size();
@@ -578,7 +687,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         if (ch == 0 || c.input_view.empty()) { ImGui::TextDisabled("No input yet: add a source and a link, then press Run."); return; }
     }
     const bool spikes = c.schedule == NeuralSchedule::Spike;
-    const bool sync = what == kNeuralSync, sweep = what == kNeuralSweep, input = what == kNeuralInput, lyapWindow = what == kNeuralLyap, rate = what == kNeuralRate, raster = what == kNeuralRaster;
+    const bool sync = what == kNeuralSync, sweep = what == kNeuralSweep, input = what == kNeuralInput, lyapWindow = what == kNeuralLyap, rate = what == kNeuralRate, raster = what == kNeuralRaster, weights = what == kNeuralWeights;
     if ((rate || raster) && r.spike_count.empty()) { ImGui::TextDisabled("Pick the Spikes schedule and press Run."); return; }
     if (rate) {
         InputNumStr("bin (0 = auto)", vs.rate_bin_text, kFieldW);
@@ -607,14 +716,14 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     // Показатель от значения свипа рисуется как сводка свипа.
     const bool byValue = sweep || (lyapWindow && r.lyapunov.size() > 1 && vs.lyap_kind == 0);
     const bool spread = (sync && vs.sync_kind == 1) || (sweep && !spikes && vs.sweep_kind == 1);
-    if (!sweep && !input && !lyap && !rate && !raster && !s.vars.empty() && (!sync || spread)) {
+    if (!sweep && !input && !lyap && !rate && !raster && !weights && !s.vars.empty() && (!sync || spread)) {
         const std::vector<const char*> items = c_str_list(s.vars);
         if (sync) ImGui::SameLine();
         ImGui::SetNextItemWidth(90.0f);
         ImGui::Combo(what == kNeuralMeans ? "variable##means" : what == kNeuralNodes ? "variable##nodes" : "variable##sync",
                      &vs.series_var, items.data(), (int)items.size());
     }
-    if (!byValue && !input) neural_instance_picker(c, vs, what == kNeuralMeans ? "instance##means" : what == kNeuralNodes ? "instance##nodes" : lyap ? "instance##lyap" : rate ? "instance##rate" : raster ? "instance##raster" : "instance##sync");
+    if (!byValue && !input) neural_instance_picker(c, vs, what == kNeuralMeans ? "instance##means" : what == kNeuralNodes ? "instance##nodes" : lyap ? "instance##lyap" : rate ? "instance##rate" : raster ? "instance##raster" : weights ? "instance##weights" : "instance##sync");
 
     // Точка p кривой k.
     std::function<double(int)> xof = [&](int p) { return r.t0 + r.dt * (double)p; };
@@ -686,6 +795,23 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         };
         yname = "node";
         ImGui::TextDisabled(stride > 1 ? "%zu spikes, every %d-th node is shown" : "%zu spikes", shown.size(), stride);
+    }
+    else if (weights) {
+        const std::vector<double>& d = !r.weight_trace.empty() ? r.weight_trace : r.device_trace;
+        const int W = c.watched_per_instance;
+        if (d.empty() || W < 1 || nInst < 1 || d.size() != (size_t)r.n_points * nInst * W) empty = "Give a projection a plasticity rule or a device, then press Run.";
+        else {
+            curves = W;
+            const int at = vs.instance * W, row = nInst * W;
+            yof = [&d, at, row](int k, int p) { return d[(size_t)p * row + at + k]; };
+            yname = !r.weight_trace.empty() ? std::string("weight") : "device state " + c.device.state_name;
+            if (!r.weight_trace.empty()) ImGui::TextDisabled("Weights of %d plastic arcs picked evenly, source -> receiver.", W);
+            else ImGui::TextDisabled("State of the device between two nodes. In the presets 0 = Ron (strong link), 1 = Roff (weak link).");
+            if (c.weight_summary.size() == (size_t)nInst * 3) {
+                const double* q = c.weight_summary.data() + (size_t)vs.instance * 3;
+                ImGui::TextDisabled("all plastic arcs at the end: min %.5g, mean %.5g, max %.5g", q[0], q[1], q[2]);
+            }
+        }
     }
     else if (!lyap && (r.n_points <= 0 || nPops <= 0)) empty = none;
     else if (!sweep && !lyap && !(sync && !spread) && recorded >= nVars) empty = "This variable is not recorded.";
@@ -785,6 +911,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         si.color = ImGui::ColorConvertU32ToFloat4(cmap_sample_id(t, model.heatmap_colormap));
         si.label = what == kNeuralNodes ? std::to_string(r.observed[(size_t)nodes[(size_t)k]])
                  : input ? c.sources[(size_t)k].name
+                 : weights ? (k < (int)c.watch_labels.size() ? c.watch_labels[(size_t)k] : std::to_string(k))
                  : lyap ? std::string("lambda") : c.populations[(size_t)(k % K)].name;
         if (byValue && !c.sweep2_values.empty()) {
             const int perNet = lyap ? 1 : K;

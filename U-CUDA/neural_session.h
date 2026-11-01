@@ -42,6 +42,26 @@ struct NeuralReceptor {
     std::string gain_text = "1";       // выражение над параметрами узла
 };
 
+// Правило STDP, на него ссылается проекция. a_plus и a_minus в единицах веса дуги.
+struct NeuralPlasticRule {
+    std::string name = "stdp";
+    std::string a_plus_text = "0.01", a_minus_text = "0.012";
+    std::string tau_plus_text = "20", tau_minus_text = "20";
+    std::string w_min_text = "0", w_max_text = "1";
+    std::string mu_plus_text = "0", mu_minus_text = "0";
+    bool nearest = false;
+};
+
+// Устройство на связи, одна модель на эксперимент. В текстах доступны v, состояние и параметры, params_text = "a = 1, b = 2".
+struct NeuralDeviceModel {
+    std::string state_name = "m";
+    std::string rhs_text, current_text, params_text;
+    std::string initial_text = "0.5", min_text = "0", max_text = "1";
+};
+enum class NeuralDevicePreset { Vteam = 0, Team };
+const char* neural_device_preset_name(NeuralDevicePreset p);
+NeuralDeviceModel neural_device_preset(NeuralDevicePreset p);
+
 struct NeuralProjection {
     int from = 0, to = 0;
     NeuralRule rule = NeuralRule::FixedDegree;
@@ -59,6 +79,12 @@ struct NeuralProjection {
     int law = 0;
     int receptor = 0;                  // импульсный режим вместо закона связи
     std::string delay_text = "0";      // кратна h, 0 = один шаг
+    int plastic = -1;                  // импульсный режим: правило STDP, -1 = вес постоянный
+    // stage: вместо закона связи устройство, gain = вес дуги. one_element: дуга и встречная дуга это один элемент с током в обе стороны;
+    // иначе каждая дуга свой элемент с током только в приёмник.
+    bool device = false;
+    bool one_element = true;
+    int device_var = 0;
 };
 
 // Свип: значения идут отдельными экземплярами одного запуска, графом из несвязных компонент.
@@ -153,6 +179,13 @@ struct NeuralConfig {
     std::vector<std::string> reset_text;
     std::string refractory_text = "0";
     std::vector<NeuralReceptor> receptors;
+    std::vector<NeuralPlasticRule> plastic_rules;
+    NeuralDeviceModel device;
+
+    // Снимок конца расчёта живёт только в памяти, пока его не сохранили в файл.
+    bool keep_checkpoint = false;
+    std::string checkpoint_path;
+    std::shared_ptr<NeuralCheckpoint> checkpoint;
 
     // Рецепт, по которому получен graph_hash, и система на момент расчёта.
     std::string graph_recipe, graph_hash, model_text;
@@ -168,6 +201,9 @@ struct NeuralConfig {
     int pops_per_instance = 0;
     std::vector<int> pop_start;           // [pops + 1] последнего расчёта
     std::vector<double> pop_rate;         // импульсный режим: спайков на узел в единицу времени
+    int watched_per_instance = 0;         // столбцов weight_trace или device_trace на экземпляр
+    std::vector<std::string> watch_labels;   // подписи этих столбцов
+    std::vector<double> weight_summary;   // [instance][3]: min, среднее, max пластичных дуг в конце
     long long arcs = 0;
     int degree_min = 0, degree_max = 0;
     double build_seconds = 0.0;
@@ -183,7 +219,10 @@ struct NeuralGraph {
     std::vector<int> pop_start;
     std::vector<int> start, src, law;
     std::vector<int> delay;            // только импульсный режим, в шагах
+    std::vector<int> rule;             // только импульсный режим, -1 = постоянный вес
     std::vector<double> w;
+    std::vector<int> dev_a, dev_b, dev_var, dev_two_way;   // устройства: их дуг в CSR нет
+    std::vector<double> dev_gain;
     std::string hash;
     int degree_min = 0, degree_max = 0;
 };
@@ -195,6 +234,8 @@ struct NeuralPlan {
     long long arcs = 0;
     int degree_min = 0, degree_max = 0;
     int pops_per_instance = 0;
+    int watched_per_instance = 0;
+    std::vector<std::string> watch_labels;
     std::vector<double> sweep_values, sweep2_values;
     std::vector<double> input_view;
     double input_view_t0 = 0.0, input_view_dt = 0.0;
@@ -208,6 +249,10 @@ struct NeuralOutcome {
     int pops_per_instance = 0;
     std::vector<int> pop_start;
     std::vector<double> pop_rate;
+    int watched_per_instance = 0;
+    std::vector<std::string> watch_labels;
+    std::vector<double> weight_summary;
+    bool resumed = false;
     std::string hash, recipe;
     long long arcs = 0;
     int degree_min = 0, degree_max = 0;
@@ -248,7 +293,8 @@ struct NeuralSession {
                           const std::vector<std::string>& params_);
     void add_config();
     void remove_config(int i);
-    bool run_async(ParametricEngine& engine, int config_idx);
+    // resume: продолжить с контрольной точки конфигурации до её T max.
+    bool run_async(ParametricEngine& engine, int config_idx, bool resume = false);
     void request_cancel();
     bool poll();
 };
@@ -281,6 +327,11 @@ std::string neural_sweep_csv(const NeuralConfig& c);
 double neural_record_time(const NeuralConfig& c);
 // Спайки строками: шаг, время, узел. Время спайка шага n = (n + 1) h.
 std::string neural_spike_csv(const NeuralConfig& c);
+// Контрольная точка в файле. Бросает на ошибке чтения и записи.
+void neural_checkpoint_save(const std::string& path, const NeuralCheckpoint& c);
+std::shared_ptr<NeuralCheckpoint> neural_checkpoint_load(const std::string& path);
+// Ранняя часть записи из прошлого расчёта: продолжение пишет только свою часть.
+void neural_merge_resumed(const NeuralResult& before, NeuralResult& after);
 // Конфигурация одного значения: в эксперименте меняется только то, что свипается.
 NeuralConfig neural_sweep_instance(const NeuralConfig& c, int index, double value);
 NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custom_schemes,

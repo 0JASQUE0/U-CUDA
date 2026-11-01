@@ -15,7 +15,10 @@
 // NEURAL_INST 1: несвязные экземпляры. status[node] = шаг разлёта, узел с ненулевым status замирает, хост
 // замораживает весь экземпляр на границе чанка; при 0 текст ядра шага прежний.
 //
-// Плейсхолдеры: AMOUNT_OF_X, AMOUNT_OF_VALUES, NEURAL_SCHED, NEURAL_LAWS, NEURAL_INST, KRS_BODY (шаг узла),
+// NEURAL_PLASTIC 1: пластичные дуги импульсной сети; при 0 текст ядра прежний.
+// NEURAL_DEV > 0: устройства на связях у stage, столько состояний на устройство, NEURAL_DEV_P параметров; при 0 текст прежний.
+//
+// Плейсхолдеры: AMOUNT_OF_X, AMOUNT_OF_VALUES, NEURAL_SCHED, NEURAL_LAWS, NEURAL_INST, NEURAL_PLASTIC, KRS_BODY (шаг узла),
 // KRS_RHS_BODY (F = f(X), нужен stage), COUPLING_BODY (case-ветки из codegen_coupling).
 
 #define AMOUNTOFX {{AMOUNT_OF_X}}
@@ -24,6 +27,9 @@
 #define NEURAL_LAWS {{NEURAL_LAWS}}
 #define NEURAL_INST {{NEURAL_INST}}
 #define NEURAL_REC {{NEURAL_REC}}
+#define NEURAL_PLASTIC {{NEURAL_PLASTIC}}
+#define NEURAL_DEV {{NEURAL_DEV}}
+#define NEURAL_DEV_P {{NEURAL_DEV_P}}
 
 // Шаблон не зовёт свип-ядра cudaLibrary.cu, но configCUDA.h внутри
 // cudaLibrary.cuh требует par_or_var определённым.
@@ -67,6 +73,15 @@ __device__ __forceinline__ void neuralRhs(const numb* X, const numb* a, numb* F)
 {{KRS_RHS_BODY}}
 }
 
+#if NEURAL_DEV
+__device__ __forceinline__ void neuralDevRhs(const numb* X, const numb* a, numb* F) {
+{{DEV_RHS_BODY}}
+}
+__device__ __forceinline__ void neuralDevCurrent(const numb* X, const numb* a, numb* F) {
+{{DEV_CURRENT_BODY}}
+}
+#endif
+
 #include "cudaLibrary.cu"
 
 // Раскладка совпадает с NeuralStepArgs / NeuralObserveArgs / NeuralMeanArgs в parametric_engine.cpp.
@@ -93,6 +108,23 @@ struct NeuralStepArgs {
     int   step;       // номер шага с 1
     int   nRun;       // считаются узлы ниже него: клоны Ляпунова до посева стоят
     int   pad;
+    // Устройства, только stage: d0..d3 повторяют s0..s3, [состояние][устройство].
+    const int*  devStart;     // [nNodes + 1]
+    const int*  devList;      // устройство * 2 + 1 у узла b: он же владелец записи; * 2 у узла a
+    const int*  devA;
+    const int*  devB;
+    const int*  devVar;
+    const numb* devGain;
+    const numb* devValues;
+    numb* d0;
+    numb* d1;
+    numb* d2;
+    numb* d3;
+    int*  devClips;
+    numb  devMin[4];
+    numb  devMax[4];
+    int   nDev;
+    int   pad2;
 };
 
 // Сосед читается только по тем переменным, что есть в законе связи: Xj[k] как у codegen_coupling.
@@ -175,6 +207,40 @@ extern "C" __global__ void neuralStepKernel(const NeuralStepArgs A) {
     neuralRead(in, N, node, X);
     neuralRhs(X, ai, F);
     neuralCoupling(A, in, X, ai, node, C);
+#if NEURAL_DEV
+    {
+        const numb* dIn = j == 0 ? A.d0 : (j == 2 ? A.d3 : A.d2);
+        numb* dOut = j == 1 ? A.d3 : A.d2;
+        const int e1 = A.devStart[node + 1], D = A.nDev;
+        for (int e = A.devStart[node]; e < e1; ++e) {
+            const int pack = __ldg(A.devList + e), dev = pack >> 1, own = pack & 1, va = __ldg(A.devVar + dev);
+            numb s[NEURAL_DEV], q[2 + NEURAL_DEV_P], Fd[NEURAL_DEV + 1];
+            for (int k = 0; k < NEURAL_DEV; ++k) s[k] = dIn[(size_t)k * D + dev];
+            q[0] = (numb)0;
+            q[1] = in[(size_t)va * N + __ldg(A.devA + dev)] - in[(size_t)va * N + __ldg(A.devB + dev)];
+            for (int k = 0; k < NEURAL_DEV_P; ++k) q[2 + k] = __ldg(A.devValues + (size_t)dev * NEURAL_DEV_P + k);
+            neuralDevCurrent(s, q, Fd);
+            const numb I = __ldg(A.devGain + dev) * Fd[0];
+            C[va] += own ? I : -I;
+            if (!own) continue;
+            neuralDevRhs(s, q, Fd);
+            for (int k = 0; k < NEURAL_DEV; ++k) {
+                const size_t at = (size_t)k * D + dev;
+                if (j == 3) {
+                    numb x = A.d0[at] + (h / (numb)6) * (A.d1[at] + Fd[k]);
+                    if (x < A.devMin[k] || x > A.devMax[k]) {
+                        x = fmin(fmax(x, A.devMin[k]), A.devMax[k]);
+                        atomicAdd(A.devClips, 1);
+                    }
+                    A.d0[at] = x;
+                } else {
+                    if (j == 0) A.d1[at] = Fd[k]; else A.d1[at] += (numb)2 * Fd[k];
+                    dOut[at] = A.d0[at] + (j == 2 ? h : (numb)0.5 * h) * Fd[k];
+                }
+            }
+        }
+    }
+#endif
     for (int k = 0; k < AMOUNTOFX; ++k) F[k] += C[k];
     if (j == 3) {
         const numb q = h / (numb)6;
@@ -232,6 +298,17 @@ extern "C" __global__ void neuralStepKernel(const NeuralStepArgs A) {
 // Переменные X: сначала NEURAL_NV переменных узла, затем NEURAL_REC синапсов; синапс идёт по точной экспоненте.
 #define NEURAL_NV (AMOUNTOFX - NEURAL_REC)
 #define NEURAL_REC_MAX 8
+#define NEURAL_CH (NEURAL_REC + NEURAL_PLASTIC)
+
+struct NeuralStdpRule {
+    numb aPlus, aMinus;
+    numb hPlus, hMinus;       // h / tau
+    numb wMin, wMax;
+    numb muPlus, muMinus;
+    numb gain;
+    int  nearest;
+    int  pad;
+};
 
 struct NeuralSpikeArgs {
     const numb* values;
@@ -240,7 +317,7 @@ struct NeuralSpikeArgs {
     const int*  outDst;
     const int*  outPack;      // задержка * NEURAL_REC + синапс
     const unsigned long long* outW;
-    unsigned long long* ring; // [slots][NEURAL_REC][nNodes]
+    unsigned long long* ring; // [slots][NEURAL_CH][nNodes], последний канал: приходы по пластичным дугам
     const int*  refrSteps;
     int*  refr;               // сколько шагов ещё держать узел
     int*  spikes;             // счётчик узла: точен и при переполнении журнала
@@ -257,6 +334,16 @@ struct NeuralSpikeArgs {
     const numb* invW;         // масштаб целых весов узла: свой у экземпляра, иначе значение свипа не равно отдельному запуску
     int*  status;             // шаг разлёта узла + 1, -1 = экземпляр заморожен хостом
     int*  badFlag;
+    const int*  plStart;      // [nNodes + 1], пластичные входящие дуги, их пишет только поток приёмника
+    const int*  plSrc;
+    const int*  plPack;       // задержка * NEURAL_REC + синапс
+    const int*  plRule;
+    const NeuralStdpRule* rules;
+    numb* plW;
+    numb* plPre;
+    numb* plPost;
+    int*  plLast;             // индекс времени последнего обновления дуги
+    int*  stamp;              // [slots][nNodes], шаг последнего спайка в этом слоте
     numb  decay[NEURAL_REC_MAX];
     numb  decayHalf[NEURAL_REC_MAX];
     numb  h;
@@ -310,6 +397,40 @@ __device__ __forceinline__ void neuralSpikeRk4(numb* X, const numb* ai, const Ne
     for (int k = 0; k < NEURAL_NV; ++k) X[k] += q * (acc[k] + F[k]);
 }
 
+#if NEURAL_PLASTIC
+// Следы дуги на момент at. Индекс времени: приход в начале шага n это n, спайк приёмника конца шага n это n + 1.
+__device__ __forceinline__ void neuralArcTraces(const NeuralSpikeArgs& A, const NeuralStdpRule& r, const int e, const int at, numb& pre, numb& post) {
+    const numb dt = (numb)(at - A.plLast[e]);
+    pre = A.plPre[e] * exp(-dt * r.hPlus);
+    post = A.plPost[e] * exp(-dt * r.hMinus);
+    A.plLast[e] = at;
+}
+__device__ __forceinline__ numb neuralArcClip(const NeuralStdpRule& r, const numb w) { return fmin(fmax(w, r.wMin), r.wMax); }
+
+__device__ __forceinline__ numb neuralArcArrive(const NeuralSpikeArgs& A, const int e, const int at) {
+    const NeuralStdpRule& r = A.rules[__ldg(A.plRule + e)];
+    numb pre, post;
+    neuralArcTraces(A, r, e, at, pre, post);
+    numb w = A.plW[e];
+    const numb f = r.muMinus == (numb)0 ? (numb)1 : pow((w - r.wMin) / (r.wMax - r.wMin), r.muMinus);
+    w = neuralArcClip(r, w - r.gain * r.aMinus * post * f);
+    A.plW[e] = w;
+    A.plPre[e] = r.nearest ? (numb)1 : pre + (numb)1;
+    A.plPost[e] = post;
+    return w;
+}
+__device__ __forceinline__ void neuralArcSpike(const NeuralSpikeArgs& A, const int e, const int at) {
+    const NeuralStdpRule& r = A.rules[__ldg(A.plRule + e)];
+    numb pre, post;
+    neuralArcTraces(A, r, e, at, pre, post);
+    const numb w = A.plW[e];
+    const numb f = r.muPlus == (numb)0 ? (numb)1 : pow((r.wMax - w) / (r.wMax - r.wMin), r.muPlus);
+    A.plW[e] = neuralArcClip(r, w + r.gain * r.aPlus * pre * f);
+    A.plPre[e] = pre;
+    A.plPost[e] = r.nearest ? (numb)1 : post + (numb)1;
+}
+#endif
+
 extern "C" __global__ void neuralSpikeKernel(const NeuralSpikeArgs A) {
     const int node = blockIdx.x * blockDim.x + threadIdx.x;
     const int N = A.nNodes;
@@ -321,11 +442,11 @@ extern "C" __global__ void neuralSpikeKernel(const NeuralSpikeArgs A) {
     numb X[AMOUNTOFX];
     neuralRead(A.state, N, node, X);
     int refr = A.refr[node], fired = 0;
-    const int period = A.slots * NEURAL_REC;
+    const int period = A.slots * NEURAL_CH;
 
     for (int j = 0; j < A.steps; ++j) {
         const long long step = A.step0 + j;
-        const int base = (int)(step % A.slots) * NEURAL_REC;
+        const int base = (int)(step % A.slots) * NEURAL_CH;
         bool spiked = false;
         if (source) {
             spiked = step >= A.srcFrom[node] && step < A.srcTo[node] && neuralUniform(A.srcSeed[node], step) < A.srcP[node];
@@ -335,6 +456,23 @@ extern "C" __global__ void neuralSpikeKernel(const NeuralSpikeArgs A) {
                 const unsigned long long w = *cell;
                 if (w != 0ULL) { X[NEURAL_NV + r] += (numb)(long long)w * A.invW[node]; *cell = 0ULL; }
             }
+#if NEURAL_PLASTIC
+            // Счёт приходов ограничивает проход: узел без приходов дуг не читает.
+            unsigned long long* arrived = A.ring + (size_t)(base + NEURAL_REC) * N + node;
+            long long left = (long long)*arrived;
+            if (left != 0) {
+                *arrived = 0ULL;
+                const int slot = (int)(step % A.slots), e1 = A.plStart[node + 1];
+                for (int e = A.plStart[node]; left > 0 && e < e1; ++e) {
+                    const int pack = __ldg(A.plPack + e), d = pack / NEURAL_REC;
+                    if (step < d) continue;
+                    const int q = slot >= d ? slot - d : slot - d + A.slots;
+                    if (A.stamp[(size_t)q * N + __ldg(A.plSrc + e)] != (int)(step - d)) continue;
+                    --left;
+                    X[NEURAL_NV + pack % NEURAL_REC] += neuralArcArrive(A, e, (int)step);
+                }
+            }
+#endif
             if (refr > 0) --refr;
             else {
                 numb u0 = (numb)0, uh = (numb)0, u1 = (numb)0;
@@ -355,12 +493,21 @@ extern "C" __global__ void neuralSpikeKernel(const NeuralSpikeArgs A) {
                     break;
                 }
                 neuralSpikeRule(X, ai, spiked);
-                if (spiked) refr = A.refrSteps[node];
+                if (spiked) {
+                    refr = A.refrSteps[node];
+#if NEURAL_PLASTIC
+                    const int e1 = A.plStart[node + 1];
+                    for (int e = A.plStart[node]; e < e1; ++e) neuralArcSpike(A, e, (int)step + 1);
+#endif
+                }
             }
             for (int r = 0; r < NEURAL_REC; ++r) X[NEURAL_NV + r] *= A.decay[r];
         }
         if (!spiked) continue;
         ++fired;
+#if NEURAL_PLASTIC
+        A.stamp[(size_t)(step % A.slots) * N + node] = (int)step;
+#endif
         const int at = atomicAdd(A.logCount, 1);
         if (at < A.logCap) { A.logNode[at] = node; A.logStep[at] = (int)(step - A.logBase); }
         const int e1 = __ldg(A.outStart + node + 1);
@@ -383,6 +530,17 @@ struct NeuralObserveArgs {
     numb* out;
     int nNodes, nSel, nVars, pad;
 };
+
+struct NeuralWeightArgs {
+    const numb* w;
+    const int*  arcs;
+    numb* out;
+    int n, pad;
+};
+extern "C" __global__ void neuralWeightKernel(const NeuralWeightArgs A) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < A.n) A.out[i] = A.w[A.arcs[i]];
+}
 
 // Выбранные узлы: out[sel * nVars + v].
 extern "C" __global__ void neuralObserveKernel(const NeuralObserveArgs A) {
