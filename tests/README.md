@@ -22,6 +22,12 @@ families, parsing/codegen, imports, caches, old JSON, CSV, queues/cancellation.
 Performance runs smoke plus benchmarks; all runs regression plus benchmarks.
 Original CTest names adaptive_cpu, adaptive_gpu, architecture, gpu_smoke and
 Linux platform remain available. GoogleTest names start with numerical.
+`layer_rules` ([layer_rules.cmake](layer_rules.cmake)) checks module boundaries the
+compiler cannot see: domain includes no higher module, `<future>`/`<thread>` or engine
+names; storage includes no compute/application/GUI header; computation includes no GUI.
+
+For frequent runs `UCUDA_TEST_SKIP_GGL=1` drops the "+ GGL" DAE methods from the DAE
+suite (their bodies build slowest); add `-E GGL` to skip their solver-matrix cases too.
 
 ```powershell
 ctest --preset windows-release -R 'adaptive_cpu|architecture'

@@ -31,7 +31,7 @@ Use [README.md](README.md) to locate the owning module. Consult [ARCHITECTURE.md
 - Numerical and performance-sensitive changes must add or extend accuracy/convergence checks and benchmarks for every supported CPU/GPU path. Do not weaken tolerances or replace baselines merely to make tests pass.
 - If automated verification is objectively impossible, document the reason and a reproducible manual check in the change description.
 - Build affected targets; build `U-CUDA-legacy` when shared compute signatures change.
-- Run `adaptive_cpu`, `architecture`, and relevant platform tests. CUDA/NVRTC changes also require non-skipped `adaptive_gpu` and `gpu_smoke` runs on a real GPU.
+- Run `adaptive_cpu`, `architecture`, `layer_rules`, and relevant platform tests. CUDA/NVRTC changes also require non-skipped `adaptive_gpu` and `gpu_smoke` runs on a real GPU.
 - Configure once with `U_CUDA_BUILD_GUI=OFF` after dependency-boundary changes.
 - Run `git diff --check`. Report passed, failed, skipped, and not-run checks accurately.
 - For documentation-only changes, verify local links and commands plus `git diff --check`; compilation is not required.
