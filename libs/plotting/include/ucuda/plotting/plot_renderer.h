@@ -43,10 +43,9 @@ constexpr int kSlanCmCount = 200;
 constexpr int kSlanCmIdBase = 1000;          // валидные id: 1001..1200
 constexpr int kSlanCmCategoryCount = 9;
 
-// Дефолт для полей типа HeatmapColormap. #1 viridis — ровно та карта, что
-// была дефолтом и раньше (когда встроенный Viridis считался полиномом), так
-// что новые HeatmapView / PlotSeriesInput стартуют с прежним видом.
-constexpr HeatmapColormap kDefaultColormap = (HeatmapColormap)(kSlanCmIdBase + 1);
+// Дефолт для полей типа HeatmapColormap: #168 turbo — та же карта, что у
+// бассейнов и FastSync, хорошо разделяет соседние значения.
+constexpr HeatmapColormap kDefaultColormap = (HeatmapColormap)(kSlanCmIdBase + 168);
 
 constexpr bool is_slancm_id(int id) {
     return id > kSlanCmIdBase && id <= kSlanCmIdBase + kSlanCmCount;
