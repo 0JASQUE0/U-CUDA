@@ -8,4 +8,4 @@ Use [README.md](README.md) for module entry points; consult [ARCHITECTURE.md](..
 - Check every CUDA/driver/NVRTC result and keep cancellation/progress cooperative.
 - Do not include UI, plotting, or application headers.
 
-Validation: Build Debug/Release and legacy; run `adaptive_gpu` and `gpu_smoke` on a real GPU with a clean runtime kernel package.
+Validation: build Release; run `adaptive_gpu` and `gpu_smoke` on a real GPU with a clean runtime kernel package.

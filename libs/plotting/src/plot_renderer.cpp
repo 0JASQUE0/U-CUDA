@@ -57,7 +57,7 @@ const char* colormap_label(int id) {
     // Мигрируем на всякий случай: все живые пути уже прогоняют id через
     // colormap_id_or, но подпись не должна превращаться в "?" даже если
     // где-то просочится сырое значение из старой сессии.
-    const int v = colormap_id_or(id, slancm_id(1));
+    const int v = colormap_id_or(id, (int)kDefaultColormap);
     return labels[slancm_number(v) - 1].c_str();
 }
 
@@ -84,7 +84,7 @@ int colormap_id_or(int id, int fallback) {
     if (is_slancm_id(m)) return m;
     const int f = migrate(fallback);
     if (is_slancm_id(f)) return f;
-    return slancm_id(1);   // #1 viridis — тот же цвет, что и прежний дефолт
+    return (int)kDefaultColormap;
 }
 
 namespace {
@@ -141,7 +141,7 @@ const char* const kPointMarkerNames[7] = {
 
 ImU32 cmap_sample_id(float t, int colormap_id) {
     t = std::min(std::max(t, 0.0f), 1.0f);
-    const int id = colormap_id_or(colormap_id, slancm_id(1));
+    const int id = colormap_id_or(colormap_id, (int)kDefaultColormap);
     const vec3f c = cmap_lut_sample(t, kSlanCmLut[slancm_number(id) - 1]);
     auto clamp01 = [](float v){ return std::min(std::max(v, 0.0f), 1.0f); };
     return IM_COL32((int)(clamp01(c.r) * 255.0f),

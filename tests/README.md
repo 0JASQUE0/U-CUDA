@@ -9,7 +9,7 @@ For a separate build of the original main sources and direct CPU/GPU output
 comparison, see [upstream parity](parity/README.md) and its [results](parity/RESULTS.md).
 
 ```powershell
-cmake --preset windows -DU_CUDA_BUILD_LEGACY=ON
+cmake --preset windows
 cmake --build --preset windows-release --target check-smoke
 cmake --build --preset windows-release --target check-regression
 cmake --build --preset windows-release --target check-performance

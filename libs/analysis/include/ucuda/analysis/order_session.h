@@ -1,7 +1,6 @@
 ﻿#pragma once
 #include "ucuda/domain/order_session.h"
 #include "ucuda/analysis/analysis_session.h"
-#include "ucuda/cuda/parametric_engine.h"
 #include "ucuda/equations/adaptive_params.h"
 
 // Сессия = сохраняемое состояние (OrderAnalysisState, domain) + выполнение: future, отмена, прогресс,

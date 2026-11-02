@@ -1,7 +1,6 @@
 ﻿#pragma once
 #include "ucuda/domain/network_session.h"
 #include "ucuda/analysis/analysis_session.h"
-#include "ucuda/cuda/parametric_engine.h"
 
 // Сессия = сохраняемое состояние (NetworkState, domain) + выполнение: future, отмена, прогресс,
 // запуск и опрос. Сериализация (storage) видит только NetworkState.

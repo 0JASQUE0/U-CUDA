@@ -2,13 +2,14 @@
 // Сессии анализа: сохраняемое состояние (*State) — в domain/analysis_session.h, здесь —
 // выполнение (future, отмена, прогресс, запуск, опрос) и резолвер имени схемы.
 #include "ucuda/domain/analysis_session.h"
-#include "ucuda/cuda/parametric_engine.h"
 #include "ucuda/equations/adaptive_params.h"
 #include <atomic>
 #include <chrono>
 #include <functional>
 #include <future>
 #include <memory>
+
+class ParametricEngine;   // ucuda/cuda/parametric_engine.h — только в .cpp analysis
 
 // Тело calculateDiscreteModel для выбранной схемы: сперва ищется среди
 // пользовательских КРС по имени, затем имя пробуется как экстраполяционная

@@ -7,9 +7,6 @@
     <Filter Include="apps\desktop">
       <UniqueIdentifier>{8F67AB9B-A945-57F5-84D3-6826393F4057}</UniqueIdentifier>
     </Filter>
-    <Filter Include="apps\legacy">
-      <UniqueIdentifier>{9533F4E3-537F-5299-8E24-21726AB19F15}</UniqueIdentifier>
-    </Filter>
     <Filter Include="libs">
       <UniqueIdentifier>{3E602646-8452-50C5-A576-11DA572AE059}</UniqueIdentifier>
     </Filter>
@@ -126,31 +123,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <CudaCompile Include="..\libs\cuda\src\cudaMacros.cu">
-      <Filter>libs\cuda\src</Filter>
-    </CudaCompile>
     <CudaCompile Include="..\libs\cuda\src\host_rqa.cu">
-      <Filter>libs\cuda\src</Filter>
-    </CudaCompile>
-    <CudaCompile Include="..\libs\cuda\src\cudaLibrary.cu">
-      <Filter>libs\cuda\src</Filter>
-    </CudaCompile>
-    <CudaCompile Include="..\libs\cuda\src\host_basins.cu">
-      <Filter>libs\cuda\src</Filter>
-    </CudaCompile>
-    <CudaCompile Include="..\libs\cuda\src\host_bifurcation.cu">
-      <Filter>libs\cuda\src</Filter>
-    </CudaCompile>
-    <CudaCompile Include="..\libs\cuda\src\host_dft.cu">
-      <Filter>libs\cuda\src</Filter>
-    </CudaCompile>
-    <CudaCompile Include="..\libs\cuda\src\host_fastsync.cu">
-      <Filter>libs\cuda\src</Filter>
-    </CudaCompile>
-    <CudaCompile Include="..\libs\cuda\src\host_lyapunov.cu">
-      <Filter>libs\cuda\src</Filter>
-    </CudaCompile>
-    <CudaCompile Include="..\libs\cuda\src\host_trajectory.cu">
       <Filter>libs\cuda\src</Filter>
     </CudaCompile>
     <ClCompile Include="..\libs\domain\src\session_defaults.cpp">
@@ -486,9 +459,6 @@
     <ClCompile Include="..\apps\desktop\app_main.cpp">
       <Filter>apps\desktop</Filter>
     </ClCompile>
-    <CudaCompile Include="..\apps\legacy\main_NonLinAnal.cu">
-      <Filter>apps\legacy</Filter>
-    </CudaCompile>
     <ClInclude Include="..\libs\domain\include\ucuda\domain\adaptive_settings.h">
       <Filter>libs\domain\include</Filter>
     </ClInclude>
@@ -630,9 +600,6 @@
     <ClInclude Include="..\libs\cuda\include\ucuda\cuda\cudaMacros.cuh">
       <Filter>libs\cuda\include</Filter>
     </ClInclude>
-    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\hostLibrary.cuh">
-      <Filter>libs\cuda\include</Filter>
-    </ClInclude>
     <ClInclude Include="..\libs\cuda\include\ucuda\cuda\nvrtc_engine.h">
       <Filter>libs\cuda\include</Filter>
     </ClInclude>
@@ -664,9 +631,6 @@
       <Filter>libs\cuda\src</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\cuda\src\engine_impl.h">
-      <Filter>libs\cuda\src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\libs\cuda\src\host_internal.cuh">
       <Filter>libs\cuda\src</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\cuda\src\module_lru.h">
@@ -810,6 +774,9 @@
     <ClInclude Include="..\libs\ui\src\ui_resources.h">
       <Filter>libs\ui\src</Filter>
     </ClInclude>
+    <None Include="..\libs\cuda\src\cudaLibrary.cu">
+      <Filter>libs\cuda\src</Filter>
+    </None>
     <None Include="..\resources\kernels\adaptive_part.cu">
       <Filter>resources\kernels</Filter>
     </None>

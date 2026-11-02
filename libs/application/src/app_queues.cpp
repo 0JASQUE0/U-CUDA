@@ -2,6 +2,9 @@
 #include "ucuda/equations/codegen.hpp"
 #include "ucuda/domain/num_parse.h"   // fmt_num_shortest — round-trip формат для пинов узлов
 #include "ucuda/application/session_persistence.h"
+#include "ucuda/application/time_estimate.h"
+#include "ucuda/cuda/parametric_engine.h"
+#include "ucuda/cuda/runtime_settings.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -521,6 +524,16 @@ void AppModel::remove_neural_config(int i) {
 
 
 // ---- Команды UI: запуск на движке, очереди ----
+
+AppModel::AppModel(OcrFn ocr)
+    : SystemEditor(std::move(ocr)), library_edit_buffer(std::make_unique<SystemEditor>(ocr_)) {}
+
+AppModel::~AppModel() = default;
+
+std::string TrajTimeEstimator::cost_key(const TrajWork& w) const {
+    return std::to_string(std::hash<std::string>{}(w.krs_body)) + ":" + std::to_string(w.amountOfX)
+         + (get_nvrtc_fmad() ? ":fm1" : ":fm0");
+}
 
 ParametricEngine& AppModel::ensure_engine() {
     if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();

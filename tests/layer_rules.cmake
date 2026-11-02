@@ -56,6 +56,12 @@ foreach(lib cuda numerics equations analysis)
     rule("${lib} includes GUI" "libs/${lib}/*.cpp" "#include[ \t]+(\"ucuda/(plotting|ui|application)/|<imgui|<GLFW|\"glad)")
 endforeach()
 
+# Public headers of analysis and application name the engine only by forward declaration: CUDA and
+# numerics stay PRIVATE dependencies, so nothing above application sees them even transitively.
+foreach(lib analysis application)
+    rule("${lib} public header includes cuda/numerics" "libs/${lib}/include/*.h" "#include[ \t]+\"ucuda/(cuda|numerics)/")
+endforeach()
+
 # UI reaches computation only through application (compute_services.h, AppModel): no CUDA runtime,
 # NVRTC or CPU compiler paths from a window. Equations (text and DAE structure) stays allowed.
 rule("ui includes cuda/numerics" "libs/ui/*.h"   "#include[ \t]+(\"ucuda/(cuda|numerics)/|<(cuda|nvrtc)[A-Za-z_]*\\.h>)")

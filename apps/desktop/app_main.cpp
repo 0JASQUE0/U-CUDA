@@ -4,6 +4,7 @@
 #endif
 #include <vector>
 #include <cmath>
+#include "ucuda/application/compute_services.h"   // apply_* — глобальные настройки GPU
 #include "ucuda/plotting/gpu_line_series_3d.h"
 #include "ucuda/plotting/plot_camera_3d.h"
 #include "imgui.h"
@@ -484,10 +485,10 @@ int main() {
     }
     // Пушим до первого Run: движок создаётся лениво, а конфиг глобальный и
     // должен быть актуален уже на самой первой компиляции NVRTC.
-    set_peak_config(model.peak);
-    set_nvrtc_fmad(model.nvrtc_fmad);
-    set_nvrtc_rdc(model.nvrtc_rdc);
-    set_gpu_block_size(model.gpu_block_size);
+    apply_peak_config(model.peak);
+    apply_nvrtc_fmad(model.nvrtc_fmad);
+    apply_nvrtc_rdc(model.nvrtc_rdc);
+    apply_gpu_block_size(model.gpu_block_size);
     model.sync_peak_text();   // текстовые буферы полей Settings — из свежих значений
     set_tick_precision(model.tick_precision);
     // Клампится внутри: конфиг мог быть правлен руками.

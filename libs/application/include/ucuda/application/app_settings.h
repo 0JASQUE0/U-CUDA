@@ -73,10 +73,10 @@ struct AppSettings {
     bool show_alg_ic = false;
 
     // Последний выбранный colormap для HeatmapView (LLE-2D и пр.). 1001..1200 — карта slanCM
-    // (id = 1000 + её родной номер), легаси 0..8 мигрируют при чтении конфига; дефолт 0 = #1
-    // viridis. Персистится в _app_config.json. Combo «Colormap» над хитмапой пишет сюда, а static
+    // (id = 1000 + её родной номер), легаси 0..8 мигрируют при чтении конфига; дефолт 2 = #168
+    // turbo. Персистится в _app_config.json. Combo «Colormap» над хитмапой пишет сюда, а static
     // HeatmapView в draw_lle_plot читает при первом создании.
-    int heatmap_colormap = 0;
+    int heatmap_colormap = 2;
 
     // Colormap для табов панели бассейнов. Каждый таб (Basins/AvgPk/AvgInt/States) хранит свой
     // независимый выбор, чтобы переключение в одном не влияло на остальные; отдельно от

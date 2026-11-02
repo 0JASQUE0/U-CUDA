@@ -32,8 +32,7 @@ nvidia-smi
 
 ### Приложение: Visual Studio (без CMake)
 
-Открыть `U-CUDA.sln` в корне и собрать **Release|x64** (приложение) или **Debug|x64** (старое пакетное
-приложение `apps/legacy/main_NonLinAnal.cu`). То же из командной строки:
+Открыть `U-CUDA.sln` в корне и собрать **Release|x64** (единственная конфигурация). То же из командной строки:
 
 ```powershell
 & "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe" U-CUDA.sln /p:Configuration=Release /p:Platform=x64 /m
@@ -41,7 +40,7 @@ nvidia-smi
 ```
 
 ImGui, ImPlot, ImPlot3D и GLFW ставит vcpkg по `vcpkg.json` (manifest mode, первый раз — несколько минут). Post-build
-упаковывает рантайм в `x64\<Configuration>\` тем же `cmake/PackRuntime.cmake`, что и CMake (cmake берётся из VS 2022).
+упаковывает рантайм в `x64\Release\` тем же `cmake/PackRuntime.cmake`, что и CMake (cmake берётся из VS 2022).
 Библиотека систем — `U-CUDA\library` в корне репозитория. Новый `.cpp` / `.cu` в `libs/` добавляется и в
 `libs/<модуль>/CMakeLists.txt`, и в `U-CUDA/U-CUDA.vcxproj`; тест `vcxproj_sync` проверяет, что списки совпадают.
 
@@ -59,17 +58,10 @@ ctest --preset windows-release
 
 Presets задают `CMAKE_CUDA_ARCHITECTURES=75`. Если нужна другая архитектура, укажите значение для своей GPU при конфигурации или создайте локальный `CMakeUserPresets.json`; не меняйте общий preset ради одной машины.
 
-Старое пакетное приложение через CMake:
-
-```powershell
-cmake --preset windows -DU_CUDA_BUILD_LEGACY=ON
-cmake --build --preset windows-debug --target U-CUDA-legacy
-```
-
 Отдельная сборка без GUI:
 
 ```powershell
-cmake -S . -B build/headless -G 'Visual Studio 17 2022' -A x64 -DU_CUDA_BUILD_GUI=OFF -DU_CUDA_BUILD_LEGACY=ON
+cmake -S . -B build/headless -G 'Visual Studio 17 2022' -A x64 -DU_CUDA_BUILD_GUI=OFF
 cmake --build build/headless --config Debug
 ctest --test-dir build/headless -C Debug --output-on-failure
 ```
@@ -232,7 +224,6 @@ ctest --preset windows-debug -R '^(adaptive_cpu|architecture)$'
 git diff --check
 ```
 
-- При изменении общих вычислительных сигнатур включите и соберите `U-CUDA-legacy`.
 - При изменении CUDA/NVRTC выполните `adaptive_gpu` и `gpu_smoke`; для проверки runtime-заголовков используйте чистый каталог сборки/runtime. Пропуск GPU-теста не является успешной проверкой вычислений.
 - При изменении границ зависимостей выполните конфигурацию с `U_CUDA_BUILD_GUI=OFF`.
 - В Linux выполните применимые платформенные проверки, включая `platform`.

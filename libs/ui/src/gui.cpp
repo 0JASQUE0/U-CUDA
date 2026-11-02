@@ -1312,7 +1312,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     before.eps_interPeak_delta != pk.eps_interPeak_delta ||
                     before.max_amount_of_peaks != pk.max_amount_of_peaks)
                     model.sync_peak_text();
-                set_peak_config(pk);       // бампает epoch -> PTX-кэши инвалидируются
+                apply_peak_config(pk);       // бампает epoch -> PTX-кэши инвалидируются
                 persist_settings(model);
             }
 
@@ -1327,7 +1327,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::TextDisabled("the kernels on the next Run.");
 
             if (ImGui::Checkbox("FMA contraction (--fmad)##nvrtc_fmad", &model.nvrtc_fmad)) {
-                set_nvrtc_fmad(model.nvrtc_fmad);
+                apply_nvrtc_fmad(model.nvrtc_fmad);
                 persist_settings(model);
             }
             if (model.nvrtc_fmad) {
@@ -1350,7 +1350,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::TextDisabled("kernel and are unaffected.");
 
             if (ImGui::Checkbox("Split compilation (-rdc + link)##nvrtc_rdc", &model.nvrtc_rdc)) {
-                set_nvrtc_rdc(model.nvrtc_rdc);
+                apply_nvrtc_rdc(model.nvrtc_rdc);
                 persist_settings(model);
             }
             if (model.nvrtc_rdc) {
@@ -1392,7 +1392,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 if (kWidths[i] == model.gpu_block_size) { widthIdx = i; break; }
             if (ImGui::Combo("Threads per block##gpu_block_size", &widthIdx, kWidthNames, IM_ARRAYSIZE(kWidthNames))) {
                 model.gpu_block_size = clamp_gpu_block_size(kWidths[widthIdx]);
-                set_gpu_block_size(model.gpu_block_size);
+                apply_gpu_block_size(model.gpu_block_size);
                 persist_settings(model);
             }
             ImGui::TextDisabled("Measured on a 30-SM Turing card: on large grids every width is");

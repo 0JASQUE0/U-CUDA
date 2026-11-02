@@ -1,5 +1,6 @@
 ﻿#include "ucuda/analysis/network_session.h"
 #include "ucuda/domain/num_parse.h"
+#include "ucuda/cuda/parametric_engine.h"
 #include "ucuda/equations/codegen.hpp"   // codegen_coupling
 #include "ucuda/equations/sysparse.hpp"
 #include <algorithm>

@@ -5,6 +5,7 @@
 #include <vector>
 
 struct PhaseAnalysisSession;
+struct PeakConfig;
 
 // Найден ли компилятор для CPU-путей (cl.exe). При false в why_not причина.
 bool cpu_compiler_available(std::string* why_not = nullptr);
@@ -21,6 +22,12 @@ bool check_controller_body(const std::string& body, std::string& log);
 
 // Время изменения файла схемы (слежение Watch во вкладке DAE); 0, если файла нет.
 long long circuit_file_mtime(const std::string& path);
+
+// Глобальные настройки GPU-пайплайна из окна Settings (передаются движку; смена бампает ключи PTX-кэшей).
+void apply_peak_config(const PeakConfig& c);
+void apply_nvrtc_fmad(bool enabled);
+void apply_nvrtc_rdc(bool enabled);
+void apply_gpu_block_size(int threads);
 
 // SPICE-нетлист синтезированной схемы из результата Analysis в файл path; итог в s.result.circuit_status.
 void write_synthesized_netlist(PhaseAnalysisSession& s, const std::string& path);

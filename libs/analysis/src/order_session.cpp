@@ -1,5 +1,6 @@
 ﻿#include "ucuda/analysis/order_session.h"
 #include "ucuda/domain/num_parse.h"
+#include "ucuda/cuda/parametric_engine.h"
 #include "ucuda/numerics/krs_cpu.h"      // CPU-ветка считает шаг тем же телом КРС, что уходит в NVRTC
 #include "ucuda/cuda/phase_portrait_nvrtc.h"   // computeAdaptiveEndpointNVRTC — замер адаптивного шага
 #include <algorithm>

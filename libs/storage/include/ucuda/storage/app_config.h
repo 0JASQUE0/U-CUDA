@@ -31,8 +31,8 @@ struct AppConfig {
 
     // Последний выбранный colormap для HeatmapView (LLE-2D и пр.).
     // 1001..1200 — карта slanCM; 0..8 — легаси, мигрируют при чтении (см.
-    // colormap_id_or в plot_renderer.h). Дефолт 0 читается как #1 viridis.
-    int heatmap_colormap = 0;
+    // colormap_id_or в plot_renderer.h). Дефолт 2 читается как #168 turbo.
+    int heatmap_colormap = 2;
 
     // Colormap для табов панели бассейнов (независимо для каждого таба).
     // Дефолт 2 читается как #168 turbo: хорошо разделяет дискретные /

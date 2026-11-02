@@ -1,5 +1,6 @@
 ﻿#include "ucuda/analysis/neural_session.h"
 #include "ucuda/domain/num_parse.h"
+#include "ucuda/cuda/parametric_engine.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
