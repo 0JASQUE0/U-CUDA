@@ -1,6 +1,7 @@
 ﻿#include "ucuda/application/compute_services.h"
 #include "ucuda/analysis/analysis_session.h"
 #include "ucuda/cuda/nvrtc_engine.h"
+#include "ucuda/cuda/runtime_settings.h"
 #include "ucuda/numerics/circuit_netlist.h"
 #include "ucuda/numerics/kicad_import.h"
 #include "ucuda/numerics/krs_cpu.h"
@@ -22,6 +23,11 @@ std::vector<BodyIndexDiag> check_body_indices(const std::string& body, int amoun
 bool check_controller_body(const std::string& body, std::string& log) {
     return nvrtc_check_ctrl_body(body, log);
 }
+
+void apply_peak_config(const PeakConfig& c) { set_peak_config(c); }
+void apply_nvrtc_fmad(bool enabled)          { set_nvrtc_fmad(enabled); }
+void apply_nvrtc_rdc(bool enabled)           { set_nvrtc_rdc(enabled); }
+void apply_gpu_block_size(int threads)       { set_gpu_block_size(threads); }
 
 long long circuit_file_mtime(const std::string& path) {
     return circuit_source_mtime(path);

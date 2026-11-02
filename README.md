@@ -28,24 +28,22 @@ Every documented directory also has an `AGENTS.md` with short, scoped rules for 
 | What | Host compilers | Configure | Build |
 |---|---|---|---|
 | Windows desktop app | MSVC 2022, nvcc with MSVC host | — | [U-CUDA.sln](U-CUDA.sln), **Release\|x64** |
-| Windows legacy batch app | same | — | [U-CUDA.sln](U-CUDA.sln), **Debug\|x64** |
 | Windows tests | same | `cmake --preset windows` | `cmake --build --preset windows-release` |
 | Linux Debug | GCC 15, nvcc with GCC host | `cmake --preset linux-debug` | `cmake --build --preset linux-debug` |
 | Linux Release | GCC 15, nvcc with GCC host | `cmake --preset linux-release` | `cmake --build --preset linux-release` |
 
-CUDA Toolkit is required in every configuration. The classic Visual Studio solution (`U-CUDA/U-CUDA.vcxproj`) builds without CMake: the exe and its runtime land in `x64\<Configuration>\`, GUI libraries come from the vcpkg manifest. CMake builds the test suite, Linux and the headless configuration. The `vcxproj_sync` test keeps both build definitions on the same library sources. Commands are in [SETUP.md](SETUP.md).
+CUDA Toolkit is required in every configuration. The classic Visual Studio solution (`U-CUDA/U-CUDA.vcxproj`) builds without CMake: the exe and its runtime land in `x64\Release\`, GUI libraries come from the vcpkg manifest. CMake builds the test suite, Linux and the headless configuration. The `vcxproj_sync` test keeps both build definitions on the same library sources. Commands are in [SETUP.md](SETUP.md).
 
 The repository does not define a MinGW/GCC-on-Windows preset. The supported Windows CUDA host compiler is MSVC; GCC is used by the Linux presets.
 
 Useful options:
 
-- `-DU_CUDA_BUILD_GUI=OFF`: build computation, storage, the OCR client, and tests without fetching GUI dependencies; the legacy executable is also available when enabled separately.
-- `-DU_CUDA_BUILD_LEGACY=ON`: add the `U-CUDA-legacy` batch executable.
+- `-DU_CUDA_BUILD_GUI=OFF`: build computation, storage, the OCR client, and tests without fetching GUI dependencies.
 - `-DBUILD_TESTING=OFF`: omit CTest executables.
 
 ## Applications and runtime files
 
-`U-CUDA` is the desktop application. `U-CUDA-legacy` preserves the old batch workflow. Post-build packaging places `kernels/`, `library_template/`, `ocr_server.py`, and required Windows DLLs beside each executable.
+`U-CUDA` is the desktop application. Post-build packaging places `kernels/`, `library_template/`, `ocr_server.py`, and required Windows DLLs beside the executable.
 
 The development user library remains in `U-CUDA/library/`. It is ignored, must not be overwritten, and can be relocated with `U_CUDA_LIBRARY`. OCR is optional; run `setup.ps1` to install [tools/ocr/requirements.txt](tools/ocr/requirements.txt).
 

@@ -12,7 +12,7 @@ Use [README.md](README.md) to locate the owning module. Consult [ARCHITECTURE.md
 ## Project invariants
 
 - Use C++17 and CUDA C++17 as configured by CMake. Match local naming, formatting, includes, and error-handling conventions. Follow `.editorconfig`; keep `setup.ps1` ASCII-only.
-- Two build definitions describe the same sources: CMake (tests, Linux, headless) and the classic Visual Studio solution `U-CUDA.sln` / `U-CUDA/U-CUDA.vcxproj` (Windows: Release = desktop app, Debug = legacy). Add every new `libs/` source to both; `vcxproj_sync` checks it. Public headers belong in `include/ucuda/<module>/`; implementation details belong in `src/`. Use `PUBLIC` dependencies only when exposed by a public header.
+- Two build definitions describe the same sources: CMake (tests, Linux, headless) and the classic Visual Studio solution `U-CUDA.sln` / `U-CUDA/U-CUDA.vcxproj` (Windows: Release|x64, the desktop app). Add every new `libs/` source to both; `vcxproj_sync` checks it. Public headers belong in `include/ucuda/<module>/`; implementation details belong in `src/`. Use `PUBLIC` dependencies only when exposed by a public header.
 - Keep dependencies one-way. Domain is independent of CUDA, storage, application, plotting, and UI. Storage and computation build without GUI.
 - Sessions contain serializable computation state, never ImGui/OpenGL resources. UI owns views; plotting owns GL objects and releases them before the GL context.
 - Background work uses request snapshots, result objects, and existing cancellation/progress mechanisms. Polling, queue advancement, persistence, and cancellation run through `AppModel::tick`; worker threads do not access UI/GL state.
@@ -30,7 +30,7 @@ Use [README.md](README.md) to locate the owning module. Consult [ARCHITECTURE.md
 - Каждая новая функция или изменение поведения, результат которого можно объективно проверить, сопровождается автоматическими тестами в том же изменении. Функция считается завершённой после прохождения соответствующих проверок. Исправление ошибки сопровождается регрессионным тестом, воспроизводящим её.
 - Numerical and performance-sensitive changes must add or extend accuracy/convergence checks and benchmarks for every supported CPU/GPU path. Do not weaken tolerances or replace baselines merely to make tests pass.
 - If automated verification is objectively impossible, document the reason and a reproducible manual check in the change description.
-- Build affected targets; build `U-CUDA-legacy` when shared compute signatures change.
+- Build affected targets.
 - Run `adaptive_cpu`, `architecture`, `layer_rules`, and relevant platform tests. CUDA/NVRTC changes also require non-skipped `adaptive_gpu` and `gpu_smoke` runs on a real GPU.
 - Configure once with `U_CUDA_BUILD_GUI=OFF` after dependency-boundary changes.
 - Run `git diff --check`. Report passed, failed, skipped, and not-run checks accurately.

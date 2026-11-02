@@ -1,10 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
-    <ProjectConfiguration Include="Debug|x64">
-      <Configuration>Debug</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
     <ProjectConfiguration Include="Release|x64">
       <Configuration>Release</Configuration>
       <Platform>x64</Platform>
@@ -15,12 +11,6 @@
     <RootNamespace>U_CUDA</RootNamespace>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
-    <ConfigurationType>Application</ConfigurationType>
-    <UseDebugLibraries>true</UseDebugLibraries>
-    <CharacterSet>MultiByte</CharacterSet>
-    <PlatformToolset>v143</PlatformToolset>
-  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
@@ -44,9 +34,6 @@
   <ImportGroup Label="ExtensionSettings">
     <Import Project="$(UcudaCudaBase).props" Condition="Exists('$(UcudaCudaBase).props')" />
   </ImportGroup>
-  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-  </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
@@ -57,50 +44,6 @@
     <VcpkgTriplet>x64-windows</VcpkgTriplet>
     <VcpkgManifestRoot>$(SolutionDir)</VcpkgManifestRoot>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <LinkIncremental>true</LinkIncremental>
-  </PropertyGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
-      <Optimization>Disabled</Optimization>
-      <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <PreprocessorDefinitions>WIN32;WIN64;_DEBUG;_CONSOLE;NOMINMAX;WIN32_LEAN_AND_MEAN;U_CUDA_PROJECT_DIR="$(SolutionDir.TrimEnd('\').Replace('\','/'))";U_CUDA_RESOURCE_DIR="$(SolutionDir.TrimEnd('\').Replace('\','/'))/resources";U_CUDA_TOOLKIT_INCLUDE="$(CUDA_PATH.TrimEnd('\').Replace('\','/'))/include";%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <LanguageStandard>stdcpp17</LanguageStandard>
-      <!-- /utf-8 = /source-charset:utf-8 /execution-charset:utf-8. Обязателен:
-           русские строковые литералы уходят в ImGui, который рисует UTF-8. Без
-           него MSVC кодирует их в системную ANSI (CP1251) и UI показывает ромбики.
-           /bigobj: крупные файлы UI в Debug превышают 65279 секций объектного файла (C1128). -->
-      <AdditionalOptions>/utf-8 /bigobj %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(SolutionDir)libs\domain\include;$(SolutionDir)libs\platform\include;$(SolutionDir)libs\equations\include;$(SolutionDir)libs\numerics\include;$(SolutionDir)libs\storage\include;$(SolutionDir)libs\cuda\include;$(SolutionDir)libs\analysis\include;$(SolutionDir)libs\ocr\include;$(SolutionDir)libs\application\include;$(SolutionDir)libs\plotting\include;$(SolutionDir)libs\ui\include;$(SolutionDir)libs\cuda\include\ucuda\cuda;$(SolutionDir)resources\kernels;$(SolutionDir)third_party\glad\include;$(SolutionDir)third_party\stb;$(CUDA_PATH)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-    </ClCompile>
-    <Link>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
-      <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>cudart_static.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;opengl32.lib;nvrtc.lib;cuda.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-    </Link>
-    <CudaCompile>
-      <TargetMachinePlatform>64</TargetMachinePlatform>
-      <!-- Ядра cudaLibrary.cu зовутся из host_*.cu других файлов: нужен relocatable device code
-           (в CMake — CUDA_SEPARABLE_COMPILATION). Архитектура — как CMAKE_CUDA_ARCHITECTURES. -->
-      <GenerateRelocatableDeviceCode>true</GenerateRelocatableDeviceCode>
-      <CodeGeneration>compute_75,sm_75</CodeGeneration>
-      <CudaRuntime>Static</CudaRuntime>
-      <AdditionalOptions>-Xcompiler="/utf-8" %(AdditionalOptions)</AdditionalOptions>
-    </CudaCompile>
-    <CudaLink>
-      <PerformDeviceLink>true</PerformDeviceLink>
-    </CudaLink>
-    <PostBuildEvent>
-      <!-- Тот же сценарий упаковки рантайма, что у CMake (cmake/PackRuntime.cmake): шаблоны NVRTC,
-           плоские заголовки для NVRTC, ocr_server.py, library_template, шрифты. cmake — из VS 2022. -->
-      <Command>set "UC_CMAKE=$(VsInstallRoot)\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
-"%UC_CMAKE%" "-Dsource_root=$(SolutionDir.TrimEnd('\').Replace('\','/'))" "-Ddestination=$(OutDir.TrimEnd('\').Replace('\','/'))" -P "$(SolutionDir)cmake\PackRuntime.cmake"</Command>
-      <Message>Packing runtime (kernels\, NVRTC headers, ocr_server.py, library_template, fonts) into $(OutDir)</Message>
-    </PostBuildEvent>
-  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -113,7 +56,7 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
       <!-- /utf-8 = /source-charset:utf-8 /execution-charset:utf-8. Обязателен:
            русские строковые литералы уходят в ImGui, который рисует UTF-8. Без
            него MSVC кодирует их в системную ANSI (CP1251) и UI показывает ромбики.
-           /bigobj: крупные файлы UI в Debug превышают 65279 секций объектного файла (C1128). -->
+           /bigobj: крупные файлы UI могут превысить 65279 секций объектного файла (C1128). -->
       <AdditionalOptions>/utf-8 /bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(SolutionDir)libs\domain\include;$(SolutionDir)libs\platform\include;$(SolutionDir)libs\equations\include;$(SolutionDir)libs\numerics\include;$(SolutionDir)libs\storage\include;$(SolutionDir)libs\cuda\include;$(SolutionDir)libs\analysis\include;$(SolutionDir)libs\ocr\include;$(SolutionDir)libs\application\include;$(SolutionDir)libs\plotting\include;$(SolutionDir)libs\ui\include;$(SolutionDir)libs\cuda\include\ucuda\cuda;$(SolutionDir)resources\kernels;$(SolutionDir)third_party\glad\include;$(SolutionDir)third_party\stb;$(CUDA_PATH)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
@@ -127,16 +70,20 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
-      <!-- Ядра cudaLibrary.cu зовутся из host_*.cu других файлов: нужен relocatable device code
-           (в CMake — CUDA_SEPARABLE_COMPILATION). Архитектура — как CMAKE_CUDA_ARCHITECTURES. -->
-      <GenerateRelocatableDeviceCode>true</GenerateRelocatableDeviceCode>
+      <!-- NVCC собирает только RQA (host_rqa.cu); остальной счёт идёт через NVRTC.
+           Архитектура — как CMAKE_CUDA_ARCHITECTURES. -->
       <CodeGeneration>compute_75,sm_75</CodeGeneration>
       <CudaRuntime>Static</CudaRuntime>
       <AdditionalOptions>-Xcompiler="/utf-8" %(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
-    <CudaLink>
-      <PerformDeviceLink>true</PerformDeviceLink>
-    </CudaLink>
+    <PreBuildEvent>
+      <!-- Один проект не разделяет модули: все include-каталоги видны всем файлам. Направление
+           зависимостей проверяет тот же tests/layer_rules.cmake, что и ctest; нарушение валит сборку. -->
+      <Command>set "UC_CMAKE=$(VsInstallRoot)\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
+"%UC_CMAKE%" "-DROOT=$(SolutionDir.TrimEnd('\').Replace('\','/'))" -P "$(SolutionDir)tests\layer_rules.cmake"</Command>
+      <Message>Checking module layer rules (tests\layer_rules.cmake)</Message>
+    </PreBuildEvent>
     <PostBuildEvent>
       <!-- Тот же сценарий упаковки рантайма, что у CMake (cmake/PackRuntime.cmake): шаблоны NVRTC,
            плоские заголовки для NVRTC, ocr_server.py, library_template, шрифты. cmake — из VS 2022. -->
@@ -147,18 +94,7 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <CudaCompile Include="..\libs\cuda\src\cudaMacros.cu" />
     <CudaCompile Include="..\libs\cuda\src\host_rqa.cu" />
-    <CudaCompile Include="..\libs\cuda\src\cudaLibrary.cu" />
-    <CudaCompile Include="..\libs\cuda\src\host_basins.cu" />
-    <CudaCompile Include="..\libs\cuda\src\host_bifurcation.cu" />
-    <CudaCompile Include="..\libs\cuda\src\host_dft.cu" />
-    <CudaCompile Include="..\libs\cuda\src\host_fastsync.cu" />
-    <CudaCompile Include="..\libs\cuda\src\host_lyapunov.cu" />
-    <CudaCompile Include="..\libs\cuda\src\host_trajectory.cu" />
-    <CudaCompile Include="..\apps\legacy\main_NonLinAnal.cu">
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
-    </CudaCompile>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\libs\domain\src\session_defaults.cpp" />
@@ -271,9 +207,7 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
     <ClCompile Include="..\libs\ui\src\widgets.cpp" />
     <ClCompile Include="..\libs\ui\src\workspace.cpp" />
     <ClCompile Include="..\third_party\glad\src\glad.c" />
-    <ClCompile Include="..\apps\desktop\app_main.cpp">
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
-    </ClCompile>
+    <ClCompile Include="..\apps\desktop\app_main.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\libs\domain\include\ucuda\domain\adaptive_settings.h" />
@@ -323,7 +257,6 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
     <ClInclude Include="..\libs\cuda\include\ucuda\cuda\circuit_nvrtc.h" />
     <ClInclude Include="..\libs\cuda\include\ucuda\cuda\cudaLibrary.cuh" />
     <ClInclude Include="..\libs\cuda\include\ucuda\cuda\cudaMacros.cuh" />
-    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\hostLibrary.cuh" />
     <ClInclude Include="..\libs\cuda\include\ucuda\cuda\nvrtc_engine.h" />
     <ClInclude Include="..\libs\cuda\include\ucuda\cuda\parametric_engine.h" />
     <ClInclude Include="..\libs\cuda\include\ucuda\cuda\phase_portrait_nvrtc.h" />
@@ -335,7 +268,6 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
     <ClInclude Include="..\libs\cuda\src\device\peaks.cuh" />
     <ClInclude Include="..\libs\cuda\src\engine_helpers.h" />
     <ClInclude Include="..\libs\cuda\src\engine_impl.h" />
-    <ClInclude Include="..\libs\cuda\src\host_internal.cuh" />
     <ClInclude Include="..\libs\cuda\src\module_lru.h" />
     <ClInclude Include="..\libs\cuda\src\perf_warmup.h" />
     <ClInclude Include="..\libs\analysis\include\ucuda\analysis\analysis_session.h" />
@@ -385,6 +317,7 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
     <ClInclude Include="..\libs\ui\src\ui_resources.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="..\libs\cuda\src\cudaLibrary.cu" />
     <None Include="..\resources\kernels\adaptive_part.cu" />
     <None Include="..\resources\kernels\basins.template.cu" />
     <None Include="..\resources\kernels\bifurcation1d.template.cu" />

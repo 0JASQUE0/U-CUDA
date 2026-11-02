@@ -13,4 +13,4 @@ ucuda_library(analysis
     src/phase_session.cpp
     src/session_helpers.cpp
 )
-target_link_libraries(ucuda_analysis PUBLIC ucuda::cuda ucuda::equations PRIVATE ucuda::numerics Threads::Threads)
+target_link_libraries(ucuda_analysis PUBLIC ucuda::equations PRIVATE ucuda::cuda ucuda::numerics Threads::Threads)

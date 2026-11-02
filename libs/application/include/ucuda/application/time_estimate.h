@@ -1,6 +1,6 @@
 ﻿#pragma once
 #include "ucuda/domain/traj_work.h"
-#include "ucuda/cuda/runtime_settings.h"
+#include "ucuda/domain/analysis_types.h"   // krs_step_cost, gpu_calibrate, GpuCalibration
 #include <fstream>
 #include <functional>
 #include <future>
@@ -182,10 +182,8 @@ private:
         });
     }
 
-    std::string cost_key(const TrajWork& w) const {
-        return std::to_string(std::hash<std::string>{}(w.krs_body)) + ":" + std::to_string(w.amountOfX)
-             + (get_nvrtc_fmad() ? ":fm1" : ":fm0");
-    }
+    // Ключ цены шага: тело КРС, размерность, fmad NVRTC (определение в app_queues.cpp).
+    std::string cost_key(const TrajWork& w) const;
 
     void start_cost(const std::string& key, const std::string& body, int n) {
         cost_key_tmp_ = key;

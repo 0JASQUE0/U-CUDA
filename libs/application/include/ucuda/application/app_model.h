@@ -237,8 +237,9 @@ class AppModel : public SystemEditor {
 public:
     void tick(SystemLibrary& library);
     // Черновик редактора библиотеки — только редактор системы, без сессий и очередей.
-    explicit AppModel(OcrFn ocr)
-        : SystemEditor(std::move(ocr)), library_edit_buffer(std::make_unique<SystemEditor>(ocr_)) {}
+    // Конструктор и деструктор в app_queues.cpp: там ParametricEngine полный тип.
+    explicit AppModel(OcrFn ocr);
+    ~AppModel();
 
     // Платформенное состояние screenshot-to-clipboard, см. PendingScreenshot.
     PendingScreenshot pending_screenshot;
@@ -390,7 +391,7 @@ public:
     const std::deque<CustomQueueItem>&     custom_queue()     const { return custom_queue_; }
 
 private:
-    // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
+    // движок параметрики (NVRTC). Лениво создаётся при первом Run.
     std::unique_ptr<ParametricEngine> parametric_engine;
     ParametricEngine& ensure_engine();
 public:

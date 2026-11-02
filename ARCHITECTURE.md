@@ -4,10 +4,10 @@
 
 Both describe the same sources and the same module graph below.
 
-- `U-CUDA.sln` / `U-CUDA/U-CUDA.vcxproj` (Windows, Visual Studio): one project that compiles every `libs/` source into the executable. Release builds the desktop app (`apps/desktop`), Debug the legacy entry (`apps/legacy`); output goes to `x64\<Configuration>\`. The post-build step runs [cmake/PackRuntime.cmake](cmake/PackRuntime.cmake) to pack `kernels/` and the other runtime files.
+- `U-CUDA.sln` / `U-CUDA/U-CUDA.vcxproj` (Windows, Visual Studio): one project that compiles every `libs/` source into the executable. Only Release|x64 is defined; it builds the desktop app (`apps/desktop`) into `x64\Release\`. The post-build step runs [cmake/PackRuntime.cmake](cmake/PackRuntime.cmake) to pack `kernels/` and the other runtime files.
 - CMake: one library target per module, so the dependency arrows below are enforced by the linker; used for tests (`ctest`), Linux and the headless configuration.
 
-[tests/vcxproj_sync.cmake](tests/vcxproj_sync.cmake) checks that both list the same `libs/` sources. A single Visual Studio project does not enforce module boundaries, so [tests/layer_rules.cmake](tests/layer_rules.cmake) checks the include direction instead.
+[tests/vcxproj_sync.cmake](tests/vcxproj_sync.cmake) checks that both list the same `libs/` sources. A single Visual Studio project does not enforce module boundaries, so [tests/layer_rules.cmake](tests/layer_rules.cmake) checks the include direction instead; the solution runs it as a pre-build step, so a violation fails the classic build as well as `ctest`.
 
 ## Dependency direction
 
@@ -19,7 +19,6 @@ flowchart LR
     numerics[numerics]
     exportfmt[internal export format]
     cuda[cuda]
-    cudalegacy[cuda_legacy]
     analysis[analysis]
     storage[storage]
     ocr[ocr]
@@ -27,7 +26,6 @@ flowchart LR
     plotting[plotting]
     ui[ui]
     desktop[U-CUDA]
-    legacy[U-CUDA-legacy]
 
     equations --> domain
     numerics --> equations
@@ -55,14 +53,11 @@ flowchart LR
     ui --> plotting
     ui --> storage
     desktop --> ui
-    cudalegacy --> cuda
-    cudalegacy --> exportfmt
-    legacy --> cudalegacy
 ```
 
 `ucuda_export_format` is an internal implementation target in storage. It lets compute-time streaming and later GUI export share byte-identical CSV writers without making `ucuda_cuda` depend on the complete `ucuda_storage` library.
 
-Forbidden directions include domain to any higher module, storage to application/UI/plotting, CUDA to application/UI/plotting, analysis to UI/plotting, plotting to application, and UI to CUDA/numerics. UI reaches computation through application: `AppModel` for tasks, `compute_services.h` for direct checks (CPU compiler, KRS indices, controller body, circuit files, netlist export).
+Forbidden directions include domain to any higher module, storage to application/UI/plotting, CUDA to application/UI/plotting, analysis to UI/plotting, plotting to application, and UI to CUDA/numerics. UI reaches computation through application: `AppModel` for tasks, `compute_services.h` for direct checks (CPU compiler, KRS indices, controller body, circuit files, netlist export) and the global GPU settings. Public headers of analysis and application name `ParametricEngine` only by forward declaration, so `ucuda::cuda` and `ucuda::numerics` are PRIVATE dependencies and never reach UI include paths.
 
 One deliberate exception: domain includes the layout part of `resources/kernels/ucuda_adaptive.cuh` (`UCUDA_ADAPT_LAYOUT_ONLY`) from `adaptive_settings.h`. `UcudaAdaptParams` and the step-controller structures are passed to kernels byte for byte, so host and device keep one definition. [tests/layer_rules.cmake](tests/layer_rules.cmake) checks both rules.
 
@@ -104,7 +99,7 @@ Runtime-only IDs and GPU/GL handles are never written to JSON.
 
 ```text
 <executable directory>/
-  U-CUDA[.exe] or U-CUDA-legacy[.exe]
+  U-CUDA[.exe]
   kernels/
   library_template/
   ocr_server.py

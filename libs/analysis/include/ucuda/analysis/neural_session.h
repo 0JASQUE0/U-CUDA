@@ -3,7 +3,6 @@
 // (future, отмена, прогресс, запуск, опрос) и функции, которые строят граф и запрос (через кодоген).
 #include "ucuda/domain/neural_session.h"
 #include "ucuda/analysis/analysis_session.h"
-#include "ucuda/cuda/parametric_engine.h"
 #include <atomic>
 #include <chrono>
 #include <future>

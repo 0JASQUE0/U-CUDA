@@ -2,17 +2,17 @@
 
 ## Purpose
 
-Owns CUDA/NVRTC module compilation, kernel launch infrastructure, module caches, GPU algorithms, CPU fallbacks used by parameter sweeps, and legacy host CUDA entry points.
+Owns CUDA/NVRTC module compilation, kernel launch infrastructure, module caches, GPU algorithms, CPU fallbacks used by parameter sweeps, and the NVCC-built RQA kernels.
 
 ## Public API and internals
 
-Main facades are `NvrtcEngine`, `ParametricEngine`, phase portrait APIs, runtime settings, and legacy declarations in `hostLibrary.cuh`. Requests/results come from domain.
+Main facades are `NvrtcEngine`, `ParametricEngine`, phase portrait APIs, and runtime settings. Requests/results come from domain.
 
 ## Dependencies and consumers
 
-Target `ucuda::cuda` depends on domain, numerics, platform, CUDA Toolkit libraries, threads, and the internal export-format target. It is consumed by analysis and legacy.
+Target `ucuda::cuda` depends on domain, numerics, platform, CUDA Toolkit libraries, threads, and the internal export-format target. It is consumed by analysis.
 
-The NVCC-built legacy host library (`hostLibrary.cuh`: `cudaLibrary.cu` and `host_*.cu` except `host_rqa.cu`) is its own target `ucuda::cuda_legacy`, linked only by `U-CUDA-legacy`. The desktop app and the tests run every analysis through NVRTC modules (`cuLaunchKernel`), so they do not link it; the only NVCC kernels they need are RQA (`host_rqa.cu`, in `ucuda::cuda`). `ucuda::cuda_legacy` is built in every configuration so it keeps compiling.
+Every analysis runs through NVRTC modules (`cuLaunchKernel`); `src/cudaLibrary.cu` is not compiled by NVCC, it is the shared kernel source that `PackRuntime.cmake` copies into `kernels/` for the templates. The only NVCC kernels are RQA (`host_rqa.cu`).
 
 It must not depend on application, storage orchestration, plotting, ImGui, or OpenGL. The internal export-format dependency contains formatting only and does not pull the storage library into compute code.
 
@@ -22,11 +22,11 @@ Analysis submits typed requests and generated source. CUDA resolves runtime temp
 
 ## Change this when
 
-Use `engine_*` files for modern analysis families (`engine_runtime.cpp` holds shared helpers, source loading and module builds; `engine_metrics.cpp`, `engine_network.cpp`, `engine_order.cpp` with Stability and Performance, and so on per family), with `ParametricEngine::Impl` (`src/engine_impl.h`) layered as `EngineContext` (CUDA context, run signals) <- `EngineSources` (template texts) <- `EngineModuleCache` (module pools, locks, cancel mirrors, `wait_with_signals`) <- `EngineModuleBuilder` (NVRTC, PTX caches, linking) <- `Impl` (`compile_*_if_needed` and `run_*` per family), `host_*` files for legacy entry points, runtime/engine files for compilation and caches, and `device/*.cuh` plus kernel templates for device algorithms.
+Use `engine_*` files for modern analysis families (`engine_runtime.cpp` holds shared helpers, source loading and module builds; `engine_metrics.cpp`, `engine_network.cpp`, `engine_order.cpp` with Stability and Performance, and so on per family), with `ParametricEngine::Impl` (`src/engine_impl.h`) layered as `EngineContext` (CUDA context, run signals) <- `EngineSources` (template texts) <- `EngineModuleCache` (module pools, locks, cancel mirrors, `wait_with_signals`) <- `EngineModuleBuilder` (NVRTC, PTX caches, linking) <- `Impl` (`compile_*_if_needed` and `run_*` per family), `host_rqa.cu` for RQA, runtime/engine files for compilation and caches, and `device/*.cuh` plus kernel templates for device algorithms.
 
 ## Build and checks
 
-Build with `cmake --build --preset windows-debug --target ucuda_cuda` (and `ucuda_cuda_legacy` for `host_*` changes) and repeat for Release and `U-CUDA-legacy`. Required checks are listed in [AGENTS.md](AGENTS.md).
+Build with `cmake --build --preset windows-release --target ucuda_cuda` and the Release|x64 solution. Required checks are listed in [AGENTS.md](AGENTS.md).
 
 ## Compatibility and platforms
 

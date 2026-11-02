@@ -9,7 +9,7 @@ cmake --build --preset windows-release --target upstream_network upstream_sessio
 ctest --preset windows-release -R '^upstream_'
 ```
 
-DAE checks are split into GoogleTest cases in ../dae_gtest.cpp. Library/session
+The adaptive, architecture and GPU smoke checks live in the canonical ../adaptive_test.cpp, ../architecture_test.cpp and ../gpu_smoke.cpp (CTest adaptive_cpu/adaptive_gpu, architecture, gpu_smoke). DAE checks are split into GoogleTest cases in ../dae_gtest.cpp. Library/session
 tests use temporary fixture copies. KiCad/ngspice checks require external tools
 and explicitly report skip code 77 when unavailable.
 

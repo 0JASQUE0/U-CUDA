@@ -5,4 +5,4 @@
 - **PackRuntime.cmake** copies kernel templates, assembles flat NVRTC headers from shared sources, and copies OCR/library templates.
 - **CopyRuntimeDlls.cmake** copies resolved runtime DLLs while filtering invalid entries.
 
-The root CMakeLists.txt controls module order and optional GUI/legacy/test subtrees. Keep build-tree paths out of sources and preserve executable-relative runtime behavior.
+The root CMakeLists.txt controls module order and optional GUI/test subtrees. Keep build-tree paths out of sources and preserve executable-relative runtime behavior.

@@ -305,7 +305,7 @@ __global__ void DFT_custom(numb* data, const int sizeOfBlock, const int amountOf
 // Арифметика на пару (k, точка) — та же, операция в операцию (f_k, поворот, сброс через
 // cosf/sinf, деление в конце), сумма лишь копится в регистре, а не в AkCOS[]: результат бит-в-бит
 // как у DFT_custom. Соседние потоки — соседние частоты одной точки, поэтому data[n] и window[n]
-// варп читает одним запросом. DFT_custom оставлен для NonLinAnal (hostLibrary.cu).
+// варп читает одним запросом. DFT_custom приложение не вызывает; отсечение ядер убирает его из модуля.
 #if !defined(UCUDA_PRUNE_KERNELS) || defined(UCUDA_KEEP_DFT_custom_pf)
 __global__ void DFT_custom_pf(numb* data, const int sizeOfBlock, const int amountOfBlocks,
 	int* checkerArray, numb* AkCOS, numb* BkSIN, numb* rangesFreq, numb* window, int nFreq, numb h,
