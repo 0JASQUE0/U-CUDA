@@ -31,7 +31,7 @@ Change parser syntax in parsing files, expression semantics in evaluator files, 
 
 ## Build and checks
 
-Build with `cmake --build --preset windows-debug --target ucuda_equations`. Run `adaptive_cpu`; run `adaptive_gpu` and `gpu_smoke` when generated code changes.
+Build with `cmake --build --preset windows-debug --target ucuda_equations`. Required checks are listed in [AGENTS.md](AGENTS.md).
 
 ## Compatibility and platforms
 

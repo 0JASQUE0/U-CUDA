@@ -24,7 +24,7 @@ Edit the matching renderer/view source for visual behavior. Put clipboard transf
 
 ## Build and checks
 
-Build with `cmake --build --preset windows-debug --target ucuda_plotting U-CUDA`. Exercise 2D, 3D, heatmap, zoom/camera, screenshot, and context shutdown paths.
+Build with `cmake --build --preset windows-debug --target ucuda_plotting U-CUDA`. Required checks are listed in [AGENTS.md](AGENTS.md).
 
 ## Compatibility and platforms
 

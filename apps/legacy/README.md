@@ -14,4 +14,4 @@ Edit this entry point only for legacy workflow behavior. Change shared signature
 
 ## Build and checks
 
-Configure with `U_CUDA_BUILD_LEGACY=ON`, build target `U-CUDA-legacy`, and verify its expected input/output contract whenever host CUDA signatures change.
+On Windows build **Debug|x64** of `U-CUDA.sln`; in CMake configure with `U_CUDA_BUILD_LEGACY=ON` and build target `U-CUDA-legacy`. In both cases verify its expected input/output contract whenever host CUDA signatures change.

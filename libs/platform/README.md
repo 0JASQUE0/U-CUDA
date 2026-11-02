@@ -24,7 +24,7 @@ Change this module for OS integration or image transfer. OpenGL framebuffer capt
 
 ## Build and checks
 
-Build with `cmake --build --preset windows-debug --target ucuda_platform` or `cmake --build --preset linux-debug --target ucuda_platform`. On Linux run `platform`; on Windows smoke-test paths, dialogs, child processes, and clipboard behavior.
+Build with `cmake --build --preset windows-debug --target ucuda_platform` or `cmake --build --preset linux-debug --target ucuda_platform`. Required checks are listed in [AGENTS.md](AGENTS.md).
 
 ## Compatibility and platforms
 

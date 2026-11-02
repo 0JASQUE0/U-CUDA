@@ -47,6 +47,7 @@ flowchart LR
     application --> analysis
     application --> storage
     application --> ocr
+    application --> numerics
     application --> platform
     plotting --> domain
     plotting --> platform
@@ -90,9 +91,12 @@ When device helpers, `configCUDA.h` or kernel includes change, update the packer
 - Analysis owns futures, progress/cancellation tokens, session transitions, and computation orchestration: each session is `<Name> : <Name>State` in analysis.
 - Storage owns JSON, settings, system-library layout, and CSV formatting. It serializes `<Name>State`; sessions owning other sessions (Basins phase slots, Custom) pass the owned parts explicitly.
 - Application owns the active system, cross-analysis queues, dirty/save decisions, and global ticking, and wraps storage's state serializers for whole sessions (`session_persistence.h`). `AppModel` is layered: `AppSettings` (mirror of `AppConfig`) <- `SystemEditor` (the edited system, its code generation and library record) <- `AppModel` (sessions, engine, queues, plot windows, broadcast and undo). The Library editor's scratch buffer is a `SystemEditor`, not a second `AppModel`.
+- The GPU cost estimator (`time_estimate.h`) belongs to application; domain's trajectory work description (`traj_work.h`) contains only values.
+- DAE IR, device expansion and scheme generation belong to equations; domain owns serializable DAE/Newton settings and sparse numerical data types. Numerics owns the CPU BDF driver and SPICE/KiCad import; CUDA owns GPU/NVRTC execution of the same adaptive/BDF algorithms, and runtime packaging includes their common headers.
 - UI owns widget state and plot-view instances.
 - Plotting owns OpenGL buffers, textures, cameras, renderers, and framebuffer capture.
 - Platform owns clipboard transfer and OS-specific paths/processes/dialogs.
+- Test executables depend on the owning libraries and never require GUI. The GoogleTest/Benchmark dependencies and the artifact/baseline CLI live only in `tests/`.
 
 Runtime-only IDs and GPU/GL handles are never written to JSON.
 
@@ -110,14 +114,5 @@ Runtime-only IDs and GPU/GL handles are never written to JSON.
 The application resolves packaged resources relative to the executable, not the current working directory. In a source build, writable user systems remain in `U-CUDA/library/`; `U_CUDA_LIBRARY` overrides that location.
 
 ## Documentation map
-
-DAE IR, device expansion and scheme generation belong to equations. Domain owns
-serializable DAE/Newton settings and sparse numerical data types. Numerics owns
-the CPU BDF driver and SPICE/KiCad import; CUDA owns GPU/NVRTC execution of the
-same adaptive/BDF algorithms. Runtime packaging includes their common headers.
-Test executables depend on the owning libraries and never require GUI. The
-GoogleTest/Benchmark dependencies and artifact/baseline CLI live only in tests.
-Domain's trajectory work description contains only values; the asynchronous
-GPU cost estimator belongs to application, alongside AppModel.
 
 The root [README.md](README.md) answers “where should I start?”. [libs/README.md](libs/README.md) maps library ownership. Directory README files explain design and entry points; directory AGENTS files contain operational rules for coding agents.

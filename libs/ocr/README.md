@@ -24,7 +24,7 @@ Change process protocol/client behavior here and Python recognition behavior in 
 
 ## Build and checks
 
-Build with `cmake --build --preset windows-debug --target ucuda_ocr` or the Linux equivalent. Run Linux `platform` protocol tests where available and perform an optional end-to-end OCR smoke test with the configured Python environment.
+Build with `cmake --build --preset windows-debug --target ucuda_ocr` or the Linux equivalent. Required checks are listed in [AGENTS.md](AGENTS.md).
 
 ## Compatibility and platforms
 

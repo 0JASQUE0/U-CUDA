@@ -10,8 +10,9 @@ passed on RTX 4070 SUPER and CPU/GPU Euler, RK4, DOPRI78 and Complex CD
 trajectories/timings were saved. See [migration evidence](tests/baselines/README.md).
 
 All upstream computation, DAE, BDF, circuit import, Network, GUI and serialization
-changes are assigned to the existing modules. Monolithic source/project copies
-are removed; CMake remains the build definition. User library files are untouched.
+changes are assigned to the existing modules. Monolithic source copies are
+removed; the build definitions are described in [ARCHITECTURE.md](ARCHITECTURE.md).
+User library files are untouched.
 GL caches belong to UI resources; background polling, queue progression and
 Order autosave remain in AppModel::tick, including when views are hidden.
 

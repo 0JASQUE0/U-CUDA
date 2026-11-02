@@ -7,7 +7,7 @@ Use [README.md](README.md) to locate the owning module. Consult [ARCHITECTURE.md
 - Inspect the working tree first and preserve unrelated changes. Keep edits focused; do not bundle cleanup, dependency upgrades, or public API redesigns.
 - Read a module README when first entering that module or when changing its contract, build, ownership, or runtime behavior. Use [SETUP.md](SETUP.md) only for environment setup and command examples.
 - Ask only when requirements leave materially different behavior choices unresolved, especially numerical defaults, persisted formats, or destructive data operations.
-- Use the installed `codebase-memory` skill for structural exploration. Check index freshness and cited-path coverage; use source reads and `rg` for stale, partial, or missing coverage.
+- Where the `codebase-memory` skill is installed (Codex, see [SETUP.md](SETUP.md)), use it for structural exploration. Check index freshness and cited-path coverage; use source reads and `rg` for stale, partial, or missing coverage.
 
 ## Project invariants
 

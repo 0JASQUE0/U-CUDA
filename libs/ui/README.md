@@ -10,7 +10,7 @@ Implements ImGui windows, controls, workspaces, and per-analysis presentation. I
 
 ## Dependencies and consumers
 
-Target `ucuda::ui` depends on application and storage and privately on plotting/numerics. Only the desktop application should consume it.
+Target `ucuda::ui` depends on application and storage and privately on plotting. Only the desktop application should consume it. It never includes CUDA or numerics headers (`layer_rules` checks it); direct checks such as the CPU compiler or KRS indices go through application `compute_services.h`.
 
 UI may issue model commands and render model state. It must not implement numerical algorithms, launch independent worker queues, own persistence policy, or place view resources inside domain sessions.
 
@@ -26,7 +26,7 @@ Shared declarations live in `src/gui_internal.h`, which every UI source includes
 
 ## Build and checks
 
-Build with `cmake --build --preset windows-debug --target ucuda_ui U-CUDA`. Smoke-test session switching, window creation/closing, queues, save/load/export, OCR, screenshots, and shutdown.
+Build with `cmake --build --preset windows-debug --target ucuda_ui U-CUDA`. Required checks are listed in [AGENTS.md](AGENTS.md).
 
 ## Compatibility and platforms
 
