@@ -162,7 +162,7 @@ void draw_latex_preview(const char* id, const std::string& src, ImVec2 size) {
 
 
 namespace ucuda::ui_detail {
-void draw_rhs_preview(const AppModel& model) {
+void draw_rhs_preview(const SystemEditor& model) {
     const std::string& src =
         (model.mode == InputMode::Plain) ? model.plain_text : model.latex_text;
     if (src.find_first_not_of(" \t\r\n") == std::string::npos) return;

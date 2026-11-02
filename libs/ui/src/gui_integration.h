@@ -33,7 +33,7 @@ struct BuiltinScheme {
     // чекбоксы циклом — раньше список схем был выписан там ещё раз руками, и
     // Complex Implicit Euler, добавленный только в одну из копий, не попадал
     // ни под "Select all", ни под "Clear all".
-    bool AppModel::*flag;
+    bool SystemEditor::*flag;
     // Подсказка чекбокса; nullptr — схема говорит сама за себя.
     const char* tooltip;
     // Своя группа вместо "Order N" (nullptr — группа по порядку). Схемы одной

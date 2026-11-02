@@ -34,7 +34,7 @@ void draw_resize_handle(const char* id, float& height,
 void draw_latex_preview(const char* id, const std::string& src, ImVec2 size);
 
 
-void draw_rhs_preview(const AppModel& model);
+void draw_rhs_preview(const SystemEditor& model);
 
 
 bool InputTextStr(const char* label, std::string& str, float width = 0.0f);

@@ -499,7 +499,7 @@ void parametric_type_from_index(int t, ParametricPlotWindow::Kind& kind, bool& m
 bool draw_parametric_window_setup_row(AppModel& model, ParametricPlotWindow& win) ;
 
 
-void draw_generated_code_block(AppModel& model, const GuiCallbacks& cb) ;
+void draw_generated_code_block(SystemEditor& model, const GuiCallbacks& cb) ;
 
 
 void draw_wrapper_coefficients(const std::string& name,
@@ -518,28 +518,28 @@ std::string wrapper_name_field(const char* id, std::string& text,
 bool extr_base_needs_half_s(const std::string& nm) ;
 
 
-void draw_extrapolation_builder(AppModel& model) ;
+void draw_extrapolation_builder(SystemEditor& model) ;
 
 
-void comp_load_coeffs_from_file(AppModel& model, const std::string& path) ;
+void comp_load_coeffs_from_file(SystemEditor& model, const std::string& path) ;
 
 
-void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) ;
+void draw_composition_builder(SystemEditor& model, const GuiCallbacks& cb) ;
 
 
-void draw_wrapper_list(AppModel& model) ;
+void draw_wrapper_list(SystemEditor& model) ;
 
 
-void draw_builtin_scheme_checkboxes(AppModel& model) ;
+void draw_builtin_scheme_checkboxes(SystemEditor& model) ;
 
 
-void draw_dae_method_checkboxes(AppModel& model) ;
+void draw_dae_method_checkboxes(SystemEditor& model) ;
 
 
-void draw_system_tab(AppModel& model, const GuiCallbacks& cb) ;
+void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) ;
 
 
-void draw_parameters_tab(AppModel& model) ;
+void draw_parameters_tab(SystemEditor& model) ;
 
 
 [[nodiscard]] std::string trim_copy(const std::string& s) ;

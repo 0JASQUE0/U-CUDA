@@ -105,7 +105,7 @@ std::string describe_record(const SystemRecord& r) {
 
 namespace ucuda::ui_detail {
 void library_editor_save(AppModel& model, SystemLibrary& lib) {
-    AppModel& buf = *model.library_edit_buffer;
+    SystemEditor& buf = *model.library_edit_buffer;
     std::string name = trim_copy(buf.name);
     if (name.empty()) {
         model.edit_error = "Name is required.";
@@ -172,7 +172,7 @@ void draw_library_list(AppModel& model, SystemLibrary& lib, LibTab tab) {
     // молча затёрли бы несохранённую правку.
     const bool other_tab_editing = model.library_edit_mode != AppModel::LibraryEditMode::None;
     if (other_tab_editing) {
-        const AppModel& eb = *model.library_edit_buffer;
+        const SystemEditor& eb = *model.library_edit_buffer;
         ImGui::TextDisabled("Finish editing in the %s tab first.",
                             kLibTabName[(int)lib_tab_of(eb.is_dae, eb.is_map)]);
     }

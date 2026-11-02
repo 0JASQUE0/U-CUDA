@@ -650,7 +650,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
 }
 
 namespace ucuda::ui_detail {
-void draw_builtin_scheme_checkboxes(AppModel& model) {
+void draw_builtin_scheme_checkboxes(SystemEditor& model) {
     ImGui::Text("Schemes to generate:");
     // И кнопки, и сам список идут по kBuiltinSchemes и пропускают схемы,
     // скрытые в Settings: скрытая схема не должна ни показываться, ни
@@ -690,7 +690,7 @@ void draw_builtin_scheme_checkboxes(AppModel& model) {
 }
 
 namespace ucuda::ui_detail {
-void draw_dae_method_checkboxes(AppModel& model) {
+void draw_dae_method_checkboxes(SystemEditor& model) {
     ImGui::Text("DAE methods to generate:");
     // Как у схем ОДУ: методы, скрытые в Settings, не показываются и не включаются скопом.
     const std::vector<std::string> all = dae_method_list();
@@ -753,7 +753,7 @@ void draw_dae_method_checkboxes(AppModel& model) {
 }
 
 namespace ucuda::ui_detail {
-void draw_param_groups_window(AppModel& m, const std::vector<std::string>& params,
+void draw_param_groups_window(SystemEditor& m, const std::vector<std::string>& params,
                               const std::vector<std::string>& vars, const char* id) {
     AppModel::ParamGroupsUi& u = m.pg_ui;
     if (!u.open) return;
@@ -985,7 +985,7 @@ std::string dot_latex(const std::string& name, const FieldLabels* labels ) {
 namespace ucuda::ui_detail {
 void draw_library_editor(AppModel& model, SystemLibrary& lib,
                                 const GuiCallbacks& cb) {
-    AppModel& buf = *model.library_edit_buffer;
+    SystemEditor& buf = *model.library_edit_buffer;
     const bool add_new = (model.library_edit_mode == AppModel::LibraryEditMode::AddNew);
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
                        add_new ? "New system" : "Editing");

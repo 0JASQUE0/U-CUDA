@@ -37,7 +37,7 @@ void set_field_library(SystemLibrary* lib) { g_field_lib = lib; }
 
 
 namespace ucuda::ui_detail {
-const SystemRecord* field_lib_record(const AppModel* m, bool reload) {
+const SystemRecord* field_lib_record(const SystemEditor* m, bool reload) {
     static SystemRecord rec;
     static std::string name;
     static bool ok = false;
@@ -53,7 +53,7 @@ const SystemRecord* field_lib_record(const AppModel* m, bool reload) {
 
 
 namespace ucuda::ui_detail {
-bool field_restore_menu_items(const AppModel* model, BroadcastField f, const std::string& name,
+bool field_restore_menu_items(const SystemEditor* model, BroadcastField f, const std::string& name,
                               std::map<std::string, std::string>& values, const std::vector<std::string>& names) {
     if (f != BroadcastField::Param && f != BroadcastField::InitCondition) return false;
     const SystemRecord* r = field_lib_record(model, ImGui::IsWindowAppearing());
@@ -99,7 +99,7 @@ bool field_restore_menu_items(const AppModel* model, BroadcastField f, const std
 
 
 namespace ucuda::ui_detail {
-bool field_restore_popup(const char* popup_id, const AppModel* model, BroadcastField f, const std::string& name,
+bool field_restore_popup(const char* popup_id, const SystemEditor* model, BroadcastField f, const std::string& name,
                          std::map<std::string, std::string>& values, const std::vector<std::string>& names) {
     if (!ImGui::BeginPopupContextItem(popup_id)) return false;
     const bool changed = field_restore_menu_items(model, f, name, values, names);

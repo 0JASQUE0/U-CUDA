@@ -11,11 +11,11 @@ void field_apply_all_menu(AppModel* model, BroadcastField f,
 
 void set_field_library(SystemLibrary* lib);
 
-bool field_restore_menu_items(const AppModel* model, BroadcastField f, const std::string& name,
+bool field_restore_menu_items(const SystemEditor* model, BroadcastField f, const std::string& name,
                               std::map<std::string, std::string>& values, const std::vector<std::string>& names);
 
 
-bool field_restore_popup(const char* popup_id, const AppModel* model, BroadcastField f, const std::string& name,
+bool field_restore_popup(const char* popup_id, const SystemEditor* model, BroadcastField f, const std::string& name,
                          std::map<std::string, std::string>& values, const std::vector<std::string>& names);
 
 void draw_param_tree(ParamGroups* groups, const std::vector<std::string>& names,
@@ -23,7 +23,7 @@ void draw_param_tree(ParamGroups* groups, const std::vector<std::string>& names,
                      const std::function<void(const std::vector<std::string>&)>& group_menu = {});
 
 
-void draw_param_groups_window(AppModel& m, const std::vector<std::string>& params,
+void draw_param_groups_window(SystemEditor& m, const std::vector<std::string>& params,
                               const std::vector<std::string>& vars, const char* id);
 
 
@@ -67,7 +67,7 @@ void draw_named_num_fields(const char* header,
                                   // читается как настройка, которой оно не является.
                                   const std::function<bool(const std::string&)>& overwritten = {});
 
-const SystemRecord* field_lib_record(const AppModel* m, bool reload) ;
+const SystemRecord* field_lib_record(const SystemEditor* m, bool reload) ;
 
 
 MathExtent field_tex_extent(const std::string& tex, float fs) ;

@@ -236,7 +236,9 @@ class SystemLibrary;
 class AppModel : public SystemEditor {
 public:
     void tick(SystemLibrary& library);
-    explicit AppModel(OcrFn ocr) : AppModel(std::move(ocr), true) {}
+    // Черновик редактора библиотеки — только редактор системы, без сессий и очередей.
+    explicit AppModel(OcrFn ocr)
+        : SystemEditor(std::move(ocr)), library_edit_buffer(std::make_unique<SystemEditor>(ocr_)) {}
 
     // Платформенное состояние screenshot-to-clipboard, см. PendingScreenshot.
     PendingScreenshot pending_screenshot;
@@ -262,7 +264,7 @@ public:
     // Library-tab edit state (in-memory only, not persisted to session)
     // Library sub-tab has two states: a plain list (None) and an editor
     // (EditExisting for the "Edit" action, AddNew for "Add new system").
-    // The editor edits into library_edit_buffer (a scratch AppModel), never
+    // The editor edits into library_edit_buffer (a scratch SystemEditor), never
     // into this model directly, so opening/typing/Cancel never touches the
     // globally active system used by Parametric/Phase/Basins/FastSync. Save
     // validates, rename+saves (EditExisting) or saves (AddNew) the buffer to
@@ -273,7 +275,7 @@ public:
     std::string     library_selected_name;   // row selected in the list (for note preview)
     std::string     edit_original_name;      // on-disk name at the moment Edit was pressed
     std::string     edit_error;              // inline validation / rename error in the editor
-    std::unique_ptr<AppModel> library_edit_buffer; // scratch model the editor actually edits
+    std::unique_ptr<SystemEditor> library_edit_buffer; // scratch editor the Library editor actually edits
 
     // режим приложения и сессия анализа (слой 2)
     // режим верхнего уровня: библиотека, фазовый анализ, параметрический,
@@ -623,15 +625,4 @@ public:
     // вкладке, или nullptr (стек пуст).
     [[nodiscard]] const std::string* undo_top() const;
     [[nodiscard]] const std::string* redo_top() const;
-
-private:
-    // with_edit_buffer=false constructs the scratch library_edit_buffer
-    // itself, without recursing into another scratch buffer.
-    AppModel(OcrFn ocr, bool with_edit_buffer) : SystemEditor(std::move(ocr)) {
-        // std::make_unique can't reach this private constructor (it isn't a
-        // friend), so construct directly with new from within the class.
-        if (with_edit_buffer)
-            library_edit_buffer.reset(new AppModel(ocr_, false));
-    }
-
 };

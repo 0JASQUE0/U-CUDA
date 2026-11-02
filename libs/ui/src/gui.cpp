@@ -679,7 +679,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     if (model.app_mode == AppModel::AppMode::Library) {
         // Library mode: list view by default, editor view (System/Parameters sub-tabs +
         // Save/Cancel) after Edit or Add new. Switching top-level tabs during edit is safe — the
-        // editor works on model.library_edit_buffer, a scratch AppModel, so it never touches the
+        // editor works on model.library_edit_buffer, a scratch SystemEditor, so it never touches the
         // system active in Parametric/Phase/Basins/FastSync.
         //
         // Две вкладки: ODE (бывшая Editor — "###Editor" сохраняет её место в

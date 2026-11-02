@@ -5,7 +5,7 @@ using namespace ucuda::ui_detail;
 
 
 namespace ucuda::ui_detail {
-void draw_generated_code_block(AppModel& model, const GuiCallbacks& cb) {
+void draw_generated_code_block(SystemEditor& model, const GuiCallbacks& cb) {
     if (ImGui::Button("Generate")) model.generate();
     if (!model.error_message.empty()) {
         ImGui::SameLine();
@@ -255,7 +255,7 @@ bool extr_base_needs_half_s(const std::string& nm) {
 
 
 namespace ucuda::ui_detail {
-void draw_extrapolation_builder(AppModel& model) {
+void draw_extrapolation_builder(SystemEditor& model) {
     ImGui::Spacing();
     if (!ImGui::CollapsingHeader("Extrapolated schemes (Richardson)",
         model.wrapper_schemes.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen))
@@ -446,7 +446,7 @@ void draw_extrapolation_builder(AppModel& model) {
 
 
 namespace ucuda::ui_detail {
-void comp_load_coeffs_from_file(AppModel& model, const std::string& path) {
+void comp_load_coeffs_from_file(SystemEditor& model, const std::string& path) {
     std::ifstream in(path);
     if (!in) {
         model.comp_load_status = "cannot open " + path;
@@ -479,7 +479,7 @@ void comp_load_coeffs_from_file(AppModel& model, const std::string& path) {
 
 
 namespace ucuda::ui_detail {
-void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) {
+void draw_composition_builder(SystemEditor& model, const GuiCallbacks& cb) {
     ImGui::Spacing();
     if (!ImGui::CollapsingHeader("Composed schemes (triple jump / Suzuki)"))
         return;
@@ -722,7 +722,7 @@ void draw_composition_builder(AppModel& model, const GuiCallbacks& cb) {
 
 
 namespace ucuda::ui_detail {
-void draw_wrapper_list(AppModel& model) {
+void draw_wrapper_list(SystemEditor& model) {
     if (model.wrapper_schemes.empty()) return;
     ImGui::Spacing();
     if (!ImGui::CollapsingHeader("Assembled wrappers", ImGuiTreeNodeFlags_DefaultOpen))
@@ -838,7 +838,7 @@ void draw_wrapper_list(AppModel& model) {
 
 
 namespace ucuda::ui_detail {
-void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
+void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
 
     // режим ввода
     ImGui::Text("Input mode:");
@@ -1182,7 +1182,7 @@ void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
 
 
 namespace ucuda::ui_detail {
-void draw_parameters_tab(AppModel& model) {
+void draw_parameters_tab(SystemEditor& model) {
     ImGui::TextDisabled("Parameter fields appear after parsing the system.");
     if (ImGui::Button("Refresh from system")) {
         model.refresh_symbols();
