@@ -20,7 +20,7 @@ The desktop loop calls application ticking and then UI drawing. UI maps stable s
 
 ## Change this when
 
-Edit family files for controls/windows, `widgets.cpp` for shared widgets, `workspace.cpp` for layout, `library.cpp` for system management, and `ui_resources.cpp` for view lifetime.
+Edit family files for controls/windows, `widgets.cpp` for shared input fields, `integration_widgets.cpp` for the Integration block and controller library, `field_names.cpp` for field names and parameter-group trees, `plot_widgets.cpp` for plot toolbars, view ranges and colormaps, `system_tab.cpp` and `library_list.cpp` for the System tab and the library list, `workspace.cpp` for layout, `library.cpp` for system management, and `ui_resources.cpp` for view lifetime.
 
 ## Build and checks
 

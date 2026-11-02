@@ -4,14 +4,19 @@ ucuda_library(ui
     src/custom.cpp
     src/dft.cpp
     src/fastsync.cpp
+    src/field_names.cpp
     src/gui.cpp
+    src/integration_widgets.cpp
     src/library.cpp
+    src/library_list.cpp
     src/lyapunov.cpp
     src/network.cpp
     src/neural.cpp
     src/order.cpp
     src/parametric_windows.cpp
     src/phase.cpp
+    src/plot_widgets.cpp
+    src/system_tab.cpp
     src/ui_resources.cpp
     src/widgets.cpp
     src/workspace.cpp

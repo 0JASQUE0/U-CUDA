@@ -4,7 +4,7 @@
 
 // Общее для файлов интерфейса (gui*.cpp): включения, типы, константы и функции, которыми
 // пользуются несколько вкладок. Получено механическим разносом gui.cpp; определения функций — в
-// gui_*.cpp по вкладкам (gui_widgets.cpp — общие виджеты).
+// файлах вкладок; общие виджеты — widgets.cpp, integration_widgets.cpp, field_names.cpp, plot_widgets.cpp.
 #include "ucuda/ui/gui.h"
 #include "ucuda/equations/dae_ir.h"
 #include "ucuda/application/compute_services.h" // проверки, файлы схем, нетлист: без cuda / numerics

@@ -450,6 +450,21 @@
     <ClCompile Include="..\libs\ui\src\ui_resources.cpp">
       <Filter>libs\ui\src</Filter>
     </ClCompile>
+    <ClCompile Include="..\libs\ui\src\field_names.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\integration_widgets.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\library_list.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\plot_widgets.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\system_tab.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
     <ClCompile Include="..\libs\ui\src\widgets.cpp">
       <Filter>libs\ui\src</Filter>
     </ClCompile>
