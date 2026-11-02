@@ -354,6 +354,9 @@
     <ClCompile Include="..\libs\application\src\app_model.cpp">
       <Filter>libs\application\src</Filter>
     </ClCompile>
+    <ClCompile Include="..\libs\application\src\compute_services.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
     <ClCompile Include="..\libs\application\src\tick.cpp">
       <Filter>libs\application\src</Filter>
     </ClCompile>
@@ -661,6 +664,9 @@
       <Filter>libs\application\include</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\application\include\ucuda\application\session_persistence.h">
+      <Filter>libs\application\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\application\include\ucuda\application\compute_services.h">
       <Filter>libs\application\include</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\application\include\ucuda\application\time_estimate.h">

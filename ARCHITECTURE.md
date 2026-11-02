@@ -52,7 +52,9 @@ flowchart LR
 
 `ucuda_export_format` is an internal implementation target in storage. It lets compute-time streaming and later GUI export share byte-identical CSV writers without making `ucuda_cuda` depend on the complete `ucuda_storage` library.
 
-Forbidden directions include domain to any higher module, storage to application/UI/plotting, CUDA to application/UI/plotting, analysis to UI/plotting, and plotting to application.
+Forbidden directions include domain to any higher module, storage to application/UI/plotting, CUDA to application/UI/plotting, analysis to UI/plotting, plotting to application, and UI to CUDA/numerics. UI reaches computation through application: `AppModel` for tasks, `compute_services.h` for direct checks (CPU compiler, KRS indices, controller body, circuit files, netlist export).
+
+One deliberate exception: domain includes the layout part of `resources/kernels/ucuda_adaptive.cuh` (`UCUDA_ADAPT_LAYOUT_ONLY`) from `adaptive_settings.h`. `UcudaAdaptParams` and the step-controller structures are passed to kernels byte for byte, so host and device keep one definition. [tests/layer_rules.cmake](tests/layer_rules.cmake) checks both rules.
 
 ## Runtime data flow
 

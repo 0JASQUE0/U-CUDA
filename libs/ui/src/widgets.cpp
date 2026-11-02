@@ -1101,11 +1101,10 @@ void draw_system_tab(AppModel& model, const GuiCallbacks& cb) {
             // проход по строке стоит копейки. Пока система не распознана
             // (known_vars пуст) молчим, иначе выдали бы ложные ошибки на всё.
             if (!model.known_vars.empty()) {
-                std::vector<KrsCpuDiag> diags;
-                krs_cpu_check_indices(cs.body,
-                                      (int)model.known_vars.size(),
-                                      (int)model.known_params.size() + 1,
-                                      diags);
+                const std::vector<BodyIndexDiag> diags =
+                    check_body_indices(cs.body,
+                                       (int)model.known_vars.size(),
+                                       (int)model.known_params.size() + 1);
                 for (const auto& d : diags)
                     ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "  line %d: %s",
                                        d.line, d.message.c_str());
@@ -2968,7 +2967,7 @@ void draw_ctrl_library_window(AppModel& m) {
         m.ctrl_lib_check_log.clear();
         m.ctrl_lib_check_future = std::async(std::launch::async, [check_body]() {
             std::string log;
-            const bool ok = nvrtc_check_ctrl_body(check_body, log);
+            const bool ok = check_controller_body(check_body, log);
             return std::make_pair(ok, log);
         });
     }

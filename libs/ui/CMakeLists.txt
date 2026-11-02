@@ -16,4 +16,4 @@ ucuda_library(ui
     src/widgets.cpp
     src/workspace.cpp
 )
-target_link_libraries(ucuda_ui PUBLIC ucuda::application ucuda::storage PRIVATE ucuda::plotting ucuda::numerics)
+target_link_libraries(ucuda_ui PUBLIC ucuda::application ucuda::storage PRIVATE ucuda::plotting)

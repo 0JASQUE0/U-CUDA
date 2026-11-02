@@ -12,21 +12,7 @@ void gui_process_deferred(AppModel& model, const GuiCallbacks& cb) {
     const std::string path = cb.pick_save_file_netlist();
     if (path.empty()) return;
 
-    NetlistOptions no;
-    no.title      = "U-CUDA synthesized circuit";
-    no.var_names  = s.vars;
-    no.rhs_text   = s.sys.rhs;
-    no.scale      = s.result.circuit_scale;
-    no.x0_volts   = s.result.circuit_x0;
-    no.opamp      = s.result.circuit_opamp;
-    no.h_ode      = s.result.circuit_h_ode;
-    no.t_end_ode  = s.result.circuit_t_end_ode;
-    no.dialect    = s.circuit_netlist_poly ? NetlistDialect::Poly : NetlistDialect::Behavioral;
-
-    const std::string text = emit_spice_netlist(s.result.circuit_graph, no);
-    std::ofstream f(path, std::ios::binary);
-    if (f) { f << text; s.result.circuit_status = "netlist written to " + path; }
-    else     s.result.circuit_status = "cannot write " + path;
+    write_synthesized_netlist(s, path);
 }
 
 namespace ucuda::ui_detail {

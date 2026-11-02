@@ -29,6 +29,20 @@ rule("domain includes a higher module" "libs/domain/*.h"   "#include[ \t]+\"${hi
 rule("domain includes a higher module" "libs/domain/*.cpp" "#include[ \t]+\"${higher}")
 rule("domain uses <future>/<thread>"   "libs/domain/*.h"   "#include[ \t]+<(future|thread)>")
 rule("domain names an engine"          "libs/domain/*.h"   "^[^/]*(ParametricEngine|NvrtcEngine)")
+# The one kernel header domain may see: the layout part of ucuda_adaptive.cuh (UcudaAdaptParams and the
+# controller structures go to the kernel byte for byte, so host and device share one definition).
+# adaptive_settings.h includes it under UCUDA_ADAPT_LAYOUT_ONLY; anything else from resources/kernels is a leak.
+file(GLOB_RECURSE domain_files "${ROOT}/libs/domain/*.h" "${ROOT}/libs/domain/*.cpp")
+foreach(f IN LISTS domain_files)
+    file(STRINGS "${f}" hits REGEX "^[ \t]*#[ \t]*include[ \t]+\"[^\"]+\"")
+    foreach(h IN LISTS hits)
+        string(REGEX REPLACE "^[^\"]*\"([^\"]+)\".*$" "\\1" inc "${h}")
+        if(NOT inc MATCHES "^ucuda/domain/" AND NOT inc STREQUAL "ucuda_adaptive.cuh")
+            file(RELATIVE_PATH rel "${ROOT}" "${f}")
+            set(failures "${failures}\n  domain includes a non-domain header: ${rel}: ${inc}")
+        endif()
+    endforeach()
+endforeach()
 
 # Storage serializes domain values only: no compute, application or GUI headers.
 rule("storage includes compute/GUI" "libs/storage/*.h"
@@ -41,6 +55,11 @@ foreach(lib cuda numerics equations analysis)
     rule("${lib} includes GUI" "libs/${lib}/*.h"   "#include[ \t]+(\"ucuda/(plotting|ui|application)/|<imgui|<GLFW|\"glad)")
     rule("${lib} includes GUI" "libs/${lib}/*.cpp" "#include[ \t]+(\"ucuda/(plotting|ui|application)/|<imgui|<GLFW|\"glad)")
 endforeach()
+
+# UI reaches computation only through application (compute_services.h, AppModel): no CUDA runtime,
+# NVRTC or CPU compiler paths from a window. Equations (text and DAE structure) stays allowed.
+rule("ui includes cuda/numerics" "libs/ui/*.h"   "#include[ \t]+(\"ucuda/(cuda|numerics)/|<(cuda|nvrtc)[A-Za-z_]*\\.h>)")
+rule("ui includes cuda/numerics" "libs/ui/*.cpp" "#include[ \t]+(\"ucuda/(cuda|numerics)/|<(cuda|nvrtc)[A-Za-z_]*\\.h>)")
 
 if(failures)
     message(FATAL_ERROR "Layer rules violated:${failures}")

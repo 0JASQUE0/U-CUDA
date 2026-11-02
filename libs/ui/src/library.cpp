@@ -33,7 +33,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
     // компилятор на машине не найден.
     if (scheme_needs_compiled_body(s.scheme, s.custom_schemes) && !s.use_gpu) {
         std::string why;
-        if (!krs_cpu_backend_available(&why)) {
+        if (!cpu_compiler_available(&why)) {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(custom requires GPU: %s)",
                                why.c_str());
@@ -1114,7 +1114,7 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
                 const double now = ImGui::GetTime();
                 if (now - cst.circuit_poll_t > 1.0) {
                     cst.circuit_poll_t = now;
-                    const long long mt = circuit_source_mtime(buf.circuit_source);
+                    const long long mt = circuit_file_mtime(buf.circuit_source);
                     if (cst.circuit_path != buf.circuit_source) {   // новый путь: только запомнить время
                         cst.circuit_path = buf.circuit_source;
                         cst.circuit_mtime = mt;
@@ -1127,7 +1127,7 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
                 if (buf.import_circuit(&rep, &e)) { cst.circuit_report = rep; cst.circuit_error.clear(); }
                 else cst.circuit_error = "Import failed: " + e;
                 cst.circuit_path = buf.circuit_source;
-                cst.circuit_mtime = circuit_source_mtime(buf.circuit_source);
+                cst.circuit_mtime = circuit_file_mtime(buf.circuit_source);
             }
             if (ImGui::Button("DC operating point##dae")) {
                 std::string rep, e;

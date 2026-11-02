@@ -6,9 +6,8 @@
 // пользуются несколько вкладок. Получено механическим разносом gui.cpp; определения функций — в
 // gui_*.cpp по вкладкам (gui_widgets.cpp — общие виджеты).
 #include "ucuda/ui/gui.h"
-#include "ucuda/numerics/circuit_netlist.h"
 #include "ucuda/equations/dae_ir.h"
-#include "ucuda/numerics/kicad_import.h"   // circuit_source_mtime — слежение за файлом схемы (вкладка DAE)
+#include "ucuda/application/compute_services.h" // проверки, файлы схем, нетлист: без cuda / numerics
 #include <fstream>
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder* API — needed for Custom Workspace per-tab dockspaces.
@@ -21,8 +20,6 @@
 #include "ucuda/plotting/heatmap_view.h"
 #include "ucuda/storage/app_config.h"
 #include "ucuda/storage/data_export.h"
-#include "ucuda/numerics/krs_cpu.h"
-#include "ucuda/cuda/nvrtc_engine.h"   // nvrtc_check_ctrl_body — Check в библиотеке регуляторов
 #include "ucuda/domain/num_parse.h"   // parse_num — единый разбор числовых полей
 #include "ucuda/plotting/digit_input.h" // DigitInput::ComputeStep — ↑/↓ по значению в списке (atol)
 #include <algorithm>
@@ -817,7 +814,7 @@ static void draw_continuation_device_block(Cfg& c, const char* id, bool blocked,
     }
     if (!c.use_gpu) {
         std::string why;
-        if (!krs_cpu_backend_available(&why)) {
+        if (!cpu_compiler_available(&why)) {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(no compiler: %s)", why.c_str());
         }
