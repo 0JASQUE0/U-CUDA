@@ -22,6 +22,8 @@ The desktop loop calls application ticking and then UI drawing. UI maps stable s
 
 Edit family files for controls/windows, `widgets.cpp` for shared input fields, `integration_widgets.cpp` for the Integration block and controller library, `field_names.cpp` for field names and parameter-group trees, `plot_widgets.cpp` for plot toolbars, view ranges and colormaps, `system_tab.cpp` and `library_list.cpp` for the System tab and the library list, `workspace.cpp` for layout, `library.cpp` for system management, and `ui_resources.cpp` for view lifetime.
 
+Shared declarations live in `src/gui_internal.h`, which every UI source includes. It only pulls in the topic headers, each including the previous one: `gui_common.h` (includes, constants, mode tabs), `gui_inputs.h` (input fields, auto labels, undo), `gui_integration.h` (built-in scheme table, Integration block, controllers), `gui_fields.h` (field names, parameter-group trees), `gui_plot.h` (export, view ranges, toolbars, colormaps) and `gui_tabs.h` (per-tab functions and shared window state). Put a new declaration into the topic header of the file that defines it.
+
 ## Build and checks
 
 Build with `cmake --build --preset windows-debug --target ucuda_ui U-CUDA`. Smoke-test session switching, window creation/closing, queues, save/load/export, OCR, screenshots, and shutdown.

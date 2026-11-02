@@ -363,6 +363,12 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
     <ClInclude Include="..\libs\plotting\include\ucuda\plotting\screenshot.h" />
     <ClInclude Include="..\libs\ui\include\ucuda\ui\gui.h" />
     <ClInclude Include="..\libs\ui\include\ucuda\ui\gui_tree_state.h" />
+    <ClInclude Include="..\libs\ui\src\gui_common.h" />
+    <ClInclude Include="..\libs\ui\src\gui_fields.h" />
+    <ClInclude Include="..\libs\ui\src\gui_inputs.h" />
+    <ClInclude Include="..\libs\ui\src\gui_integration.h" />
+    <ClInclude Include="..\libs\ui\src\gui_plot.h" />
+    <ClInclude Include="..\libs\ui\src\gui_tabs.h" />
     <ClInclude Include="..\libs\ui\src\gui_internal.h" />
     <ClInclude Include="..\libs\ui\src\ui_resources.h" />
   </ItemGroup>

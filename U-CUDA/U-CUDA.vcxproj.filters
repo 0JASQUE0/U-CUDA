@@ -750,6 +750,24 @@
     <ClInclude Include="..\libs\ui\include\ucuda\ui\gui_tree_state.h">
       <Filter>libs\ui\include</Filter>
     </ClInclude>
+    <ClInclude Include="..\libs\ui\src\gui_common.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\gui_fields.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\gui_inputs.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\gui_integration.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\gui_plot.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\gui_tabs.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
     <ClInclude Include="..\libs\ui\src\gui_internal.h">
       <Filter>libs\ui\src</Filter>
     </ClInclude>
