@@ -1,7 +1,10 @@
-﻿#include "gui_internal.h"
+﻿#include "gui_common.h"
+#include "gui_inputs.h"
+#include "gui_integration.h"
+#include "gui_fields.h"
+#include "tab_system.h"
 // Вкладка System: блок сгенерированного кода, построители Extr/Comp, список обёрток, параметры.
 using namespace ucuda::ui_detail;
-
 
 
 namespace ucuda::ui_detail {
@@ -23,167 +26,6 @@ void draw_generated_code_block(SystemEditor& model, const GuiCallbacks& cb) {
             ImVec2(-1, model.gen_code_editor_h), ImGuiInputTextFlags_ReadOnly);
         draw_resize_handle("##code_resize", model.gen_code_editor_h);
     }
-}
-}
-
-
-namespace ucuda::ui_detail {
-std::string wrapper_coefficients_text(
-        const std::string& name,
-        const std::vector<CustomScheme>& custom_schemes,
-        const std::map<std::string, std::string>& param_values) {
-    // Паспорт базы: встроенная — из таблицы, кастомная — со слов автора.
-    auto base_traits = [&](const std::string& base, int* p, bool* sym) {
-        if (builtin_scheme_traits(base, p, sym)) return true;
-        for (const auto& cs : custom_schemes)
-            if (cs.name == base) { *p = cs.order; *sym = cs.symmetric; return true; }
-        return false;
-    };
-    char buf[256];
-    std::string o;
-
-    ExtrapolationSpec esp;
-    CompositionSpec   csp;
-
-    if (parse_extrapolation_name(name, &esp)) {
-        int p = 1; bool sym = false;
-        const bool known = base_traits(esp.base, &p, &sym);
-        sym = extrapolation_symmetric(esp.re_at_output, sym);
-        const int  K = (int)esp.n.size();
-        long long  cost = 0;
-        for (int v : esp.n) cost += v;
-
-        o += name;
-        o += "\n";
-        if (esp.re_at_output)
-            o += "ExtrZ: complex state across all substeps, Re taken ONCE on the output;\n"
-                 "the real part expands in even powers only, so the weights are symmetric\n";
-        std::snprintf(buf, sizeof(buf), "base %s: order %d, %s%s",
-                      esp.base.c_str(), p,
-                      sym ? "symmetric" : "non-symmetric",
-                      known ? "" : "  (UNRESOLVED - the figures below assume order 1)");
-        o += buf; o += "\n";
-        std::snprintf(buf, sizeof(buf),
-                      "%d stages, %lld base steps per macro-step  ->  order %d",
-                      K, cost, extrapolation_order(K, p, sym));
-        o += buf; o += "\n";
-        // Что именно гасят эти веса: разложение идёт по u_k = 1/n_k у обычной
-        // базы и по 1/n_k^2 у симметричной — отсюда и разный прирост порядка.
-        o += sym ? "the weights cancel h^p, h^(p+2), ... (expansion in even powers only)\n"
-                 : "the weights cancel h^p, h^(p+1), ...\n";
-        o += "\n";
-
-        const std::vector<double> alpha = extrapolation_weights(esp.n, p, sym);
-        std::vector<std::string>  exact;
-        const bool has_exact = extrapolation_weights_exact(esp.n, p, sym, &exact);
-
-        o += has_exact ? "  k   n_k   substep     alpha_k (exact)   alpha_k (double)\n"
-                       : "  k   n_k   substep     alpha_k\n";
-        double asum = 0.0, amax = 0.0;
-        for (int k = 0; k < K; ++k) {
-            asum += alpha[(size_t)k];
-            if (std::fabs(alpha[(size_t)k]) > amax) amax = std::fabs(alpha[(size_t)k]);
-            if (has_exact)
-                std::snprintf(buf, sizeof(buf), "  %-3d %-5d h/%-9d %-17s %.17g",
-                              k, esp.n[(size_t)k], esp.n[(size_t)k],
-                              exact[(size_t)k].c_str(), alpha[(size_t)k]);
-            else
-                std::snprintf(buf, sizeof(buf), "  %-3d %-5d h/%-9d %.17g",
-                              k, esp.n[(size_t)k], esp.n[(size_t)k], alpha[(size_t)k]);
-            o += buf; o += "\n";
-        }
-        std::snprintf(buf, sizeof(buf), "sum(alpha) = %.17g   max|alpha| = %.6g", asum, amax);
-        o += buf; o += "\n";
-        if (!has_exact)
-            o += "the exact fractions do not fit in 2^53 - the kernel gets the doubles above\n";
-        if (amax > 20.0) {
-            std::snprintf(buf, sizeof(buf),
-                          "cancellation: about %.1f decimal digits are lost in the weighted sum\n",
-                          std::log10(amax));
-            o += buf;
-        }
-        return o;
-    }
-
-    if (parse_composition_name(name, &csp)) {
-        int p = 1; bool sym = false;
-        const bool known = base_traits(csp.base, &p, &sym);
-        const int  K = (int)csp.gammas.size();
-
-        o += name;
-        o += "\n";
-        std::snprintf(buf, sizeof(buf), "base %s: order %d, %s%s",
-                      csp.base.c_str(), p,
-                      sym ? "symmetric" : "non-symmetric",
-                      known ? "" : "  (UNRESOLVED)");
-        o += buf; o += "\n";
-        std::snprintf(buf, sizeof(buf), "%d stages, %d base steps per macro-step", K, K);
-        o += buf; o += "\n";
-        o += "\n";
-
-        // Значения — при ТЕКУЩИХ параметрах. Для постоянного коэффициента это
-        // то же самое число, для символьного — единственный способ его увидеть.
-        std::vector<double> val;
-        std::string         verr;
-        const bool all_val = composition_gamma_values(csp, param_values, &val, &verr);
-
-        o += "  k   gamma (as written)        value                 stage step\n";
-        double gsum = 0.0, gcube = 0.0, gmin = 0.0;
-        bool   sums_ok = true;
-        for (int k = 0; k < K; ++k) {
-            const double v = val[(size_t)k];
-            if (std::isfinite(v)) {
-                gsum += v; gcube += v * v * v;
-                if (v < gmin) gmin = v;
-            } else sums_ok = false;
-            char vb[64], sb[64];
-            if (std::isfinite(v)) {
-                std::snprintf(vb, sizeof(vb), "%.17g", v);
-                std::snprintf(sb, sizeof(sb), "%.6g*h", v);
-            } else {
-                std::snprintf(vb, sizeof(vb), "?");
-                std::snprintf(sb, sizeof(sb), "?");
-            }
-            std::snprintf(buf, sizeof(buf), "  %-3d %-25s %-21s %s",
-                          k, csp.gammas[(size_t)k].c_str(), vb, sb);
-            o += buf; o += "\n";
-        }
-        if (!all_val) {
-            o += "\n";
-            o += "not every stage is numeric: ";
-            o += verr.empty() ? std::string("a coefficient did not resolve") : verr;
-            o += "\n";
-            o += "(give the parameter a value on the tab, or type a number in its place)\n";
-        }
-        if (sums_ok) {
-            o += "\n";
-            std::snprintf(buf, sizeof(buf), "sum(gamma)   = %.17g%s",
-                          gsum, std::fabs(gsum - 1.0) < 1e-12
-                                    ? "   (consistent)"
-                                    : "   NOT 1 - this integrates a rescaled field");
-            o += buf; o += "\n";
-            std::snprintf(buf, sizeof(buf), "sum(gamma^3) = %.6g", gcube);
-            o += buf;
-            if (sym && std::fabs(gcube) < 1e-12) {
-                std::snprintf(buf, sizeof(buf), "   ->  expected order %d", p + 2);
-                o += buf;
-            } else if (sym) {
-                std::snprintf(buf, sizeof(buf), "   not 0 - the order stays %d", p);
-                o += buf;
-            } else {
-                o += "   (the base is not symmetric: the p+2 conditions do not apply)";
-            }
-            o += "\n";
-            if (gmin < 0.0) {
-                std::snprintf(buf, sizeof(buf),
-                              "most negative stage: %.6g*h - a step BACKWARD in time", gmin);
-                o += buf; o += "\n";
-            }
-        }
-        return o;
-    }
-
-    return std::string();   // не обёртка: выводить из имени нечего
 }
 }
 
@@ -1252,5 +1094,110 @@ void draw_parameters_tab(SystemEditor& model) {
         ImGui::Spacing();
         ImGui::TextDisabled("No symbols yet. Enter a system and press 'Refresh from system'.");
     }
+}
+}
+
+
+namespace ucuda::ui_detail {
+void draw_builtin_scheme_checkboxes(SystemEditor& model) {
+    ImGui::Text("Schemes to generate:");
+    // И кнопки, и сам список идут по kBuiltinSchemes и пропускают схемы,
+    // скрытые в Settings: скрытая схема не должна ни показываться, ни
+    // включаться скопом.
+    auto scheme_shown = [&](const BuiltinScheme& b) { return !model.scheme_hidden(b.name); };
+    if (ImGui::Button("Select all"))
+        for (const auto& b : kBuiltinSchemes) if (scheme_shown(b)) model.*b.flag = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Clear all"))
+        for (const auto& b : kBuiltinSchemes) if (scheme_shown(b)) model.*b.flag = false;
+
+    // Схемы сгруппированы по порядку точности — тот же порядок, что в комбо
+    // выбора схемы и в списке генерации (AppModel::generate). Таблица
+    // отсортирована по order, поэтому шапка печатается на его смене, и группа
+    // целиком скрытых схем не оставляет пустого заголовка.
+    // У CD, Complex CD, SEMP и SIMP порядок группы достигается только при
+    // s = a[0] = 0.5; при других s все четыре падают до первого.
+    {
+        std::string  shown_group;
+        bool first_in_line = true;
+        for (const auto& b : kBuiltinSchemes) {
+            if (!scheme_shown(b)) continue;
+            if (scheme_group_title(b) != shown_group) {
+                ImGui::SeparatorText(scheme_group_title(b).c_str());
+                shown_group   = scheme_group_title(b);
+                first_in_line = true;
+            }
+            if (!first_in_line) ImGui::SameLine();
+            first_in_line = false;
+            ImGui::Checkbox(b.name, &(model.*b.flag));
+            if (b.tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", b.tooltip);
+        }
+    }
+
+    ImGui::TextDisabled("Generate includes only methods selected here and visible in Settings.");
+}
+}
+
+
+namespace ucuda::ui_detail {
+void draw_dae_method_checkboxes(SystemEditor& model) {
+    ImGui::Text("DAE methods to generate:");
+    // Как у схем ОДУ: методы, скрытые в Settings, не показываются и не включаются скопом.
+    const std::vector<std::string> all = dae_method_list();
+    auto set_on = [&](const std::string& n, bool on) {
+        auto& off = model.dae_schemes_off;
+        off.erase(std::remove(off.begin(), off.end(), n), off.end());
+        if (!on) off.push_back(n);
+    };
+    if (ImGui::Button("Select all##dae"))
+        for (const auto& n : all) if (!model.dae_method_hidden(n)) set_on(n, true);
+    ImGui::SameLine();
+    if (ImGui::Button("Clear all##dae"))
+        for (const auto& n : all) if (!model.dae_method_hidden(n)) set_on(n, false);
+    // Группы: неявные (любой индекс), с решением связи при каждом x (только индекс 1), многошаговый.
+    // Подсказки — по имени (список методов рос, по номеру они съезжали).
+    static const std::map<std::string, const char*> kTips = {
+        { "DAE BDF1", "Implicit Euler on [x; z], one Newton per step. Order 1, L-stable, any index." },
+        { "DAE Trapezoidal", "Trapezoid in x, constraint at the new node. Order 2, not L-stable (index 3 diverges)." },
+        { "DAE TR-BDF2", "TR-BDF2: trapezoid to t + gamma h, then BDF2. Order 2, L-stable." },
+        { "DAE SDIRK2", "SDIRK2 (Alexander): two implicit Euler stages with gamma h. Order 2 (z: 1 on index 2), L-stable." },
+        { "DAE Implicit Midpoint", "Implicit midpoint: control method, does not hold an index-2 constraint, diverges on index 3." },
+        { "DAE Radau IIA (5)", "Radau IIA, 3 stages: order 5 (index 1), x 5 / z 3 (index 2), x 3 / z 2 (index 3).\n"
+                               "Newton full = 0 in Integration: RADAU5 simplified Newton (one J per step)." },
+        { "DAE BDF1 + GGL", "BDF1 on the GGL-stabilised system (index 3 -> 2, multipliers local to the step)." },
+        { "DAE Radau IIA + GGL", "Radau IIA on the GGL-stabilised system: index 3 with x 5 / lambda 3." },
+        { "DAE Rosenbrock ROS2", "Rosenbrock ROS2: linearly implicit, one LU per step, no Newton. Order 2, L-stable." },
+        { "DAE Rosenbrock ROS3P", "Rosenbrock ROS3P (Lang-Verwer): order 3 in x and z, A-stable, one LU per step." },
+        { "DAE Rodas4", "Rodas4 (Hairer-Wanner): order 4, stiffly accurate, L-stable, one LU per step.\n"
+                        "With Integration -> Adaptive step: embedded error estimate (index 1)." },
+        { "DAE CD", "CD for DAE (level B): explicit forward half with z re-solved after every x update, implicit\n"
+                    "reverse half with one Newton on (x_i, z). Order 2 at s = 0.5. Index 1 only." },
+        { "DAE CD + Yoshida-4", "Yoshida composition of three CD steps: order 4 at s = 0.5. Index 1 only." },
+        { "DAE CD (index 2)", "CD with z constant per half-step, chosen so that g holds at its end. Index 2 only." },
+        { "DAE Explicit Euler", "Explicit Euler with z solved from the constraint at every stage. Index 1, non-stiff." },
+        { "DAE Explicit Midpoint", "Explicit midpoint with z solved at every stage. Order 2, index 1, non-stiff." },
+        { "DAE RK4", "RK4 with z solved at every stage. Order 4, index 1, non-stiff." },
+        { kBdfSchemeDae, "BDF orders 1-5 (DASSL form), its own multistep driver: Analysis on CPU / GPU and the\n"
+                         "Parametric sweeps. Adaptive step: variable step and order; fixed step: step h, order\n"
+                         "ramped up 1..5, no step controller. Index 1-2 directly, index 3 through GGL.\n"
+                         "Generate prints its residual [f; g] and Jacobian." },
+    };
+    static const char* const kGroupTitle[] = { "implicit, any index", "constraint solved whenever x changes, index 1",
+                                               "multistep" };
+    int group = 0, shown_group = -1;
+    bool first_in_line = true;
+    for (const std::string& n : all) {
+        if (n == "DAE CD") group = 1;
+        if (n == kBdfSchemeDae) group = 2;
+        if (model.dae_method_hidden(n)) continue;
+        if (group != shown_group) { ImGui::SeparatorText(kGroupTitle[group]); shown_group = group; first_in_line = true; }
+        if (!first_in_line) ImGui::SameLine();
+        first_in_line = false;
+        bool on = model.dae_scheme_on(n);
+        if (ImGui::Checkbox(n.c_str(), &on)) set_on(n, on);
+        auto tip = kTips.find(n);
+        if (tip != kTips.end() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip->second);
+    }
+    ImGui::TextDisabled("Generate includes only methods selected here and visible in Settings.");
 }
 }

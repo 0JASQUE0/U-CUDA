@@ -1,4 +1,6 @@
-﻿#include "gui_internal.h"
+﻿#include "gui_common.h"
+#include "gui_inputs.h"
+#include "tab_library.h"
 // Список систем библиотеки: кэш списка, описание записи, сохранение редактора.
 using namespace ucuda::ui_detail;
 

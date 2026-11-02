@@ -56,20 +56,20 @@ void queue_cleanup() {
     model.bifurcation_session.add_diagram();
     model.bifurcation_session.add_diagram();
     const size_t n0 = model.bifurcation_session.diagrams.size();
-    model.parametric_queue.push_back({ ParametricQueueItem::Kind::Bifurcation, 0 });
-    model.parametric_queue.push_back({ ParametricQueueItem::Kind::Bifurcation, 1 });
-    model.parametric_queue.push_back({ ParametricQueueItem::Kind::Bifurcation, 2 });
-    model.parametric_queue.push_back({ ParametricQueueItem::Kind::LLE, 4 });
+    model.enqueue_parametric({ParametricQueueItem::Kind::Bifurcation, 0});
+    model.enqueue_parametric({ParametricQueueItem::Kind::Bifurcation, 1});
+    model.enqueue_parametric({ParametricQueueItem::Kind::Bifurcation, 2});
+    model.enqueue_parametric({ParametricQueueItem::Kind::LLE, 4});
     model.remove_bifurcation_diagram(1);
     ut::require(model.bifurcation_session.diagrams.size() == n0 - 1, "diagram removal did not update the session");
-    ut::require(model.parametric_queue.size() == 3, "queue item of the removed diagram was not erased");
-    ut::require(model.parametric_queue[0].index == 0 && model.parametric_queue[1].index == 1 &&
-                model.parametric_queue[2].kind == ParametricQueueItem::Kind::LLE && model.parametric_queue[2].index == 4,
+    ut::require(model.parametric_queue().size() == 3, "queue item of the removed diagram was not erased");
+    ut::require(model.parametric_queue()[0].index == 0 && model.parametric_queue()[1].index == 1 &&
+                model.parametric_queue()[2].kind == ParametricQueueItem::Kind::LLE && model.parametric_queue()[2].index == 4,
                 "queue indices were not shifted by analysis kind");
 
-    model.dft1d_queue.push_back({ -1 });
-    model.dft1d_queue.push_back({ 99 });
-    ut::require(!model.start_next_in_dft1d_queue() && model.dft1d_queue.empty(), "invalid DFT queue entries were not drained");
+    model.enqueue_dft1d(-1);
+    model.enqueue_dft1d(99);
+    ut::require(!model.start_next_in_dft1d_queue() && model.dft1d_queue().empty(), "invalid DFT queue entries were not drained");
 }
 
 void cancellation() {

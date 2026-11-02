@@ -1,6 +1,6 @@
 ﻿#pragma once
 // Имена полей формулами, подписи, комбо переменных, деревья групп параметров, меню полей.
-#include "gui_integration.h"
+#include "gui_common.h"
 
 namespace ucuda::ui_detail {
 void field_apply_all_menu(AppModel* model, BroadcastField f,

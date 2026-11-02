@@ -12,7 +12,9 @@ The public surface is `app_model.h`. `AppModel` is one object built from layers,
 - `SystemEditor : AppSettings` (`system_editor.h`, `system_editor.cpp`): the edited system — equation text, schemes, Extr/Comp builders, the DAE editor and circuit import, OCR, `generate`, `build_system`, `to_record` / `from_record`.
 - `AppModel : SystemEditor` (`app_model.h`): sessions, the engine, queues, plot windows, broadcast and undo, the Library tab and its scratch `library_edit_buffer`.
 
-Sources of `AppModel` by topic: `app_model.cpp` (`start_*_analysis`, `propagate_to_sessions`), `app_queues.cpp` (queues, prewarm, `remove_*` with queue and window cleanup), `app_plot_windows.cpp`, `app_broadcast.cpp` (broadcast and undo), `tick.cpp` (polling, queue advance, persistence). A new field goes into the lowest layer that owns it; the editor and settings layers never see sessions or the engine.
+The engine and the batch queues are private. UI starts work and changes queues only through commands: `run_<analysis>(idx)`, `recluster_basins`, `reset_engine`, `enqueue_<tab>`, `enqueue_custom_level_*`, `clear_*_queue`, `clear_all_queues`; it reads queues through const `<tab>_queue()`. Sessions stay public: their configs are user input that UI edits in place, and their run state (`in_flight`, tokens, results) is read-only for UI. `architecture_test` checks that the engine and queues stay private.
+
+Sources of `AppModel` by topic: `app_model.cpp` (`start_*_analysis`, `propagate_to_sessions`), `app_queues.cpp` (queues, prewarm, `remove_*` with queue and window cleanup, the UI commands), `app_plot_windows.cpp`, `app_broadcast.cpp` (broadcast and undo), `tick.cpp` (polling, queue advance, persistence). A new field goes into the lowest layer that owns it; the editor and settings layers never see sessions or the engine.
 
 `session_persistence.h` saves and loads whole sessions that own other sessions (Basins phase slots, Custom sub-sessions) on top of storage's state serializers; that is why storage is a public dependency.
 

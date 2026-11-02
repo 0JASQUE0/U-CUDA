@@ -288,7 +288,7 @@ void AppModel::tick(SystemLibrary& lib) {
         // When the whole pipeline is drained (queue empty AND nothing left
         // running), promote pending → committed for each level's signature
         // so the next Run knows which levels are still up-to-date.
-        if (model.custom_queue.empty() && !model.custom_session.any_in_flight())
+        if (model.custom_queue_.empty() && !model.custom_session.any_in_flight())
             model.custom_session.commit_pending_signatures();
     }
 

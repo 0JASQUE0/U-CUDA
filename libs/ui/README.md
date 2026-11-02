@@ -20,9 +20,15 @@ The desktop loop calls application ticking and then UI drawing. UI maps stable s
 
 ## Change this when
 
-Edit family files for controls/windows, `widgets.cpp` for shared input fields, `integration_widgets.cpp` for the Integration block and controller library, `field_names.cpp` for field names and parameter-group trees, `plot_widgets.cpp` for plot toolbars, view ranges and colormaps, `system_tab.cpp` and `library_list.cpp` for the System tab and the library list, `workspace.cpp` for layout, `library.cpp` for system management, and `ui_resources.cpp` for view lifetime.
+One tab, one set of files: `phase.cpp`; Parametric in `bifurcation.cpp`, `lyapunov.cpp` (LLE, LS), `metrics.cpp` and `parametric_windows.cpp`; `dft.cpp`; `basins.cpp`; `fastsync.cpp`; `order.cpp`; `network.cpp`; `neural.cpp`; Custom in `custom.cpp` and `workspace.cpp`; `system_tab.cpp`; Library in `library.cpp` (editor, system switch) and `library_list.cpp`. Shared widgets: `widgets.cpp` (input fields, auto labels, undo), `integration_widgets.cpp` (scheme table, Integration block, controller library), `field_names.cpp` (field names, parameter-group trees), `plot_widgets.cpp` (export, view ranges, toolbars, colormaps, regime summaries). `gui.cpp` is the top-level dispatcher, `ui_resources.cpp` owns view lifetime.
 
-Shared declarations live in `src/gui_internal.h`, which every UI source includes. It only pulls in the topic headers, each including the previous one: `gui_common.h` (includes, constants, mode tabs), `gui_inputs.h` (input fields, auto labels, undo), `gui_integration.h` (built-in scheme table, Integration block, controllers), `gui_fields.h` (field names, parameter-group trees), `gui_plot.h` (export, view ranges, toolbars, colormaps) and `gui_tabs.h` (per-tab functions and shared window state). Put a new declaration into the topic header of the file that defines it.
+Private headers, each compiling on its own:
+
+- `gui_common.h`: includes, constants, mode tabs; every UI source includes it.
+- Topic headers for the shared widgets: `gui_inputs.h`, `gui_integration.h`, `gui_fields.h`, `gui_plot.h`.
+- One header per tab, `tab_<tab>.h` (`tab_phase.h`, `tab_parametric.h`, `tab_dft.h`, `tab_basins.h`, `tab_fastsync.h`, `tab_order.h`, `tab_network.h`, `tab_neural.h`, `tab_custom.h`, `tab_system.h`, `tab_library.h`), with the functions and window state of that tab.
+
+A source includes `gui_common.h` and only the topic and tab headers whose names it uses; only `gui.cpp` sees every tab. Put a new declaration into the header of the file that defines it, and a function into the file of its tab.
 
 ## Build and checks
 

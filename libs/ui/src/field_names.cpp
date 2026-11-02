@@ -1,4 +1,6 @@
-﻿#include "gui_internal.h"
+﻿#include "gui_common.h"
+#include "gui_inputs.h"
+#include "gui_fields.h"
 // Имена полей формулами, подписи, комбо переменных, деревья групп параметров.
 using namespace ucuda::ui_detail;
 
@@ -419,66 +421,348 @@ void draw_param_tree(ParamGroups* groups, const std::vector<std::string>& names,
 
 
 namespace ucuda::ui_detail {
-void draw_csv_output_block(const char* header, const char* checkbox_label,
-                                  bool& enabled, const char* path_id, std::string& path,
-                                  const char* hint) {
-    if (!ImGui::CollapsingHeader(header)) return;
-    ImGui::Checkbox(checkbox_label, &enabled);
-    InputTextStr(path_id, path);
-    ImGui::TextDisabled("%s", hint);
-}
-}
+void field_apply_all_menu(AppModel* model, BroadcastField f,
+                                 const std::string& name, const std::string& label,
+                                 const std::string& value,
+                                 const std::function<void()>& extra) {
+    if (!model) return;
+    // ID popup'а обязан быть свой у каждого поля: в блоке Integration шесть
+    // полей лежат на ОДНОМ уровне ID-стека, и общий идентификатор склеил бы
+    // их меню в одно.
+    const std::string popup_id = "##apply_all_" + label + name;
+    if (!ImGui::BeginPopupContextItem(popup_id.c_str())) return;
+    ImGui::TextDisabled("%s = %s", label.c_str(), value.c_str());
+    ImGui::Separator();
+    if (extra) {
+        extra();
+        ImGui::Separator();
+    }
 
-
-namespace ucuda::ui_detail {
-void draw_error_box(const char* id, const std::string& err,
-                           int lines) {
-    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
-    const ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * (float)lines);
-    ImGui::InputTextMultiline(id, const_cast<char*>(err.c_str()), err.size() + 1,
-                              sz, ImGuiInputTextFlags_ReadOnly);
-}
-}
-
-
-namespace ucuda::ui_detail {
-void draw_export_menu_item(bool busy, const GuiCallbacks& cb,
-                                  const std::function<void(const std::string&)>& write) {
-    if (!ImGui::MenuItem("Export data...", nullptr, false, !busy)) return;
-    if (!cb.pick_save_file_csv) return;
-    const std::string path = cb.pick_save_file_csv();
-    if (!path.empty() && write) write(path);
-}
-}
-
-
-namespace ucuda::ui_detail {
-[[nodiscard]] ViewRangeTarget vr_target_fixed(std::string name,
-        std::string* x_lo, std::string* x_hi,
-        std::string* y_lo, std::string* y_hi) {
-    ViewRangeTarget t;
-    t.name = std::move(name);
-    t.x_lo = x_lo; t.x_hi = x_hi; t.y_lo = y_lo; t.y_hi = y_hi;
-    t.relocate = [x_lo, x_hi, y_lo, y_hi]() {
-        ViewRangeSlots s;
-        s.x_lo = x_lo; s.x_hi = x_hi; s.y_lo = y_lo; s.y_hi = y_hi;
-        return s;
+    // Сухой прогон: сколько конфигов реально РАЗОЙДЁТСЯ с этим значением.
+    // Показываем числом, но НЕ гасим по нему команду: серый пункт читается как
+    // подпись, и "0 differ" выглядит как сломанная рассылка, хотя на деле все
+    // цели уже с этим значением.
+    auto differ_count = [&](const std::vector<BroadcastTarget>* only) {
+        return model->broadcast_field(f, name, value, /*apply*/false, label, only, "");
     };
-    return t;
+    // Применяет и кладёт отчёт в шапку: адресаты бывают не открыты, и без
+    // строки сверху "применилось" неотличимо от "ничего не произошло".
+    auto apply_now = [&](const std::vector<BroadcastTarget>* only, const std::string& note) {
+        const int n = model->broadcast_field(f, name, value, /*apply*/true, label, only, note);
+        model->undo_note = n > 0
+            ? ("Applied: " + label + " = " + value + " -> " + note)
+            : ("Nothing to apply: " + note + " already at " + value);
+        model->undo_note_time = ImGui::GetTime();
+    };
+    // Подпись склеиваем, а НЕ прогоняем вторым проходом через printf: в шаблон
+    // подставляется имя группы, и попади в него '%', результат стал бы
+    // спецификацией формата с несуществующим аргументом. Сегодня имена — жёсткие
+    // литералы из group_of, но держать это на соглашении незачем.
+    auto count_and_item = [&](const std::string& title,
+                              const std::vector<BroadcastTarget>* only,
+                              const std::string& note) {
+        const std::string lbl = title + " (" + std::to_string(differ_count(only)) + " differ)";
+        if (ImGui::MenuItem(lbl.c_str())) apply_now(only, note);
+    };
+
+    const std::vector<BroadcastTarget> all = model->broadcast_targets(f);
+
+    // 1. Свой тип. Источник берём из панели, которая сейчас рисуется
+    //    (broadcast_source_*): по app_mode его не вывести — вкладка Parametric
+    //    покрывает сразу Bifurcation, LLE и LS.
+    std::vector<BroadcastTarget> same_group;
+    std::string group;
+    for (const auto& t : all)
+        if (t.tab == model->broadcast_source_tab && t.idx == model->broadcast_source_idx) {
+            group = t.group;
+            break;
+        }
+    if (!group.empty()) {
+        for (const auto& t : all)
+            if (t.group == group) same_group.push_back(t);
+    }
+    if (same_group.size() > 1)
+        count_and_item("Apply to all " + group, &same_group, "all " + group);
+
+    // 2. Выбор галочками. Маска живёт в модели и пересобирается, когда
+    //    сменилось поле или изменился состав целей (диаграмму добавили/закрыли).
+    if (ImGui::BeginMenu("Apply to...")) {
+        // Подпись состава: поле + имена целей по порядку. Меняется состав —
+        // маска собирается заново, а не переезжает на соседние конфиги.
+        std::string sig = std::to_string((int)f);
+        for (const auto& t : all) { sig += '\x1f'; sig += t.label; }
+        if (model->broadcast_pick_sig != sig ||
+            model->broadcast_pick.size() != all.size()) {
+            model->broadcast_pick.assign(all.size(), '0');
+            model->broadcast_pick_sig = sig;
+            // По умолчанию отмечаем свой тип: это и подсказка, что здесь
+            // выбирают, и самый частый набор.
+            for (size_t i = 0; i < all.size(); ++i)
+                if (all[i].group == group) model->broadcast_pick[i] = '1';
+        }
+        if (ImGui::SmallButton("All")) model->broadcast_pick.assign(all.size(), '1');
+        ImGui::SameLine();
+        if (ImGui::SmallButton("None")) model->broadcast_pick.assign(all.size(), '0');
+
+        // Кнопка применения — СВЕРХУ, до списка: галочек бывает под два десятка,
+        // и внизу она уезжает за край экрана. Кнопка, а не пункт меню: пункт в
+        // конце списка читается как подпись, а не как действие.
+        {
+            std::vector<BroadcastTarget> sel;
+            for (size_t i = 0; i < all.size(); ++i)
+                if (model->broadcast_pick[i] == '1') sel.push_back(all[i]);
+            char btn[96];
+            std::snprintf(btn, sizeof(btn), "Apply to %d selected", (int)sel.size());
+            if (sel.empty()) ImGui::BeginDisabled();
+            if (ImGui::Button(btn)) {
+                char note[64];
+                std::snprintf(note, sizeof(note), "%d selected", (int)sel.size());
+                apply_now(&sel, note);
+                ImGui::CloseCurrentPopup();
+            }
+            if (sel.empty()) ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (sel.empty()) {
+                ImGui::TextDisabled("nothing ticked");
+            } else {
+                const int d = differ_count(&sel);
+                if (d > 0) ImGui::TextDisabled("%d differ", d);
+                else       ImGui::TextDisabled("already at this value");
+            }
+        }
+        ImGui::Separator();
+
+        std::string shown_group;
+        for (size_t i = 0; i < all.size(); ++i) {
+            if (all[i].group != shown_group) {
+                shown_group = all[i].group;
+                ImGui::SeparatorText(shown_group.c_str());
+            }
+            ImGui::PushID((int)i);
+            bool on = (model->broadcast_pick[i] == '1');
+            if (ImGui::Checkbox("##pick", &on))
+                model->broadcast_pick[i] = on ? '1' : '0';
+            ImGui::SameLine();
+            ImGui::TextUnformatted(all[i].label.c_str());
+            ImGui::PopID();
+        }
+
+        ImGui::EndMenu();
+    }
+
+    // 3. Прежний адресат: активный конфиг каждой вкладки (only = nullptr).
+    count_and_item("Apply to all calculation tabs", nullptr, "all tabs");
+
+    draw_undo_menu_item(model);
+    ImGui::EndPopup();
 }
 }
 
 
 namespace ucuda::ui_detail {
-[[nodiscard]] std::string fmt_view_bound(double v, double span) {
-    const double tol = std::abs(span) * 1e-6;
-    if (tol > 0.0) {
-        char buf[64];
-        for (int prec = 6; prec <= 17; ++prec) {
-            std::snprintf(buf, sizeof(buf), "%.*g", prec, v);
-            if (std::abs(parse_ratio_or(buf, v) - v) <= tol) return std::string(buf);
+void draw_param_groups_window(SystemEditor& m, const std::vector<std::string>& params,
+                              const std::vector<std::string>& vars, const char* id) {
+    AppModel::ParamGroupsUi& u = m.pg_ui;
+    if (!u.open) return;
+    ImGui::SetNextWindowSize(ImVec2(760.0f, 620.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin((std::string("Parameter groups##") + id).c_str(), &u.open)) { ImGui::End(); return; }
+    ImGui::TextDisabled("Only how the fields are laid out and labelled in the tabs; the computation does not change.\n"
+                        "Nested groups: '/' in the name, e.g. OPA2134/XU1. Drag a group row to reorder it among\n"
+                        "its siblings; drag a name onto a group row to move it there.");
+    if (ImGui::BeginTabBar("##pg_kind")) {
+        const int was = u.kind;
+        auto req = [&](int k) { return u.kind_req == k ? ImGuiTabItemFlags_SetSelected : 0; };
+        if (ImGui::BeginTabItem("Parameters", nullptr, req(0))) { u.kind = 0; ImGui::EndTabItem(); }
+        if (!vars.empty() && ImGui::BeginTabItem("Initial conditions", nullptr, req(1))) { u.kind = 1; ImGui::EndTabItem(); }
+        ImGui::EndTabBar();
+        u.kind_req = -1;
+        if (u.kind != was) { u.sel.clear(); u.target.clear(); u.rename_from.clear(); }
+    }
+    if (vars.empty()) u.kind = 0;
+    ParamGroups& G = u.kind == 1 ? m.ic_groups : m.param_groups;
+    const std::vector<std::string>& names = u.kind == 1 ? vars : params;
+
+    InputTextStrHint("##pg_new", u.new_path, "new group, e.g. OPA2134/XU1", 300.0f);
+    ImGui::SameLine();
+    if (ImGui::Button("Create group")) {
+        const std::string p = pg_normalize_path(u.new_path);
+        if (!p.empty()) { pg_get(G, p); u.target = p; }
+        u.new_path.clear();
+    }
+
+    const std::vector<std::string> rows = pg_rows(G);
+    const std::set<std::string> present(names.begin(), names.end());
+    auto count_in = [&](const std::string& path) {
+        int n = 0;
+        for (const ParamGroup& g : G)
+            if (pg_in_subtree(g.path, path))
+                for (const std::string& p : g.params) n += present.count(p) ? 1 : 0;
+        return n;
+    };
+
+    // Перетаскивание: строка группы (среди соседей) и имя из таблицы (на строку группы).
+    static const char* const kRowDrag = "UCUDA_PG_ROW";
+    static const char* const kNameDrag = "UCUDA_PG_NAME";
+    std::string drop_from, drop_to, drop_name;
+    bool drop_after = false;
+
+    ImGui::SeparatorText("Groups");
+    if (rows.empty()) ImGui::TextDisabled("No groups: the tabs show a flat list.");
+    std::string del, ren_from, ren_to;
+    if (!rows.empty() && ImGui::BeginChild("##pg_rows", ImVec2(0, std::min(240.0f, 26.0f * (float)rows.size() + 8.0f)),
+                                           ImGuiChildFlags_Borders)) {
+        for (const std::string& r : rows) {
+            ImGui::PushID(r.c_str());
+            const int depth = (int)std::count(r.begin(), r.end(), '/');
+            const size_t sl = r.rfind('/');
+            const std::string seg = sl == std::string::npos ? r : r.substr(sl + 1);
+            ImGui::Indent(16.0f * (float)depth + 1.0f);
+            if (u.rename_from == r) {
+                InputTextStr("##rn", u.rename_to, 260.0f);
+                ImGui::SameLine();
+                if (ImGui::SmallButton("OK")) { ren_from = r; ren_to = u.rename_to; }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Cancel")) u.rename_from.clear();
+            } else {
+                const std::string text = seg + "  (" + std::to_string(count_in(r)) + ")";
+                ImGui::Selectable(text.c_str(), u.target == r, 0, ImVec2(330.0f - 16.0f * (float)depth, 0));
+                if (ImGui::IsItemClicked()) u.target = r;
+                if (ImGui::BeginDragDropSource()) {
+                    ImGui::SetDragDropPayload(kRowDrag, r.data(), r.size());
+                    ImGui::TextUnformatted(seg.c_str());
+                    ImGui::EndDragDropSource();
+                }
+                if (ImGui::BeginDragDropTarget()) {
+                    const ImGuiPayload* pk = ImGui::GetDragDropPayload();
+                    const ImRect rc(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+                    if (pk && pk->IsDataType(kRowDrag)) {
+                        const std::string from((const char*)pk->Data, (size_t)pk->DataSize);
+                        if (from != r && pg_parent(from) == pg_parent(r)) {
+                            const bool after = ImGui::GetMousePos().y > (rc.Min.y + rc.Max.y) * 0.5f;
+                            const float y = after ? rc.Max.y : rc.Min.y;
+                            ImGui::GetWindowDrawList()->AddLine(ImVec2(rc.Min.x, y), ImVec2(rc.Max.x, y),
+                                                                ImGui::GetColorU32(ImGuiCol_DragDropTarget), 2.0f);
+                            if (ImGui::AcceptDragDropPayload(kRowDrag, ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
+                                drop_from = from; drop_to = r; drop_after = after;
+                            }
+                        }
+                    } else if (const ImGuiPayload* pn = ImGui::AcceptDragDropPayload(kNameDrag)) {
+                        drop_name.assign((const char*)pn->Data, (size_t)pn->DataSize);
+                        drop_to = r;
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+                ImGui::SameLine(360.0f);
+                if (ImGui::SmallButton("Rename")) { u.rename_from = r; u.rename_to = r; }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Delete")) del = r;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Removes the group and its subgroups; their fields stay ungrouped.");
+            }
+            ImGui::Unindent(16.0f * (float)depth + 1.0f);
+            ImGui::PopID();
         }
     }
-    return fmt_num_shortest(v);
+    if (!rows.empty()) ImGui::EndChild();
+    if (!drop_from.empty()) pg_reorder(G, drop_from, drop_to, drop_after);
+    if (!drop_name.empty()) {
+        // Брошено выделенное имя — едут все выделенные.
+        if (u.sel.count(drop_name)) {
+            for (const std::string& p : names) if (u.sel.count(p)) pg_move(G, p, drop_to);
+            u.sel.clear();
+        } else pg_move(G, drop_name, drop_to);
+    }
+    if (!del.empty()) { pg_remove(G, del); if (pg_in_subtree(u.target, del)) u.target.clear(); }
+    if (!ren_from.empty()) {
+        pg_rename(G, ren_from, ren_to);
+        u.rename_from.clear();
+        u.target.clear();
+    }
+
+    ImGui::SeparatorText(u.kind == 1 ? "Initial conditions" : "Parameters");
+    InputTextStr("filter##pg", u.filter, 200.0f);
+    std::vector<std::string> shown;
+    for (const std::string& p : names)
+        if (u.filter.empty() || p.find(u.filter) != std::string::npos
+            || pg_group_of(G, p).find(u.filter) != std::string::npos) shown.push_back(p);
+    ImGui::SameLine();
+    if (ImGui::Button("Select shown")) u.sel.insert(shown.begin(), shown.end());
+    ImGui::SameLine();
+    if (ImGui::Button("Clear selection")) u.sel.clear();
+
+    // Список целей: все строки групп + "без группы".
+    auto group_combo = [&](const char* label, std::string& cur) {
+        bool changed = false;
+        if (ImGui::BeginCombo(label, cur.empty() ? "(no group)" : cur.c_str())) {
+            if (ImGui::Selectable("(no group)", cur.empty())) { cur.clear(); changed = true; }
+            for (const std::string& r : rows)
+                if (ImGui::Selectable(r.c_str(), cur == r)) { cur = r; changed = true; }
+            ImGui::EndCombo();
+        }
+        return changed;
+    };
+    ImGui::SetNextItemWidth(260.0f);
+    group_combo("##pg_target", u.target);
+    ImGui::SameLine();
+    int nsel = 0;
+    for (const std::string& p : names) nsel += u.sel.count(p) ? 1 : 0;
+    ImGui::BeginDisabled(nsel == 0);
+    if (ImGui::Button(("Move selected (" + std::to_string(nsel) + ")").c_str())) {
+        for (const std::string& p : names)
+            if (u.sel.count(p)) pg_move(G, p, u.target);
+        u.sel.clear();
+    }
+    ImGui::EndDisabled();
+
+    if (ImGui::BeginTable("##pg_params", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV,
+                          ImVec2(0, ImGui::GetContentRegionAvail().y))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+        ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        ImGui::TableSetupColumn("label (LaTeX)", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        ImGui::TableSetupColumn("shown as", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGui::TableSetupColumn("group");
+        ImGui::TableHeadersRow();
+        ImGuiListClipper clip;
+        clip.Begin((int)shown.size());
+        while (clip.Step())
+            for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
+                const std::string& p = shown[(size_t)i];
+                ImGui::PushID(p.c_str());
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                bool s = u.sel.count(p) > 0;
+                if (ImGui::Checkbox("##s", &s)) { if (s) u.sel.insert(p); else u.sel.erase(p); }
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Selectable(p.c_str(), false);
+                if (ImGui::BeginDragDropSource()) {
+                    ImGui::SetDragDropPayload(kNameDrag, p.data(), p.size());
+                    const int k = u.sel.count(p) ? nsel : 1;
+                    if (k > 1) ImGui::Text("%s (+%d)", p.c_str(), k - 1);
+                    else ImGui::TextUnformatted(p.c_str());
+                    ImGui::EndDragDropSource();
+                }
+                ImGui::TableSetColumnIndex(2);
+                {
+                    auto it = m.field_labels.find(p);
+                    std::string lab = it == m.field_labels.end() ? std::string() : it->second;
+                    ImGui::SetNextItemWidth(-1.0f);
+                    const std::string hint = field_label_auto(p);
+                    if (InputTextStrHint("##lab", lab, hint.c_str())) {
+                        if (lab.find_first_not_of(" \t") == std::string::npos) m.field_labels.erase(p);
+                        else m.field_labels[p] = lab;
+                    }
+                }
+                ImGui::TableSetColumnIndex(3);
+                draw_field_name(p, &m.field_labels);
+                ImGui::TableSetColumnIndex(4);
+                std::string g = pg_group_of(G, p);
+                ImGui::SetNextItemWidth(-1.0f);
+                if (group_combo("##g", g)) pg_move(G, p, g);
+                ImGui::PopID();
+            }
+        ImGui::EndTable();
+    }
+    ImGui::End();
 }
 }

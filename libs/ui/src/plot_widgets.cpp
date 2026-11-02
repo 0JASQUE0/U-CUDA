@@ -1,4 +1,6 @@
-﻿#include "gui_internal.h"
+﻿#include "gui_common.h"
+#include "gui_inputs.h"
+#include "gui_plot.h"
 // Диапазоны видов, вкладки дока, панели графиков, стили точек, палитры, панель тепловой карты.
 using namespace ucuda::ui_detail;
 
@@ -1100,12 +1102,6 @@ void ls_resolve_plane(LSCurveConfig& cact, int k,
 }
 
 
-namespace ucuda::ui_detail {}
-
-
-namespace ucuda::ui_detail {}
-
-
 namespace ucuda::ui_detail {
 void sweep_range_from_result(double res_lo, double res_hi,
                                     const std::string& lo_text, const std::string& hi_text,
@@ -1115,6 +1111,210 @@ void sweep_range_from_result(double res_lo, double res_hi,
     if (hi == lo) {
         lo = parse_ratio_or(lo_text, 0.0);
         hi = parse_ratio_or(hi_text, 1.0);
+    }
+}
+}
+
+
+namespace ucuda::ui_detail {
+void draw_csv_output_block(const char* header, const char* checkbox_label,
+                                  bool& enabled, const char* path_id, std::string& path,
+                                  const char* hint) {
+    if (!ImGui::CollapsingHeader(header)) return;
+    ImGui::Checkbox(checkbox_label, &enabled);
+    InputTextStr(path_id, path);
+    ImGui::TextDisabled("%s", hint);
+}
+}
+
+
+namespace ucuda::ui_detail {
+void draw_error_box(const char* id, const std::string& err,
+                           int lines) {
+    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+    const ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * (float)lines);
+    ImGui::InputTextMultiline(id, const_cast<char*>(err.c_str()), err.size() + 1,
+                              sz, ImGuiInputTextFlags_ReadOnly);
+}
+}
+
+
+namespace ucuda::ui_detail {
+void draw_export_menu_item(bool busy, const GuiCallbacks& cb,
+                                  const std::function<void(const std::string&)>& write) {
+    if (!ImGui::MenuItem("Export data...", nullptr, false, !busy)) return;
+    if (!cb.pick_save_file_csv) return;
+    const std::string path = cb.pick_save_file_csv();
+    if (!path.empty() && write) write(path);
+}
+}
+
+
+namespace ucuda::ui_detail {
+[[nodiscard]] ViewRangeTarget vr_target_fixed(std::string name,
+        std::string* x_lo, std::string* x_hi,
+        std::string* y_lo, std::string* y_hi) {
+    ViewRangeTarget t;
+    t.name = std::move(name);
+    t.x_lo = x_lo; t.x_hi = x_hi; t.y_lo = y_lo; t.y_hi = y_hi;
+    t.relocate = [x_lo, x_hi, y_lo, y_hi]() {
+        ViewRangeSlots s;
+        s.x_lo = x_lo; s.x_hi = x_hi; s.y_lo = y_lo; s.y_hi = y_hi;
+        return s;
+    };
+    return t;
+}
+}
+
+
+namespace ucuda::ui_detail {
+[[nodiscard]] std::string fmt_view_bound(double v, double span) {
+    const double tol = std::abs(span) * 1e-6;
+    if (tol > 0.0) {
+        char buf[64];
+        for (int prec = 6; prec <= 17; ++prec) {
+            std::snprintf(buf, sizeof(buf), "%.*g", prec, v);
+            if (std::abs(parse_ratio_or(buf, v) - v) <= tol) return std::string(buf);
+        }
+    }
+    return fmt_num_shortest(v);
+}
+}
+
+
+namespace ucuda::ui_detail {
+void count_regimes(const std::vector<int>& flags, int& fp, int& unb, int& osc, int* stopped ) {
+    fp = unb = osc = 0;
+    if (stopped) *stopped = 0;
+    for (int f : flags) {
+        if      (regime_is_cancelled(f))   { if (stopped) ++*stopped; }
+        else if (regime_is_fixed_point(f)) ++fp;
+        else if (regime_is_unbound(f))     ++unb;
+        else                               ++osc;
+    }
+}
+}
+
+
+namespace ucuda::ui_detail {
+std::function<const char*(int, int)> regime_cell_label(const std::vector<int>& flags,
+                                                              int row_stride,
+                                                              bool with_oscillation) {
+    return [&flags, row_stride, with_oscillation](int ix, int iy) -> const char* {
+        const size_t k = (size_t)iy * (size_t)row_stride + (size_t)ix;
+        if (k >= flags.size()) return nullptr;
+        if (!with_oscillation && regime_is_oscillation(flags[k])) return nullptr;
+        return regime_label(flags[k]);
+    };
+}
+}
+
+
+namespace ucuda::ui_detail {
+std::function<bool(int, int)> cancelled_cell_mask(const std::vector<int>& flags, int row_stride) {
+    return [&flags, row_stride](int ix, int iy) -> bool {
+        const size_t k = (size_t)iy * (size_t)row_stride + (size_t)ix;
+        return k < flags.size() && regime_is_cancelled(flags[k]);
+    };
+}
+}
+
+
+namespace ucuda::ui_detail {
+void draw_adaptive_stats(const std::vector<double>& st) {
+    if (st.size() < 4) return;
+    double acc = 0, rej = 0, frc = 0, hsum = 0, hmin = 0, hmax = 0;
+    size_t n = 0;
+    for (size_t i = 0; i + 3 < st.size(); i += 4) {
+        acc += st[i]; rej += st[i + 1]; frc += st[i + 2];
+        const double hm = st[i + 3];
+        if (hm > 0) {
+            if (n == 0 || hm < hmin) hmin = hm;
+            if (n == 0 || hm > hmax) hmax = hm;
+            hsum += hm; ++n;
+        }
+    }
+    const double att = acc + rej;
+    ImGui::TextDisabled("Adaptive step: mean h %.3g (%.3g..%.3g over points), %.0f accepted, "
+                        "%.0f rejected (%.1f%%), %.0f forced",
+                        n ? hsum / (double)n : 0.0, hmin, hmax, acc, rej,
+                        att > 0 ? 100.0 * rej / att : 0.0, frc);
+}
+}
+
+
+namespace ucuda::ui_detail {
+void draw_regime_summary(const std::vector<int>& flags, RegimeCounts* cache, int gen) {
+    int fp = 0, unb = 0, osc = 0, stopped = 0;
+    if (!cache) {
+        count_regimes(flags, fp, unb, osc, &stopped);
+    } else {
+        if (cache->gen != gen || cache->data != (const void*)flags.data() || cache->size != flags.size()) {
+            count_regimes(flags, cache->fp, cache->unb, cache->osc, &cache->stopped);
+            cache->gen = gen; cache->data = flags.data(); cache->size = flags.size();
+        }
+        fp = cache->fp; unb = cache->unb; osc = cache->osc; stopped = cache->stopped;
+    }
+    if (stopped > 0)
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                           "Stopped: %d of %d points computed, the rest are grey / blank",
+                           (int)flags.size() - stopped, (int)flags.size());
+    if (fp == 0 && unb == 0) return;
+    ImGui::TextDisabled("regimes: %d %s / %d %s / %d %s",
+                        fp,  regime_label(REGIME_FIXED_POINT),
+                        unb, regime_label(REGIME_UNBOUND),
+                        osc, regime_label(REGIME_OSCILLATION));
+}
+}
+
+
+namespace ucuda::ui_detail {
+[[nodiscard]] std::string ic_legend_text(const AnalysisResult& res, size_t k) {
+    if (k < res.snapshot.ic_flat.size() && !res.snapshot.ic_flat[k].empty()) {
+        const std::vector<double>& v = res.snapshot.ic_flat[k];
+        std::string txt = "(";
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (i) txt += ",";
+            txt += fmt_tick(v[i]);
+        }
+        txt += ")";
+        return txt;
+    }
+    return (k < res.ic_text.size()) ? res.ic_text[k] : std::string();
+}
+}
+
+
+namespace ucuda::ui_detail {
+void draw_writable_var_combo(const std::vector<std::string>& vars,
+                                    int& writable_var,
+                                    const char* combo_id) {
+    if (vars.empty()) return;
+    const int N = (int)vars.size();
+    // Допустимые значения: -1 (combination) или [0, N-1]. Старые сейвы могли
+    // иметь невалидные индексы — clamp в 0.
+    if (writable_var < -1 || writable_var >= N) writable_var = 0;
+    // Для системы из одной переменной combination сворачивается до x[0] —
+    // показывать отдельную опцию бессмысленно, форсим single-var.
+    if (N == 1 && writable_var == -1) writable_var = 0;
+
+    // Подпись комбинации — общая combo_var_label (раньше здесь жила её копия).
+    const std::string preview =
+        (writable_var == -1) ? combo_var_label(vars) : vars[writable_var];
+
+    ImGui::SetNextItemWidth(220);
+    if (ImGui::BeginCombo(combo_id, preview.c_str())) {
+        for (int i = 0; i < N; ++i) {
+            bool sel = writable_var == i;
+            if (ImGui::Selectable(vars[i].c_str(), sel)) writable_var = i;
+        }
+        if (N >= 2) {
+            ImGui::Separator();
+            const std::string lbl = combo_var_label(vars);
+            bool sel_combo = writable_var == -1;
+            if (ImGui::Selectable(lbl.c_str(), sel_combo)) writable_var = -1;
+        }
+        ImGui::EndCombo();
     }
 }
 }

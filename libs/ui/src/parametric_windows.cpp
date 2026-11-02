@@ -1,133 +1,9 @@
-﻿#include "gui_internal.h"
+﻿#include "gui_common.h"
+#include "gui_inputs.h"
+#include "gui_plot.h"
+#include "tab_parametric.h"
 using namespace ucuda::ui_detail;
 
-namespace ucuda::ui_detail {
-void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s, int idx) {
-    Dft1DConfig& c = s.configs[idx];
-    // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
-    model.broadcast_source_tab = BroadcastTab::Dft1D;
-    model.broadcast_source_idx = idx;
-
-    ImGui::SetNextItemWidth(kComboW);
-    if (InputTextStr("Label", c.label))
-        c.label_is_manual = !c.label.empty();   // empty → back to auto
-    ImGui::Separator();
-
-    // Scheme (built-in + custom)
-    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                      &model, model.is_map, &s.wrapper_schemes);
-    ImGui::Separator();
-
-    // Sweep target (parameter ИЛИ initial condition), см. draw_diagram_controls
-    // dt (h) — как у Bif/LLE/LS 1D: число сэмплов блока и окно пересчитываются
-    // под шаг каждой точки. Второй оси у DFT нет, поэтому other_over_h = nullptr.
-    draw_sweep_target_combo("Sweep", s.params, s.vars,
-                            c.param_index, c.sweep_over_var, c.var_sweep_index,
-                            c.sweep_over_h, nullptr,
-                            /*note_when_empty*/ true, kComboW,
-                            scheme_uses_symmetry(c.scheme, s.custom_schemes),
-                            &model, BroadcastField::SweepTarget, !model.is_map);
-    InputNumStr(c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text, kFieldW,
-                [&]{ field_apply_all_menu(&model, BroadcastField::SweepLo, {},
-                                        c.sweep_over_h ? "h lo" : "Param lo", c.param_lo_text); });
-    InputNumStr(c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text, kFieldW,
-                [&]{ field_apply_all_menu(&model, BroadcastField::SweepHi, {},
-                                        c.sweep_over_h ? "h hi" : "Param hi", c.param_hi_text); });
-    ImGui::Checkbox("Log scale##dft_log", &c.log_scale);
-    if (c.log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
-
-    // Тот же блок Continuation + GPU/CPU, что у Bif / LLE / LS 1D.
-    // 2D-режима у DFT нет, поэтому блокирует только IC-свип.
-    draw_continuation_device_block(c, "dft", c.sweep_over_var, /*device_locked*/ false);
-    ImGui::Separator();
-
-    // Variable + Resolution X
-    draw_writable_var_combo(s.vars, c.writable_var, "Writable var##dft_wv");
-    InputNumStr("Resolution X", c.n_pts_text, kFieldW,
-                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
-                                        "Resolution X", c.n_pts_text); });
-    ImGui::Separator();
-
-    // ----- Resolution Y / Frequency range (обязательные поля для rangesFreq;
-    // без auto-режима — частотный диапазон всегда физически осмыслен только
-    // когда задан явно, в отличие от colored_1d's Y auto-range). -----
-    if (ImGui::CollapsingHeader("Resolution Y##dft_freq", ImGuiTreeNodeFlags_DefaultOpen)) {
-        InputNumStr("Resolution Y", c.n_freq_text, kFieldW);
-        InputNumStr("Freq lo", c.freq_lo_text, kFieldW);
-        InputNumStr("Freq hi", c.freq_hi_text, kFieldW);
-        ImGui::Checkbox("Log scale (Y)##dft_freq_log", &c.freq_log_scale);
-        if (c.freq_log_scale) { ImGui::SameLine(); ImGui::TextDisabled("(lo/hi > 0)"); }
-        // Порядок = window_type (см. cpu_build_window). Дописывать только в
-        // конец: значение уходит числом в JSON сессии.
-        static const char* windows[] = { "None", "Hanning", "Hamming", "Blackman", "Blackman-Harris" };
-        ImGui::SetNextItemWidth(kComboW);
-        ImGui::Combo("Window", &c.window_type, windows, IM_ARRAYSIZE(windows));
-    }
-
-    // Display mode + normalize
-    if (ImGui::CollapsingHeader("Display##dft_disp", ImGuiTreeNodeFlags_DefaultOpen)) {
-        static const char* modes[] = { "Power spectrum", "Amplitude", "Phase" };
-        ImGui::SetNextItemWidth(kComboW);
-        ImGui::Combo("Mode", &c.display_mode, modes, IM_ARRAYSIZE(modes));
-        ImGui::Checkbox("Normalize?", &c.normalize);
-        // Шкала и её порог осмысленны только для power/amplitude — на phase (радианы) гасим оба.
-        ImGui::BeginDisabled(c.display_mode == 2);
-        ImGui::Checkbox("dB scale", &c.db_scale);
-        if (c.display_mode != 2) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(?)");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("In dB power and amplitude are identically equal:\n"
-                                  "20*log10(sqrt(P)) = 10*log10(P).\n"
-                                  "They differ only on a linear scale -\n"
-                                  "power suppresses weak peaks quadratically.");
-        }
-        ImGui::BeginDisabled(!c.db_scale);
-        InputNumStr("dB floor", c.db_floor_text, kFieldW);
-        ImGui::EndDisabled();
-        if (c.display_mode != 2 && c.db_scale) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(?)");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Lower bound of the logarithmic scale.\n"
-                                  "Everything weaker is pinned to this value -\n"
-                                  "otherwise a zero bin would give -inf.");
-        }
-        ImGui::EndDisabled();
-    }
-
-    // Integration (collapsible)
-    {
-        IntegrationFields f;
-        f.h           = &c.h_text;
-        f.symmetry_s  = &c.symmetry_s;
-        f.cd_fp_iters = &c.cd_fp_iters;
-        f.newton      = &c.newton;
-        f.t_max       = &c.t_max_text;
-        f.transient   = &c.transient_text;
-        f.pre_scaller = &c.pre_scaller_text;
-        f.max_value   = &c.max_value_text;
-        draw_integration_block("Integration##dft_int", c.scheme, s.custom_schemes, f, &model, model.is_map);
-    }
-
-    draw_named_num_fields("Initial conditions##dft_ic", s.vars,   c.initial_conditions,
-                          nullptr, &model, BroadcastField::InitCondition);
-    draw_named_num_fields("Parameters##dft_par",        s.params, c.param_values,
-                          nullptr, &model, BroadcastField::Param);
-    draw_csv_output_block("CSV output##dft_csv", "Save to file", c.csv_save_enabled,
-                          "##dft_csv_path", c.csv_output_path,
-                          "Writes <path>_config.csv, _AkCOS.csv, _BkSIN.csv.");
-
-    // Run-кнопка живёт в draw_dft1d_controls, как у Bifurcation/Basins.
-    if (c.last_run_ok) {
-        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
-            "OK: n_pts=%d, n_freq=%d", c.result.n_pts, c.result.n_freq);
-        draw_regime_summary(c.result.flags);
-    } else if (!c.last_error.empty()) {
-        draw_error_box("##dft_err", c.last_error);
-    }
-}
-}
 
 namespace ucuda::ui_detail {
 [[nodiscard]] std::vector<ParamPlotMatchItem>
@@ -311,5 +187,135 @@ void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, const Gui
         view_configured_for.erase(id);
         model.remove_parametric_plot_window(to_remove);
     }
+}
+}
+
+
+namespace ucuda::ui_detail {
+void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
+    ImGui::Text("Parametric analysis");
+    ImGui::TextDisabled("Per-thread parameter sweep via NVRTC + NonLinAnal kernels.");
+
+    // Union used by the Run / Run all... buttons below to disable themselves
+    // while any sub-analysis (Bif/LLE/LS) is computing. Kept after the tab's
+    // System combo was moved to the top-bar; the top-bar combo has its own
+    // wider union across all 7 sessions.
+    bool any_in_flight = model.bifurcation_session.in_flight
+                      || model.lle_session.in_flight
+                      || model.ls_session.in_flight
+                      || model.metrics_session.in_flight;
+
+    // Run (active sub-tab, active config) + batch Run all. Кнопка Run единая для Bif/LLE/LS,
+    // диспатчится по parametric_active_analysis (0=Bif, 1=LLE, 2=LS) к соответствующему
+    // active_*_index. Run all — глобальный по всем трём спискам: попап показывает чекбоксы
+    // для каждой диаграммы / кривой / спектра, Run кладёт отмеченные в
+    // model.parametric_queue и стартует первый; draw_gui тикает очередь после poll'ов.
+    {
+        const int kind = model.parametric_active_analysis;
+        int  active_idx = -1;
+        bool no_active  = false;
+        if (kind == 0) {
+            active_idx = model.bifurcation_session.active_diagram_index;
+            no_active  = model.bifurcation_session.diagrams.empty();
+        } else if (kind == 1) {
+            active_idx = model.lle_session.active_curve_index;
+            no_active  = model.lle_session.curves.empty();
+        } else if (kind == 2) {
+            active_idx = model.ls_session.active_curve_index;
+            no_active  = model.ls_session.curves.empty();
+        } else if (kind == 3) {
+            active_idx = model.metrics_session.active_config_index;
+            no_active  = model.metrics_session.configs.empty();
+        }
+
+        std::vector<RunAllGroup> groups;
+        groups.push_back(RunAllGroup{
+            "Bifurcation", "pbd_", (int)model.bifurcation_session.diagrams.size(),
+            [&model](int i) { return model.bifurcation_session.diagrams[i].label; },
+            [&model](int i) {
+                model.enqueue_parametric({ParametricQueueItem::Kind::Bifurcation, i});
+            } });
+        groups.push_back(RunAllGroup{
+            "LLE", "plle_", (int)model.lle_session.curves.size(),
+            [&model](int i) { return model.lle_session.curves[i].label; },
+            [&model](int i) {
+                model.enqueue_parametric({ParametricQueueItem::Kind::LLE, i});
+            } });
+        groups.push_back(RunAllGroup{
+            "LS", "pls_", (int)model.ls_session.curves.size(),
+            [&model](int i) { return model.ls_session.curves[i].label; },
+            [&model](int i) {
+                model.enqueue_parametric({ParametricQueueItem::Kind::LS, i});
+            } });
+        groups.push_back(RunAllGroup{
+            "Metrics", "pmet_", (int)model.metrics_session.configs.size(),
+            [&model](int i) { return model.metrics_session.configs[i].label; },
+            [&model](int i) {
+                model.enqueue_parametric({ParametricQueueItem::Kind::Metrics, i});
+            } });
+
+        // Run all блокируется ТОЛЬКО на время расчёта: списков три, и пустой
+        // активный не повод запрещать запуск остальных (в отличие от вкладок
+        // с одним списком, где block_run_all включает и «нет конфигов»).
+        draw_run_and_run_all("##run_all_parametric", any_in_flight, no_active,
+                             any_in_flight, 140.0f,
+                             [&model, kind, active_idx]() {
+                                 if (active_idx < 0) return;
+                                 if      (kind == 0) model.run_bifurcation(active_idx);
+                                 else if (kind == 1) model.run_lle(active_idx);
+                                 else if (kind == 2) model.run_ls(active_idx);
+                                 else if (kind == 3) model.run_metrics(active_idx);
+                             },
+                             {}, groups,
+                             [&model]() { model.start_next_in_parametric_queue(); },
+                             model.parametric_queue().size());
+    }
+    ImGui::Separator();
+
+    if (ImGui::BeginTabBar("##parm_top")) {
+        if (ImGui::BeginTabItem("Bifurcation")) {
+            model.parametric_active_analysis = 0;
+            draw_bifurcation_controls(model, lib);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("LLE")) {
+            model.parametric_active_analysis = 1;
+            draw_lle_controls(model, lib);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("LS")) {
+            model.parametric_active_analysis = 2;
+            draw_ls_controls(model, lib);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Metrics")) {
+            model.parametric_active_analysis = 3;
+            draw_metrics_controls(model, lib);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+
+    // Plot windows: dynamic list, mirrors Phase's Projections section. A sibling of the
+    // Bif/LLE/LS tabs above (not nested in any of them) — always visible, since a plot window
+    // can be any (kind, dimension) combo. Each row has its own Type combo so the chart type
+    // can be changed after creation instead of being fixed at "Add".
+    ImGui::Separator();
+    ImGui::SeparatorText("Plot windows");
+
+    int win_to_remove = -1;
+    for (int i = 0; i < (int)model.parametric_plot_windows.size(); ++i) {
+        ParametricPlotWindow& win = model.parametric_plot_windows[i];
+        ImGui::PushID(win.id);
+        if (draw_parametric_window_setup_row(model, win)) win_to_remove = i;
+        ImGui::PopID();
+    }
+    if (win_to_remove >= 0) model.remove_parametric_plot_window(win_to_remove);
+
+    if (ImGui::Button("Add window")) {
+        model.add_parametric_plot_window(ParametricPlotWindow::Kind::Bifurcation, false, {});
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset windows layout")) { model.parametric_layout_generation++; }
 }
 }

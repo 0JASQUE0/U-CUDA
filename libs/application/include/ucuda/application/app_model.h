@@ -72,7 +72,7 @@ struct Dft1DQueueItem {
 };
 
 // Один элемент basins-очереди — индекс config'а в basins_session.configs. Basins живёт в отдельной
-// очереди (а не в parametric_queue), потому что параметрика и basins сейчас не пересекаются по UI:
+// очереди (а не в parametric_queue_), потому что параметрика и basins сейчас не пересекаются по UI:
 // parametric "Run all" пушит BD/LLE/LS, а basins "Run all" — свои configs. Драйнится тем же
 // движком, но независимым тиком в draw_gui.
 struct BasinsQueueItem {
@@ -343,8 +343,57 @@ public:
     // следующей успешной загрузки. Пишет apply_session_json в gui.cpp.
     std::string session_load_warning;
 
+    // ---- Команды UI. Движок и очереди закрыты (private): UI не создаёт движок, не запускает
+    // в нём сессии и не правит очереди сам, а только через эти методы (app_queues.cpp).
+    // run_*: запуск конфига idx на движке (создаётся лениво); false, если сессия отказала
+    // (причина в её last_error).
+    bool run_bifurcation(int idx);
+    bool run_lle(int idx);
+    bool run_ls(int idx);
+    bool run_metrics(int idx);
+    bool run_dft1d(int idx);
+    bool run_basins(int idx);
+    bool recluster_basins(int idx);
+    bool run_fastsync(int idx);
+    bool run_order(int idx);
+    bool run_network(int idx);
+    bool run_neural(int idx, bool resume = false);
+    // Сброс движка вместе с кэшами модулей (смена системы в Custom). Сначала дожидается
+    // фонового прогрева: его поток держит ссылку на движок.
+    void reset_engine();
+
+    void enqueue_parametric(ParametricQueueItem item);
+    void enqueue_dft1d(int idx);
+    void enqueue_basins(int idx);
+    void enqueue_fastsync(int idx);
+    void enqueue_order(int idx);
+    void enqueue_network(int idx);
+    void enqueue_neural(int idx);
+    void enqueue_custom(CustomQueueItem item);
+    // Уровни Custom-конвейера ставит в очередь сама сессия (CustomSession::enqueue_level_*).
+    void enqueue_custom_level_2d();
+    void enqueue_custom_level_1d();
+    void enqueue_custom_level_3();
+    void enqueue_custom_level_1d_partial(bool x_slices, bool y_slices);
+    void clear_neural_queue();
+    void clear_custom_queue();
+    void clear_all_queues();
+
+    // Чтение очередей (размер для подписей, содержимое для тестов).
+    const std::deque<ParametricQueueItem>& parametric_queue() const { return parametric_queue_; }
+    const std::deque<Dft1DQueueItem>&      dft1d_queue()      const { return dft1d_queue_; }
+    const std::deque<BasinsQueueItem>&     basins_queue()     const { return basins_queue_; }
+    const std::deque<FastSyncQueueItem>&   fastsync_queue()   const { return fastsync_queue_; }
+    const std::deque<OrderQueueItem>&      order_queue()      const { return order_queue_; }
+    const std::deque<NetworkQueueItem>&    network_queue()    const { return network_queue_; }
+    const std::deque<NeuralQueueItem>&     neural_queue()     const { return neural_queue_; }
+    const std::deque<CustomQueueItem>&     custom_queue()     const { return custom_queue_; }
+
+private:
     // движок параметрики (NVRTC + NonLinAnal). Лениво создаётся при первом Run.
     std::unique_ptr<ParametricEngine> parametric_engine;
+    ParametricEngine& ensure_engine();
+public:
 
     // Оценка времени счёта траекторий (time_estimate.h) — подпись справа от прогресс-бара.
     // Движку не принадлежит: цена шага — только NVRTC, калибровка — на первичном контексте.
@@ -379,7 +428,9 @@ public:
 
     // Cross-analysis batch queue. Run all... popup пушит сюда выбранные конфиги
     // BD/LLE/LS. start_next_in_parametric_queue() драйнит её серийно (engine один).
-    std::deque<ParametricQueueItem> parametric_queue;
+private:
+    std::deque<ParametricQueueItem> parametric_queue_;
+public:
 
     // Если ни одна из трёх сессий не in_flight и очередь не пуста — снимает
     // элемент с фронта и запускает run_async соответствующей сессии.
@@ -428,8 +479,10 @@ public:
     // window list, meaning the user deliberately closed everything), respects it as-is.
     void load_or_init_parametric_plot_windows(const std::string& json);
 
-    // DFT1D batch queue — независимая от parametric_queue (см. Dft1DQueueItem).
-    std::deque<Dft1DQueueItem> dft1d_queue;
+    // DFT1D batch queue — независимая от parametric_queue_ (см. Dft1DQueueItem).
+private:
+    std::deque<Dft1DQueueItem> dft1d_queue_;
+public:
     bool start_next_in_dft1d_queue();
 
     // Dynamic plot windows for DFT1D mode (see Dft1DPlotWindow) — mirrors
@@ -459,29 +512,41 @@ public:
     void remove_order_plot_window(int pos);
     void load_or_init_order_plot_windows(const std::string& json);
 
-    // Basins batch queue — независимая от parametric_queue (см. BasinsQueueItem).
-    std::deque<BasinsQueueItem> basins_queue;
+    // Basins batch queue — независимая от parametric_queue_ (см. BasinsQueueItem).
+private:
+    std::deque<BasinsQueueItem> basins_queue_;
+public:
     bool start_next_in_basins_queue();
 
     // FastSync batch queue — независимая (см. FastSyncQueueItem).
-    std::deque<FastSyncQueueItem> fastsync_queue;
+private:
+    std::deque<FastSyncQueueItem> fastsync_queue_;
+public:
     bool start_next_in_fastsync_queue();
 
     // Order batch queue — независимая (см. OrderQueueItem).
-    std::deque<OrderQueueItem> order_queue;
+private:
+    std::deque<OrderQueueItem> order_queue_;
+public:
     bool start_next_in_order_queue();
 
     // Network batch queue — независимая (см. NetworkQueueItem).
-    std::deque<NetworkQueueItem> network_queue;
+private:
+    std::deque<NetworkQueueItem> network_queue_;
+public:
     bool start_next_in_network_queue();
-    std::deque<NeuralQueueItem> neural_queue;
+private:
+    std::deque<NeuralQueueItem> neural_queue_;
+public:
     bool start_next_in_neural_queue();
 
     // Custom-tab pipeline queue — drives the 2D→1D→Phase/Basins ordering.
     // Items are pushed by the Run buttons and by drill-down clicks; drained
     // sequentially by start_next_in_custom_queue() so the shared engine
-    // processes them one at a time (like parametric_queue).
-    std::deque<CustomQueueItem> custom_queue;
+    // processes them one at a time (like parametric_queue_).
+private:
+    std::deque<CustomQueueItem> custom_queue_;
+public:
     bool start_next_in_custom_queue();
 
     // Удаление конфига + чистка очереди (убрать item с этим индексом, у

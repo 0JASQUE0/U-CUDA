@@ -10,10 +10,23 @@
 #include <string>
 #include <filesystem>
 #include <chrono>
+#include <type_traits>
+#include <utility>
 
 std::string exe_dir() { return platform::executable_dir(); }
 
 namespace {
+
+// Движок и очереди AppModel закрыты: UI работает с ними только командами (run_*, enqueue_*,
+// clear_*). Проверка доступа здесь — часть подстановки, поэтому закрытый член даёт false.
+template <class T, class = void> struct engine_is_public : std::false_type {};
+template <class T>
+struct engine_is_public<T, std::void_t<decltype(std::declval<T&>().parametric_engine)>> : std::true_type {};
+template <class T, class = void> struct queue_is_public : std::false_type {};
+template <class T>
+struct queue_is_public<T, std::void_t<decltype(std::declval<T&>().parametric_queue_)>> : std::true_type {};
+static_assert(!engine_is_public<AppModel>::value, "AppModel::parametric_engine must stay private");
+static_assert(!queue_is_public<AppModel>::value, "AppModel queues must stay private");
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -51,50 +64,67 @@ void queue_cleanup() {
     model.bifurcation_session.add_diagram();
     model.bifurcation_session.add_diagram();
     model.bifurcation_session.add_diagram();
-    model.parametric_queue.push_back({ParametricQueueItem::Kind::Bifurcation, 0});
-    model.parametric_queue.push_back({ParametricQueueItem::Kind::Bifurcation, 1});
-    model.parametric_queue.push_back({ParametricQueueItem::Kind::Bifurcation, 2});
-    model.parametric_queue.push_back({ParametricQueueItem::Kind::LLE, 4});
+    model.enqueue_parametric({ParametricQueueItem::Kind::Bifurcation, 0});
+    model.enqueue_parametric({ParametricQueueItem::Kind::Bifurcation, 1});
+    model.enqueue_parametric({ParametricQueueItem::Kind::Bifurcation, 2});
+    model.enqueue_parametric({ParametricQueueItem::Kind::LLE, 4});
     model.remove_bifurcation_diagram(1);
 
     require(model.bifurcation_session.diagrams.size() == 2,
             "diagram removal did not update the session");
-    require(model.parametric_queue.size() == 3,
+    require(model.parametric_queue().size() == 3,
             "queue item for removed diagram was not erased");
-    require(model.parametric_queue[0].index == 0 &&
-            model.parametric_queue[1].index == 1 &&
-            model.parametric_queue[2].kind == ParametricQueueItem::Kind::LLE &&
-            model.parametric_queue[2].index == 4,
+    require(model.parametric_queue()[0].index == 0 &&
+            model.parametric_queue()[1].index == 1 &&
+            model.parametric_queue()[2].kind == ParametricQueueItem::Kind::LLE &&
+            model.parametric_queue()[2].index == 4,
             "queue indices were not shifted by analysis kind");
 
-    model.dft1d_queue.push_back({-1});
-    model.dft1d_queue.push_back({99});
-    require(!model.start_next_in_dft1d_queue() && model.dft1d_queue.empty(),
+    model.enqueue_dft1d(-1);
+    model.enqueue_dft1d(99);
+    require(!model.start_next_in_dft1d_queue() && model.dft1d_queue().empty(),
             "invalid headless queue entries were not drained");
 
     // Все очереди вкладок с одной сессией идут одним ходом (run_next_queued): устаревшие индексы
     // снимаются без запуска, а пока сессия считает, очередь не трогается.
-    auto drains = [](auto& session, auto& queue, auto start) {
-        queue.clear();
-        queue.push_back({-1});
-        queue.push_back({99});
+    auto drains = [&](auto& session, const auto& queue, auto enqueue, auto start) {
+        model.clear_all_queues();
+        enqueue(-1);
+        enqueue(99);
         session.in_flight = true;
         const bool busy_ok = !start() && queue.size() == 2;
         session.in_flight = false;
         return busy_ok && !start() && queue.empty();
     };
-    require(drains(model.dft1d_session, model.dft1d_queue, [&] { return model.start_next_in_dft1d_queue(); }),
+    require(drains(model.dft1d_session, model.dft1d_queue(), [&](int i) { model.enqueue_dft1d(i); }, [&] { return model.start_next_in_dft1d_queue(); }),
             "DFT queue");
-    require(drains(model.basins_session, model.basins_queue, [&] { return model.start_next_in_basins_queue(); }),
+    require(drains(model.basins_session, model.basins_queue(), [&](int i) { model.enqueue_basins(i); }, [&] { return model.start_next_in_basins_queue(); }),
             "Basins queue");
-    require(drains(model.order_session, model.order_queue, [&] { return model.start_next_in_order_queue(); }),
+    require(drains(model.order_session, model.order_queue(), [&](int i) { model.enqueue_order(i); }, [&] { return model.start_next_in_order_queue(); }),
             "Order queue");
-    require(drains(model.network_session, model.network_queue, [&] { return model.start_next_in_network_queue(); }),
+    require(drains(model.network_session, model.network_queue(), [&](int i) { model.enqueue_network(i); }, [&] { return model.start_next_in_network_queue(); }),
             "Network queue");
-    require(drains(model.neural_session, model.neural_queue, [&] { return model.start_next_in_neural_queue(); }),
+    require(drains(model.neural_session, model.neural_queue(), [&](int i) { model.enqueue_neural(i); }, [&] { return model.start_next_in_neural_queue(); }),
             "Neural queue");
-    require(drains(model.fastsync_session, model.fastsync_queue, [&] { return model.start_next_in_fastsync_queue(); }),
+    require(drains(model.fastsync_session, model.fastsync_queue(), [&](int i) { model.enqueue_fastsync(i); }, [&] { return model.start_next_in_fastsync_queue(); }),
             "FastSync queue");
+
+    // Stop в шапке осушает все очереди, в том числе Network и Custom.
+    model.enqueue_parametric({ParametricQueueItem::Kind::LS, 0});
+    model.enqueue_dft1d(0);
+    model.enqueue_basins(0);
+    model.enqueue_fastsync(0);
+    model.enqueue_order(0);
+    model.enqueue_network(0);
+    model.enqueue_neural(0);
+    model.enqueue_custom({CustomQueueItem::Kind::Phase});
+    model.clear_all_queues();
+    require(model.parametric_queue().empty() && model.dft1d_queue().empty() &&
+            model.basins_queue().empty() && model.fastsync_queue().empty() &&
+            model.order_queue().empty() && model.network_queue().empty() &&
+            model.neural_queue().empty() && model.custom_queue().empty(),
+            "clear_all_queues left items behind");
+    model.reset_engine();   // без движка и без прогрева — ничего не делает
 }
 
 void cancellation() {
