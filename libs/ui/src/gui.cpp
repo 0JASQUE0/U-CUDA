@@ -1350,7 +1350,20 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::TextDisabled("default -- try wider only on a different GPU.");
             ImGui::TextDisabled("Wide systems are capped back down to fit 48 KB of shared memory");
             ImGui::TextDisabled("per block, so the value here is a request, not a guarantee.");
+
+            ImGui::Separator();
+            ImGui::Text("Step controllers");
+#ifdef UCUDA_AD_HAIRER_ONLY
+            ImGui::TextDisabled("Your own adaptive step controllers (C bodies), shared by all systems");
+            ImGui::TextDisabled("and tabs (library\\step_controllers.json).");
+#else
+            ImGui::TextDisabled("Your own adaptive step controllers: C bodies and named Soderlind");
+            ImGui::TextDisabled("filters, shared by all systems and tabs (library\\step_controllers.json).");
+#endif
+            if (ImGui::Button("Step controller library...")) model.show_ctrl_library = true;
         }
         ImGui::End();
     }
+    track_dock_selection(model);
+    draw_ctrl_library_window(model);
 }
