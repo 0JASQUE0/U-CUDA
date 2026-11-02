@@ -1379,30 +1379,6 @@ struct StabilityResult {
     double err_min = 0.0, err_max = 0.0;   // только по конечным err ячеек со status OK
 };
 
-// Проверка запроса и раскладка сетки — общие для GPU- и CPU-ветки, иначе одни
-// и те же настройки принимались бы на одном устройстве и отвергались на
-// другом. stability_validate возвращает пустую строку, когда всё в порядке.
-std::string stability_validate(const StabilityRequest& req);
-void        stability_fill_axes(const StabilityRequest& req, StabilityResult& res);
-
-// Счётчики, число устойчивых ячеек и диапазон rho по чистым ячейкам. Функция
-// общая для GPU- и CPU-ветки: разойдись они здесь, одна и та же карта
-// подписывалась бы по-разному в зависимости от устройства.
-void stability_summarize(StabilityResult& res);
-
-// Относительная ошибка одного шага на тестовой матрице узла (sigma, omega):
-// ||e^{hA} - R||_2 / ||e^{hA}||_2, где A строится из (sigma, omega, k, r) по
-// тем же формулам, что в ядре, а R = [[R00, R01], [R10, R11]] — матрица
-// усиления схемы. Спектр A ровно sigma +- i*omega, поэтому экспонента берётся
-// в замкнутом виде:
-//   e^{hA} = e^{h*sigma} * (cos(h*omega) I + h*sinc(h*omega) (A - sigma I)).
-// Считается в double при любой точности CPU-ветки: сравнение идёт с допуском
-// порядка единицы, и разрядов double здесь с запасом.
-// Возвращает +inf, когда e^{hA} вырождается в 0 или inf, и NaN, когда
-// матрицу построить нельзя или R не конечна.
-double stability_step_error(double sigma, double omega, double k, double r, double h,
-                            double R00, double R01, double R10, double R11);
-
 // Ячейка области предпочтительности: посчитана, устойчива (rho <= 1) и
 // ошибка шага не больше допуска. Одно определение на карту, счётчик и экспорт.
 inline bool stability_cell_preferred(const StabilityResult& res, size_t i, double tol) {
@@ -1537,8 +1513,45 @@ constexpr int kSignalMetricAllMask = (1 << SIGM_COUNT) - 1;
 
 // Короткое имя для таба/легенды и подпись оси (с единицами). Для отображений,
 // где время — это номер итерации (дискретные отображения), единицы те же по смыслу.
-const char* signal_metric_name(int m);
-const char* signal_metric_axis_label(int m);
+inline const char* signal_metric_name(int m) {
+    switch (m) {
+        case SIGM_MAX:               return "Max";
+        case SIGM_MIN:               return "Min";
+        case SIGM_RANGE:             return "Max - Min";
+        case SIGM_MEAN:              return "Mean";
+        case SIGM_MEAN_FREQ:         return "Mean freq";
+        case SIGM_MEDIAN_FREQ:       return "Median freq";
+        case SIGM_VARIANCE:   return "Variance";
+        case SIGM_HJORTH_MOBILITY:   return "Mobility";
+        case SIGM_HJORTH_COMPLEXITY: return "Complexity";
+        case SIGM_INT_MAX:           return "Int. max";
+        case SIGM_INT_MIN:           return "Int. min";
+        case SIGM_INT_RANGE:         return "Int. max - min";
+        case SIGM_INT_MEAN:          return "Int. mean";
+        case SIGM_VOLUME:            return "Volume";
+        default:                     return "?";
+    }
+}
+
+inline const char* signal_metric_axis_label(int m) {
+    switch (m) {
+        case SIGM_MAX:               return "max(x)";
+        case SIGM_MIN:               return "min(x)";
+        case SIGM_RANGE:             return "max(x) - min(x)";
+        case SIGM_MEAN:              return "mean(x)";
+        case SIGM_MEAN_FREQ:         return "mean freq, 1/t";
+        case SIGM_MEDIAN_FREQ:       return "median freq, 1/t";
+        case SIGM_VARIANCE:   return "variance = var(x)";
+        case SIGM_HJORTH_MOBILITY:   return "Hjorth mobility, rad/t";
+        case SIGM_HJORTH_COMPLEXITY: return "Hjorth complexity";
+        case SIGM_INT_MAX:           return "max(T), t";
+        case SIGM_INT_MIN:           return "min(T), t";
+        case SIGM_INT_RANGE:         return "max(T) - min(T), t";
+        case SIGM_INT_MEAN:          return "mean(T), t";
+        case SIGM_VOLUME:            return "volume = prod(max x_i - min x_i)";
+        default:                     return "";
+    }
+}
 
 struct SignalMetricsRequest {
     std::string krs_body;
@@ -1636,10 +1649,6 @@ struct SignalMetricsResult {
     double max_val[SIGM_COUNT] = {};
 };
 
-// CSV одной таблицей: x [, y], regime, метрики из маски. Зовёт и движок
-// (csv_output_path), и ПКМ-экспорт с графика.
-bool signal_metrics_write_csv(const SignalMetricsResult& r, const std::string& path, std::string& err);
-
 // --- Оценка времени счёта траекторий (см. time_estimate.h) ---------------------------------
 // Цена шага — взвешенное число арифметических инструкций типа numb в PTX тела КРС (IEEE-деление
 // и корень ~8, остальное по 1). Медленные ветви libm (редукция больших аргументов sin/cos) живут
@@ -1648,8 +1657,6 @@ struct KrsStepCost {
     double ops   = 0.0;    // на один вызов шага
     bool   loops = false;  // есть цикл (Ньютон неявных схем, итерации CD FP): посчитан один проход
 };
-// Без контекста: только NVRTC. Тяжёлый (~0.2-1 с) — звать из фонового потока.
-bool krs_step_cost(const std::string& krs_body, int amountOfX, KrsStepCost& out, std::string& err);
 
 // Калибровка карты: два калибровочных шага (Эйлер и RK4 Лоренца) в цикле, повторяющем
 // loopCalculateDiscreteModel_int, блоки по варпу, на двух загрузках SM. Модель времени:
@@ -1670,8 +1677,3 @@ struct GpuCalibration {
     // расчётам (TrajTimeEstimator::learn).
     double kernel_factor = 1.3;
 };
-bool gpu_device_info(std::string& name, int& sm_count, std::string& err);
-// <каталог exe>\gpu_calibration.txt — хранилище калибровок (time_estimate.h).
-std::string gpu_calibration_path();
-// Занимает GPU на ~0.5-1 с. Звать, когда расчётов нет: иначе замер завышен.
-bool gpu_calibrate(GpuCalibration& out, std::string& err);

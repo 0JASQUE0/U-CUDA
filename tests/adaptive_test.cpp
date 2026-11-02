@@ -1,6 +1,7 @@
 ﻿#include "ucuda/cuda/parametric_engine.h"
 #include "ucuda/cuda/nvrtc_engine.h"
 #include "ucuda/cuda/runtime_settings.h"
+#include "ucuda/cuda/rqa.h"
 #include "ucuda/equations/codegen.hpp"
 #include "ucuda/equations/adaptive_params.h"
 #include "ucuda/numerics/integrator.h"

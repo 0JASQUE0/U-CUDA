@@ -1,4 +1,5 @@
 ﻿#include "ucuda/analysis/neural_session.h"
+#include "ucuda/analysis/network_session.h"   // net_coupling_body
 #include "ucuda/domain/num_parse.h"
 #include "ucuda/cuda/parametric_engine.h"
 #include <algorithm>

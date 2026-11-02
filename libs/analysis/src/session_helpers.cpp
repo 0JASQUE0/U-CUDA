@@ -1,4 +1,6 @@
 ﻿#include "session_internal.h"
+#include "ucuda/numerics/circuit_solver.h"
+#include "ucuda/numerics/circuit_synth.h"
 using namespace ucuda::analysis_detail;
 
 namespace ucuda::analysis_detail {

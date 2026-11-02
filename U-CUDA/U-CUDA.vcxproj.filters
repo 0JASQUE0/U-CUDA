@@ -555,6 +555,12 @@
     <ClInclude Include="..\libs\numerics\include\ucuda\numerics\circuit_codegen.h">
       <Filter>libs\numerics\include</Filter>
     </ClInclude>
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\circuit_synth.h">
+      <Filter>libs\numerics\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\circuit_solver.h">
+      <Filter>libs\numerics\include</Filter>
+    </ClInclude>
     <ClInclude Include="..\libs\numerics\include\ucuda\numerics\circuit_netlist.h">
       <Filter>libs\numerics\include</Filter>
     </ClInclude>
@@ -607,6 +613,9 @@
       <Filter>libs\cuda\include</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\cuda\include\ucuda\cuda\phase_portrait_nvrtc.h">
+      <Filter>libs\cuda\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\rqa.h">
       <Filter>libs\cuda\include</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\cuda\include\ucuda\cuda\runtime_settings.h">

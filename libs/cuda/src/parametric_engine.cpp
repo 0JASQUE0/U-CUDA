@@ -94,46 +94,6 @@ void ParametricEngine::prewarm(const BasinsRequest& req)        { impl_->prewarm
 
 void ParametricEngine::prewarm(const SignalMetricsRequest& req) { impl_->prewarm_metrics(req); }
 
-const char* signal_metric_name(int m) {
-    switch (m) {
-        case SIGM_MAX:               return "Max";
-        case SIGM_MIN:               return "Min";
-        case SIGM_RANGE:             return "Max - Min";
-        case SIGM_MEAN:              return "Mean";
-        case SIGM_MEAN_FREQ:         return "Mean freq";
-        case SIGM_MEDIAN_FREQ:       return "Median freq";
-        case SIGM_VARIANCE:   return "Variance";
-        case SIGM_HJORTH_MOBILITY:   return "Mobility";
-        case SIGM_HJORTH_COMPLEXITY: return "Complexity";
-        case SIGM_INT_MAX:           return "Int. max";
-        case SIGM_INT_MIN:           return "Int. min";
-        case SIGM_INT_RANGE:         return "Int. max - min";
-        case SIGM_INT_MEAN:          return "Int. mean";
-        case SIGM_VOLUME:            return "Volume";
-        default:                     return "?";
-    }
-}
-
-const char* signal_metric_axis_label(int m) {
-    switch (m) {
-        case SIGM_MAX:               return "max(x)";
-        case SIGM_MIN:               return "min(x)";
-        case SIGM_RANGE:             return "max(x) - min(x)";
-        case SIGM_MEAN:              return "mean(x)";
-        case SIGM_MEAN_FREQ:         return "mean freq, 1/t";
-        case SIGM_MEDIAN_FREQ:       return "median freq, 1/t";
-        case SIGM_VARIANCE:   return "variance = var(x)";
-        case SIGM_HJORTH_MOBILITY:   return "Hjorth mobility, rad/t";
-        case SIGM_HJORTH_COMPLEXITY: return "Hjorth complexity";
-        case SIGM_INT_MAX:           return "max(T), t";
-        case SIGM_INT_MIN:           return "min(T), t";
-        case SIGM_INT_RANGE:         return "max(T) - min(T), t";
-        case SIGM_INT_MEAN:          return "mean(T), t";
-        case SIGM_VOLUME:            return "volume = prod(max x_i - min x_i)";
-        default:                     return "";
-    }
-}
-
 bool signal_metrics_write_csv(const SignalMetricsResult& r, const std::string& path, std::string& err) {
     std::ofstream out(path);
     if (!out.is_open()) { err = "cannot open " + path; return false; }

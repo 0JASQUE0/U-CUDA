@@ -16,23 +16,6 @@ inline NewtonSettings newton_from_record(const SystemRecord& r) {
     return n;
 }
 
-// Names of built-in schemes enabled in SystemRecord (order matches kBuiltinSchemeNames).
-// Empty when nothing is ticked; combo callers fall back to "show all built-ins".
-std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r);
-
-// Резолвер имени схемы (compute_krs_for_scheme и соседи) идёт через кодоген и живёт в
-// analysis/analysis_session.h.
-
-// Session start step. Hard-pinned to 1 for a map: the engine derives "time" as
-// t/h, so with h = 1 the computing time is exactly the iteration count.
-std::string default_h_from_record(const SystemRecord& r);
-
-// Session start scheme: "Map" for a map, otherwise left untouched.
-std::string default_scheme_from_record(const SystemRecord& r, std::string current);
-
-// Start value for BifurcationDiagramConfig::plot_all_iterates: a map's diagram
-// is built from every iterate, a flow's from peaks (a Poincare section).
-bool default_all_iterates_from_record(const SystemRecord& r);
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -270,14 +253,6 @@ struct AnalysisResult {
     // metadata into <path>_config.csv that drove the compute.
     data_export::PhaseSnapshot snapshot;
 };
-
-// Найти результат под конкретный job. nullptr, если такого расчёта в результате нет
-// (конфиг поменяли после Run, или расчёт пропустили).
-const rqa::Result* find_rqa(const AnalysisResult& res, const RqaJob& job);
-
-// Собрать RqaJob из проекции: разбор текстовых полей + перевод RR из процентов в долю.
-// Возвращает false, если проекция не RecurrencePlot или источник ещё не выбран.
-bool make_rqa_job(const Projection& pr, RqaJob& out);
 
 // Сессия анализа фазовых портретов: общие параметры системы +
 // список НУ + список проекций. Параметры общие на все проекции.
@@ -1035,25 +1010,6 @@ struct BasinsConfig {
     float       scatter_alpha        = 0.6f;
 };
 
-// Перенумерация бассейнов (spiral-from-center, порт MATLAB)
-// Положительные id → 1,2,3... в порядке первого появления при обходе спиралью
-// из центра, отрицательные → -1,-2,-3... Нули (diverged) не трогаются.
-std::vector<int> renumber_basins_spiral(const std::vector<int>& src, int N,
-                                        int& out_n_pos, int& out_n_neg);
-// Лениво (пере)заполнить c.basin_idx_spiral для текущего data_generation.
-// Безопасно звать каждый кадр — пересчёт только при смене поколения данных.
-void ensure_basins_spiral_cache(BasinsConfig& c);
-// Массив id'ов в ТЕКУЩЕЙ нумерации (учитывает renumber_spiral).
-// nullptr, если результата ещё нет.
-const int* basins_display_ids(BasinsConfig& c);
-// Подпись только тех входов, что влияют на ФОРМУ траекторий (интегратор,
-// время, параметры, НУ не-осевых переменных, устройство). Сюда намеренно НЕ
-// входят data_generation / renumber_spiral / max_attractors: они меняют лишь
-// НАБОР представительных ячеек, а он сравнивается напрямую.
-std::string build_basins_phase_run_signature(const BasinsConfig& c);
-// Полная подпись (run-подпись + то, что влияет на набор ячеек). Равные строки
-// ⇔ портреты актуальны.
-std::string build_basins_phase_signature(const BasinsConfig& c);
 
 struct BasinsAnalysisState {
     std::vector<std::string> vars;

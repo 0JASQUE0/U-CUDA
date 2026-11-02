@@ -76,3 +76,8 @@ NeuralConfig neural_sweep_instance(const NeuralConfig& c, int index, double valu
 NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custom_schemes,
                        const std::vector<std::string>& vars, const std::vector<std::string>& params,
                        const NeuralConfig& c);
+
+// Вспомогательные функции сессий (реализация в analysis; типы — в ucuda/domain).
+
+const char* neural_device_preset_name(NeuralDevicePreset p);
+NeuralDeviceModel neural_device_preset(NeuralDevicePreset p);

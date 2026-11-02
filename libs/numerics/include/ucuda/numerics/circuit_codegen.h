@@ -1,7 +1,7 @@
 ﻿#pragma once
 #include <string>
 #include <vector>
-#include "ucuda/domain/circuit_solver.h"
+#include "ucuda/numerics/circuit_solver.h"
 
 // Кодогенерация схемного решателя под NVRTC (фаза 3 плана).
 //

@@ -5,9 +5,9 @@
 
 // RQA (Recurrence Quantification Analysis) для одной траектории.
 //
-// Почему заголовок отдельный, а реализация — в host_rqa.cu: считается всё на GPU (NVCC), а вызывает
-// расчёт analysis_session.cpp (обычный cl.exe), которому нельзя видеть __device__-код. Здесь же только POD-типы
-// и numb из configCUDA.h (тот host-safe, см. гарды в его шапке).
+// Здесь только типы. Расчёт rqa::compute объявлен в ucuda/cuda/rqa.h, реализован в host_rqa.cu:
+// считается всё на GPU (NVCC), а вызывает расчёт analysis (обычный cl.exe), которому нельзя видеть
+// __device__-код. Здесь только POD-типы и numb из configCUDA.h (тот host-safe, см. гарды в его шапке).
 //
 // Матрица считается ОДИН раз на конфиг: порог eps применяется уже к готовой D на устройстве, но
 // смена eps требует нового вызова compute() — пересборка D стоит O(n^2*d) и на n=2048 это единицы
@@ -109,14 +109,5 @@ inline bool operator==(const Config& a, const Config& b)
         && a.points == b.points && a.network_measures == b.network_measures;
 }
 inline bool operator!=(const Config& a, const Config& b) { return !(a == b); }
-
-// traj — [step][coord], как AnalysisResult::trajectories[ic], но ЖЕЛАТЕЛЬНО непрореженная:
-// прореживание до Config::points делается здесь, и dt возвращается честный.
-// dt_traj — шаг между соседними точками traj в секундах (h * decimator, если traj уже прорежена).
-// Возвращает out.ok; при ошибке текст в out.error.
-bool compute(const std::vector<std::vector<double>>& traj,
-             double dt_traj,
-             const Config& cfg,
-             Result& out);
 
 }  // namespace rqa

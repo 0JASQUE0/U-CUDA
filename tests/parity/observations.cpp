@@ -1,5 +1,5 @@
 ﻿#include "ucuda/equations/codegen.hpp"
-#include "ucuda/domain/rqa.h"
+#include "ucuda/cuda/rqa.h"
 #include "ucuda/numerics/integrator.h"
 #include "ucuda/application/session_persistence.h"
 #include "ucuda/analysis/order_session.h"

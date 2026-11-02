@@ -300,7 +300,7 @@ void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& 
             heatmap.popup_extras = [&cact, &cb, busy, &vrt, &model, &heatmap]() {
                 draw_export_menu_item(busy, cb, [&cact](const std::string& p) {
                     std::string e;
-                    signal_metrics_write_csv(cact.result_2d, p, e);
+                    write_signal_metrics_csv(cact.result_2d, p, e);
                 });
                 draw_view_range_menu(vrt, heatmap.x_axis, heatmap.y_axis, heatmap.swap_axes, &model);
             };
@@ -415,7 +415,7 @@ void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& 
             [&s](int i) { return s.in_flight && !s.is_2d_run && i == s.running_config_index; },
             [&s](int i, const std::string& p) {
                 std::string e;
-                signal_metrics_write_csv(s.configs[i].result, p, e);
+                write_signal_metrics_csv(s.configs[i].result, p, e);
             },
             cb);
         draw_view_range_menu(vrt, view.x_axis, view.y_axis, /*swapped*/ false, &model);

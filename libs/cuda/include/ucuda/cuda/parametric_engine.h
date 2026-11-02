@@ -80,3 +80,42 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// ---- Свободные функции движка (реализация в cuda) ----
+// Стабильность: общие для GPU- и CPU-ветки проверки и сводка.
+// Проверка запроса и раскладка сетки — общие для GPU- и CPU-ветки, иначе одни
+// и те же настройки принимались бы на одном устройстве и отвергались на
+// другом. stability_validate возвращает пустую строку, когда всё в порядке.
+std::string stability_validate(const StabilityRequest& req);
+void        stability_fill_axes(const StabilityRequest& req, StabilityResult& res);
+
+// Счётчики, число устойчивых ячеек и диапазон rho по чистым ячейкам. Функция
+// общая для GPU- и CPU-ветки: разойдись они здесь, одна и та же карта
+// подписывалась бы по-разному в зависимости от устройства.
+void stability_summarize(StabilityResult& res);
+
+// Относительная ошибка одного шага на тестовой матрице узла (sigma, omega):
+// ||e^{hA} - R||_2 / ||e^{hA}||_2, где A строится из (sigma, omega, k, r) по
+// тем же формулам, что в ядре, а R = [[R00, R01], [R10, R11]] — матрица
+// усиления схемы. Спектр A ровно sigma +- i*omega, поэтому экспонента берётся
+// в замкнутом виде:
+//   e^{hA} = e^{h*sigma} * (cos(h*omega) I + h*sinc(h*omega) (A - sigma I)).
+// Считается в double при любой точности CPU-ветки: сравнение идёт с допуском
+// порядка единицы, и разрядов double здесь с запасом.
+// Возвращает +inf, когда e^{hA} вырождается в 0 или inf, и NaN, когда
+// матрицу построить нельзя или R не конечна.
+double stability_step_error(double sigma, double omega, double k, double r, double h,
+                            double R00, double R01, double R10, double R11);
+
+// CSV одной таблицей: x [, y], regime, метрики из маски. Зовёт и движок
+// (csv_output_path), и ПКМ-экспорт с графика.
+bool signal_metrics_write_csv(const SignalMetricsResult& r, const std::string& path, std::string& err);
+
+// Без контекста: только NVRTC. Тяжёлый (~0.2-1 с) — звать из фонового потока.
+bool krs_step_cost(const std::string& krs_body, int amountOfX, KrsStepCost& out, std::string& err);
+
+bool gpu_device_info(std::string& name, int& sm_count, std::string& err);
+// <каталог exe>\gpu_calibration.txt — хранилище калибровок (time_estimate.h).
+std::string gpu_calibration_path();
+// Занимает GPU на ~0.5-1 с. Звать, когда расчётов нет: иначе замер завышен.
+bool gpu_calibrate(GpuCalibration& out, std::string& err);

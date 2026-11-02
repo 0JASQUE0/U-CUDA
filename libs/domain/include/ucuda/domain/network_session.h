@@ -167,33 +167,16 @@ struct NetworkState {
 // по ПЕРВОЙ переменной, K*(x_j - x_i). Ровно то, с чего начинают в 99%
 // постановок, и единственный вариант, который можно предложить, не зная
 // смысла переменных.
-NetCouplingLaw net_default_law(const std::vector<std::string>& vars);
-
-// Перестраивает nodes/edges под текущие настройки генератора. Существующие
-// переопределения параметров сохраняются для узлов, которые остались (по
-// индексу): смена топологии не должна стирать расстройку ансамбля.
-// Возвращает текст ошибки (пусто = успех).
-std::string net_generate_topology(NetworkConfig& c, const std::vector<std::string>& vars);
-
-// Раскладывает рёбра в дуги и считает CSR по узлу-приёмнику. Веса уже
-// домножены на общий множитель связи. Используется и движком, и редактором
-// (чтобы показать степень узла).
-void net_build_csr(const NetworkConfig& c, double coupling,
-                   std::vector<int>& edge_start, std::vector<int>& edge_src,
-                   std::vector<double>& edge_w, std::vector<int>& edge_law);
-
-// Готовое тело switch(law) для ядра. Бросает std::runtime_error с текстом от
-// кодогена, если выражение закона не разобралось.
-std::string net_coupling_body(const System& sys, const std::vector<NetCouplingLaw>& laws);
-
-// Человекочитаемое имя топологии (для комбо и подписей).
-const char* net_topology_name(NetTopology t);
+inline NetCouplingLaw net_default_law(const std::vector<std::string>& vars) {
+    NetCouplingLaw law;
+    law.name = "diffusive";
+    law.expr.assign(vars.size(), std::string());
+    if (!vars.empty())
+        law.expr[0] = "K*(" + vars[0] + "_j - " + vars[0] + "_i)";
+    return law;
+}
 
 struct NetworkMonolithic {
     System sys;
     SystemRecord record;
 };
-
-// Independent ODE snapshot. Coupling is part of the RHS and therefore every
-// stage of a generated scheme. Throws on unsupported input or engine limits.
-NetworkMonolithic net_monolithic_snapshot(const NetworkState& s, const NetworkConfig& c);

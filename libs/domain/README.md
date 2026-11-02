@@ -22,6 +22,8 @@ Parsers and UI create domain requests; analysis and compute libraries fill domai
 
 Change this module when a value must cross module boundaries or be serialized. Put runtime handles, futures, engines, widgets, and GL objects elsewhere.
 
+Domain declares only what it defines: a header here holds types and inline helpers, and every non-inline function it declares is defined in `src/`. A function implemented in analysis, CUDA or numerics is declared in that module's header (`ucuda/analysis/*_session.h`, `ucuda/cuda/parametric_engine.h`, `ucuda/cuda/rqa.h`, `ucuda/numerics/circuit_solver.h`, `ucuda/numerics/circuit_synth.h`); `tests/layer_rules.cmake` enforces this.
+
 ## Build and checks
 
 Build with `cmake --build --preset windows-debug --target ucuda_domain` or the corresponding Linux preset. Required checks are listed in [AGENTS.md](AGENTS.md).

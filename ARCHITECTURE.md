@@ -59,7 +59,7 @@ flowchart LR
 
 Forbidden directions include domain to any higher module, storage to application/UI/plotting, CUDA to application/UI/plotting, analysis to UI/plotting, plotting to application, and UI to CUDA/numerics. UI reaches computation through application: `AppModel` for tasks, `compute_services.h` for direct checks (CPU compiler, KRS indices, controller body, circuit files, netlist export) and the global GPU settings. Public headers of analysis and application name `ParametricEngine` only by forward declaration, so `ucuda::cuda` and `ucuda::numerics` are PRIVATE dependencies and never reach UI include paths.
 
-One deliberate exception: domain includes the layout part of `resources/kernels/ucuda_adaptive.cuh` (`UCUDA_ADAPT_LAYOUT_ONLY`) from `adaptive_settings.h`. `UcudaAdaptParams` and the step-controller structures are passed to kernels byte for byte, so host and device keep one definition. [tests/layer_rules.cmake](tests/layer_rules.cmake) checks both rules.
+One deliberate exception: domain includes the layout part of `resources/kernels/ucuda_adaptive.cuh` (`UCUDA_ADAPT_LAYOUT_ONLY`) from `adaptive_settings.h`. `UcudaAdaptParams` and the step-controller structures are passed to kernels byte for byte, so host and device keep one definition. Domain also declares only what it defines: a function implemented in analysis, CUDA or numerics is declared in that module's header, so the link graph shows every dependency. [tests/layer_rules.cmake](tests/layer_rules.cmake) checks all three rules.
 
 ## Runtime data flow
 

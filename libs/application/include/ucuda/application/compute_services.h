@@ -6,6 +6,7 @@
 
 struct PhaseAnalysisSession;
 struct PeakConfig;
+struct SignalMetricsResult;
 
 // Найден ли компилятор для CPU-путей (cl.exe). При false в why_not причина.
 bool cpu_compiler_available(std::string* why_not = nullptr);
@@ -28,6 +29,9 @@ void apply_peak_config(const PeakConfig& c);
 void apply_nvrtc_fmad(bool enabled);
 void apply_nvrtc_rdc(bool enabled);
 void apply_gpu_block_size(int threads);
+
+// CSV метрик сигнала одной таблицей (ПКМ-экспорт с графика) — тот же писатель, что у движка.
+bool write_signal_metrics_csv(const SignalMetricsResult& r, const std::string& path, std::string& err);
 
 // SPICE-нетлист синтезированной схемы из результата Analysis в файл path; итог в s.result.circuit_status.
 void write_synthesized_netlist(PhaseAnalysisSession& s, const std::string& path);

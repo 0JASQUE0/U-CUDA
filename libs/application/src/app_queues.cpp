@@ -535,6 +535,41 @@ std::string TrajTimeEstimator::cost_key(const TrajWork& w) const {
          + (get_nvrtc_fmad() ? ":fm1" : ":fm0");
 }
 
+std::string TrajTimeEstimator::calib_path() { return gpu_calibration_path(); }
+
+void TrajTimeEstimator::start_calibration() {
+    calib_state_ = 1;
+    const bool forget = forget_;
+    forget_ = false;
+    calib_future_ = std::async(std::launch::async, [this, forget]() -> bool {
+        GpuCalibration me;
+        if (!gpu_device_info(me.device, me.sm_count, calib_tmp_err_)) return false;
+        me.numb_bytes = (int)sizeof(numb);
+        std::vector<GpuCalibration> all = read_file();
+        double learned = 0.0;   // повторная калибровка не сбрасывает выученную поправку
+        for (const GpuCalibration& c : all)
+            if (same_card(c, me)) {
+                if (!forget) { calib_tmp_ = c; return true; }
+                learned = c.kernel_factor;
+            }
+        if (!gpu_calibrate(calib_tmp_, calib_tmp_err_)) return false;
+        if (learned > 0.0) calib_tmp_.kernel_factor = learned;
+        all.erase(std::remove_if(all.begin(), all.end(),
+                                 [&](const GpuCalibration& c) { return same_card(c, calib_tmp_); }),
+                  all.end());
+        all.push_back(calib_tmp_);
+        write_file(all);
+        return true;
+    });
+}
+
+void TrajTimeEstimator::start_cost(const std::string& key, const std::string& body, int n) {
+    cost_key_tmp_ = key;
+    cost_future_ = std::async(std::launch::async, [this, body, n]() -> bool {
+        return krs_step_cost(body, n, cost_tmp_, cost_tmp_err_);
+    });
+}
+
 ParametricEngine& AppModel::ensure_engine() {
     if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
     return *parametric_engine;

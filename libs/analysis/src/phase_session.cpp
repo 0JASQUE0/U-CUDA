@@ -1,4 +1,5 @@
 ﻿#include "session_internal.h"
+#include "ucuda/cuda/rqa.h"
 using namespace ucuda::analysis_detail;
 
 

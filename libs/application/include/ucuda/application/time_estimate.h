@@ -1,6 +1,6 @@
 ﻿#pragma once
 #include "ucuda/domain/traj_work.h"
-#include "ucuda/domain/analysis_types.h"   // krs_step_cost, gpu_calibrate, GpuCalibration
+#include "ucuda/domain/analysis_types.h"   // KrsStepCost, GpuCalibration
 #include <fstream>
 #include <functional>
 #include <future>
@@ -112,7 +112,7 @@ private:
                                         calib_.ns_lat * (c.ops + calib_.c0_lat));
         return w.steps * ns_step * 1e-9;
     }
-    static std::string calib_path() { return gpu_calibration_path(); }
+    static std::string calib_path();   // <каталог exe>\gpu_calibration.txt
 
     // Строки файла: device \t numb_bytes \t sm \t ns_thr \t c0_thr \t ns_lat \t c0_lat \t calib_ops \t kernel_factor.
     // Строки старого формата (без c0) пропускаются — такая карта откалибруется заново.
@@ -156,41 +156,12 @@ private:
         return a.device == b.device && a.numb_bytes == b.numb_bytes && a.sm_count == b.sm_count;
     }
 
-    void start_calibration() {
-        calib_state_ = 1;
-        const bool forget = forget_;
-        forget_ = false;
-        calib_future_ = std::async(std::launch::async, [this, forget]() -> bool {
-            GpuCalibration me;
-            if (!gpu_device_info(me.device, me.sm_count, calib_tmp_err_)) return false;
-            me.numb_bytes = (int)sizeof(numb);
-            std::vector<GpuCalibration> all = read_file();
-            double learned = 0.0;   // повторная калибровка не сбрасывает выученную поправку
-            for (const GpuCalibration& c : all)
-                if (same_card(c, me)) {
-                    if (!forget) { calib_tmp_ = c; return true; }
-                    learned = c.kernel_factor;
-                }
-            if (!gpu_calibrate(calib_tmp_, calib_tmp_err_)) return false;
-            if (learned > 0.0) calib_tmp_.kernel_factor = learned;
-            all.erase(std::remove_if(all.begin(), all.end(),
-                                     [&](const GpuCalibration& c) { return same_card(c, calib_tmp_); }),
-                      all.end());
-            all.push_back(calib_tmp_);
-            write_file(all);
-            return true;
-        });
-    }
-
-    // Ключ цены шага: тело КРС, размерность, fmad NVRTC (определение в app_queues.cpp).
+    // Обращения к GPU (калибровка, цена шага через NVRTC, путь файла калибровок) — в
+    // app_queues.cpp: движок cuda — закрытая зависимость application, заголовок его не видит.
+    void start_calibration();
+    // Ключ цены шага: тело КРС, размерность, fmad NVRTC.
     std::string cost_key(const TrajWork& w) const;
-
-    void start_cost(const std::string& key, const std::string& body, int n) {
-        cost_key_tmp_ = key;
-        cost_future_ = std::async(std::launch::async, [this, body, n]() -> bool {
-            return krs_step_cost(body, n, cost_tmp_, cost_tmp_err_);
-        });
-    }
+    void start_cost(const std::string& key, const std::string& body, int n);
 
     void harvest() {
         if (cost_future_.valid() &&

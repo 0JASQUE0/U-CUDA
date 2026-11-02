@@ -430,7 +430,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                 }
             }
             // Recurrence plot + RQA. Матрица считается на GPU в воркере вместе с траекториями
-            // (см. rqa::compute в hostLibrary.cu); здесь только показ. Переключение
+            // (см. rqa::compute в host_rqa.cu); здесь только показ. Переключение
             // Distance <-> Recurrence GPU не трогает: бинарная матрица получается порогом по
             // уже посчитанной dist, поэтому оно мгновенное.
             else if (pr.type == ProjType::RecurrencePlot) {
