@@ -354,6 +354,21 @@
     <ClCompile Include="..\libs\application\src\app_model.cpp">
       <Filter>libs\application\src</Filter>
     </ClCompile>
+    <ClCompile Include="..\libs\application\src\app_broadcast.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\application\src\app_plot_windows.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\application\src\app_queues.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\application\src\app_settings.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\application\src\system_editor.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
     <ClCompile Include="..\libs\application\src\compute_services.cpp">
       <Filter>libs\application\src</Filter>
     </ClCompile>
@@ -664,6 +679,12 @@
       <Filter>libs\application\include</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\application\include\ucuda\application\session_persistence.h">
+      <Filter>libs\application\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\application\include\ucuda\application\app_settings.h">
+      <Filter>libs\application\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\application\include\ucuda\application\system_editor.h">
       <Filter>libs\application\include</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\application\include\ucuda\application\compute_services.h">
