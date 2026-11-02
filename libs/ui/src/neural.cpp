@@ -727,6 +727,8 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     NeuralConfig& c = s.configs[(size_t)s.active_config_index];
     const NeuralResult& r = c.result;
     NeuralViewState& vs = model.neural_view;
+    // Сессия другой системы начинает data_generation заново: без номера сессии кэши ниже отдают данные прошлой.
+    const int epoch = model.session_epoch[(int)AppModel::AppMode::Neural];
     const int nVars = (int)r.observed_vars.size(), K = c.pops_per_instance;
     const int recorded = (int)(std::find(r.observed_vars.begin(), r.observed_vars.end(), vs.series_var) - r.observed_vars.begin());
     const int nInst = (int)c.instance_start.size() - 1, nPops = (std::max)(0, nInst) * K;
@@ -803,7 +805,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     else if (rate) {
         // Спайки уже упорядочены по шагу, поэтому гистограмма считается один раз на расчёт и ширину окна.
         static std::vector<double> table;
-        static int tableKey = -1;
+        static int tableKey = -1, tableEpoch = -1;
         const int pops = (int)c.pop_start.size() - 1;
         const double t0 = r.t0, span = (double)r.steps_done * r.h - t0;
         const double typed = parse_num(vs.rate_bin_text, 0.0), bin = typed > 0.0 ? typed : span / 512.0;
@@ -811,8 +813,8 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         curves = K;
         const int key = (c.data_generation * 131 + s.active_config_index) * 131 + points;
         if (pops < 1 || points < 1) empty = none;
-        else if (tableKey != key) {
-            tableKey = key;
+        else if (tableKey != key || tableEpoch != epoch) {
+            tableKey = key; tableEpoch = epoch;
             table.assign((size_t)points * pops, 0.0);
             for (size_t e = 0; e < r.spike_step.size(); ++e) {
                 const int b = (std::min)(points - 1, (int)(((double)(r.spike_step[e] + 1) * r.h - t0) / bin));
@@ -831,12 +833,12 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     else if (raster) {
         // Точка на спайк, серия на популяцию. Сверх лимита показывается каждый stride-й узел: его спайки все, строки не рвутся.
         static std::vector<int> shown;
-        static int shownKey = -1;
+        static int shownKey = -1, shownEpoch = -1;
         static int stride = 1;
         const int key = (c.data_generation * 131 + s.active_config_index) * 131 + vs.instance;
         const int i0 = c.instance_start[(size_t)vs.instance], i1 = c.instance_start[(size_t)vs.instance + 1];
-        if (shownKey != key) {
-            shownKey = key;
+        if (shownKey != key || shownEpoch != epoch) {
+            shownKey = key; shownEpoch = epoch;
             size_t inside = 0;
             for (int node : r.spike_node) inside += node >= i0 && node < i1;
             stride = (int)((inside + kNeuralRasterPoints - 1) / kNeuralRasterPoints);
@@ -950,10 +952,12 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     // Вид держит указатели между кадрами.
     static std::vector<std::vector<double>> buffers[kNeuralWindowCount];
     static int filled[kNeuralWindowCount] = {};
+    static int filled_epoch[kNeuralWindowCount] = {};
     std::vector<std::vector<double>>& bufs = buffers[what];
     const int gen = (((((c.data_generation * 131 + vs.series_var) * 131 + s.active_config_index) * 131 + vs.instance) * 131 + vs.sync_kind * 3 + vs.sweep_kind) * 131 + curves) * 131 + vs.lyap_kind + (rate ? points * 7 : 0) + (readout ? vs.readout_target * 11 : 0);
-    const bool fresh = (int)bufs.size() != curves || filled[what] != gen + 1;
+    const bool fresh = (int)bufs.size() != curves || filled[what] != gen + 1 || filled_epoch[what] != epoch;
     if (fresh) {
+        filled_epoch[what] = epoch;
         bufs.assign((size_t)curves, {});
         for (int k = 0; k < curves; ++k) {
             std::vector<double>& b = bufs[(size_t)k];
