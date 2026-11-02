@@ -24,7 +24,7 @@ Edit the matching `<analysis>_session.cpp` for session lifecycle. Put shared pri
 
 ## Build and checks
 
-Build with `cmake --build --preset windows-debug --target ucuda_analysis`. Run `architecture`, relevant CPU/GPU tests, queue/cancellation tests, and session serialization checks.
+Build with `cmake --build --preset windows-debug --target ucuda_analysis`. Required checks are listed in [AGENTS.md](AGENTS.md).
 
 ## Compatibility and platforms
 

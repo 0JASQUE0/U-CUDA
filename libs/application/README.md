@@ -22,7 +22,9 @@ never launches calibration.
 
 ## Dependencies and consumers
 
-Target `ucuda::application` exposes analysis, platform and storage requirements and privately uses OCR. UI consumes it.
+Target `ucuda::application` exposes analysis, platform and storage requirements and privately uses numerics and OCR. UI consumes it.
+
+`compute_services.h` gives UI the direct checks it needs without including CUDA or numerics: CPU compiler availability, KRS body indices, controller bodies, circuit file times and netlist export.
 
 It must not depend on plotting, ImGui, OpenGL, GLFW, or desktop startup code. Public dependencies are limited to types visible from `app_model.h`.
 
@@ -36,7 +38,7 @@ Use `system_editor.cpp` for the edited system, `app_queues.cpp` for queue change
 
 ## Build and checks
 
-Build with `U-CUDA.sln` (Windows) or `cmake --build --preset windows-debug --target ucuda_application`. Run `architecture`; test queues, index cleanup, cancellation, save-on-completion, and operation with `U_CUDA_BUILD_GUI=OFF`.
+Build with `U-CUDA.sln` (Windows) or `cmake --build --preset windows-debug --target ucuda_application`. Required checks are listed in [AGENTS.md](AGENTS.md).
 
 ## Compatibility and platforms
 

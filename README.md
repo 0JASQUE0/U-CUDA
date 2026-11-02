@@ -25,14 +25,15 @@ Every documented directory also has an `AGENTS.md` with short, scoped rules for 
 
 ## Build matrix
 
-| Host | C++ compiler | CUDA compiler | Configure | Build |
-|---|---|---|---|---|
-| Windows | MSVC 2022 | nvcc with MSVC host | `cmake --preset windows` | `cmake --build --preset windows-debug` |
-| Windows Release | MSVC 2022 | nvcc with MSVC host | same tree | `cmake --build --preset windows-release` |
-| Linux Debug | GCC 15 | nvcc with GCC host | `cmake --preset linux-debug` | `cmake --build --preset linux-debug` |
-| Linux Release | GCC 15 | nvcc with GCC host | `cmake --preset linux-release` | `cmake --build --preset linux-release` |
+| What | Host compilers | Configure | Build |
+|---|---|---|---|
+| Windows desktop app | MSVC 2022, nvcc with MSVC host | — | [U-CUDA.sln](U-CUDA.sln), **Release\|x64** |
+| Windows legacy batch app | same | — | [U-CUDA.sln](U-CUDA.sln), **Debug\|x64** |
+| Windows tests | same | `cmake --preset windows` | `cmake --build --preset windows-release` |
+| Linux Debug | GCC 15, nvcc with GCC host | `cmake --preset linux-debug` | `cmake --build --preset linux-debug` |
+| Linux Release | GCC 15, nvcc with GCC host | `cmake --preset linux-release` | `cmake --build --preset linux-release` |
 
-CUDA Toolkit is required in every configuration. On Windows the classic Visual Studio solution [U-CUDA.sln](U-CUDA.sln) (`U-CUDA/U-CUDA.vcxproj`) builds the same sources without CMake: open it and build **Release|x64** (desktop app) or **Debug|x64** (legacy batch `main_NonLinAnal.cu`); the exe and its runtime land in `x64\<Configuration>\`, GUI libraries come from the vcpkg manifest. CMake builds the test suite, Linux and the headless configuration. The `vcxproj_sync` test keeps both build definitions on the same library sources.
+CUDA Toolkit is required in every configuration. The classic Visual Studio solution (`U-CUDA/U-CUDA.vcxproj`) builds without CMake: the exe and its runtime land in `x64\<Configuration>\`, GUI libraries come from the vcpkg manifest. CMake builds the test suite, Linux and the headless configuration. The `vcxproj_sync` test keeps both build definitions on the same library sources. Commands are in [SETUP.md](SETUP.md).
 
 The repository does not define a MinGW/GCC-on-Windows preset. The supported Windows CUDA host compiler is MSVC; GCC is used by the Linux presets.
 

@@ -26,7 +26,7 @@ Edit the matching `session_<family>.cpp` for session JSON, `system_library.cpp` 
 
 ## Build and checks
 
-Build with `cmake --build --preset windows-debug --target ucuda_storage`. Run `architecture`, old-save load tests, round trips, and byte/shape checks for affected CSV outputs.
+Build with `cmake --build --preset windows-debug --target ucuda_storage`. Required checks are listed in [AGENTS.md](AGENTS.md).
 
 ## Compatibility and platforms
 

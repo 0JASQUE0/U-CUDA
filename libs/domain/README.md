@@ -24,7 +24,7 @@ Change this module when a value must cross module boundaries or be serialized. P
 
 ## Build and checks
 
-Build with `cmake --build --preset windows-debug --target ucuda_domain` or the corresponding Linux preset. Run `architecture`, serialization round trips, CPU tests, and GPU tests when request/result ABI or numerical types change.
+Build with `cmake --build --preset windows-debug --target ucuda_domain` or the corresponding Linux preset. Required checks are listed in [AGENTS.md](AGENTS.md).
 
 ## Compatibility and platforms
 

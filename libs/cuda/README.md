@@ -26,7 +26,7 @@ Use `engine_*` files for modern analysis families (`engine_runtime.cpp` holds sh
 
 ## Build and checks
 
-Build with `cmake --build --preset windows-debug --target ucuda_cuda` (and `ucuda_cuda_legacy` for `host_*` changes) and repeat for Release and `U-CUDA-legacy`. Run `adaptive_gpu` and `gpu_smoke` on a real GPU with a clean runtime kernel package.
+Build with `cmake --build --preset windows-debug --target ucuda_cuda` (and `ucuda_cuda_legacy` for `host_*` changes) and repeat for Release and `U-CUDA-legacy`. Required checks are listed in [AGENTS.md](AGENTS.md).
 
 ## Compatibility and platforms
 

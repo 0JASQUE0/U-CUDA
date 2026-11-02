@@ -19,7 +19,7 @@
 Откройте Developer PowerShell for VS 2022. Клонируйте репозиторий по своему URL либо перейдите в существующую копию:
 
 ```powershell
-Set-Location 'E:\progs\CUDA\CUDA-optimization'
+Set-Location 'D:\U-CUDA'
 git status --short
 cmake --version
 nvcc --version
@@ -30,41 +30,7 @@ nvidia-smi
 
 ## 2. Сборка и запуск
 
-```powershell
-cmake --preset windows
-cmake --build --preset windows-debug
-ctest --preset windows-debug
-& .\build\windows\bin\Debug\U-CUDA.exe
-```
-
-После ошибки команды сначала устраните причину, затем продолжайте. Первая GUI-конфигурация требует сети: CMake получает закреплённые ревизии ImGui, ImPlot, ImPlot3D и при необходимости GLFW. Список зависимостей находится в [third_party/CMakeLists.txt](third_party/CMakeLists.txt).
-
-Release:
-
-```powershell
-cmake --build --preset windows-release
-ctest --preset windows-release
-& .\build\windows\bin\Release\U-CUDA.exe
-```
-
-Presets задают `CMAKE_CUDA_ARCHITECTURES=75`. Если нужна другая архитектура, укажите значение для своей GPU при конфигурации или создайте локальный `CMakeUserPresets.json`; не меняйте общий preset ради одной машины.
-
-Для старого пакетного приложения:
-
-```powershell
-cmake --preset windows -DU_CUDA_BUILD_LEGACY=ON
-cmake --build --preset windows-debug --target U-CUDA-legacy
-```
-
-Отдельная сборка без GUI:
-
-```powershell
-cmake -S . -B build/headless -G 'Visual Studio 17 2022' -A x64 -DU_CUDA_BUILD_GUI=OFF -DU_CUDA_BUILD_LEGACY=ON
-cmake --build build/headless --config Debug
-ctest --test-dir build/headless -C Debug --output-on-failure
-```
-
-### Классическая сборка из Visual Studio (без CMake)
+### Приложение: Visual Studio (без CMake)
 
 Открыть `U-CUDA.sln` в корне и собрать **Release|x64** (приложение) или **Debug|x64** (старое пакетное
 приложение `apps/legacy/main_NonLinAnal.cu`). То же из командной строки:
@@ -79,7 +45,34 @@ ImGui, ImPlot, ImPlot3D и GLFW ставит vcpkg по `vcpkg.json` (manifest m
 Библиотека систем — `U-CUDA\library` в корне репозитория. Новый `.cpp` / `.cu` в `libs/` добавляется и в
 `libs/<модуль>/CMakeLists.txt`, и в `U-CUDA/U-CUDA.vcxproj`; тест `vcxproj_sync` проверяет, что списки совпадают.
 
-CMake остаётся для тестов (`ctest`), Linux и сборки без GUI.
+### Тесты: CMake
+
+CMake нужен для тестов (`ctest`), Linux и сборки без GUI. Каталог сборки CMake с приложением не связан:
+
+```powershell
+cmake --preset windows
+cmake --build --preset windows-release
+ctest --preset windows-release
+```
+
+После ошибки команды сначала устраните причину, затем продолжайте. Первая GUI-конфигурация требует сети: CMake получает закреплённые ревизии ImGui, ImPlot, ImPlot3D и при необходимости GLFW. Список зависимостей находится в [third_party/CMakeLists.txt](third_party/CMakeLists.txt).
+
+Presets задают `CMAKE_CUDA_ARCHITECTURES=75`. Если нужна другая архитектура, укажите значение для своей GPU при конфигурации или создайте локальный `CMakeUserPresets.json`; не меняйте общий preset ради одной машины.
+
+Старое пакетное приложение через CMake:
+
+```powershell
+cmake --preset windows -DU_CUDA_BUILD_LEGACY=ON
+cmake --build --preset windows-debug --target U-CUDA-legacy
+```
+
+Отдельная сборка без GUI:
+
+```powershell
+cmake -S . -B build/headless -G 'Visual Studio 17 2022' -A x64 -DU_CUDA_BUILD_GUI=OFF -DU_CUDA_BUILD_LEGACY=ON
+cmake --build build/headless --config Debug
+ctest --test-dir build/headless -C Debug --output-on-failure
+```
 
 ### Linux
 

@@ -1,10 +1,5 @@
 # Numerics module
 
-The module also owns `multistep_bdf.h` (CPU BDF using the common runtime driver),
-SPICE parsing and KiCad import. KiCad CLI invocation uses native Windows process
-support or the POSIX platform process API; imports never require GUI. Numerical
-regression and benchmark workloads cover fixed/adaptive/BDF and DAE paths.
-
 ## Purpose
 
 Provides CPU integration and native compilation of generated KRS code. It is the CPU execution counterpart to the CUDA module and supports CPU fallbacks and comparisons.
@@ -13,9 +8,14 @@ Provides CPU integration and native compilation of generated KRS code. It is the
 
 `integrator.h` exposes CPU integration; `krs_cpu.h` exposes compilation/loading and diagnostics for user-generated schemes.
 
+The module also owns `multistep_bdf.h` (CPU BDF using the common runtime driver),
+SPICE parsing and KiCad import. KiCad CLI invocation uses native Windows process
+support or the POSIX platform process API; imports never require GUI. Numerical
+regression and benchmark workloads cover fixed/adaptive/BDF and DAE paths.
+
 ## Dependencies and consumers
 
-Target `ucuda::numerics` depends on equations and privately on platform, dynamic loading, and threads. CUDA and analysis consume it.
+Target `ucuda::numerics` depends on equations and privately on platform, dynamic loading, and threads. CUDA, analysis and application (`compute_services`, circuit import) consume it.
 
 It must not depend on CUDA, storage, application, plotting, or UI. Platform remains private because public numerical APIs do not expose OS handles or paths.
 
@@ -29,7 +29,7 @@ Edit `integrator.cpp` for CPU stepping and `krs_cpu.cpp` for compiler invocation
 
 ## Build and checks
 
-Build with `cmake --build --preset windows-debug --target ucuda_numerics` or the Linux equivalent. Run `adaptive_cpu`, `architecture`, and Linux `platform`; compare CPU/GPU deterministic calculations after numerical changes.
+Build with `cmake --build --preset windows-debug --target ucuda_numerics` or the Linux equivalent. Required checks are listed in [AGENTS.md](AGENTS.md).
 
 ## Compatibility and platforms
 
