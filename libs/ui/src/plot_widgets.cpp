@@ -417,15 +417,30 @@ void track_dock_selection(AppModel& model) {
     if (model.dock_prev_mode != mode) {
         model.dock_prev_mode      = mode;
         model.dock_restore_frames = 3;
+        model.dock_restore_budget = 12;
     }
     if (model.dock_restore_frames > 0) {
         --model.dock_restore_frames;
+        bool corrected = false;
         for (const std::string& name : mem) {
             ImGuiWindow* w = ImGui::FindWindowByName(name.c_str());
             if (w == nullptr || !w->Active || w->DockNode == nullptr || w->DockNode->TabBar == nullptr) continue;
             ImGuiTabBar* tb = w->DockNode->TabBar;
-            if (tb->SelectedTabId != w->TabId && ImGui::TabBarFindTabByID(tb, w->TabId) != nullptr)
+            if (tb->SelectedTabId != w->TabId && ImGui::TabBarFindTabByID(tb, w->TabId) != nullptr) {
                 tb->NextSelectedTabId = w->TabId;
+                // Узел снова выбирает окно с фокусом (NavWindow), а фокус после входа у окна,
+                // появившегося последним: без переноса фокуса выбор возвращается через кадр.
+                ImGui::FocusWindow(w);
+                corrected = true;
+            }
+        }
+        // ImGui отдаёт узел окну, появившемуся последним, не сразу: на третьем кадре после
+        // входа (Parametric: LLE 2D держится два кадра, затем выбран Metrics 2D). Поправка
+        // в последнем кадре без продления проигрывает этому переключению, поэтому, пока
+        // выбор приходится править, восстановление идёт ещё два кадра (не больше бюджета).
+        if (corrected && model.dock_restore_frames < 2 && model.dock_restore_budget > 0) {
+            model.dock_restore_budget -= 2 - model.dock_restore_frames;
+            model.dock_restore_frames  = 2;
         }
         return;
     }

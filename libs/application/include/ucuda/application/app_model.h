@@ -409,6 +409,7 @@ public:
     std::map<int, std::vector<std::string>> dock_selected_by_mode;
     int  dock_prev_mode      = -1;   // режим прошлого кадра
     int  dock_restore_frames = 0;    // сколько кадров ещё восстанавливать выбор после входа
+    int  dock_restore_budget = 0;    // сколько кадров восстановление ещё может продлеваться
 
     // Add a new plot window of (kind, mode_2d) with the given initial member
     // indices (into the matching session's diagrams/curves list). Assigns a
