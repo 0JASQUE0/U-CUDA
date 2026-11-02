@@ -17,7 +17,7 @@
 // не объектом: старые сборки пропускают неизвестный ключ через parse_string).
 //
 // Подписи полей (FieldLabels, "field_labels"): имя -> LaTeX, строки "<имя>: <подпись>"; без своей
-// подписи поле подписано автоматически (field_label_auto в gui_widgets.cpp).
+// подписи поле подписано автоматически (field_label_auto в libs/ui/src/field_names.cpp).
 
 #include <algorithm>
 #include <map>

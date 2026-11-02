@@ -878,7 +878,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
 
     if (!c.use_gpu) {
         std::string why;
-        if (!krs_cpu_backend_available(&why))
+        if (!cpu_compiler_available(&why))
             ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
                                "CPU backend unavailable: %s", why.c_str());
 

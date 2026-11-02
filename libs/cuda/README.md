@@ -22,7 +22,7 @@ Analysis submits typed requests and generated source. CUDA resolves runtime temp
 
 ## Change this when
 
-Use `engine_*` files for modern analysis families, `host_*` files for legacy entry points, runtime/engine files for compilation and caches, and `device/*.cuh` plus kernel templates for device algorithms.
+Use `engine_*` files for modern analysis families (`engine_runtime.cpp` holds shared helpers, source loading and module builds; `engine_metrics.cpp`, `engine_network.cpp`, `engine_order.cpp` with Stability and Performance, and so on per family), with `ParametricEngine::Impl` (`src/engine_impl.h`) layered as `EngineContext` (CUDA context, run signals) <- `EngineSources` (template texts) <- `EngineModuleCache` (module pools, locks, cancel mirrors, `wait_with_signals`) <- `EngineModuleBuilder` (NVRTC, PTX caches, linking) <- `Impl` (`compile_*_if_needed` and `run_*` per family), `host_*` files for legacy entry points, runtime/engine files for compilation and caches, and `device/*.cuh` plus kernel templates for device algorithms.
 
 ## Build and checks
 

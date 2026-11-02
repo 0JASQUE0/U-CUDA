@@ -71,6 +71,30 @@ void queue_cleanup() {
     model.dft1d_queue.push_back({99});
     require(!model.start_next_in_dft1d_queue() && model.dft1d_queue.empty(),
             "invalid headless queue entries were not drained");
+
+    // Все очереди вкладок с одной сессией идут одним ходом (run_next_queued): устаревшие индексы
+    // снимаются без запуска, а пока сессия считает, очередь не трогается.
+    auto drains = [](auto& session, auto& queue, auto start) {
+        queue.clear();
+        queue.push_back({-1});
+        queue.push_back({99});
+        session.in_flight = true;
+        const bool busy_ok = !start() && queue.size() == 2;
+        session.in_flight = false;
+        return busy_ok && !start() && queue.empty();
+    };
+    require(drains(model.dft1d_session, model.dft1d_queue, [&] { return model.start_next_in_dft1d_queue(); }),
+            "DFT queue");
+    require(drains(model.basins_session, model.basins_queue, [&] { return model.start_next_in_basins_queue(); }),
+            "Basins queue");
+    require(drains(model.order_session, model.order_queue, [&] { return model.start_next_in_order_queue(); }),
+            "Order queue");
+    require(drains(model.network_session, model.network_queue, [&] { return model.start_next_in_network_queue(); }),
+            "Network queue");
+    require(drains(model.neural_session, model.neural_queue, [&] { return model.start_next_in_neural_queue(); }),
+            "Neural queue");
+    require(drains(model.fastsync_session, model.fastsync_queue, [&] { return model.start_next_in_fastsync_queue(); }),
+            "FastSync queue");
 }
 
 void cancellation() {

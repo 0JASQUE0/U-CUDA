@@ -33,7 +33,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
     // компилятор на машине не найден.
     if (scheme_needs_compiled_body(s.scheme, s.custom_schemes) && !s.use_gpu) {
         std::string why;
-        if (!krs_cpu_backend_available(&why)) {
+        if (!cpu_compiler_available(&why)) {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(custom requires GPU: %s)",
                                why.c_str());
@@ -650,7 +650,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
 }
 
 namespace ucuda::ui_detail {
-void draw_builtin_scheme_checkboxes(AppModel& model) {
+void draw_builtin_scheme_checkboxes(SystemEditor& model) {
     ImGui::Text("Schemes to generate:");
     // И кнопки, и сам список идут по kBuiltinSchemes и пропускают схемы,
     // скрытые в Settings: скрытая схема не должна ни показываться, ни
@@ -690,7 +690,7 @@ void draw_builtin_scheme_checkboxes(AppModel& model) {
 }
 
 namespace ucuda::ui_detail {
-void draw_dae_method_checkboxes(AppModel& model) {
+void draw_dae_method_checkboxes(SystemEditor& model) {
     ImGui::Text("DAE methods to generate:");
     // Как у схем ОДУ: методы, скрытые в Settings, не показываются и не включаются скопом.
     const std::vector<std::string> all = dae_method_list();
@@ -753,7 +753,7 @@ void draw_dae_method_checkboxes(AppModel& model) {
 }
 
 namespace ucuda::ui_detail {
-void draw_param_groups_window(AppModel& m, const std::vector<std::string>& params,
+void draw_param_groups_window(SystemEditor& m, const std::vector<std::string>& params,
                               const std::vector<std::string>& vars, const char* id) {
     AppModel::ParamGroupsUi& u = m.pg_ui;
     if (!u.open) return;
@@ -985,7 +985,7 @@ std::string dot_latex(const std::string& name, const FieldLabels* labels ) {
 namespace ucuda::ui_detail {
 void draw_library_editor(AppModel& model, SystemLibrary& lib,
                                 const GuiCallbacks& cb) {
-    AppModel& buf = *model.library_edit_buffer;
+    SystemEditor& buf = *model.library_edit_buffer;
     const bool add_new = (model.library_edit_mode == AppModel::LibraryEditMode::AddNew);
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
                        add_new ? "New system" : "Editing");
@@ -1114,7 +1114,7 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
                 const double now = ImGui::GetTime();
                 if (now - cst.circuit_poll_t > 1.0) {
                     cst.circuit_poll_t = now;
-                    const long long mt = circuit_source_mtime(buf.circuit_source);
+                    const long long mt = circuit_file_mtime(buf.circuit_source);
                     if (cst.circuit_path != buf.circuit_source) {   // новый путь: только запомнить время
                         cst.circuit_path = buf.circuit_source;
                         cst.circuit_mtime = mt;
@@ -1127,7 +1127,7 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
                 if (buf.import_circuit(&rep, &e)) { cst.circuit_report = rep; cst.circuit_error.clear(); }
                 else cst.circuit_error = "Import failed: " + e;
                 cst.circuit_path = buf.circuit_source;
-                cst.circuit_mtime = circuit_source_mtime(buf.circuit_source);
+                cst.circuit_mtime = circuit_file_mtime(buf.circuit_source);
             }
             if (ImGui::Button("DC operating point##dae")) {
                 std::string rep, e;

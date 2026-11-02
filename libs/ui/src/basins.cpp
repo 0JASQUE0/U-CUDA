@@ -85,7 +85,7 @@ void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
     // draw_phase_controls; без него молча возвращаем GPU.
     if (scheme_needs_compiled_body(c.scheme, s.custom_schemes) && !c.pp_use_gpu) {
         std::string why;
-        if (!krs_cpu_backend_available(&why)) {
+        if (!cpu_compiler_available(&why)) {
             ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(custom scheme requires GPU: %s)", why.c_str());
             c.pp_use_gpu = true;
         }

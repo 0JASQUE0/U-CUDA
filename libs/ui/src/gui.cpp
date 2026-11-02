@@ -679,7 +679,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     if (model.app_mode == AppModel::AppMode::Library) {
         // Library mode: list view by default, editor view (System/Parameters sub-tabs +
         // Save/Cancel) after Edit or Add new. Switching top-level tabs during edit is safe — the
-        // editor works on model.library_edit_buffer, a scratch AppModel, so it never touches the
+        // editor works on model.library_edit_buffer, a scratch SystemEditor, so it never touches the
         // system active in Parametric/Phase/Basins/FastSync.
         //
         // Две вкладки: ODE (бывшая Editor — "###Editor" сохраняет её место в
@@ -1350,7 +1350,20 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::TextDisabled("default -- try wider only on a different GPU.");
             ImGui::TextDisabled("Wide systems are capped back down to fit 48 KB of shared memory");
             ImGui::TextDisabled("per block, so the value here is a request, not a guarantee.");
+
+            ImGui::Separator();
+            ImGui::Text("Step controllers");
+#ifdef UCUDA_AD_HAIRER_ONLY
+            ImGui::TextDisabled("Your own adaptive step controllers (C bodies), shared by all systems");
+            ImGui::TextDisabled("and tabs (library\\step_controllers.json).");
+#else
+            ImGui::TextDisabled("Your own adaptive step controllers: C bodies and named Soderlind");
+            ImGui::TextDisabled("filters, shared by all systems and tabs (library\\step_controllers.json).");
+#endif
+            if (ImGui::Button("Step controller library...")) model.show_ctrl_library = true;
         }
         ImGui::End();
     }
+    track_dock_selection(model);
+    draw_ctrl_library_window(model);
 }

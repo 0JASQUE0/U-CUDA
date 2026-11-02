@@ -282,6 +282,12 @@
     <ClCompile Include="..\libs\cuda\src\engine_lle.cpp">
       <Filter>libs\cuda\src</Filter>
     </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_metrics.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_network.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
     <ClCompile Include="..\libs\cuda\src\engine_neural.cpp">
       <Filter>libs\cuda\src</Filter>
     </ClCompile>
@@ -352,6 +358,24 @@
       <Filter>libs\ocr\src</Filter>
     </ClCompile>
     <ClCompile Include="..\libs\application\src\app_model.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\application\src\app_broadcast.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\application\src\app_plot_windows.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\application\src\app_queues.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\application\src\app_settings.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\application\src\system_editor.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\application\src\compute_services.cpp">
       <Filter>libs\application\src</Filter>
     </ClCompile>
     <ClCompile Include="..\libs\application\src\tick.cpp">
@@ -430,6 +454,21 @@
       <Filter>libs\ui\src</Filter>
     </ClCompile>
     <ClCompile Include="..\libs\ui\src\ui_resources.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\field_names.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\integration_widgets.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\library_list.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\plot_widgets.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\system_tab.cpp">
       <Filter>libs\ui\src</Filter>
     </ClCompile>
     <ClCompile Include="..\libs\ui\src\widgets.cpp">
@@ -663,6 +702,15 @@
     <ClInclude Include="..\libs\application\include\ucuda\application\session_persistence.h">
       <Filter>libs\application\include</Filter>
     </ClInclude>
+    <ClInclude Include="..\libs\application\include\ucuda\application\app_settings.h">
+      <Filter>libs\application\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\application\include\ucuda\application\system_editor.h">
+      <Filter>libs\application\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\application\include\ucuda\application\compute_services.h">
+      <Filter>libs\application\include</Filter>
+    </ClInclude>
     <ClInclude Include="..\libs\application\include\ucuda\application\time_estimate.h">
       <Filter>libs\application\include</Filter>
     </ClInclude>
@@ -707,6 +755,24 @@
     </ClInclude>
     <ClInclude Include="..\libs\ui\include\ucuda\ui\gui_tree_state.h">
       <Filter>libs\ui\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\gui_common.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\gui_fields.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\gui_inputs.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\gui_integration.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\gui_plot.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\gui_tabs.h">
+      <Filter>libs\ui\src</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\ui\src\gui_internal.h">
       <Filter>libs\ui\src</Filter>
