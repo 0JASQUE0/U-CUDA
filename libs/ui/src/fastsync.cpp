@@ -1,4 +1,9 @@
-﻿#include "gui_internal.h"
+﻿#include "gui_common.h"
+#include "gui_inputs.h"
+#include "gui_integration.h"
+#include "gui_fields.h"
+#include "gui_plot.h"
+#include "tab_fastsync.h"
 using namespace ucuda::ui_detail;
 
 namespace ucuda::ui_detail {
@@ -362,882 +367,371 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
 }
 }
 
-namespace ucuda::ui_detail {
-int builtin_scheme_order(const std::string& name) {
-    for (const auto& b : kBuiltinSchemes)
-        if (name == b.name) return b.order;
-    return 0;
-}
-}
 
 namespace ucuda::ui_detail {
-void draw_order_target_combo(const char* label, int& target,
-                                    const OrderAnalysisSession& s) {
-    const std::vector<std::string> names = s.axis_target_names();
-    const int n = (int)names.size();
-    int sel = target + 1;                       // -1 (h) -> 0
-    if (sel < 0 || sel >= n) sel = 0;
-    ImGui::SetNextItemWidth(kComboW);
-    if (ImGui::BeginCombo(label, names[(size_t)sel].c_str())) {
-        for (int i = 0; i < n; ++i) {
-            if (ImGui::Selectable(names[(size_t)i].c_str(), i == sel)) {
-                target = i - 1;
-                sel = i;
-            }
-        }
-        ImGui::EndCombo();
-    }
-}
-}
-
-namespace ucuda::ui_detail {
-void draw_order_axis_block(const char* id, const char* title,
-                                  const OrderAnalysisSession& s,
-                                  int& target, std::string& lo, std::string& hi,
-                                  bool& log_grid, std::string* n_text,
-                                  bool enabled, const char* n_label ) {
-    ImGui::PushID(id);
-    if (!enabled) ImGui::BeginDisabled();
-    ImGui::SeparatorText(title);
-    draw_order_target_combo("sweep over", target, s);
-    InputNumStr("from", lo, kFieldW);
-    ImGui::SameLine();
-    InputNumStr("to", hi, kFieldW);
-    if (n_text) {
-        InputNumStr(n_label, *n_text, kFieldW);
-        ImGui::SameLine();
-    }
-    else {
-        ImGui::TextDisabled("resolution: same as X");
-        ImGui::SameLine();
-    }
-    ImGui::Checkbox("log grid", &log_grid);
-    if (log_grid) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(from/to > 0)");
-    }
-    if (!enabled) ImGui::EndDisabled();
-    ImGui::PopID();
-}
-}
-
-namespace ucuda::ui_detail {
-void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSession& s) {
-    const double tmax = parse_ratio_or(c.t_max_text, 0.0);
-    if (!(tmax > 0.0)) { ImGui::TextDisabled("computing time must be > 0"); return; }
-
-    // Собираем узлы по h — либо одну точку (h не свипуется), либо всю ось.
-    std::vector<double> hs;
-    auto collect = [&](int target, const std::string& lo_s, const std::string& hi_s,
-                       bool log_grid, const std::string& n_s, bool active) {
-        if (!active || target != kOrderTargetH) return false;
-        double lo = parse_ratio_or(lo_s, 0.0), hi = parse_ratio_or(hi_s, 0.0);
-        if (hi < lo) std::swap(lo, hi);
-        int n = std::max(1, (int)parse_ratio_or(n_s, 200.0));
-        n = std::min(n, 100000);
-        hs.reserve((size_t)n);
-        if (n == 1) { hs.push_back(lo); return true; }
-        if (log_grid && lo > 0.0 && hi > 0.0) {
-            const double k = std::log(hi / lo) / (double)(n - 1);
-            for (int i = 0; i < n; ++i) hs.push_back(lo * std::exp(k * (double)i));
-        } else {
-            const double d = (hi - lo) / (double)(n - 1);
-            for (int i = 0; i < n; ++i) hs.push_back(lo + d * (double)i);
-        }
-        return true;
-    };
-    bool sweeping_h = collect(c.axis_x_target, c.axis_x_lo_text, c.axis_x_hi_text,
-                              c.axis_x_log, c.axis_x_n_text, true);
-    if (!sweeping_h)
-        sweeping_h = collect(c.axis_y_target, c.axis_y_lo_text, c.axis_y_hi_text,
-                             c.axis_y_log, c.axis_x_n_text, c.two_d);
-    if (!sweeping_h) hs.push_back(parse_ratio_or(c.h_text, 0.0));
-
-    long long n_min = -1, n_max = -1;
-    int n_bad = 0, n_zero = 0;
-    double worst_rel = 0.0;
-    for (double h : hs) {
-        if (!(h > 0.0)) { ++n_zero; continue; }
-        const long long N = order_steps_for_h(h, tmax, c.snap_steps);
-        if (n_min < 0 || N < n_min) n_min = N;
-        if (n_max < 0 || N > n_max) n_max = N;
-        const double r = tmax / h;
-        const double frac = std::fabs(r - std::floor(r + 0.5));
-        if (frac > 1e-9 * std::max(1.0, r)) {
-            ++n_bad;
-            // Насколько подогнанный шаг отличается от заданного.
-            const double h_snap = tmax / (double)std::max(1LL, (long long)(r + 0.5));
-            const double rel = std::fabs(h_snap - h) / h;
-            if (rel > worst_rel) worst_rel = rel;
-        }
-    }
-
-    if (n_zero > 0)
-        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
-                           "%d nodes with h <= 0 - they will go to diverged", n_zero);
-    if (n_min > 0) {
-        // Полная работа: 7 вызовов КРС на грубый шаг (1 + 2 + 4).
-        double total = 0.0;
-        for (double h : hs) if (h > 0.0) total += (double)order_steps_for_h(h, tmax, c.snap_steps);
-        double cells = (double)hs.size();
-        if (c.two_d) {
-            // Сетка квадратная, N x N. hs уже содержит узлы той оси, что свипует
-            // h; вторая добавляет N. Если h не свипуется вовсе, hs — одна точка,
-            // и обе оси идут множителями (раньше здесь терялась одна из них, и
-            // счётчик ячеек занижался ровно в N раз).
-            const double n_side = std::max(1.0, parse_ratio_or(c.axis_x_n_text, 200.0));
-            const double other = sweeping_h ? n_side : n_side * n_side;
-            total *= other;
-            cells *= other;
-        }
-        if (n_min == n_max)
-            ImGui::Text("steps per cell: %lld   cells: %.0f   KRS calls: %.3g",
-                        n_min, cells, total * 7.0);
-        else
-            ImGui::Text("steps per cell: %lld..%lld   cells: %.0f   KRS calls: %.3g",
-                        n_min, n_max, cells, total * 7.0);
-    }
-
-    if (n_bad > 0) {
-        if (c.snap_steps) {
-            ImGui::TextColored(ImVec4(0.65f, 0.85f, 0.65f, 1.0f),
-                "t_max/h non-integer in %d of %d nodes - h snapped to t_max/N (shift up to %.2g%%)",
-                n_bad, (int)hs.size(), worst_rel * 100.0);
-        } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
-                "t_max/h non-integer in %d of %d nodes: the final time drifts, "
-                "an O(h) contribution is mixed into the error", n_bad, (int)hs.size());
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "The number of steps must be an integer. Otherwise the actual final time\n"
-                "N*h differs from t_max and CHANGES from node to node, and the difference\n"
-                "between solutions at different moments in time is of order O(h) - it\n"
-                "adds up with the measured error and for schemes of order above\n"
-                "the first it drowns it out completely.\n"
-                "\"snap h -> t_max/N\" removes this by shifting the step itself slightly.");
-    }
-}
-}
-
-namespace ucuda::ui_detail {
-void draw_order_stability_block(AppModel& model, const OrderAnalysisSession& s,
-                                       OrderConfig& c) {
-    if (!ImGui::CollapsingHeader("Stability region", ImGuiTreeNodeFlags_DefaultOpen)) return;
-
-    if ((int)s.vars.size() != 2) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
-            "This computation needs the linear two-dimensional test system: %d state "
-            "variables are loaded.", (int)s.vars.size());
-        ImGui::TextDisabled("Library -> Dahlquist 2D. Run will be refused until then.");
-        ImGui::Separator();
-    }
-
-    InputNumStr("asymmetry k", c.stab_k_text, kFieldW);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "Drives the test matrix along the family with the SAME spectrum:\n"
-            "a = k*d and d = 2*sigma/(1+k), so the trace stays 2*sigma and the\n"
-            "determinant stays sigma^2 + omega^2 whatever k is. k = 1 gives the\n"
-            "symmetric case a = d; the further from 1, the stronger the\n"
-            "asymmetry the scheme has to cope with at unchanged eigenvalues.\n"
-            "k = -1 is forbidden: it makes d infinite.");
-    InputNumStr("ratio r", c.stab_r_text, kFieldW);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "Scales the off-diagonal entries: b = r*c, and c itself is built so\n"
-            "that the spectrum does not move. Must be NEGATIVE - with r >= 0 the\n"
-            "radicand of c is not positive and no real test matrix exists.");
-    InputNumStr("step h", c.stab_h_text, kFieldW);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "The step whose transition operator is diagonalised. Exactly ONE\n"
-            "step is taken: the test is linear and homogeneous, so R_N = R^N and\n"
-            "more steps would only raise the same spectrum to a power.\n"
-            "\n"
-            "At h = 1 (the default) the axes read directly as h*sigma and\n"
-            "h*omega - the classic dimensionless picture.");
-
-    const double k_val = parse_num(c.stab_k_text, 1.0);
-    const double r_val = parse_num(c.stab_r_text, -1.0);
-    if (k_val == -1.0)
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
-                           "k = -1: d = 2*sigma/(1+k) is undefined, the run will be refused.");
-    if (!(r_val < 0.0))
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
-                           "r must be negative: with r >= 0 the matrix has no real form.");
-
-    ImGui::Separator();
-    InputNumStr("sigma from", c.stab_sig_lo_text, kFieldW);
-    ImGui::SameLine();
-    InputNumStr("to##sigma", c.stab_sig_hi_text, kFieldW);
-    InputNumStr("omega from", c.stab_om_lo_text, kFieldW);
-    ImGui::SameLine();
-    InputNumStr("to##omega", c.stab_om_hi_text, kFieldW);
-    InputNumStr("resolution (both axes)", c.stab_n_text, kFieldW);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "The map is always N x N: a cell costs two steps of the scheme, so\n"
-            "even 512 x 512 is cheaper than a single node of the p(h) curve.");
-
-    ImGui::Separator();
-    InputNumStr("preference tolerance", c.stab_pref_tol_text, kFieldW);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "Preference region (Fedoseev, Karimov, Legat, Butusov, Mathematics\n"
-            "10:4327, 2022): the part of the stability region where one step is\n"
-            "also ACCURATE. A cell is preferred when rho <= 1 and\n"
-            "\n"
-            "    err = ||e^{hA} - R||_2 / ||e^{hA}||_2 <= tolerance,\n"
-            "\n"
-            "e^{hA} being the exact transition operator of the test problem and\n"
-            "R the one of the scheme (spectral norm). The paper uses 1, i.e. up\n"
-            "to 100%% error per step - a 'not nonsense' boundary rather than an\n"
-            "accuracy target; 0.1 or 0.01 show where the scheme is actually good.\n"
-            "\n"
-            "Applied when drawing, not during the run: change it and the overlay\n"
-            "follows at once, no rerun needed.");
-    const double tol_val = parse_num(c.stab_pref_tol_text, 1.0);
-    if (!(tol_val > 0.0))
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
-                           "tolerance <= 0: the preference region is empty by definition.");
-
-    // Селекторы индексов a[]. Подписи те же, что у селектора оси свипа, минус
-    // "h" и минус a[0] — коэффициент симметрии s занят схемой.
-    ImGui::Separator();
-    std::vector<std::string> items;
-    items.reserve(s.params.size());
-    for (size_t i = 0; i < s.params.size(); ++i)
-        items.push_back(s.params[i] + " (a[" + std::to_string(i + 1) + "])");
-    std::vector<const char*> item_ptrs;
-    item_ptrs.reserve(items.size());
-    for (const auto& it : items) item_ptrs.push_back(it.c_str());
-
-    auto idx_combo = [&](const char* label, int& target) {
-        int sel = target - 1;   // a[1] — первый элемент списка
-        if (sel < 0 || sel >= (int)item_ptrs.size()) sel = -1;
-        ImGui::SetNextItemWidth(kFieldW + 60.0f);
-        if (ImGui::Combo(label, &sel, item_ptrs.empty() ? nullptr : item_ptrs.data(),
-                         (int)item_ptrs.size()))
-            target = sel + 1;
-    };
-    idx_combo("matrix a##stab", c.stab_idx_a);
-    idx_combo("matrix b##stab", c.stab_idx_b);
-    idx_combo("matrix c##stab", c.stab_idx_c);
-    idx_combo("matrix d##stab", c.stab_idx_d);
-    ImGui::TextDisabled("Which parameter of the system carries which entry of "
-                        "[[a, b], [c, d]].");
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "The entries are recomputed in every node from (sigma, omega, k, r)\n"
-            "and written into these a[] slots, so whatever you set here is\n"
-            "overwritten during the run - the values on the Parameters panel are\n"
-            "not used for them.\n"
-            "\n"
-            "For Library -> Dahlquist 2D this is a, b, c, d = a[1..4]. A custom\n"
-            "KRS for this computation must address exactly these slots.");
-
-    (void)model;
-}
-}
-
-namespace ucuda::ui_detail {
-OrderPlotWindow::Kind order_kind_for(const OrderConfig& c) {
-    if (c.calc_kind == kOrderCalcPerf) return OrderPlotWindow::Kind::Perf;
-    // Область устойчивости — карта по построению: сетка всегда (sigma, omega).
-    if (c.calc_kind == kOrderCalcStab) return OrderPlotWindow::Kind::Map;
-    return c.two_d ? OrderPlotWindow::Kind::Map : OrderPlotWindow::Kind::P;
-}
-}
-
-namespace ucuda::ui_detail {
-void order_rehome_config(AppModel& model, int idx) {
-    OrderAnalysisSession& s = model.order_session;
-    if (idx < 0 || idx >= (int)s.configs.size()) return;
-    const OrderConfig& c = s.configs[(size_t)idx];
-    const OrderPlotWindow::Kind want = order_kind_for(c);
-    auto& wins = model.order_plot_windows;
-
-    bool placed = false;
-    std::vector<int> vacated;   // id окон, опустевших от этого ухода
-    for (auto& w : wins) {
-        auto& mem = w.members;
-        const bool has = std::find(mem.begin(), mem.end(), idx) != mem.end();
-        if (!has) continue;
-        if (order_member_fits(c, w.kind)) { placed = true; continue; }
-        mem.erase(std::remove(mem.begin(), mem.end(), idx), mem.end());
-        w.plot_sig = -1;
-        if (mem.empty()) vacated.push_back(w.id);
-    }
-    if (!placed) {
-        for (auto& w : wins) {
-            if (w.kind != want) continue;
-            if (want == OrderPlotWindow::Kind::Map && !w.members.empty()) continue;
-            w.members.push_back(idx);
-            w.plot_sig = -1;
-            placed = true;
-            break;
-        }
-    }
-    if (!placed && !vacated.empty()) {
-        for (auto& w : wins) {
-            if (w.id != vacated.front()) continue;
-            // То же, что делает смена вида в комбо "Plot windows".
-            w.kind = want;
-            w.members.assign(1, idx);
-            if (want == OrderPlotWindow::Kind::P) w.y_log = false;
-            w.plot_sig = -1;
-            placed = true;
-            break;
-        }
-        vacated.erase(vacated.begin());
-    }
-    if (!placed) model.add_order_plot_window(want, { idx });
-    wins.erase(std::remove_if(wins.begin(), wins.end(), [&](const OrderPlotWindow& w) {
-                   return w.members.empty() && !w.label_is_manual
-                       && std::find(vacated.begin(), vacated.end(), w.id) != vacated.end();
-               }), wins.end());
-    model.order_plot_windows_dirty = true;
-}
-}
-
-namespace ucuda::ui_detail {
-void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
-    OrderAnalysisSession& s = model.order_session;
+void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
+    FastSyncAnalysisSession& s = model.fastsync_session;
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
-    model.broadcast_source_tab = BroadcastTab::Order;
+    model.broadcast_source_tab = BroadcastTab::FastSync;
     model.broadcast_source_idx = s.active_config_index;
-    if (s.configs.empty()) {
-        // Система загружена, а вкладок нет: так остаются сессии, у которых
-        // удалили последнюю вкладку до запрета на это (см. draw_config_tab_bar).
-        // Таб-бара с "+" здесь нет, поэтому без этой кнопки вкладку было не
-        // вернуть ничем. Новая вкладка строится из записи системы — теми же
-        // умолчаниями, что и при первом входе в Order.
-        if (s.loaded_system_name.empty() || s.loaded_system_name != model.name) {
-            ImGui::TextDisabled("No system loaded. Pick a system in the list above.");
-            return;
-        }
-        ImGui::TextDisabled("This system has no Order tabs.");
-        if (ImGui::Button("New tab from system defaults") && model.start_order_analysis()
-            && !s.configs.empty())
-            order_rehome_config(model, 0);
-        return;
-    }
-    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
-        s.active_config_index = 0;
 
-    // Run / Run all... — над таб-баром, как у Basins/FastSync: управляют активным
-    // конфигом и должны быть доступны без прокрутки. Ctrl+R / Ctrl+Shift+R приходят
-    // вместе с общим хелпером; "Run all..." кладёт отмеченные индексы в
-    // model.order_queue, которую draw_gui тикает после poll'ов.
+    // Source of truth для custom-схем — AppModel (редактируются в Library).
+    // load_from_record() сохраняет снапшот ОДНОКРАТНО при входе в режим, поэтому
+    // схемы, добавленные позже, не видны без рефреша. Подтягиваем актуальный
+    // список каждый кадр, чтобы Combo и compute_krs_for_scheme работали с live.
+    s.custom_schemes = model.custom_schemes;
+    s.wrapper_schemes   = model.enabled_wrapper_schemes();
+
+    ImGui::Text("Fast Synchro");
+    ImGui::TextDisabled("Recurrent synchronization analysis (anti-sync error).");
+
+    // Run / Cancel / Run all... — сразу под пикером системы, над таб-баром: эти кнопки
+    // управляют активным конфигом и должны быть доступны без прокрутки.
+    // "Run all..." кладёт выбранные индексы в model.fastsync_queue; draw_gui тикает
+    // очередь после poll'ов.
     {
         const bool no_cfg = s.configs.empty();
         RunAllGroup g;
-        g.pick_id = "porder_";
+        g.pick_id = "pfs_";
         g.n       = (int)s.configs.size();
         g.label   = [&s](int i) { return s.configs[i].label; };
-        g.enqueue = [&model](int i) { model.order_queue.push_back({ i }); };
-        draw_run_and_run_all("##run_all_order", s.in_flight, no_cfg,
+        g.enqueue = [&model](int i) { model.fastsync_queue.push_back({i}); };
+        draw_run_and_run_all("##run_all_fastsync", s.in_flight, no_cfg,
                              s.in_flight || no_cfg, 160.0f,
                              [&model, &s]() {
                                  if (!model.parametric_engine)
                                      model.parametric_engine = std::make_unique<ParametricEngine>();
                                  s.run_async(*model.parametric_engine, s.active_config_index);
                              },
+                             // Cancel — только у FastSync, между Run и Run all.
                              [&s]() {
-                                 // Локальный Stop остаётся рядом с Run: глобальный
-                                 // Cancel живёт в статус-баре, но привычка жать Stop
-                                 // тут же, где Run, старше вкладки.
                                  ImGui::SameLine();
-                                 if (!s.in_flight) ImGui::BeginDisabled();
-                                 if (ImGui::Button("Stop", ImVec2(90, 0))) s.request_cancel();
-                                 if (!s.in_flight) ImGui::EndDisabled();
+                                 if (s.in_flight && ImGui::Button("Cancel")) s.request_cancel();
                              },
                              { g },
-                             [&model]() { model.start_next_in_order_queue(); },
-                             model.order_queue.size());
+                             [&model]() { model.start_next_in_fastsync_queue(); },
+                             model.fastsync_queue.size());
     }
     ImGui::Separator();
 
+    // Tab bar для config'ов.
     const TabBarResult tabs = draw_config_tab_bar(
-        "##order_tabs", "order_tab_", (int)s.configs.size(),
+        "##fs_tabs", "fs_tab_", (int)s.configs.size(),
         s.in_flight, s.running_config_index,
         [&s](int i) { return s.configs[i].label; },
         {},
-        [&s, &model]() {
-            s.add_config();
-            // Новая вкладка обязана где-то показаться: кладём её в первое
-            // подходящее окно-оверлей, а если такого нет — заводим своё.
-            const int ni = (int)s.configs.size() - 1;
-            if (ni < 0) return;
-            const OrderPlotWindow::Kind want = order_kind_for(s.configs[(size_t)ni]);
-            if (want != OrderPlotWindow::Kind::Map) {
-                for (auto& w : model.order_plot_windows)
-                    if (w.kind == want) {
-                        w.members.push_back(ni);
-                        model.order_plot_windows_dirty = true;
-                        return;
-                    }
-            }
-            model.add_order_plot_window(want, { ni });
-        });
+        [&s]() { s.add_config(); });
     if (tabs.active    >= 0) s.active_config_index = tabs.active;
-    if (tabs.to_remove >= 0) model.remove_order_config(tabs.to_remove);
+    if (tabs.to_remove >= 0) model.remove_fastsync_config(tabs.to_remove);
 
     if (s.configs.empty()) {
-        ImGui::TextDisabled("No order configs. Press '+' to add one.");
+        ImGui::TextDisabled("No FastSync configs. Press '+' to add one.");
         return;
     }
-    if (s.active_config_index >= (int)s.configs.size())
-        s.active_config_index = (int)s.configs.size() - 1;
+    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
+        s.active_config_index = 0;
+    FastSyncConfig& c = s.configs[s.active_config_index];
 
-    const int idx = s.active_config_index;
-    OrderConfig& c = s.configs[(size_t)idx];
-
-    draw_label_rename("##order_label", c.label, kFieldW);
-    ImGui::SameLine();
-    ImGui::TextDisabled("|"); ImGui::SameLine();
-    const int calc_kind_before = c.calc_kind;
-    ImGui::RadioButton("order p", &c.calc_kind, kOrderCalcOrder);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Accuracy order and the error curve over the node grid.");
-    ImGui::SameLine();
-    ImGui::RadioButton("performance", &c.calc_kind, kOrderCalcPerf);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "Timing over the same X axis: on every node the kernel that\n"
-            "integrates a single trajectory with that node's step is launched\n"
-            "several times under cudaEvents. The plot then shows time against\n"
-            "the error achieved - what that accuracy costs.");
-    ImGui::SameLine();
-    ImGui::RadioButton("stability", &c.calc_kind, kOrderCalcStab);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "Stability region on the two-dimensional Dahlquist test problem.\n"
-            "The grid runs over the eigenvalues of the test matrix: sigma along\n"
-            "X, omega along Y. In every node the matrix is rebuilt from\n"
-            "(sigma, omega) and the settings k and r, one step of the scheme is\n"
-            "taken from each basis vector, and the map shows the spectral radius\n"
-            "of the resulting amplification matrix. The boundary is rho = 1.\n"
-            "\n"
-            "Needs the linear two-dimensional test system - Library ->\n"
-            "Dahlquist 2D. Any other system is refused.");
-    if (c.calc_kind != calc_kind_before) order_rehome_config(model, idx);
-
-    // Устройство расчёта. Обе ветки считают по одним формулам и одним порогам,
-    // но замер времени у них меряет РАЗНОЕ: GPU — ядро с replicas нитями,
-    // CPU — одну траекторию последовательно. Числа между устройствами поэтому
-    // не сопоставимы, и это не баг, а два разных вопроса к схеме.
-    ImGui::SameLine();
-    ImGui::TextDisabled("|"); ImGui::SameLine();
-    int ord_dev = c.use_gpu ? 0 : 1;
-    ImGui::RadioButton("GPU##ord_dev", &ord_dev, 0);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Kernel compiled by NVRTC (kernels/order.template.cu).");
-    ImGui::SameLine();
-    ImGui::RadioButton("CPU##ord_dev", &ord_dev, 1);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "The same KRS body, compiled to a native step by cl.exe instead of\n"
-            "NVRTC, run sequentially on one core. Same formulas, same floor and\n"
-            "divergence thresholds, so the order diagram is directly comparable\n"
-            "with the GPU one.\n"
-            "Performance means something else here: the time of ONE trajectory,\n"
-            "not the throughput of a loaded GPU - replicas are ignored.");
-    c.use_gpu = (ord_dev == 0);
-
-    // Точность арифметики. Есть только у CPU: на GPU ядро собирается в numb,
-    // и выбор там был бы обманом — цифры те же, смысл другой.
-    ImGui::SameLine();
-    ImGui::TextDisabled("|"); ImGui::SameLine();
-    if (c.use_gpu) ImGui::BeginDisabled();
-    const char* prec_items[] = { "double", "double-double", "quad-double" };
-    ImGui::SetNextItemWidth(150.0f);
-    ImGui::Combo("precision##ord_prec", &c.cpu_precision, prec_items, IM_ARRAYSIZE(prec_items));
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "Arithmetic of the CPU branch.\n"
-            "double        - 16 digits, bit-for-bit the same as the GPU.\n"
-            "double-double - 32 digits (106-bit mantissa), about 35x slower.\n"
-            "quad-double   - 62 digits (212-bit mantissa), about 600x slower.\n"
-            "\n"
-            "The order estimate subtracts nearby solutions, so it sits on a\n"
-            "rounding floor of about 2*eps*|y|*sqrt(N) - near 3e-13 in double.\n"
-            "A scheme of order p gives E1 ~ h^p, so from p = 8 on there is\n"
-            "almost no usable window in h left: the curve hits the floor before\n"
-            "the scheme reaches its asymptotic regime. double-double lowers the\n"
-            "floor by 16 decades, quad-double by 47.\n"
-            "\n"
-            "Measured on Extr(CD|1,2,3,4): the floor sits at 5e-13 in double,\n"
-            "2e-26 in double-double, below 1e-50 in quad-double.\n"
-            "\n"
-            "The same KRS body is rebuilt with numb = ucuda::dd / ucuda::qd;\n"
-            "each build is cached separately, so switching does not recompile.");
-    if (c.use_gpu) ImGui::EndDisabled();
-    if (!c.use_gpu && c.cpu_precision > 0) order_float_build_warning();
-
-    if (!c.use_gpu) {
-        std::string why;
-        if (!cpu_compiler_available(&why))
-            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
-                               "CPU backend unavailable: %s", why.c_str());
-
-        // Подмена допуска Ньютона обязана быть видимой: это чужая настройка,
-        // и без строки пользователь не поймёт, почему неявная схема на этой
-        // вкладке считается иначе, чем на остальных.
-        const double ntol = order_newton_tol_for_precision(c.cpu_precision);
-        if (ntol > 0.0) {
-            ImGui::TextDisabled("Implicit schemes: Newton tolerance at most %.0e, at least 12 "
-                                "iterations (Integration: %s, %s)", ntol, c.newton.tol.c_str(),
-                                c.newton.max_iters.c_str());
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "Newton stops at ||dX|| < tol, so the system-wide setting would\n"
-                    "cap the result long before the arithmetic does: in double-double\n"
-                    "the rounding floor sits near 1e-29, and a 1e-10 tolerance would\n"
-                    "throw away nineteen decades of it.\n"
-                    "\n"
-                    "This tab measures the order of the SCHEME, not the accuracy of\n"
-                    "the solver, so the tolerance is tightened to match the chosen\n"
-                    "arithmetic - never loosened: a stricter setting of your own is\n"
-                    "kept. Explicit schemes are unaffected.");
-        }
-    }
-    // Дискретное отображение шага не имеет вовсе, уточнять нечего: обе
-    // диаграммы вкладки меряют, как ошибка убывает с h, и на карте x_{n+1} =
-    // f(x_n) обе разности тождественно нулевые.
-    if (s.sys.is_map)
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
-                           "Discrete map: there is no step to refine, the accuracy order is undefined.");
+    // Label rename.
+    draw_label_rename("Label##fs_label", c.label);
     ImGui::Separator();
 
-    // ---- Интегрирование ----
+    // Mode
+    ImGui::Text("Mode:");
+    ImGui::RadioButton("On Attractor", &c.mode, 0); ImGui::SameLine();
+    ImGui::RadioButton("On Grid",      &c.mode, 1);
+    ImGui::Separator();
+
+    // Scheme
+    draw_scheme_combo("Scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
+                      &model, model.is_map, &s.wrapper_schemes);
+    if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
+        InputNumStr("symmetry s", c.symmetry_s, kFieldW);
+    if (scheme_uses_cd_fp_iters(c.scheme)) {
+        InputNumStr("FP iterations n", c.cd_fp_iters, kFieldW);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
+    }
+    if (scheme_uses_newton(c.scheme))
+        draw_newton_fields(c.newton, kFieldW, "fs_newton");
+    ImGui::Separator();
+
+    // Mode-specific axes
+    if (c.mode == 1 && !s.vars.empty()) {
+        if (c.axis_x_var < 0 || c.axis_x_var >= (int)s.vars.size()) c.axis_x_var = 0;
+        if (c.axis_y_var < 0 || c.axis_y_var >= (int)s.vars.size())
+            c.axis_y_var = (s.vars.size() > 1) ? 1 : 0;
+        const std::vector<const char*> items = c_str_list(s.vars);
+
+        const char* axis_role_x = c.grid_swap_master_slave ? "Axis X (slave IC)" : "Axis X (master IC)";
+        const char* axis_role_y = c.grid_swap_master_slave ? "Axis Y (slave IC)" : "Axis Y (master IC)";
+        ImGui::SetNextItemWidth(kComboW);
+        ImGui::Combo(axis_role_x, &c.axis_x_var, items.data(), (int)items.size());
+        InputNumStr("X lo", c.axis_x_lo_text, kFieldW);
+        InputNumStr("X hi", c.axis_x_hi_text, kFieldW);
+        ImGui::SetNextItemWidth(kComboW);
+        ImGui::Combo(axis_role_y, &c.axis_y_var, items.data(), (int)items.size());
+        InputNumStr("Y lo", c.axis_y_lo_text, kFieldW);
+        InputNumStr("Y hi", c.axis_y_hi_text, kFieldW);
+        InputNumStr("Resolution", c.n_pts_text, kFieldW,
+                [&]{ field_apply_all_menu(&model, BroadcastField::Resolution, {},
+                                        "Resolution", c.n_pts_text); });
+        // Какую сторону перебирать по сетке: master IC (legacy default) или slave IC.
+        ImGui::Checkbox("Vary slave IC (master fixed)##fs_gridswap", &c.grid_swap_master_slave);
+        ImGui::TextDisabled("Off: grid sweeps master IC, slave fixed. On: grid sweeps slave IC, master fixed.");
+        ImGui::Separator();
+    }
+    else if (c.mode == 0 && !s.vars.empty()) {
+        // На траектории — какие 2 переменные показывать как X/Y фазового портрета.
+        const std::vector<const char*> items = c_str_list(s.vars);
+        ImGui::SetNextItemWidth(kComboW);
+        ImGui::Combo("Display X var", &c.axis_x_var, items.data(), (int)items.size());
+        ImGui::SetNextItemWidth(kComboW);
+        ImGui::Combo("Display Y var", &c.axis_y_var, items.data(), (int)items.size());
+        // 3D-портрет — только когда есть третья переменная.
+        const bool can_3d = s.vars.size() >= 3;
+        if (!can_3d) c.plot_3d = false;
+        ImGui::BeginDisabled(!can_3d);
+        ImGui::Checkbox("3D plot##fs_plot3d", &c.plot_3d);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(can_3d ? "Phase portrait in 3D, coloured by the sync error."
+                                     : "Needs at least three state variables.");
+        if (c.plot_3d) {
+            if (c.axis_z_var < 0 || c.axis_z_var >= (int)s.vars.size()) c.axis_z_var = 2;
+            ImGui::SetNextItemWidth(kComboW);
+            ImGui::Combo("Display Z var", &c.axis_z_var, items.data(), (int)items.size());
+        }
+        ImGui::Separator();
+    }
+
+    // Integration (collapsible)
     if (ImGui::CollapsingHeader("Integration", ImGuiTreeNodeFlags_DefaultOpen)) {
-        draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
-                          &model, model.is_map, &s.wrapper_schemes);
-        if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
-            InputNumStr("symmetry s", c.symmetry_s, kFieldW);
-        if (scheme_uses_cd_fp_iters(c.scheme)) {
-            InputNumStr("FP iterations n", c.cd_fp_iters, kFieldW);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
+        if (!model.is_map) InputNumStr("h",  c.h_text, kFieldW);
+        if (c.mode == 0) {
+            InputNumStr(model.is_map ? "iterations" : "t_max", c.t_max_text, kFieldW);
         }
-        if (scheme_uses_newton(c.scheme))
-            draw_newton_fields(c.newton, kFieldW, "order_newton");
-        // Область устойчивости берёт из этого блока только схему и s: она
-        // делает ОДИН шаг, поэтому ни времени счёта, ни порога расхождения,
-        // ни подгонки числа шагов у неё нет, а собственный шаг живёт в своём
-        // блоке ниже — рядом с k и r, от которых зависит смысл осей.
-        if (c.calc_kind == kOrderCalcStab) {
-            ImGui::TextDisabled("The step and the grid of the stability region live in "
-                                "\"Stability region\" below.");
-        } else {
-        const bool h_swept = (c.axis_x_target == kOrderTargetH)
-                          || (c.two_d && c.axis_y_target == kOrderTargetH);
-        if (!model.is_map) {
-            if (h_swept) ImGui::BeginDisabled();
-            InputNumStr("h", c.h_text, kFieldW);
-            if (h_swept) ImGui::EndDisabled();
-            if (h_swept) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(swept along the axis)");
-            }
-        }
-        InputNumStr(model.is_map ? "iterations" : "computing time", c.t_max_text, kFieldW);
-        InputNumStr("max value", c.max_value_text, kFieldW);
-
-        ImGui::Checkbox("snap h -> t_max/N", &c.snap_steps);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Adjust the step so that the number of steps is an integer.\n"
-                "Turning this off reproduces the behaviour of the other tabs\n"
-                "(floor(t_max/h)) at the cost of a parasitic O(h) contribution to the error.");
-        ImGui::SameLine();
-        ImGui::Checkbox("endpoint only", &c.endpoint_only);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Measure the difference only at t = t_max, not the maximum over the whole\n"
-                "trajectory. On chaotic systems the maximum over the trajectory\n"
-                "quickly starts reflecting divergence rather than the order of the scheme.");
-
-        draw_order_steps_hint(c, s);
-        }
-    }
-
-    // ---- Stability region ----
-    if (c.calc_kind == kOrderCalcStab) draw_order_stability_block(model, s, c);
-
-    // ---- Performance ----
-    if (c.calc_kind == kOrderCalcPerf &&
-        ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
-        InputNumStr("measurements", c.perf_repeats_text, kFieldW);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "How many times to run the computation on every node. Minimum,\n"
-                "maximum and average are taken over these measurements - all\n"
-                "three go onto the plot.");
-        InputNumStr("warmup runs", c.perf_warmup_text, kFieldW);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Launches that do not count, made before the measurements. The\n"
-                "very first launch drags the code load into the context along with\n"
-                "it and is therefore always slower than the rest.");
-        ImGui::Separator();
-        // Режим шага — первым: от него зависит, какой эталон у вкладки (ровно один).
-        const bool perf_ad_on = !s.sys.is_map && c.adaptive.enabled;
-        if (!s.sys.is_map) {
-            draw_adaptive_block("order_perf_ad", c.adaptive, c.scheme, 0, s.sys.is_map, &model);
-            if (c.adaptive.enabled) {
-                InputNumStr("tol from", c.perf_tol_lo_text, kFieldW);
-                InputNumStr("tol to", c.perf_tol_hi_text, kFieldW);
-                InputNumStr("tol points", c.perf_tol_n_text, kFieldW);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip(
-                        "The nodes of the adaptive benchmark: a log grid of tol; on every node\n"
-                        "rtol = tol and atol = tol * (atol / rtol) of the settings above. The\n"
-                        "Sweep axis below is not used. Every node integrates [0, t_max] (the\n"
-                        "step only, no output) and is timed like the fixed step: on the GPU by\n"
-                        "a kernel, on the CPU by the same driver compiled with cl.exe (double).\n"
-                        "Steps, rejections and f evaluations come from the controller.");
-            }
-            ImGui::Separator();
-        }
-        if (!perf_ad_on) {
-            // Эталон постоянного шага: чем считаем «точный ответ» для Eref по оси X.
-            draw_scheme_combo("reference method", c.perf_ref_scheme, s.custom_schemes, {},
-                              &s.enabled_builtin_schemes, &model, s.sys.is_map, &s.wrapper_schemes,
-                              /*broadcast*/ false);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "The method that stands for the exact answer in Eref =\n"
-                    "max|y_h - y_ref|. DOPRI78 by default: at the steps in use its\n"
-                    "own error sits below the machine precision of the solution.\n"
-                    "With \"endpoint only\" and \"fit h to t_max\" Eref is the error at t_max:\n"
-                    "it is then also this tab's E(T), comparable with adaptive tabs.");
-            InputNumStr("reference substeps", c.perf_ref_substeps_text, kFieldW);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "Reference steps per one step of the scheme under test. 0 turns\n"
-                    "the reference off entirely - the branch is then not even compiled\n"
-                    "into the kernel. Keep it above 1 when the reference method is the\n"
-                    "same as the tested one: at an equal step that would be the very\n"
-                    "same arithmetic and the difference identically zero.");
-            // y*(T) для E(T) — тот же эталон, что у адаптивного шага: с ним кривые постоянного
-            // и адаптивного шага ложатся на одну диаграмму (X: E(T) в окне Performance).
-            const char* refs_fx[] = { "none", "DOP853 in dd (CPU)", "DOP853 in qd (CPU)" };
-            int sel_fx = (c.perf_end_ref == 1 || c.perf_end_ref == 2) ? c.perf_end_ref : 0;
-            ImGui::SetNextItemWidth(kComboW);
-            if (ImGui::Combo("reference y*(T)##fixed", &sel_fx, refs_fx, IM_ARRAYSIZE(refs_fx)))
-                c.perf_end_ref = sel_fx;
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "E(T) = max|y(T) - y*(T)| at t_max against DOP853 in double-double or\n"
-                    "quad-double on the CPU - the same y*(T) the adaptive step is measured\n"
-                    "against, so fixed-step and adaptive curves can share one diagram\n"
-                    "(X: E(T) in the Performance window). Needs \"fit h to t_max\": a node\n"
-                    "that ends at N*h != t_max has no E(T). Computed after the timing and\n"
-                    "not part of it. none: E(T) is Eref at t_max (\"endpoint only\").");
-            if (c.perf_end_ref == 1 || c.perf_end_ref == 2) order_float_build_warning();
-        } else {
-            // Эталон адаптивного шага: y*(T) высокой точности — его единственная ошибка E(T).
-            const char* refs[] = { "DOP853 in dd (CPU)", "DOP853 in qd (CPU)" };
-            int sel = (c.perf_end_ref == 2) ? 1 : 0;
-            ImGui::SetNextItemWidth(kComboW);
-            if (ImGui::Combo("reference y*(T)", &sel, refs, IM_ARRAYSIZE(refs))) c.perf_end_ref = sel + 1;
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(
-                    "E(T) = max|y(T) - y*(T)| at the end of the interval (t_max), against\n"
-                    "DOP853 with a fixed step in double-double (~32 digits) or quad-double\n"
-                    "(~62 digits) arithmetic on the CPU. Its step count doubles until two\n"
-                    "successive answers agree, so y* is exact to far below any error on\n"
-                    "the plot. The adaptive step has no h grid, so E(T) is its only error.");
-            order_float_build_warning();
-        }
-        ImGui::Separator();
-        // Реплики — понятие ядра: столько одинаковых нитей грузят GPU. На CPU
-        // прогон последовательный, и поле нечего означать, поэтому гасим его,
-        // а не молча игнорируем значение.
-        if (!c.use_gpu) ImGui::BeginDisabled();
-        InputNumStr("replicas", c.perf_replicas_text, kFieldW);
-        if (!c.use_gpu) ImGui::EndDisabled();
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                c.use_gpu
-                ? "How many IDENTICAL tasks the timed launch computes.\n"
-                  "1 - the time of a single computation (the GPU mostly idles);\n"
-                  "a large number - the throughput of a loaded GPU, where the\n"
-                  "time per task = measured / replicas."
-                : "GPU only: the CPU branch runs one trajectory sequentially,\n"
-                  "so the measurement is always the time of a single task.");
-
-        const int n_nodes = c.adaptive.enabled ? std::max(1, (int)parse_num(c.perf_tol_n_text, 11.0))
-                                               : std::max(1, (int)parse_num(c.axis_x_n_text, 200.0));
-        const int reps    = std::max(1, (int)parse_num(c.perf_repeats_text, 20.0));
-        const int wu      = std::max(0, (int)parse_num(c.perf_warmup_text, 2.0));
-        const long long launches = (long long)n_nodes * (long long)(reps + wu);
-        ImGui::TextDisabled("%d nodes x %d launches = %lld; plus the order pass for the errors",
-                            n_nodes, reps + wu, launches);
-        if (launches > 20000)
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
-                               "a great many launches: the measurement will take %d times longer "
-                               "than a plain run",
-                               reps + wu);
-        ImGui::TextDisabled("Only the kernel launch itself is timed: no H2D/D2H, no compilation.");
-        // Split compilation не встраивает шаг в ядро, и та же задача считается
-        // в разы дольше (на Лоренце с явным Эйлером — в 3.6 раза). Настройка
-        // глобальная, поэтому кривые, снятые при разном её положении, сравнивать
-        // между собой нельзя.
-        if (model.nvrtc_rdc)
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
-                               "Split compilation is on (Settings): the step is not inlined into "
-                               "the kernel,\nso the measured time is several times larger than "
-                               "with it off.");
-    }
-
-    // ---- Оси ----
-    // У области устойчивости оси заданы смыслом расчёта (sigma и omega —
-    // вещественная и мнимая части собственных чисел тестовой матрицы), и
-    // общий селектор «h + элементы a[]» к ней неприменим: показывать его
-    // рядом с настоящими границами значило бы предлагать выбор, которого нет.
-    if (c.calc_kind != kOrderCalcStab &&
-        ImGui::CollapsingHeader("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) {
-        const bool perf_mode = (c.calc_kind == kOrderCalcPerf);
-        const bool perf_ad   = perf_mode && c.adaptive.enabled && !s.sys.is_map;
-        if (perf_ad)
-            ImGui::TextDisabled("Adaptive step: the benchmark runs over the tol nodes (Performance above);\n"
-                                "the X axis below is not used.");
-        if (perf_ad) ImGui::BeginDisabled();
-        if (perf_mode) ImGui::BeginDisabled();
-        if (ImGui::Checkbox("2D map", &c.two_d)) order_rehome_config(model, idx);
-        if (perf_mode) {
+        if (c.mode == 1) {
+            // On Grid: у каждой системы свой транзиент. Свипуемая сеткой
+            // сторона отрабатывает его в КАЖДОЙ ячейке (из её затравки),
+            // фиксированная — из своей единственной точки.
+            // В random-режиме ведомая сторона стартует ОТ точки свипуемой и
+            // своего транзиента не отрабатывает — гасим его поле, чтобы не
+            // выглядело действующим.
+            const bool master_swept  = !c.grid_swap_master_slave;
+            const bool master_derived = c.ic_random_offset && !master_swept;
+            const bool slave_derived  = c.ic_random_offset &&  master_swept;
+            ImGui::BeginDisabled(master_derived);
+            InputNumStr("transient master", c.transient_text, kFieldW);
             ImGui::EndDisabled();
-            ImGui::SameLine();
-            ImGui::TextDisabled("(the measurement is 1D: the X axis carries the error)");
+            ImGui::BeginDisabled(slave_derived);
+            InputNumStr("transient slave",  c.transient_slave_text, kFieldW);
+            ImGui::EndDisabled();
+            if (c.ic_random_offset)
+                ImGui::TextDisabled(master_swept
+                    ? "Master settles per grid cell; slave starts from it (random IC)."
+                    : "Slave settles per grid cell; master starts from it (random IC).");
+            else
+                ImGui::TextDisabled(c.grid_swap_master_slave
+                    ? "Slave settles per grid cell, master from its fixed IC."
+                    : "Master settles per grid cell, slave from its fixed IC.");
         }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Off - a p(X axis) curve. On - a p(X, Y) map.");
-        draw_order_axis_block("axx", "Axis X", s, c.axis_x_target,
-                              c.axis_x_lo_text, c.axis_x_hi_text,
-                              c.axis_x_log, &c.axis_x_n_text, true,
-                              c.two_d ? "resolution (both axes)" : "points");
-        draw_order_axis_block("axy", "Axis Y", s, c.axis_y_target,
-                              c.axis_y_lo_text, c.axis_y_hi_text,
-                              c.axis_y_log, nullptr, c.two_d);
-
-        if (c.axis_x_target == kOrderTargetH && c.two_d && c.axis_y_target == kOrderTargetH)
-            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "both axes sweep h");
-        else if (c.two_d && c.axis_x_target == c.axis_y_target)
-            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "both axes sweep the same thing");
-        if (perf_ad) ImGui::EndDisabled();
+        else {
+            InputNumStr("transient",    c.transient_text, kFieldW);
+        }
+        bool window_changed = InputNumStr("window",           c.window_text, kFieldW);
+        bool iter_changed   = InputNumStr("iter of synch",    c.iter_of_synchr_text, kFieldW);
+        if (!window_changed && !iter_changed) {
+            // window/iter — источник истины в этом кадре (или ничего не
+            // менялось, напр. только что загрузили сессию): пересчитываем
+            // total sync time ДО отрисовки его поля, без задержки в кадр.
+            double window_v = parse_ratio_or(c.window_text, 0.0);
+            double iter_v   = std::max(1.0, parse_ratio_or(c.iter_of_synchr_text, 0.0));
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.10g", (2.0 * iter_v - 1.0) * window_v);
+            c.total_time_text = buf;
+        }
+        if (InputNumStr("total sync time", c.total_time_text, kFieldW)) {
+            // Пользователь правит total → пересчитываем window (iter фиксирован).
+            double total_v = parse_ratio_or(c.total_time_text, 0.0);
+            double iter_v  = std::max(1.0, parse_ratio_or(c.iter_of_synchr_text, 0.0));
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.10g", total_v / (2.0 * iter_v - 1.0));
+            c.window_text = buf;
+        }
+        if (c.mode == 0) {
+            InputNumStr("decimator",    c.pre_scaller_text, kFieldW);
+        }
+        InputNumStr("max value",        c.max_value_text, kFieldW);
     }
 
-    // Что из этих двух блоков расчёт задаёт сам. У области устойчивости это
-    // ВСЕ начальные условия (шаг делается от базисных векторов) и четыре
-    // параметра, несущих элементы тестовой матрицы: они пересчитываются из
-    // (sigma, omega, k, r) в каждом узле сетки. Остальные параметры — скажем,
-    // коэффициенты обёртки или s_i у комплексных схем — работают как обычно.
-    std::function<bool(const std::string&)> ic_overwritten, par_overwritten;
-    const char* ic_note  = nullptr;
-    const char* par_note =
-        "Declare METHOD parameters (for composition schemes) right here as ordinary "
-        "system parameters: they need not be used in the right-hand sides, "
-        "and the body of a custom KRS reads them as a[k]. In the axis selector they "
-        "will appear alongside the rest.";
-    if (c.calc_kind == kOrderCalcStab) {
-        ic_overwritten = [](const std::string&) { return true; };
-        ic_note = "Not used: the step is taken from the basis vectors (1, 0) and (0, 1) - "
-                  "that is what makes the result a fundamental matrix.";
-        par_note = "The four entries of the test matrix are greyed out: they are rebuilt from "
-                   "(sigma, omega) and k, r in every node of the grid, exactly as the "
-                   "reference script does it. The rest of the parameters work as usual.";
-        std::vector<std::string> taken;
-        const int slots[4] = { c.stab_idx_a, c.stab_idx_b, c.stab_idx_c, c.stab_idx_d };
-        for (int i = 0; i < 4; ++i) {
-            const int pi = slots[i] - 1;
-            if (pi >= 0 && pi < (int)s.params.size()) taken.push_back(s.params[(size_t)pi]);
-        }
-        par_overwritten = [taken](const std::string& n) {
-            return std::find(taken.begin(), taken.end(), n) != taken.end();
+    // Synchro runtime (collapsible)
+    if (ImGui::CollapsingHeader("Synchro runtime", ImGuiTreeNodeFlags_DefaultOpen)) {
+        static const char* tos_names[] = { "Unidirectional", "Bidirectional" };
+        ImGui::SetNextItemWidth(kComboW);
+        ImGui::Combo("Type of synch.", &c.type_of_synch, tos_names, IM_ARRAYSIZE(tos_names));
+        // Формулировки правлены по факту кода (cudaLibrary.cu): и 0, и 2 —
+        // евклидовы нормы по переменным, БЕЗ деления на их количество.
+        // 0 усредняет по времени (RMS вдоль окна), 2 берёт одну точку.
+        static const char* ee_names[] = {
+            "0: RMS of ||e|| over last window",
+            "1: # iters to reach FS_error_trs",
+            "2: ||e|| at last point",
+            "3: time to reach FS_error_trs",
+            "4: err_stop / err_start",
+            "5: log10(err_stop / err_start)",
+            "6: log10(err_stop / err_start) / iter",
+            "7: log10(rho) per cycle (Gram-Schmidt)"
         };
+        ImGui::SetNextItemWidth(280);
+        ImGui::Combo("Error estim.", &c.error_estim, ee_names, IM_ARRAYSIZE(ee_names));
+        if (c.error_estim >= 4 && c.error_estim <= 6)
+            ImGui::TextDisabled("err_start/err_stop: ||e|| at the window start before / after all\n"
+                                "forward-backward passes. Cells where err_start == 0 come out\n"
+                                "non-finite and render as diverged.\n"
+                                "6 divides by iter of synch: log10 grows as iter*log10(rho),\n"
+                                "so only the per-cycle rate compares with the linearised value.");
+        if (c.error_estim == 7) {
+            ImGui::TextDisabled("Benettin over the same forward-backward cycle: AMOUNTOFX clones\n"
+                                "at master +- eps, Gram-Schmidt and renormalisation every cycle.\n"
+                                "Gives log10(rho) per cycle directly - no speckle at low iter,\n"
+                                "no saturation, nothing to divide afterwards.");
+            InputNumStr("GS warmup cycles", c.gs_warmup_text, kFieldW);
+            ImGui::TextDisabled("Cycles dropped from the average while the basis aligns.\n"
+                                "Without it the start-basis bias only washes out as O(1/m),\n"
+                                "which is why convergence took ~100 cycles. 0 = old behaviour.");
+            if (c.type_of_synch != 0)
+                ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+                                   "Estimator 7 needs Unidirectional synchro; every cell comes out as diverged.");
+        }
+        InputNumStr("FS error trs.", c.fs_error_trs_text, kFieldW);
     }
 
-    draw_named_num_fields("Initial conditions", s.vars, c.initial_conditions,
-                          ic_note, &model, BroadcastField::InitCondition, ic_overwritten);
+    // Parameters (collapsible, placed under Synchro runtime)
     draw_named_num_fields("Parameters", s.params, c.param_values,
-                          par_note, &model, BroadcastField::Param, par_overwritten);
+                          nullptr, &model, BroadcastField::Param);
 
-    if (!c.last_error.empty())
-        draw_error_box("##order_err", c.last_error);
-
-    // ---- Окна графиков ----
-    // Ровно та же схема, что у параметрики и DFT1D: окно знает свой вид и
-    // список вкладок, чьи кривые в нём лежат.
-    ImGui::Separator();
-    ImGui::SeparatorText("Plot windows");
-    int win_to_remove = -1;
-    for (int wi = 0; wi < (int)model.order_plot_windows.size(); ++wi) {
-        OrderPlotWindow& win = model.order_plot_windows[wi];
-        ImGui::PushID(win.id);
-        ImGui::SetNextItemWidth(150);
-        if (InputTextStr("##wlabel", win.label)) {
-            win.label_is_manual = !win.label.empty();   // пусто -> обратно к автоподписи
-            model.order_plot_windows_dirty = true;
-        }
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(140);
-        int kind = (int)win.kind;
-        const char* kind_names[] = { "Order p", "Error", "Order map 2D", "Performance" };
-        if (ImGui::Combo("##wkind", &kind, kind_names, 4)) {
-            win.kind = (OrderPlotWindow::Kind)kind;
-            // Члены, которые новому виду не подходят, из окна выпадают: иначе
-            // окно молча показывало бы "нет данных" от чужой вкладки.
-            auto& mem = win.members;
-            mem.erase(std::remove_if(mem.begin(), mem.end(), [&](int idx) {
-                          return idx < 0 || idx >= (int)s.configs.size()
-                              || !order_member_fits(s.configs[(size_t)idx], win.kind);
-                      }), mem.end());
-            if (win.kind == OrderPlotWindow::Kind::Map && mem.size() > 1) mem.resize(1);
-            if (win.kind == OrderPlotWindow::Kind::P) win.y_log = false;
-            win.plot_sig = -1;
-            model.order_plot_windows_dirty = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Members...")) ImGui::OpenPopup("edit_order_window_members");
-        if (ImGui::BeginPopup("edit_order_window_members")) {
-            bool any = false;
-            for (int ci = 0; ci < (int)s.configs.size(); ++ci) {
-                if (!order_member_fits(s.configs[(size_t)ci], win.kind)) continue;
-                any = true;
-                const std::string lbl = s.configs[(size_t)ci].label + "##ordmem" + std::to_string(ci);
-                const bool sel = std::find(win.members.begin(), win.members.end(), ci) != win.members.end();
-                if (win.kind == OrderPlotWindow::Kind::Map) {
-                    // Хитмапу поверх хитмапы не положишь — здесь выбор одиночный.
-                    if (ImGui::RadioButton(lbl.c_str(), sel)) {
-                        win.members.assign(1, ci);
-                        model.order_plot_windows_dirty = true;
-                    }
-                } else {
-                    bool v = sel;
-                    if (ImGui::Checkbox(lbl.c_str(), &v)) {
-                        if (v) win.members.push_back(ci);
-                        else   win.members.erase(std::remove(win.members.begin(), win.members.end(), ci),
-                                                 win.members.end());
-                        win.plot_sig = -1;
-                        model.order_plot_windows_dirty = true;
-                    }
-                }
-            }
-            if (!any) ImGui::TextDisabled("(no matching tabs)");
-            ImGui::EndPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("X")) win_to_remove = wi;
+    // Парные сворачиваемые секции: клик по любому заголовку сворачивает обе половины.
+    // Общее состояние навязывается каждому заголовку через SetNextItemOpen каждый кадр,
+    // IsItemToggledOpen ловит клик и переключает его. Переменные рисуются построчно,
+    // чтобы x_master вставал напротив x_slave (то же для K forward/backward).
+    auto paired_header = [](const char* label, bool& open) {
+        ImGui::SetNextItemOpen(open, ImGuiCond_Always);
+        ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_None);
+        if (ImGui::IsItemToggledOpen()) open = !open;
+    };
+    auto paired_input = [&](const char* var,
+                            std::map<std::string, std::string>& m,
+                            const char* id_prefix) {
+        std::string pid = std::string(id_prefix) + var;
+        ImGui::PushID(pid.c_str());
+        InputNumStr(var, m[var], 100);
         ImGui::PopID();
-    }
-    if (win_to_remove >= 0) model.remove_order_plot_window(win_to_remove);
+    };
 
-    if (ImGui::Button("Add window"))
-        model.add_order_plot_window(order_kind_for(c), { s.active_config_index });
-    ImGui::SameLine();
-    if (ImGui::Button("Reset windows layout")) model.order_layout_generation++;
+    // Master init | Slave init.
+    // В режиме случайных НУ ведущей (свипуемой) остаётся одна сторона, вторая
+    // получает её точку ± eps — её поля гасим, чтобы не читались как рабочие.
+    // On Attractor ведущий всегда мастер; On Grid — та сторона, которую
+    // перебирает сетка (см. grid_swap_master_slave).
+    const bool fs_master_leads   = (c.mode == 0) || !c.grid_swap_master_slave;
+    const bool fs_master_derived = c.ic_random_offset && !fs_master_leads;
+    const bool fs_slave_derived  = c.ic_random_offset &&  fs_master_leads;
+    static bool ic_open = true;
+    if (ImGui::BeginTable("##fs_ic_table", 2)) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        paired_header("Master init##fs_master_ic", ic_open);
+        ImGui::TableSetColumnIndex(1);
+        paired_header("Slave init##fs_slave_ic", ic_open);
+        if (ic_open) {
+            for (const auto& v : s.vars) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::BeginDisabled(fs_master_derived);
+                paired_input(v.c_str(), c.ic_master, "icm_");
+                ImGui::EndDisabled();
+                ImGui::TableSetColumnIndex(1);
+                ImGui::BeginDisabled(fs_slave_derived);
+                paired_input(v.c_str(), c.ic_slave,  "ics_");
+                ImGui::EndDisabled();
+            }
+        }
+        ImGui::EndTable();
+    }
+
+    // Переключатель НУ второй системы: фиксированные (как раньше) либо
+    // случайный отступ в eps-окрестности точки ведущей системы.
+    ImGui::Checkbox("Random IC (eps-offset)##fs_ic_random", &c.ic_random_offset);
+    if (c.ic_random_offset) {
+        InputNumStr("eps",  c.ic_eps_text,  kFieldW);
+        InputNumStr("seed", c.ic_seed_text, kFieldW);
+        // Оценщик 7 сам расставляет клонов и НУ слейва не читает — про eps ему
+        // всё сказано выше, здесь бы вышла неправда про slave.
+        if (c.error_estim == 7)
+            ImGui::TextDisabled("Estimator 7 ignores this: it perturbs its own clones by eps, seed unused.");
+        else if (c.mode == 0)
+            ImGui::TextDisabled("Slave starts at the master point of its own window, +-eps per coordinate.");
+        else
+            ImGui::TextDisabled(fs_master_leads
+                ? "Slave starts at the master cell point (after its transient), +-eps per coordinate."
+                : "Master starts at the slave cell point (after its transient), +-eps per coordinate.");
+        if (c.error_estim != 7)
+            ImGui::TextDisabled("Same seed reproduces the run bit-for-bit.");
+    } else if (c.error_estim == 7) {
+        // Оценщик 7 сам расставляет клонов вокруг мастера, seed ему не нужен
+        // (базис единичный, не случайный), но величину возмущения берёт отсюда.
+        InputNumStr("eps", c.ic_eps_text, kFieldW);
+        ImGui::TextDisabled("Estimator 7 starts its clones at master +-eps; the slave IC above is unused.");
+    } else {
+        ImGui::TextDisabled("Off: the second system uses the fixed IC above (legacy behaviour).");
+    }
+
+    // K forward (h>0) | K backward (h<0).
+    static bool k_open = true;
+    if (ImGui::BeginTable("##fs_k_table", 2)) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        paired_header("K forward (h>0)##fs_kf",  k_open);
+        ImGui::TableSetColumnIndex(1);
+        paired_header("K backward (h<0)##fs_kb", k_open);
+        if (k_open) {
+            for (const auto& v : s.vars) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                paired_input(v.c_str(), c.k_forward,  "kf_");
+                ImGui::TableSetColumnIndex(1);
+                paired_input(v.c_str(), c.k_backward, "kb_");
+            }
+        }
+        ImGui::EndTable();
+    }
+
+    // CSV output (collapsible, moved to the bottom)
+    draw_csv_output_block("CSV output", "Save to file##fs_csv", c.csv_save_enabled,
+                          "##fs_csv_path", c.csv_output_path,
+                          c.mode == 0
+                              ? "Writes one row per trajectory point: x[0],..,x[N-1],sync_error."
+                              : "Writes 2 header lines (X/Y ranges) + n_pts x n_pts error matrix (row-major).");
+
+    if (c.last_run_ok) {
+        if (c.mode == 0)
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                "OK: traj %d pts, sync_err [%.4g, %.4g]",
+                c.result.n_pts_traj, c.result.min_val, c.result.max_val);
+        else {
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                "OK: grid %dx%d, sync_err [%.4g, %.4g]",
+                c.result.n_pts_grid, c.result.n_pts_grid,
+                c.result.min_val, c.result.max_val);
+            // Разлетевшиеся ячейки несут NaN и рисуются тёмно-серым; без счётчика
+            // сплошь серая карта неотличима от "расчёт не пошёл".
+            if (c.result.diverged_cells > 0)
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                    "diverged: %d of %d cells (maxValue / nan-inf)",
+                    c.result.diverged_cells, c.result.total_cells);
+        }
+    } else if (!c.last_error.empty()) {
+        draw_error_box("##fs_err", c.last_error, /*lines*/ 10);
+    }
 }
 }

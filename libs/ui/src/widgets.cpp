@@ -1,4 +1,5 @@
-﻿#include "gui_internal.h"
+﻿#include "gui_common.h"
+#include "gui_inputs.h"
 // Общие поля ввода: текст, числа, списки, LaTeX-превью, цвета НУ, меню отмены.
 using namespace ucuda::ui_detail;
 
@@ -229,93 +230,6 @@ namespace ucuda::ui_detail {
 
 
 namespace ucuda::ui_detail {
-[[nodiscard]] bool is_custom_scheme(const std::string& scheme_name,
-                              const std::vector<CustomScheme>& custom_schemes) {
-    for (const auto& cs : custom_schemes) if (cs.name == scheme_name) return true;
-    return false;
-}
-}
-
-
-namespace ucuda::ui_detail {
-[[nodiscard]] bool scheme_needs_compiled_body(const std::string& scheme_name,
-                              const std::vector<CustomScheme>& custom_schemes) {
-    return is_custom_scheme(scheme_name, custom_schemes)
-        || parse_extrapolation_name(scheme_name, nullptr)
-        || parse_composition_name(scheme_name, nullptr);
-}
-}
-
-
-namespace ucuda::ui_detail {
-[[nodiscard]] bool custom_scheme_uses_symmetry(const std::string& scheme_name,
-                                         const std::vector<CustomScheme>& custom_schemes) {
-    static const std::regex re(R"(a\s*\[\s*0\s*\])");
-    for (const auto& cs : custom_schemes)
-        if (cs.name == scheme_name) return std::regex_search(cs.body, re);
-    return false;
-}
-}
-
-
-namespace ucuda::ui_detail {
-[[nodiscard]] bool scheme_uses_symmetry(const std::string& scheme_name,
-                                         const std::vector<CustomScheme>& custom_schemes) {
-    // Экстраполяционная обёртка читает a[0] ровно тогда, когда его читает база:
-    // её тело — это тело базы, повторённое по стадиям. Без этой развёртки выбор
-    // "Extr(CD|1,2)" прятал бы поле s, которым обёрнутый CD пользуется.
-    ExtrapolationSpec spec;
-    if (parse_extrapolation_name(scheme_name, &spec))
-        return scheme_uses_symmetry(spec.base, custom_schemes);
-    // Same for a composition: its body is the base repeated with scaled steps,
-    // so hiding s under "Comp(CD|...)" would hide a knob the inner CD reads.
-    CompositionSpec cspec;
-    if (parse_composition_name(scheme_name, &cspec))
-        return scheme_uses_symmetry(cspec.base, custom_schemes);
-    return scheme_name == "CD" || scheme_name == "CD fast"
-        || scheme_name == "CD FP" || scheme_name == "CD fast FP"
-        || scheme_name == "Complex CD" || scheme_name == "Complex CD4"
-        || scheme_name == "CCD4 (o4s3)" || scheme_name == "CCD4 (o4s4)"
-        || scheme_name == "CD_{1-0}" || scheme_name == "Complex CD_{1-0}"
-        || scheme_name == "Complex CD4_{1-0}" || scheme_name == "CCD4 (o4s3)_{1-0}"
-        || scheme_name == "CCD4 (o4s4)_{1-0}"
-        || scheme_name == "Complex Implicit Euler"
-        || scheme_name == "SEMP" || scheme_name == "SIMP"
-        || custom_scheme_uses_symmetry(scheme_name, custom_schemes);
-}
-}
-
-
-namespace ucuda::ui_detail {
-[[nodiscard]] bool scheme_uses_cd_fp_iters(const std::string& scheme_name) {
-    ExtrapolationSpec spec;
-    if (parse_extrapolation_name(scheme_name, &spec))
-        return scheme_uses_cd_fp_iters(spec.base);
-    CompositionSpec cspec;
-    if (parse_composition_name(scheme_name, &cspec))
-        return scheme_uses_cd_fp_iters(cspec.base);
-    return scheme_name == "CD FP" || scheme_name == "CD fast FP";
-}
-}
-
-
-namespace ucuda::ui_detail {
-[[nodiscard]] bool scheme_uses_newton(const std::string& scheme_name) {
-    ExtrapolationSpec spec;
-    if (parse_extrapolation_name(scheme_name, &spec))
-        return scheme_uses_newton(spec.base);
-    CompositionSpec cspec;
-    if (parse_composition_name(scheme_name, &cspec))
-        return scheme_uses_newton(cspec.base);
-    return scheme_name == "Implicit Euler" || scheme_name == "Implicit Midpoint"
-        || scheme_name == "Complex Implicit Euler"
-        || dae_scheme_from_name(scheme_name, nullptr)    // DAE BDF1 / Trapezoidal
-        || scheme_is_multistep(scheme_name);             // BDF 1-5: корректор — тот же Ньютон
-}
-}
-
-
-namespace ucuda::ui_detail {
 [[nodiscard]] std::string auto_axis_name(const std::vector<std::string>& params,
                                    const std::vector<std::string>& vars,
                                    int param_idx, bool sweep_over_var, int var_idx,
@@ -536,5 +450,18 @@ void draw_undo_menu_item(AppModel* m) {
         const std::string lbl = "Redo: " + *r;
         if (ImGui::MenuItem(lbl.c_str(), "Ctrl+Shift+Z")) do_redo(*m);
     }
+}
+}
+
+
+namespace ucuda::ui_detail {
+std::string dot_latex(const std::string& name, const FieldLabels* labels ) {
+    std::string tex = name_to_latex(name);
+    if (labels) {
+        auto it = labels->find(name);
+        if (it != labels->end() && !it->second.empty()) tex = it->second;
+    }
+    const size_t us = tex.find("_{");
+    return us == std::string::npos || us == 0 ? "\\dot{" + tex + "}" : "\\dot{" + tex.substr(0, us) + "}" + tex.substr(us);
 }
 }

@@ -438,6 +438,9 @@
     <ClCompile Include="..\libs\ui\src\lyapunov.cpp">
       <Filter>libs\ui\src</Filter>
     </ClCompile>
+    <ClCompile Include="..\libs\ui\src\metrics.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
     <ClCompile Include="..\libs\ui\src\network.cpp">
       <Filter>libs\ui\src</Filter>
     </ClCompile>
@@ -771,10 +774,37 @@
     <ClInclude Include="..\libs\ui\src\gui_plot.h">
       <Filter>libs\ui\src</Filter>
     </ClInclude>
-    <ClInclude Include="..\libs\ui\src\gui_tabs.h">
+    <ClInclude Include="..\libs\ui\src\tab_basins.h">
       <Filter>libs\ui\src</Filter>
     </ClInclude>
-    <ClInclude Include="..\libs\ui\src\gui_internal.h">
+    <ClInclude Include="..\libs\ui\src\tab_custom.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\tab_dft.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\tab_fastsync.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\tab_library.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\tab_network.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\tab_neural.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\tab_order.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\tab_parametric.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\tab_phase.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\tab_system.h">
       <Filter>libs\ui\src</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\ui\src\ui_resources.h">

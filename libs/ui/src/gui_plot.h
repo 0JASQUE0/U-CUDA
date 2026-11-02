@@ -1,7 +1,8 @@
 ﻿#pragma once
 // Графики: экспорт, диапазоны видов, вкладки конфигов, Run all, панели стилей, оси свипа,
 // тепловые карты и палитры, буферы окон.
-#include "gui_fields.h"
+#include "gui_common.h"
+#include "gui_inputs.h"
 
 namespace ucuda::ui_detail {
 void draw_csv_output_block(const char* header, const char* checkbox_label,
@@ -394,4 +395,34 @@ void run_view_range_cmd(const std::vector<ViewRangeTarget>& targets, size_t coun
 
 
 std::vector<double>& window_node_buf(int window_id) ;
+
+
+std::function<const char*(int, int)> regime_cell_label(const std::vector<int>& flags,
+                                                              int row_stride,
+                                                              bool with_oscillation = false);
+
+
+std::function<bool(int, int)> cancelled_cell_mask(const std::vector<int>& flags, int row_stride);
+
+
+void draw_adaptive_stats(const std::vector<double>& st);
+
+
+void draw_regime_summary(const std::vector<int>& flags, RegimeCounts* cache = nullptr, int gen = 0);
+
+
+void draw_writable_var_combo(const std::vector<std::string>& vars,
+                                    int& writable_var,
+                                    const char* combo_id);
+
+
+void sweep_range_from_result(double res_lo, double res_hi,
+                                    const std::string& lo_text, const std::string& hi_text,
+                                    double& lo, double& hi) ;
+
+
+void count_regimes(const std::vector<int>& flags, int& fp, int& unb, int& osc, int* stopped = nullptr) ;
+
+
+[[nodiscard]] std::string ic_legend_text(const AnalysisResult& res, size_t k) ;
 }

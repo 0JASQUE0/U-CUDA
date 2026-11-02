@@ -256,6 +256,7 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
     <ClCompile Include="..\libs\ui\src\gui.cpp" />
     <ClCompile Include="..\libs\ui\src\library.cpp" />
     <ClCompile Include="..\libs\ui\src\lyapunov.cpp" />
+    <ClCompile Include="..\libs\ui\src\metrics.cpp" />
     <ClCompile Include="..\libs\ui\src\network.cpp" />
     <ClCompile Include="..\libs\ui\src\neural.cpp" />
     <ClCompile Include="..\libs\ui\src\order.cpp" />
@@ -370,8 +371,17 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
     <ClInclude Include="..\libs\ui\src\gui_inputs.h" />
     <ClInclude Include="..\libs\ui\src\gui_integration.h" />
     <ClInclude Include="..\libs\ui\src\gui_plot.h" />
-    <ClInclude Include="..\libs\ui\src\gui_tabs.h" />
-    <ClInclude Include="..\libs\ui\src\gui_internal.h" />
+    <ClInclude Include="..\libs\ui\src\tab_basins.h" />
+    <ClInclude Include="..\libs\ui\src\tab_custom.h" />
+    <ClInclude Include="..\libs\ui\src\tab_dft.h" />
+    <ClInclude Include="..\libs\ui\src\tab_fastsync.h" />
+    <ClInclude Include="..\libs\ui\src\tab_library.h" />
+    <ClInclude Include="..\libs\ui\src\tab_network.h" />
+    <ClInclude Include="..\libs\ui\src\tab_neural.h" />
+    <ClInclude Include="..\libs\ui\src\tab_order.h" />
+    <ClInclude Include="..\libs\ui\src\tab_parametric.h" />
+    <ClInclude Include="..\libs\ui\src\tab_phase.h" />
+    <ClInclude Include="..\libs\ui\src\tab_system.h" />
     <ClInclude Include="..\libs\ui\src\ui_resources.h" />
   </ItemGroup>
   <ItemGroup>

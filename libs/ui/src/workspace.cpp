@@ -1,4 +1,8 @@
-﻿#include "gui_internal.h"
+﻿#include "gui_common.h"
+#include "gui_inputs.h"
+#include "gui_plot.h"
+#include "tab_custom.h"
+#include "tab_phase.h"
 using namespace ucuda::ui_detail;
 
 void gui_process_deferred(AppModel& model, const GuiCallbacks& cb) {

@@ -1,4 +1,10 @@
-﻿#include "gui_internal.h"
+﻿#include "gui_common.h"
+#include "gui_inputs.h"
+#include "gui_integration.h"
+#include "gui_fields.h"
+#include "gui_plot.h"
+#include "tab_library.h"
+#include "tab_neural.h"
 
 namespace ucuda::ui_detail {
 

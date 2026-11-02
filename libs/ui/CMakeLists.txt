@@ -10,6 +10,7 @@ ucuda_library(ui
     src/library.cpp
     src/library_list.cpp
     src/lyapunov.cpp
+    src/metrics.cpp
     src/network.cpp
     src/neural.cpp
     src/order.cpp

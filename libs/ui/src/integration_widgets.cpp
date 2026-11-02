@@ -1,144 +1,9 @@
-﻿#include "gui_internal.h"
+﻿#include "gui_common.h"
+#include "gui_inputs.h"
+#include "gui_integration.h"
+#include "gui_fields.h"
 // Блок Integration: Apply to..., выбор схемы, адаптивный шаг, библиотека регуляторов, Newton; списки схем и методов ДАУ по умолчанию.
 using namespace ucuda::ui_detail;
-
-namespace ucuda::ui_detail {
-void field_apply_all_menu(AppModel* model, BroadcastField f,
-                                 const std::string& name, const std::string& label,
-                                 const std::string& value,
-                                 const std::function<void()>& extra) {
-    if (!model) return;
-    // ID popup'а обязан быть свой у каждого поля: в блоке Integration шесть
-    // полей лежат на ОДНОМ уровне ID-стека, и общий идентификатор склеил бы
-    // их меню в одно.
-    const std::string popup_id = "##apply_all_" + label + name;
-    if (!ImGui::BeginPopupContextItem(popup_id.c_str())) return;
-    ImGui::TextDisabled("%s = %s", label.c_str(), value.c_str());
-    ImGui::Separator();
-    if (extra) {
-        extra();
-        ImGui::Separator();
-    }
-
-    // Сухой прогон: сколько конфигов реально РАЗОЙДЁТСЯ с этим значением.
-    // Показываем числом, но НЕ гасим по нему команду: серый пункт читается как
-    // подпись, и "0 differ" выглядит как сломанная рассылка, хотя на деле все
-    // цели уже с этим значением.
-    auto differ_count = [&](const std::vector<BroadcastTarget>* only) {
-        return model->broadcast_field(f, name, value, /*apply*/false, label, only, "");
-    };
-    // Применяет и кладёт отчёт в шапку: адресаты бывают не открыты, и без
-    // строки сверху "применилось" неотличимо от "ничего не произошло".
-    auto apply_now = [&](const std::vector<BroadcastTarget>* only, const std::string& note) {
-        const int n = model->broadcast_field(f, name, value, /*apply*/true, label, only, note);
-        model->undo_note = n > 0
-            ? ("Applied: " + label + " = " + value + " -> " + note)
-            : ("Nothing to apply: " + note + " already at " + value);
-        model->undo_note_time = ImGui::GetTime();
-    };
-    // Подпись склеиваем, а НЕ прогоняем вторым проходом через printf: в шаблон
-    // подставляется имя группы, и попади в него '%', результат стал бы
-    // спецификацией формата с несуществующим аргументом. Сегодня имена — жёсткие
-    // литералы из group_of, но держать это на соглашении незачем.
-    auto count_and_item = [&](const std::string& title,
-                              const std::vector<BroadcastTarget>* only,
-                              const std::string& note) {
-        const std::string lbl = title + " (" + std::to_string(differ_count(only)) + " differ)";
-        if (ImGui::MenuItem(lbl.c_str())) apply_now(only, note);
-    };
-
-    const std::vector<BroadcastTarget> all = model->broadcast_targets(f);
-
-    // 1. Свой тип. Источник берём из панели, которая сейчас рисуется
-    //    (broadcast_source_*): по app_mode его не вывести — вкладка Parametric
-    //    покрывает сразу Bifurcation, LLE и LS.
-    std::vector<BroadcastTarget> same_group;
-    std::string group;
-    for (const auto& t : all)
-        if (t.tab == model->broadcast_source_tab && t.idx == model->broadcast_source_idx) {
-            group = t.group;
-            break;
-        }
-    if (!group.empty()) {
-        for (const auto& t : all)
-            if (t.group == group) same_group.push_back(t);
-    }
-    if (same_group.size() > 1)
-        count_and_item("Apply to all " + group, &same_group, "all " + group);
-
-    // 2. Выбор галочками. Маска живёт в модели и пересобирается, когда
-    //    сменилось поле или изменился состав целей (диаграмму добавили/закрыли).
-    if (ImGui::BeginMenu("Apply to...")) {
-        // Подпись состава: поле + имена целей по порядку. Меняется состав —
-        // маска собирается заново, а не переезжает на соседние конфиги.
-        std::string sig = std::to_string((int)f);
-        for (const auto& t : all) { sig += '\x1f'; sig += t.label; }
-        if (model->broadcast_pick_sig != sig ||
-            model->broadcast_pick.size() != all.size()) {
-            model->broadcast_pick.assign(all.size(), '0');
-            model->broadcast_pick_sig = sig;
-            // По умолчанию отмечаем свой тип: это и подсказка, что здесь
-            // выбирают, и самый частый набор.
-            for (size_t i = 0; i < all.size(); ++i)
-                if (all[i].group == group) model->broadcast_pick[i] = '1';
-        }
-        if (ImGui::SmallButton("All")) model->broadcast_pick.assign(all.size(), '1');
-        ImGui::SameLine();
-        if (ImGui::SmallButton("None")) model->broadcast_pick.assign(all.size(), '0');
-
-        // Кнопка применения — СВЕРХУ, до списка: галочек бывает под два десятка,
-        // и внизу она уезжает за край экрана. Кнопка, а не пункт меню: пункт в
-        // конце списка читается как подпись, а не как действие.
-        {
-            std::vector<BroadcastTarget> sel;
-            for (size_t i = 0; i < all.size(); ++i)
-                if (model->broadcast_pick[i] == '1') sel.push_back(all[i]);
-            char btn[96];
-            std::snprintf(btn, sizeof(btn), "Apply to %d selected", (int)sel.size());
-            if (sel.empty()) ImGui::BeginDisabled();
-            if (ImGui::Button(btn)) {
-                char note[64];
-                std::snprintf(note, sizeof(note), "%d selected", (int)sel.size());
-                apply_now(&sel, note);
-                ImGui::CloseCurrentPopup();
-            }
-            if (sel.empty()) ImGui::EndDisabled();
-            ImGui::SameLine();
-            if (sel.empty()) {
-                ImGui::TextDisabled("nothing ticked");
-            } else {
-                const int d = differ_count(&sel);
-                if (d > 0) ImGui::TextDisabled("%d differ", d);
-                else       ImGui::TextDisabled("already at this value");
-            }
-        }
-        ImGui::Separator();
-
-        std::string shown_group;
-        for (size_t i = 0; i < all.size(); ++i) {
-            if (all[i].group != shown_group) {
-                shown_group = all[i].group;
-                ImGui::SeparatorText(shown_group.c_str());
-            }
-            ImGui::PushID((int)i);
-            bool on = (model->broadcast_pick[i] == '1');
-            if (ImGui::Checkbox("##pick", &on))
-                model->broadcast_pick[i] = on ? '1' : '0';
-            ImGui::SameLine();
-            ImGui::TextUnformatted(all[i].label.c_str());
-            ImGui::PopID();
-        }
-
-        ImGui::EndMenu();
-    }
-
-    // 3. Прежний адресат: активный конфиг каждой вкладки (only = nullptr).
-    count_and_item("Apply to all calculation tabs", nullptr, "all tabs");
-
-    draw_undo_menu_item(model);
-    ImGui::EndPopup();
-}
-}
 
 
 namespace ucuda::ui_detail {
@@ -1035,9 +900,6 @@ bool draw_integration_block(const char* header,
 }
 
 
-
-
-
 std::vector<std::string> default_hidden_schemes() {
     static const char* const kShown[] = { "Euler", "Explicit Midpoint", "CD", "RK4", "DOPRI78", "GBS (n=2)" };
     std::vector<std::string> out;
@@ -1061,4 +923,252 @@ std::vector<std::string> default_hidden_dae_methods() {
     for (const std::string& n : dae_method_list())
         if (n != "DAE Trapezoidal" && n != kBdfSchemeDae) out.push_back(n);
     return out;
+}
+
+
+namespace ucuda::ui_detail {
+std::string wrapper_coefficients_text(
+        const std::string& name,
+        const std::vector<CustomScheme>& custom_schemes,
+        const std::map<std::string, std::string>& param_values) {
+    // Паспорт базы: встроенная — из таблицы, кастомная — со слов автора.
+    auto base_traits = [&](const std::string& base, int* p, bool* sym) {
+        if (builtin_scheme_traits(base, p, sym)) return true;
+        for (const auto& cs : custom_schemes)
+            if (cs.name == base) { *p = cs.order; *sym = cs.symmetric; return true; }
+        return false;
+    };
+    char buf[256];
+    std::string o;
+
+    ExtrapolationSpec esp;
+    CompositionSpec   csp;
+
+    if (parse_extrapolation_name(name, &esp)) {
+        int p = 1; bool sym = false;
+        const bool known = base_traits(esp.base, &p, &sym);
+        sym = extrapolation_symmetric(esp.re_at_output, sym);
+        const int  K = (int)esp.n.size();
+        long long  cost = 0;
+        for (int v : esp.n) cost += v;
+
+        o += name;
+        o += "\n";
+        if (esp.re_at_output)
+            o += "ExtrZ: complex state across all substeps, Re taken ONCE on the output;\n"
+                 "the real part expands in even powers only, so the weights are symmetric\n";
+        std::snprintf(buf, sizeof(buf), "base %s: order %d, %s%s",
+                      esp.base.c_str(), p,
+                      sym ? "symmetric" : "non-symmetric",
+                      known ? "" : "  (UNRESOLVED - the figures below assume order 1)");
+        o += buf; o += "\n";
+        std::snprintf(buf, sizeof(buf),
+                      "%d stages, %lld base steps per macro-step  ->  order %d",
+                      K, cost, extrapolation_order(K, p, sym));
+        o += buf; o += "\n";
+        // Что именно гасят эти веса: разложение идёт по u_k = 1/n_k у обычной
+        // базы и по 1/n_k^2 у симметричной — отсюда и разный прирост порядка.
+        o += sym ? "the weights cancel h^p, h^(p+2), ... (expansion in even powers only)\n"
+                 : "the weights cancel h^p, h^(p+1), ...\n";
+        o += "\n";
+
+        const std::vector<double> alpha = extrapolation_weights(esp.n, p, sym);
+        std::vector<std::string>  exact;
+        const bool has_exact = extrapolation_weights_exact(esp.n, p, sym, &exact);
+
+        o += has_exact ? "  k   n_k   substep     alpha_k (exact)   alpha_k (double)\n"
+                       : "  k   n_k   substep     alpha_k\n";
+        double asum = 0.0, amax = 0.0;
+        for (int k = 0; k < K; ++k) {
+            asum += alpha[(size_t)k];
+            if (std::fabs(alpha[(size_t)k]) > amax) amax = std::fabs(alpha[(size_t)k]);
+            if (has_exact)
+                std::snprintf(buf, sizeof(buf), "  %-3d %-5d h/%-9d %-17s %.17g",
+                              k, esp.n[(size_t)k], esp.n[(size_t)k],
+                              exact[(size_t)k].c_str(), alpha[(size_t)k]);
+            else
+                std::snprintf(buf, sizeof(buf), "  %-3d %-5d h/%-9d %.17g",
+                              k, esp.n[(size_t)k], esp.n[(size_t)k], alpha[(size_t)k]);
+            o += buf; o += "\n";
+        }
+        std::snprintf(buf, sizeof(buf), "sum(alpha) = %.17g   max|alpha| = %.6g", asum, amax);
+        o += buf; o += "\n";
+        if (!has_exact)
+            o += "the exact fractions do not fit in 2^53 - the kernel gets the doubles above\n";
+        if (amax > 20.0) {
+            std::snprintf(buf, sizeof(buf),
+                          "cancellation: about %.1f decimal digits are lost in the weighted sum\n",
+                          std::log10(amax));
+            o += buf;
+        }
+        return o;
+    }
+
+    if (parse_composition_name(name, &csp)) {
+        int p = 1; bool sym = false;
+        const bool known = base_traits(csp.base, &p, &sym);
+        const int  K = (int)csp.gammas.size();
+
+        o += name;
+        o += "\n";
+        std::snprintf(buf, sizeof(buf), "base %s: order %d, %s%s",
+                      csp.base.c_str(), p,
+                      sym ? "symmetric" : "non-symmetric",
+                      known ? "" : "  (UNRESOLVED)");
+        o += buf; o += "\n";
+        std::snprintf(buf, sizeof(buf), "%d stages, %d base steps per macro-step", K, K);
+        o += buf; o += "\n";
+        o += "\n";
+
+        // Значения — при ТЕКУЩИХ параметрах. Для постоянного коэффициента это
+        // то же самое число, для символьного — единственный способ его увидеть.
+        std::vector<double> val;
+        std::string         verr;
+        const bool all_val = composition_gamma_values(csp, param_values, &val, &verr);
+
+        o += "  k   gamma (as written)        value                 stage step\n";
+        double gsum = 0.0, gcube = 0.0, gmin = 0.0;
+        bool   sums_ok = true;
+        for (int k = 0; k < K; ++k) {
+            const double v = val[(size_t)k];
+            if (std::isfinite(v)) {
+                gsum += v; gcube += v * v * v;
+                if (v < gmin) gmin = v;
+            } else sums_ok = false;
+            char vb[64], sb[64];
+            if (std::isfinite(v)) {
+                std::snprintf(vb, sizeof(vb), "%.17g", v);
+                std::snprintf(sb, sizeof(sb), "%.6g*h", v);
+            } else {
+                std::snprintf(vb, sizeof(vb), "?");
+                std::snprintf(sb, sizeof(sb), "?");
+            }
+            std::snprintf(buf, sizeof(buf), "  %-3d %-25s %-21s %s",
+                          k, csp.gammas[(size_t)k].c_str(), vb, sb);
+            o += buf; o += "\n";
+        }
+        if (!all_val) {
+            o += "\n";
+            o += "not every stage is numeric: ";
+            o += verr.empty() ? std::string("a coefficient did not resolve") : verr;
+            o += "\n";
+            o += "(give the parameter a value on the tab, or type a number in its place)\n";
+        }
+        if (sums_ok) {
+            o += "\n";
+            std::snprintf(buf, sizeof(buf), "sum(gamma)   = %.17g%s",
+                          gsum, std::fabs(gsum - 1.0) < 1e-12
+                                    ? "   (consistent)"
+                                    : "   NOT 1 - this integrates a rescaled field");
+            o += buf; o += "\n";
+            std::snprintf(buf, sizeof(buf), "sum(gamma^3) = %.6g", gcube);
+            o += buf;
+            if (sym && std::fabs(gcube) < 1e-12) {
+                std::snprintf(buf, sizeof(buf), "   ->  expected order %d", p + 2);
+                o += buf;
+            } else if (sym) {
+                std::snprintf(buf, sizeof(buf), "   not 0 - the order stays %d", p);
+                o += buf;
+            } else {
+                o += "   (the base is not symmetric: the p+2 conditions do not apply)";
+            }
+            o += "\n";
+            if (gmin < 0.0) {
+                std::snprintf(buf, sizeof(buf),
+                              "most negative stage: %.6g*h - a step BACKWARD in time", gmin);
+                o += buf; o += "\n";
+            }
+        }
+        return o;
+    }
+
+    return std::string();   // не обёртка: выводить из имени нечего
+}
+}
+
+
+namespace ucuda::ui_detail {
+[[nodiscard]] bool is_custom_scheme(const std::string& scheme_name,
+                              const std::vector<CustomScheme>& custom_schemes) {
+    for (const auto& cs : custom_schemes) if (cs.name == scheme_name) return true;
+    return false;
+}
+}
+
+
+namespace ucuda::ui_detail {
+[[nodiscard]] bool scheme_needs_compiled_body(const std::string& scheme_name,
+                              const std::vector<CustomScheme>& custom_schemes) {
+    return is_custom_scheme(scheme_name, custom_schemes)
+        || parse_extrapolation_name(scheme_name, nullptr)
+        || parse_composition_name(scheme_name, nullptr);
+}
+}
+
+
+namespace ucuda::ui_detail {
+[[nodiscard]] bool custom_scheme_uses_symmetry(const std::string& scheme_name,
+                                         const std::vector<CustomScheme>& custom_schemes) {
+    static const std::regex re(R"(a\s*\[\s*0\s*\])");
+    for (const auto& cs : custom_schemes)
+        if (cs.name == scheme_name) return std::regex_search(cs.body, re);
+    return false;
+}
+}
+
+
+namespace ucuda::ui_detail {
+[[nodiscard]] bool scheme_uses_symmetry(const std::string& scheme_name,
+                                         const std::vector<CustomScheme>& custom_schemes) {
+    // Экстраполяционная обёртка читает a[0] ровно тогда, когда его читает база:
+    // её тело — это тело базы, повторённое по стадиям. Без этой развёртки выбор
+    // "Extr(CD|1,2)" прятал бы поле s, которым обёрнутый CD пользуется.
+    ExtrapolationSpec spec;
+    if (parse_extrapolation_name(scheme_name, &spec))
+        return scheme_uses_symmetry(spec.base, custom_schemes);
+    // Same for a composition: its body is the base repeated with scaled steps,
+    // so hiding s under "Comp(CD|...)" would hide a knob the inner CD reads.
+    CompositionSpec cspec;
+    if (parse_composition_name(scheme_name, &cspec))
+        return scheme_uses_symmetry(cspec.base, custom_schemes);
+    return scheme_name == "CD" || scheme_name == "CD fast"
+        || scheme_name == "CD FP" || scheme_name == "CD fast FP"
+        || scheme_name == "Complex CD" || scheme_name == "Complex CD4"
+        || scheme_name == "CCD4 (o4s3)" || scheme_name == "CCD4 (o4s4)"
+        || scheme_name == "CD_{1-0}" || scheme_name == "Complex CD_{1-0}"
+        || scheme_name == "Complex CD4_{1-0}" || scheme_name == "CCD4 (o4s3)_{1-0}"
+        || scheme_name == "CCD4 (o4s4)_{1-0}"
+        || scheme_name == "Complex Implicit Euler"
+        || scheme_name == "SEMP" || scheme_name == "SIMP"
+        || custom_scheme_uses_symmetry(scheme_name, custom_schemes);
+}
+}
+
+
+namespace ucuda::ui_detail {
+[[nodiscard]] bool scheme_uses_cd_fp_iters(const std::string& scheme_name) {
+    ExtrapolationSpec spec;
+    if (parse_extrapolation_name(scheme_name, &spec))
+        return scheme_uses_cd_fp_iters(spec.base);
+    CompositionSpec cspec;
+    if (parse_composition_name(scheme_name, &cspec))
+        return scheme_uses_cd_fp_iters(cspec.base);
+    return scheme_name == "CD FP" || scheme_name == "CD fast FP";
+}
+}
+
+
+namespace ucuda::ui_detail {
+[[nodiscard]] bool scheme_uses_newton(const std::string& scheme_name) {
+    ExtrapolationSpec spec;
+    if (parse_extrapolation_name(scheme_name, &spec))
+        return scheme_uses_newton(spec.base);
+    CompositionSpec cspec;
+    if (parse_composition_name(scheme_name, &cspec))
+        return scheme_uses_newton(cspec.base);
+    return scheme_name == "Implicit Euler" || scheme_name == "Implicit Midpoint"
+        || scheme_name == "Complex Implicit Euler"
+        || dae_scheme_from_name(scheme_name, nullptr)    // DAE BDF1 / Trapezoidal
+        || scheme_is_multistep(scheme_name);             // BDF 1-5: корректор — тот же Ньютон
+}
 }

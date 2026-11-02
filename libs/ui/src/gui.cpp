@@ -1,5 +1,63 @@
-﻿#include "gui_internal.h"
+﻿#include "gui_common.h"
+#include "gui_inputs.h"
+#include "gui_integration.h"
+#include "gui_fields.h"
+#include "gui_plot.h"
+#include "tab_basins.h"
+#include "tab_custom.h"
+#include "tab_dft.h"
+#include "tab_fastsync.h"
+#include "tab_library.h"
+#include "tab_network.h"
+#include "tab_neural.h"
+#include "tab_order.h"
+#include "tab_parametric.h"
+#include "tab_phase.h"
 using namespace ucuda::ui_detail;
+
+namespace ucuda::ui_detail {
+// Индикатор компьюта в верхней строке. Раньше состояние снималось лестницей из двенадцати
+// почти одинаковых веток: каждая доставала из своей сессии одну и ту же четвёрку — подпись
+// запущенного конфига, время старта, cancel_token, progress_token. Ветки успели разойтись:
+// три подставляли запасное имя только при выходе индекса за границы, три — ещё и при пустом label.
+enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync, Custom, Order, Metrics, Neural };
+
+
+struct BusyInfo {
+    BusyKind    kind = BusyKind::None;
+    std::string what;
+    std::chrono::steady_clock::time_point start{};
+    bool  cancelling = false;   // пользователь нажал Stop, ждём движок
+    float progress   = 0.0f;    // 0..1 из session.progress_token
+};
+
+
+template <class Vec>
+[[nodiscard]] static std::string running_label(const Vec& items, int idx, const char* fallback) {
+    if (idx >= 0 && idx < (int)items.size() && !items[idx].label.empty())
+        return items[idx].label;
+    return fallback;
+}
+
+
+template <class Session>
+[[nodiscard]] static BusyInfo busy_from(const Session& s, BusyKind kind, std::string what) {
+    BusyInfo b;
+    b.kind  = kind;
+    b.what  = std::move(what);
+    b.start = s.compute_start_time;
+    b.cancelling = s.cancel_token && s.cancel_token->load(std::memory_order_relaxed);
+    if (s.progress_token)
+        b.progress = s.progress_token->load(std::memory_order_relaxed);
+    return b;
+}
+
+
+[[nodiscard]] TrajWork running_traj_work(const AppModel& m);
+
+
+[[nodiscard]] TrajWork current_tab_traj_work(const AppModel& m);
+}
 
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     set_field_latex(model.field_latex);
@@ -1366,4 +1424,44 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     }
     track_dock_selection(model);
     draw_ctrl_library_window(model);
+}
+
+
+namespace ucuda::ui_detail {
+[[nodiscard]] TrajWork running_traj_work(const AppModel& m) {
+    const CustomSession& cus = m.custom_session;
+    if (m.bifurcation_session.in_flight)
+        return m.bifurcation_session.traj_work(m.bifurcation_session.running_diagram_index);
+    if (m.lle_session.in_flight)     return m.lle_session.traj_work(m.lle_session.running_curve_index);
+    if (m.ls_session.in_flight)      return m.ls_session.traj_work(m.ls_session.running_curve_index);
+    if (m.metrics_session.in_flight) return m.metrics_session.traj_work(m.metrics_session.running_config_index);
+    if (m.dft1d_session.in_flight)   return m.dft1d_session.traj_work(m.dft1d_session.running_config_index);
+    if (m.phase_session.in_flight)   return {};
+    if (m.basins_session.in_flight)  return m.basins_session.traj_work(m.basins_session.running_config_index);
+    if (m.fastsync_session.in_flight || m.order_session.in_flight) return {};
+    if (cus.bif_session.in_flight)    return cus.bif_session.traj_work(cus.bif_session.running_diagram_index);
+    if (cus.lle_session.in_flight)    return cus.lle_session.traj_work(cus.lle_session.running_curve_index);
+    if (cus.ls_session.in_flight)     return cus.ls_session.traj_work(cus.ls_session.running_curve_index);
+    if (cus.basins_session.in_flight) return cus.basins_session.traj_work(cus.basins_session.running_config_index);
+    return {};
+}
+}
+
+
+namespace ucuda::ui_detail {
+[[nodiscard]] TrajWork current_tab_traj_work(const AppModel& m) {
+    switch (m.app_mode) {
+    case AppModel::AppMode::Parametric:
+        switch (m.parametric_active_analysis) {
+        case 0:  return m.bifurcation_session.traj_work(m.bifurcation_session.active_diagram_index);
+        case 1:  return m.lle_session.traj_work(m.lle_session.active_curve_index);
+        case 2:  return m.ls_session.traj_work(m.ls_session.active_curve_index);
+        case 3:  return m.metrics_session.traj_work(m.metrics_session.active_config_index);
+        default: return {};
+        }
+    case AppModel::AppMode::Dft1D:  return m.dft1d_session.traj_work(m.dft1d_session.active_config_index);
+    case AppModel::AppMode::Basins: return m.basins_session.traj_work(m.basins_session.active_config_index);
+    default: return {};
+    }
+}
 }

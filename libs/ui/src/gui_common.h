@@ -92,4 +92,31 @@ static const ModeTab kModeTabs[] = {
     { "Neural",     "Neural",         AppModel::AppMode::Neural,     false },
     { "Settings",   "Settings",       AppModel::AppMode::Settings,   true  },
 };
+
+
+// Target — то, что принимает parse: сама сессия или её сохраняемое состояние (*State).
+template <class Session, class Target>
+static bool apply_session_json(AppModel& model,
+                               const std::string& json,
+                               Session& dst,
+                               bool (*parse)(const std::string&, Target&),
+                               const char* what)
+{
+    if (json.empty()) return true;
+    Session probe;
+    if (!parse(json, probe)) {
+        model.session_load_warning =
+            std::string("saved session '") + what + "' is corrupt - ignored";
+        std::printf("[session] %s: parse failed, keeping defaults from record\n", what);
+        std::fflush(stdout);
+        return false;
+    }
+    if (!parse(json, dst)) {                 // не должно случаться, см. выше
+        model.session_load_warning =
+            std::string("saved session '") + what + "' failed to apply";
+        return false;
+    }
+    model.session_load_warning.clear();
+    return true;
+}
 }

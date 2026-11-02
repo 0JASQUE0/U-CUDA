@@ -1,7 +1,7 @@
 ﻿#pragma once
 // Схемы и блок Integration: таблица встроенных схем, выбор схемы, цели свипа, адаптивный шаг,
 // библиотека регуляторов, Newton, рассылка настроек.
-#include "gui_inputs.h"
+#include "gui_common.h"
 
 namespace ucuda::ui_detail {
 [[nodiscard]] bool scheme_needs_compiled_body(const std::string& scheme_name,
@@ -387,4 +387,10 @@ void broadcast_adaptive(AppModel& m, const AdaptiveSettings& a) ;
 
 
 std::vector<std::pair<std::string, std::string>> user_ctrl_list() ;
+
+
+std::string wrapper_coefficients_text(
+        const std::string& name,
+        const std::vector<CustomScheme>& custom_schemes,
+        const std::map<std::string, std::string>& param_values);
 }
