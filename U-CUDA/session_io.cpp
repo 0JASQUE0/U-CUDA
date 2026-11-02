@@ -2022,6 +2022,18 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
         o << ",\"device_min\":"; jstr(o, c.device.min_text);
         o << ",\"device_max\":"; jstr(o, c.device.max_text);
     }
+    if (c.task.enabled) {
+        o << ",\"task\":{\"source\":" << c.task.source << ",\"targets\":[";
+        for (size_t i = 0; i < c.task.targets.size(); ++i) o << (i ? "," : "") << c.task.targets[i];
+        o << "],\"horizon\":"; jstr(o, c.task.horizon_text);
+        o << ",\"washout\":"; jstr(o, c.task.washout_text);
+        o << ",\"gap\":"; jstr(o, c.task.gap_text);
+        o << ",\"train\":"; jstr(o, c.task.train_text);
+        o << ",\"val\":"; jstr(o, c.task.val_text);
+        o << ",\"filter\":"; jstr(o, c.task.filter_text);
+        o << ",\"features\":"; jstr(o, c.task.features_text);
+        o << "}";
+    }
     if (c.keep_checkpoint) o << ",\"keep_checkpoint\":true";
     if (!c.checkpoint_path.empty()) { o << ",\"checkpoint_path\":"; jstr(o, c.checkpoint_path); }
     o << "}";
@@ -2222,6 +2234,33 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
             else if (k == "nearest") q.nearest = p.boolean();
             else p.skip_value();
         });
+    }
+    else if (key == "task") {
+        c.task.enabled = true;
+        p.expect('{');
+        if (!p.opt('}')) {
+            while (true) {
+                const std::string k = p.str();
+                p.expect(':');
+                if (k == "source") c.task.source = std::stoi(p.str_or_num());
+                else if (k == "targets") {
+                    c.task.targets.clear();
+                    p.expect('[');
+                    if (!p.opt(']')) while (true) { c.task.targets.push_back(std::stoi(p.str_or_num())); if (p.opt(',')) continue; p.expect(']'); break; }
+                }
+                else if (k == "horizon") c.task.horizon_text = p.str();
+                else if (k == "washout") c.task.washout_text = p.str();
+                else if (k == "gap") c.task.gap_text = p.str();
+                else if (k == "train") c.task.train_text = p.str();
+                else if (k == "val") c.task.val_text = p.str();
+                else if (k == "filter") c.task.filter_text = p.str();
+                else if (k == "features") c.task.features_text = p.str();
+                else p.skip_value();
+                if (p.opt(',')) continue;
+                p.expect('}');
+                break;
+            }
+        }
     }
     else if (key == "device_state")     c.device.state_name = p.str();
     else if (key == "device_rhs")       c.device.rhs_text = p.str();

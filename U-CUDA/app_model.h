@@ -232,6 +232,7 @@ struct NeuralViewState {
     int map_pop = 0;
     bool map_log = true; // разброс в log10: он меняется на 7 порядков
     std::string rate_bin_text = "0";   // окно Population Rate, 0 = авто
+    int readout_target = 0;            // окно Neural Readout
 };
 
 struct NetworkViewState {

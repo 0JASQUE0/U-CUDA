@@ -115,6 +115,7 @@ struct NeuralSource {
     std::string time_scale_text = "1";     // времени источника на единицу времени сети
     std::string skip_text = "100";         // переходный процесс источника
     bool normalize = true;                 // среднее 0 и СКО 1 по поданным отсчётам
+    long long normalize_first = 0;         // считать их только по первым отсчётам, 0 = по всем: задача не должна видеть тест
 };
 
 // Доля узлов популяции на канал: у одного узла один канал, доли одной популяции не пересекаются.
@@ -124,6 +125,29 @@ struct NeuralLink {
 };
 
 enum class NeuralProtocol { Continuous = 0, Trials };
+
+// Задача: по отклику сети на вход восстановить или предсказать переменные той же системы-источника. Отсчёт = отсчёт входа.
+// Разбиение по времени: прогрев, обучение, пропуск, валидация, пропуск, тест; нормировка входа только по обучению.
+struct NeuralTask {
+    bool enabled = false;
+    int source = 0;
+    std::vector<int> targets;              // переменные источника
+    std::string horizon_text = "0";        // на сколько отсчётов вперёд, 0 = наблюдатель
+    std::string washout_text = "1000", gap_text = "250";   // в отсчётах
+    std::string train_text = "0.6", val_text = "0.2";      // доли остатка
+    std::string filter_text = "20";        // импульсный режим: постоянная фильтра спайков
+    std::string features_text = "1000";    // узлов-признаков
+};
+
+struct NeuralTaskResult {
+    std::vector<std::string> names;        // [targets]
+    std::vector<double> val, test, lambda; // [targets], NRMSE
+    std::vector<double> delay_test;        // [targets], ridge по задержкам входа, длина выбрана на валидации
+    int delay_length = 0, features = 0;
+    double t0 = 0.0, dt = 0.0;             // тест в единицах времени сети
+    int points = 0;
+    std::vector<double> truth, predicted;  // [point][target], тест
+};
 
 struct NeuralConfig {
     std::string label = "Experiment";
@@ -181,6 +205,7 @@ struct NeuralConfig {
     std::vector<NeuralReceptor> receptors;
     std::vector<NeuralPlasticRule> plastic_rules;
     NeuralDeviceModel device;
+    NeuralTask task;
 
     // Снимок конца расчёта живёт только в памяти, пока его не сохранили в файл.
     bool keep_checkpoint = false;
@@ -204,6 +229,7 @@ struct NeuralConfig {
     int watched_per_instance = 0;         // столбцов weight_trace или device_trace на экземпляр
     std::vector<std::string> watch_labels;   // подписи этих столбцов
     std::vector<double> weight_summary;   // [instance][3]: min, среднее, max пластичных дуг в конце
+    NeuralTaskResult task_result;
     long long arcs = 0;
     int degree_min = 0, degree_max = 0;
     double build_seconds = 0.0;
@@ -252,6 +278,7 @@ struct NeuralOutcome {
     int watched_per_instance = 0;
     std::vector<std::string> watch_labels;
     std::vector<double> weight_summary;
+    NeuralTaskResult task_result;
     bool resumed = false;
     std::string hash, recipe;
     long long arcs = 0;
@@ -325,6 +352,12 @@ std::vector<double> neural_sweep2_values(const NeuralConfig& c);
 std::string neural_sweep_csv(const NeuralConfig& c);
 // Длительность записи с учётом протокола: при попытках это попытки * (пауза + стимул), а не t_max.
 double neural_record_time(const NeuralConfig& c);
+// Переменная снимка системы на тех же отсчётах и той же траектории, что и вход; без нормировки. Цель задачи.
+std::vector<double> neural_source_samples(const NeuralSource& s, int variable, size_t n, double dt);
+// Настройки запуска под задачу: что писать, с каким шагом, по какому отрезку нормировать вход. Бросает на несовместимых настройках.
+NeuralConfig neural_task_config(const NeuralConfig& c);
+// Обучение выхода по готовому расчёту. c из neural_task_config, r его запрос.
+NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest& r, const NeuralResult& res);
 // Спайки строками: шаг, время, узел. Время спайка шага n = (n + 1) h.
 std::string neural_spike_csv(const NeuralConfig& c);
 // Контрольная точка в файле. Бросает на ошибке чтения и записи.

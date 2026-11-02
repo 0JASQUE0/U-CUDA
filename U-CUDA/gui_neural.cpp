@@ -412,6 +412,48 @@ static void draw_neural_input(SystemLibrary& lib, NeuralSession& s, NeuralConfig
     if (c.sources.empty()) ImGui::EndDisabled();
 }
 
+static void draw_neural_readout(NeuralConfig& c) {
+    if (!ImGui::CollapsingHeader("Readout")) return;
+    NeuralTask& t = c.task;
+    ImGui::Checkbox("train a readout on the response", &t.enabled);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Ridge on the state of the nodes, or on filtered spikes. Targets are variables of the input system.\n"
+                          "Takes the record in time order: washout, train, gap, validation, gap, test.\n"
+                          "The input is normalised on the train part, lambda is chosen on validation, NRMSE is reported on the test.");
+    if (!t.enabled) return;
+    std::vector<int> systems;
+    for (int i = 0; i < (int)c.sources.size(); ++i) if (c.sources[(size_t)i].kind == NeuralSourceKind::System) systems.push_back(i);
+    if (systems.empty()) { ImGui::TextDisabled("Add an input source that is a system from the library."); return; }
+    if (std::find(systems.begin(), systems.end(), t.source) == systems.end()) t.source = systems[0];
+    ImGui::SetNextItemWidth(kFieldW);
+    if (ImGui::BeginCombo("input system", c.sources[(size_t)t.source].name.c_str())) {
+        for (int i : systems) if (ImGui::Selectable(c.sources[(size_t)i].name.c_str(), i == t.source)) { t.source = i; t.targets.clear(); }
+        ImGui::EndCombo();
+    }
+    const NeuralSource& src = c.sources[(size_t)t.source];
+    for (int k = 0; k < (int)src.vars.size(); ++k) {
+        auto it = std::find(t.targets.begin(), t.targets.end(), k);
+        bool on = it != t.targets.end();
+        if (k) ImGui::SameLine();
+        if (ImGui::Checkbox((src.vars[(size_t)k] + "##target").c_str(), &on)) {
+            if (on) t.targets.push_back(k); else t.targets.erase(it);
+            std::sort(t.targets.begin(), t.targets.end());
+        }
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("targets");
+    InputNumStr("horizon, samples", t.horizon_text, kFieldW);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("0: the target at the same moment. Above 0: this many input samples ahead.");
+    InputNumStr("washout, samples", t.washout_text, kFieldW);
+    InputNumStr("train share", t.train_text, kFieldW);
+    InputNumStr("validation share", t.val_text, kFieldW);
+    InputNumStr("gap, samples", t.gap_text, kFieldW);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Dropped between the parts, so that one window of the record does not lie on both sides.");
+    InputNumStr("feature nodes", t.features_text, kFieldW);
+    if (c.schedule == NeuralSchedule::Spike) InputNumStr("spike filter time", t.filter_text, kFieldW);
+    ImGui::TextDisabled("The input sample time sets the samples. The transient must be 0, sweeps are off.");
+}
+
 static void draw_neural_protocol(NeuralConfig& c) {
     if (!ImGui::CollapsingHeader("Protocol", ImGuiTreeNodeFlags_DefaultOpen)) return;
     int kind = (int)c.protocol;
@@ -596,6 +638,7 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
     if (spiking) draw_neural_spiking(s, c);
     draw_neural_input(lib, s, c);
     draw_neural_protocol(c);
+    draw_neural_readout(c);
     draw_neural_sweep(s, c);
     if (!spiking) draw_neural_lyapunov(c);
     draw_neural_populations(s, c);
@@ -613,6 +656,11 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
         if (c.sweep_values.empty())
             for (size_t p = 0; p < c.pop_rate.size() && p < c.populations.size(); ++p)
                 ImGui::Text("%s: %.4g spikes per node per unit of time", c.populations[p].name.c_str(), c.pop_rate[p]);
+        const NeuralTaskResult& q = c.task_result;
+        for (size_t k = 0; k < q.names.size(); ++k) {
+            ImGui::Text("%s: test NRMSE %.4f, validation %.4f, lambda %g", q.names[k].c_str(), q.test[k], q.val[k], q.lambda[k]);
+            if (k < q.delay_test.size()) { ImGui::SameLine(); ImGui::TextDisabled("delays of the input (%d): %.4f", q.delay_length, q.delay_test[k]); }
+        }
         if (c.result.device_clips > 0)
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "The device state bound acted %lld times.", c.result.device_clips);
         if (c.result.spikes_dropped > 0)
@@ -687,7 +735,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         if (ch == 0 || c.input_view.empty()) { ImGui::TextDisabled("No input yet: add a source and a link, then press Run."); return; }
     }
     const bool spikes = c.schedule == NeuralSchedule::Spike;
-    const bool sync = what == kNeuralSync, sweep = what == kNeuralSweep, input = what == kNeuralInput, lyapWindow = what == kNeuralLyap, rate = what == kNeuralRate, raster = what == kNeuralRaster, weights = what == kNeuralWeights;
+    const bool sync = what == kNeuralSync, sweep = what == kNeuralSweep, input = what == kNeuralInput, lyapWindow = what == kNeuralLyap, rate = what == kNeuralRate, raster = what == kNeuralRaster, weights = what == kNeuralWeights, readout = what == kNeuralReadout;
     if ((rate || raster) && r.spike_count.empty()) { ImGui::TextDisabled("Pick the Spikes schedule and press Run."); return; }
     if (rate) {
         InputNumStr("bin (0 = auto)", vs.rate_bin_text, kFieldW);
@@ -716,14 +764,23 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     // Показатель от значения свипа рисуется как сводка свипа.
     const bool byValue = sweep || (lyapWindow && r.lyapunov.size() > 1 && vs.lyap_kind == 0);
     const bool spread = (sync && vs.sync_kind == 1) || (sweep && !spikes && vs.sweep_kind == 1);
-    if (!sweep && !input && !lyap && !rate && !raster && !weights && !s.vars.empty() && (!sync || spread)) {
+    const NeuralTaskResult& task = c.task_result;
+    if (readout && !task.names.empty()) {
+        const std::vector<const char*> items = c_str_list(task.names);
+        if (vs.readout_target >= (int)items.size()) vs.readout_target = 0;
+        ImGui::SetNextItemWidth(90.0f);
+        ImGui::Combo("target##readout", &vs.readout_target, items.data(), (int)items.size());
+        ImGui::SameLine();
+        ImGui::TextDisabled("test part only, NRMSE %.4f, %d feature nodes", task.test[(size_t)vs.readout_target], task.features);
+    }
+    if (!sweep && !input && !lyap && !rate && !raster && !weights && !readout && !s.vars.empty() && (!sync || spread)) {
         const std::vector<const char*> items = c_str_list(s.vars);
         if (sync) ImGui::SameLine();
         ImGui::SetNextItemWidth(90.0f);
         ImGui::Combo(what == kNeuralMeans ? "variable##means" : what == kNeuralNodes ? "variable##nodes" : "variable##sync",
                      &vs.series_var, items.data(), (int)items.size());
     }
-    if (!byValue && !input) neural_instance_picker(c, vs, what == kNeuralMeans ? "instance##means" : what == kNeuralNodes ? "instance##nodes" : lyap ? "instance##lyap" : rate ? "instance##rate" : raster ? "instance##raster" : weights ? "instance##weights" : "instance##sync");
+    if (!byValue && !input && !readout) neural_instance_picker(c, vs, what == kNeuralMeans ? "instance##means" : what == kNeuralNodes ? "instance##nodes" : lyap ? "instance##lyap" : rate ? "instance##rate" : raster ? "instance##raster" : weights ? "instance##weights" : "instance##sync");
 
     // Точка p кривой k.
     std::function<double(int)> xof = [&](int p) { return r.t0 + r.dt * (double)p; };
@@ -795,6 +852,16 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         };
         yname = "node";
         ImGui::TextDisabled(stride > 1 ? "%zu spikes, every %d-th node is shown" : "%zu spikes", shown.size(), stride);
+    }
+    else if (readout) {
+        if (task.names.empty()) empty = "Turn on the readout in Neural Controls and press Run.";
+        else {
+            const int K2 = (int)task.names.size(), v = vs.readout_target;
+            curves = 2; points = task.points;
+            xof = [&task](int p) { return task.t0 + task.dt * (double)p; };
+            yof = [&task, K2, v](int k, int p) { return (k == 0 ? task.truth : task.predicted)[(size_t)p * K2 + v]; };
+            yname = task.names[(size_t)v];
+        }
     }
     else if (weights) {
         const std::vector<double>& d = !r.weight_trace.empty() ? r.weight_trace : r.device_trace;
@@ -882,7 +949,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     static std::vector<std::vector<double>> buffers[kNeuralWindowCount];
     static int filled[kNeuralWindowCount] = {};
     std::vector<std::vector<double>>& bufs = buffers[what];
-    const int gen = (((((c.data_generation * 131 + vs.series_var) * 131 + s.active_config_index) * 131 + vs.instance) * 131 + vs.sync_kind * 3 + vs.sweep_kind) * 131 + curves) * 131 + vs.lyap_kind + (rate ? points * 7 : 0);
+    const int gen = (((((c.data_generation * 131 + vs.series_var) * 131 + s.active_config_index) * 131 + vs.instance) * 131 + vs.sync_kind * 3 + vs.sweep_kind) * 131 + curves) * 131 + vs.lyap_kind + (rate ? points * 7 : 0) + (readout ? vs.readout_target * 11 : 0);
     const bool fresh = (int)bufs.size() != curves || filled[what] != gen + 1;
     if (fresh) {
         bufs.assign((size_t)curves, {});
@@ -912,6 +979,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         si.label = what == kNeuralNodes ? std::to_string(r.observed[(size_t)nodes[(size_t)k]])
                  : input ? c.sources[(size_t)k].name
                  : weights ? (k < (int)c.watch_labels.size() ? c.watch_labels[(size_t)k] : std::to_string(k))
+                 : readout ? std::string(k == 0 ? "true" : "readout")
                  : lyap ? std::string("lambda") : c.populations[(size_t)(k % K)].name;
         if (byValue && !c.sweep2_values.empty()) {
             const int perNet = lyap ? 1 : K;
@@ -933,8 +1001,8 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     // Ось времени по записи, а не по данным: у R края могут быть пустыми, окна должны совпадать по t.
     const double t_end = r.t0 + r.dt * (double)(r.n_points - 1);
     view.x_fit_use_explicit = !byValue && t_end > r.t0;
-    view.x_fit_min = r.t0;
-    view.x_fit_max = t_end;
+    view.x_fit_min = readout ? task.t0 : r.t0;
+    view.x_fit_max = readout ? task.t0 + task.dt * (double)(task.points - 1) : t_end;
     view.pad_y = true;
     view.show_zero_x = view.show_zero_y = false;
     view.point_markers = byValue;
