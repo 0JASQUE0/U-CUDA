@@ -233,25 +233,25 @@ void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
             "Bifurcation", "pbd_", (int)model.bifurcation_session.diagrams.size(),
             [&model](int i) { return model.bifurcation_session.diagrams[i].label; },
             [&model](int i) {
-                model.parametric_queue.push_back({ParametricQueueItem::Kind::Bifurcation, i});
+                model.enqueue_parametric({ParametricQueueItem::Kind::Bifurcation, i});
             } });
         groups.push_back(RunAllGroup{
             "LLE", "plle_", (int)model.lle_session.curves.size(),
             [&model](int i) { return model.lle_session.curves[i].label; },
             [&model](int i) {
-                model.parametric_queue.push_back({ParametricQueueItem::Kind::LLE, i});
+                model.enqueue_parametric({ParametricQueueItem::Kind::LLE, i});
             } });
         groups.push_back(RunAllGroup{
             "LS", "pls_", (int)model.ls_session.curves.size(),
             [&model](int i) { return model.ls_session.curves[i].label; },
             [&model](int i) {
-                model.parametric_queue.push_back({ParametricQueueItem::Kind::LS, i});
+                model.enqueue_parametric({ParametricQueueItem::Kind::LS, i});
             } });
         groups.push_back(RunAllGroup{
             "Metrics", "pmet_", (int)model.metrics_session.configs.size(),
             [&model](int i) { return model.metrics_session.configs[i].label; },
             [&model](int i) {
-                model.parametric_queue.push_back({ParametricQueueItem::Kind::Metrics, i});
+                model.enqueue_parametric({ParametricQueueItem::Kind::Metrics, i});
             } });
 
         // Run all блокируется ТОЛЬКО на время расчёта: списков три, и пустой
@@ -261,16 +261,14 @@ void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
                              any_in_flight, 140.0f,
                              [&model, kind, active_idx]() {
                                  if (active_idx < 0) return;
-                                 if (!model.parametric_engine)
-                                     model.parametric_engine = std::make_unique<ParametricEngine>();
-                                 if      (kind == 0) model.bifurcation_session.run_async(*model.parametric_engine, active_idx);
-                                 else if (kind == 1) model.lle_session.run_async(*model.parametric_engine, active_idx);
-                                 else if (kind == 2) model.ls_session.run_async(*model.parametric_engine, active_idx);
-                                 else if (kind == 3) model.metrics_session.run_async(*model.parametric_engine, active_idx);
+                                 if      (kind == 0) model.run_bifurcation(active_idx);
+                                 else if (kind == 1) model.run_lle(active_idx);
+                                 else if (kind == 2) model.run_ls(active_idx);
+                                 else if (kind == 3) model.run_metrics(active_idx);
                              },
                              {}, groups,
                              [&model]() { model.start_next_in_parametric_queue(); },
-                             model.parametric_queue.size());
+                             model.parametric_queue().size());
     }
     ImGui::Separator();
 

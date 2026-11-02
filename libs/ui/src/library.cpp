@@ -502,7 +502,7 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
             // clear on system switch — otherwise the second-system Run either
             // produced a stale-looking result or zeroed out the first one.
             model.custom_session = CustomSession{};
-            model.parametric_engine.reset();
+            model.reset_engine();
             model.start_custom_analysis();
             std::string jc = lib.load_session(model.loaded_name, "_last_custom");
             apply_session_json(model, jc, model.custom_session, session_from_json_custom, "_last_custom");

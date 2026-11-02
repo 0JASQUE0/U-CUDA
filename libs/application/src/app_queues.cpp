@@ -57,7 +57,7 @@ void AppModel::poll_parametric_prewarm() {
     // prewarm_rest_of_parametric_queue, а лишняя компиляция отняла бы у него CPU.
     if (bifurcation_session.in_flight || lle_session.in_flight || ls_session.in_flight ||
         metrics_session.in_flight) return;
-    if (!parametric_queue.empty()) return;
+    if (!parametric_queue_.empty()) return;
     if (parametric_prewarm_future.valid() &&
         parametric_prewarm_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
         return;
@@ -113,7 +113,7 @@ void AppModel::poll_parametric_prewarm() {
 // Прогрев хвоста очереди. Запросы собираются ЗДЕСЬ, на UI-потоке: фоновому потоку нельзя читать
 // сессии, их правит пользователь.
 void AppModel::prewarm_rest_of_parametric_queue() {
-    if (!parametric_engine || parametric_queue.empty()) return;
+    if (!parametric_engine || parametric_queue_.empty()) return;
     // Присваивание поверх работающего future заблокировало бы UI-поток в его деструкторе — в этом
     // случае просто пропускаем: не прогрелось, значит Run скомпилирует сам (см. analysis_session).
     if (parametric_prewarm_future.valid() &&
@@ -121,7 +121,7 @@ void AppModel::prewarm_rest_of_parametric_queue() {
         return;
 
     std::vector<std::function<void(ParametricEngine&)>> tasks;
-    for (const ParametricQueueItem& it : parametric_queue) {
+    for (const ParametricQueueItem& it : parametric_queue_) {
         std::function<void(ParametricEngine&)> t;
         switch (it.kind) {
         case ParametricQueueItem::Kind::Bifurcation: t = bifurcation_session.prewarm_task(it.index); break;
@@ -145,11 +145,11 @@ bool AppModel::start_next_in_parametric_queue() {
         lle_session.in_flight ||
         ls_session.in_flight ||
         metrics_session.in_flight) return false;
-    if (parametric_queue.empty()) return false;
+    if (parametric_queue_.empty()) return false;
     if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
-    while (!parametric_queue.empty()) {
-        ParametricQueueItem it = parametric_queue.front();
-        parametric_queue.pop_front();
+    while (!parametric_queue_.empty()) {
+        ParametricQueueItem it = parametric_queue_.front();
+        parametric_queue_.pop_front();
         bool ok = false;
         switch (it.kind) {
         case ParametricQueueItem::Kind::Bifurcation:
@@ -225,16 +225,16 @@ void pin_fixed_ic(std::map<std::string,std::string>& ic,
 
 bool AppModel::start_next_in_custom_queue() {
     if (custom_session.any_in_flight()) return false;
-    if (custom_queue.empty()) return false;
+    if (custom_queue_.empty()) return false;
     if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
 
     using K = CustomQueueItem::Kind;
     auto& cs = custom_session;
     const auto& shared = cs.shared;
 
-    while (!custom_queue.empty()) {
-        CustomQueueItem it = custom_queue.front();
-        custom_queue.pop_front();
+    while (!custom_queue_.empty()) {
+        CustomQueueItem it = custom_queue_.front();
+        custom_queue_.pop_front();
         bool ok = false;
 
         switch (it.kind) {
@@ -398,78 +398,78 @@ static bool run_next_queued(Session& s, std::deque<Item>& q, std::unique_ptr<Par
 }
 
 bool AppModel::start_next_in_dft1d_queue() {
-    return run_next_queued(dft1d_session, dft1d_queue, parametric_engine);
+    return run_next_queued(dft1d_session, dft1d_queue_, parametric_engine);
 }
 
 bool AppModel::start_next_in_basins_queue() {
-    return run_next_queued(basins_session, basins_queue, parametric_engine);
+    return run_next_queued(basins_session, basins_queue_, parametric_engine);
 }
 
 bool AppModel::start_next_in_order_queue() {
-    return run_next_queued(order_session, order_queue, parametric_engine);
+    return run_next_queued(order_session, order_queue_, parametric_engine);
 }
 
 bool AppModel::start_next_in_network_queue() {
-    return run_next_queued(network_session, network_queue, parametric_engine);
+    return run_next_queued(network_session, network_queue_, parametric_engine);
 }
 
 bool AppModel::start_next_in_neural_queue() {
-    return run_next_queued(neural_session, neural_queue, parametric_engine);
+    return run_next_queued(neural_session, neural_queue_, parametric_engine);
 }
 
 bool AppModel::start_next_in_fastsync_queue() {
-    return run_next_queued(fastsync_session, fastsync_queue, parametric_engine);
+    return run_next_queued(fastsync_session, fastsync_queue_, parametric_engine);
 }
 
 void AppModel::remove_bifurcation_diagram(int i) {
     bifurcation_session.remove_diagram(i);
-    cleanup_queue_after_removal(parametric_queue, ParametricQueueItem::Kind::Bifurcation, i);
+    cleanup_queue_after_removal(parametric_queue_, ParametricQueueItem::Kind::Bifurcation, i);
     cleanup_plot_windows_after_removal(parametric_plot_windows, ParametricPlotWindow::Kind::Bifurcation, i);
     parametric_plot_windows_dirty = true;
 }
 
 void AppModel::remove_lle_curve(int i) {
     lle_session.remove_curve(i);
-    cleanup_queue_after_removal(parametric_queue, ParametricQueueItem::Kind::LLE, i);
+    cleanup_queue_after_removal(parametric_queue_, ParametricQueueItem::Kind::LLE, i);
     cleanup_plot_windows_after_removal(parametric_plot_windows, ParametricPlotWindow::Kind::LLE, i);
     parametric_plot_windows_dirty = true;
 }
 
 void AppModel::remove_metrics_config(int i) {
     metrics_session.remove_config(i);
-    cleanup_queue_after_removal(parametric_queue, ParametricQueueItem::Kind::Metrics, i);
+    cleanup_queue_after_removal(parametric_queue_, ParametricQueueItem::Kind::Metrics, i);
     cleanup_plot_windows_after_removal(parametric_plot_windows, ParametricPlotWindow::Kind::Metrics, i);
     parametric_plot_windows_dirty = true;
 }
 
 void AppModel::remove_ls_curve(int i) {
     ls_session.remove_curve(i);
-    cleanup_queue_after_removal(parametric_queue, ParametricQueueItem::Kind::LS, i);
+    cleanup_queue_after_removal(parametric_queue_, ParametricQueueItem::Kind::LS, i);
     cleanup_plot_windows_after_removal(parametric_plot_windows, ParametricPlotWindow::Kind::LS, i);
     parametric_plot_windows_dirty = true;
 }
 
 void AppModel::remove_basins_config(int i) {
     basins_session.remove_config(i);
-    // Cleanup basins_queue: drop items pointing at the removed index, shift
+    // Cleanup basins_queue_: drop items pointing at the removed index, shift
     // index > i down by one.
-    for (auto it = basins_queue.begin(); it != basins_queue.end(); ) {
-        if (it->index == i) it = basins_queue.erase(it);
+    for (auto it = basins_queue_.begin(); it != basins_queue_.end(); ) {
+        if (it->index == i) it = basins_queue_.erase(it);
         else ++it;
     }
-    for (auto& it : basins_queue)
+    for (auto& it : basins_queue_)
         if (it.index > i) --it.index;
 }
 
 void AppModel::remove_fastsync_config(int i) {
     fastsync_session.remove_config(i);
-    // Cleanup fastsync_queue: drop items pointing at the removed index, shift
+    // Cleanup fastsync_queue_: drop items pointing at the removed index, shift
     // index > i down by one.
-    for (auto it = fastsync_queue.begin(); it != fastsync_queue.end(); ) {
-        if (it->index == i) it = fastsync_queue.erase(it);
+    for (auto it = fastsync_queue_.begin(); it != fastsync_queue_.end(); ) {
+        if (it->index == i) it = fastsync_queue_.erase(it);
         else ++it;
     }
-    for (auto& it : fastsync_queue)
+    for (auto& it : fastsync_queue_)
         if (it.index > i) --it.index;
 }
 
@@ -489,11 +489,11 @@ void AppModel::remove_order_config(int i) {
     order_plot_windows_dirty = true;
     // Та же чистка очереди, что у Basins/FastSync: выкидываем элементы,
     // указывающие на удалённый конфиг, и сдвигаем те, что были правее.
-    for (auto it = order_queue.begin(); it != order_queue.end(); ) {
-        if (it->index == i) it = order_queue.erase(it);
+    for (auto it = order_queue_.begin(); it != order_queue_.end(); ) {
+        if (it->index == i) it = order_queue_.erase(it);
         else ++it;
     }
-    for (auto& it : order_queue)
+    for (auto& it : order_queue_)
         if (it.index > i) --it.index;
 }
 
@@ -501,20 +501,75 @@ void AppModel::remove_network_config(int i) {
     network_session.remove_config(i);
     // Та же чистка очереди, что у Order: выкидываем элементы, указывающие на
     // удалённый конфиг, и сдвигаем те, что были правее.
-    for (auto it = network_queue.begin(); it != network_queue.end(); ) {
-        if (it->index == i) it = network_queue.erase(it);
+    for (auto it = network_queue_.begin(); it != network_queue_.end(); ) {
+        if (it->index == i) it = network_queue_.erase(it);
         else ++it;
     }
-    for (auto& it : network_queue)
+    for (auto& it : network_queue_)
         if (it.index > i) --it.index;
 }
 
 void AppModel::remove_neural_config(int i) {
     neural_session.remove_config(i);
-    for (auto it = neural_queue.begin(); it != neural_queue.end(); ) {
-        if (it->index == i) it = neural_queue.erase(it);
+    for (auto it = neural_queue_.begin(); it != neural_queue_.end(); ) {
+        if (it->index == i) it = neural_queue_.erase(it);
         else ++it;
     }
-    for (auto& it : neural_queue)
+    for (auto& it : neural_queue_)
         if (it.index > i) --it.index;
+}
+
+
+// ---- Команды UI: запуск на движке, очереди ----
+
+ParametricEngine& AppModel::ensure_engine() {
+    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
+    return *parametric_engine;
+}
+
+bool AppModel::run_bifurcation(int idx)  { return bifurcation_session.run_async(ensure_engine(), idx); }
+bool AppModel::run_lle(int idx)          { return lle_session.run_async(ensure_engine(), idx); }
+bool AppModel::run_ls(int idx)           { return ls_session.run_async(ensure_engine(), idx); }
+bool AppModel::run_metrics(int idx)      { return metrics_session.run_async(ensure_engine(), idx); }
+bool AppModel::run_dft1d(int idx)        { return dft1d_session.run_async(ensure_engine(), idx); }
+bool AppModel::run_basins(int idx)       { return basins_session.run_async(ensure_engine(), idx); }
+bool AppModel::recluster_basins(int idx) { return basins_session.run_recluster_async(ensure_engine(), idx); }
+bool AppModel::run_fastsync(int idx)     { return fastsync_session.run_async(ensure_engine(), idx); }
+bool AppModel::run_order(int idx)        { return order_session.run_async(ensure_engine(), idx); }
+bool AppModel::run_network(int idx)      { return network_session.run_async(ensure_engine(), idx); }
+bool AppModel::run_neural(int idx, bool resume) { return neural_session.run_async(ensure_engine(), idx, resume); }
+
+void AppModel::reset_engine() {
+    if (parametric_prewarm_future.valid()) parametric_prewarm_future.wait();
+    parametric_engine.reset();
+}
+
+void AppModel::enqueue_parametric(ParametricQueueItem item) { parametric_queue_.push_back(item); }
+void AppModel::enqueue_dft1d(int idx)    { dft1d_queue_.push_back({idx}); }
+void AppModel::enqueue_basins(int idx)   { basins_queue_.push_back({idx}); }
+void AppModel::enqueue_fastsync(int idx) { fastsync_queue_.push_back({idx}); }
+void AppModel::enqueue_order(int idx)    { order_queue_.push_back({idx}); }
+void AppModel::enqueue_network(int idx)  { network_queue_.push_back({idx}); }
+void AppModel::enqueue_neural(int idx)   { neural_queue_.push_back({idx}); }
+void AppModel::enqueue_custom(CustomQueueItem item) { custom_queue_.push_back(item); }
+
+void AppModel::enqueue_custom_level_2d() { custom_session.enqueue_level_2d(custom_queue_); }
+void AppModel::enqueue_custom_level_1d() { custom_session.enqueue_level_1d(custom_queue_); }
+void AppModel::enqueue_custom_level_3()  { custom_session.enqueue_level_3(custom_queue_); }
+void AppModel::enqueue_custom_level_1d_partial(bool x_slices, bool y_slices) {
+    custom_session.enqueue_level_1d_partial(custom_queue_, x_slices, y_slices);
+}
+
+void AppModel::clear_neural_queue() { neural_queue_.clear(); }
+void AppModel::clear_custom_queue() { custom_queue_.clear(); }
+
+void AppModel::clear_all_queues() {
+    parametric_queue_.clear();
+    dft1d_queue_.clear();
+    basins_queue_.clear();
+    fastsync_queue_.clear();
+    order_queue_.clear();
+    network_queue_.clear();
+    neural_queue_.clear();
+    custom_queue_.clear();
 }

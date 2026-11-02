@@ -268,8 +268,7 @@ static void draw_neural_checkpoint(AppModel& model, NeuralSession& s, NeuralConf
     const bool can = c.checkpoint != nullptr && !s.in_flight;
     if (!can) ImGui::BeginDisabled();
     if (ImGui::Button("Continue")) {
-        if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
-        s.run_async(*model.parametric_engine, s.active_config_index, true);
+        model.run_neural(s.active_config_index, true);
     }
     if (!can) ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Runs from the checkpoint to the computing time: raise it first.\nParameters may change. The graph, h, the decimation, the transient and the recorded nodes may not.");
@@ -559,19 +558,18 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
         g.pick_id = "pneural_";
         g.n       = (int)s.configs.size();
         g.label   = [&s](int i) { return s.configs[i].label; };
-        g.enqueue = [&model](int i) { model.neural_queue.push_back({ i }); };
+        g.enqueue = [&model](int i) { model.enqueue_neural(i); };
         draw_run_and_run_all("##run_all_neural", s.in_flight, false, s.in_flight, 160.0f,
                              [&model, &s]() {
-                                 if (!model.parametric_engine) model.parametric_engine = std::make_unique<ParametricEngine>();
-                                 s.run_async(*model.parametric_engine, s.active_config_index);
+                                 model.run_neural(s.active_config_index);
                              },
                              {},
                              { g },
                              [&model]() { model.start_next_in_neural_queue(); },
-                             model.neural_queue.size());
+                             model.neural_queue().size());
         ImGui::SameLine();
         if (!s.in_flight) ImGui::BeginDisabled();
-        if (ImGui::Button("Stop", ImVec2(90, 0))) { s.request_cancel(); model.neural_queue.clear(); }
+        if (ImGui::Button("Stop", ImVec2(90, 0))) { s.request_cancel(); model.clear_neural_queue(); }
         if (!s.in_flight) ImGui::EndDisabled();
     }
     ImGui::Separator();

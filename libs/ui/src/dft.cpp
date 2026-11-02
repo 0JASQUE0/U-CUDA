@@ -20,17 +20,15 @@ void draw_dft1d_controls(AppModel& model, SystemLibrary& lib) {
         g.pick_id = "pdft1d_";
         g.n       = (int)s.configs.size();
         g.label   = [&s](int i) { return s.configs[i].label; };
-        g.enqueue = [&model](int i) { model.dft1d_queue.push_back({i}); };
+        g.enqueue = [&model](int i) { model.enqueue_dft1d(i); };
         draw_run_and_run_all("##run_all_dft1d", s.in_flight, no_cfg,
                              s.in_flight || no_cfg, 160.0f,
                              [&model, &s]() {
-                                 if (!model.parametric_engine)
-                                     model.parametric_engine = std::make_unique<ParametricEngine>();
-                                 s.run_async(*model.parametric_engine, s.active_config_index);
+                                 model.run_dft1d(s.active_config_index);
                              },
                              {}, { g },
                              [&model]() { model.start_next_in_dft1d_queue(); },
-                             model.dft1d_queue.size());
+                             model.dft1d_queue().size());
     }
     ImGui::Separator();
 

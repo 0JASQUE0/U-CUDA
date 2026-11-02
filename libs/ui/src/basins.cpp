@@ -267,17 +267,15 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
         g.pick_id = "pbasins_";
         g.n       = (int)s.configs.size();
         g.label   = [&s](int i) { return s.configs[i].label; };
-        g.enqueue = [&model](int i) { model.basins_queue.push_back({i}); };
+        g.enqueue = [&model](int i) { model.enqueue_basins(i); };
         draw_run_and_run_all("##run_all_basins", s.in_flight, no_cfg,
                              s.in_flight || no_cfg, 160.0f,
                              [&model, &s]() {
-                                 if (!model.parametric_engine)
-                                     model.parametric_engine = std::make_unique<ParametricEngine>();
-                                 s.run_async(*model.parametric_engine, s.active_config_index);
+                                 model.run_basins(s.active_config_index);
                              },
                              {}, { g },
                              [&model]() { model.start_next_in_basins_queue(); },
-                             model.basins_queue.size());
+                             model.basins_queue().size());
     }
     ImGui::Separator();
 
@@ -398,9 +396,7 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
                                !c.result.helpful_array.empty();
     if (!can_recluster) ImGui::BeginDisabled();
     if (ImGui::Button("Clustering")) {
-        if (!model.parametric_engine)
-            model.parametric_engine = std::make_unique<ParametricEngine>();
-        s.run_recluster_async(*model.parametric_engine, s.active_config_index);
+        model.recluster_basins(s.active_config_index);
     }
     if (!can_recluster) ImGui::EndDisabled();
     ImGui::TextDisabled("Clustering radius in (Feature 1, Feature 2) space.");

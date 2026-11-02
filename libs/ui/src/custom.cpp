@@ -9,7 +9,7 @@ using namespace ucuda::ui_detail;
 
 namespace ucuda::ui_detail {
 void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
-                                 std::deque<CustomQueueItem>& q) {
+                                 AppModel& model) {
     hv.crosshair_x = cs.shared.level_1d_enabled ? cs.shared.fix_x_value
                                                 : std::numeric_limits<double>::quiet_NaN();
     hv.crosshair_y = cs.shared.level_1d_enabled ? cs.shared.fix_y_value
@@ -27,7 +27,7 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
         cs.shared.last_fix_x_change_time = t;
         cs.shared.last_fix_y_change_time = t;
     };
-    hv.on_left_click = [&cs, &q](int, int, double snap_x, double snap_y) {
+    hv.on_left_click = [&cs, &model](int, int, double snap_x, double snap_y) {
         auto& s = cs.shared;
         // Update fix_x/fix_y (also drives crosshair on other 2D windows).
         s.fix_x_value = snap_x;
@@ -54,7 +54,7 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
             s.param_values[cs.params[s.axis_y_par_index]] = fmt_num_shortest(snap_y);
         }
         if (s.autorun_on_drilldown && s.level_phase_enabled) {
-            q.push_back({ s.level3_kind == 0 ? CustomQueueItem::Kind::Phase
+            model.enqueue_custom({ s.level3_kind == 0 ? CustomQueueItem::Kind::Phase
                                              : CustomQueueItem::Kind::Basins });
         }
     };
@@ -644,19 +644,19 @@ void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
             sig.pending_armed = true;
         };
         try_enqueue(cs.sig_l2d, build_l2d_signature(c, cs),
-                    [&](){ cs.enqueue_level_2d(model.custom_queue); });
+                    [&](){ model.enqueue_custom_level_2d(); });
         try_enqueue(cs.sig_l1d, build_l1d_signature(c, cs),
-                    [&](){ cs.enqueue_level_1d(model.custom_queue); });
+                    [&](){ model.enqueue_custom_level_1d(); });
         try_enqueue(cs.sig_l3,  build_l3_signature (c, cs),
-                    [&](){ cs.enqueue_level_3 (model.custom_queue); });
+                    [&](){ model.enqueue_custom_level_3(); });
     }
     ImGui::SameLine();
     if (ImGui::Button("Stop / clear queue")) {
         model.custom_session.request_cancel_all();
-        model.custom_queue.clear();
+        model.clear_custom_queue();
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("(%zu queued)", model.custom_queue.size());
+    ImGui::TextDisabled("(%zu queued)", model.custom_queue().size());
 
     // Auto-recompute 1D on slider settle, plus Phase (если L3=Phase и включён
     // autorun_on_drilldown), чтобы отпускание крестика или ползунка давало отклик сразу.
@@ -675,11 +675,11 @@ void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
                       && now - c.last_fix_x_change_time > debounce_s;
         bool y_settled = c.last_fix_y_change_time > 0.0
                       && now - c.last_fix_y_change_time > debounce_s;
-        bool queue_free = model.custom_queue.empty();
+        bool queue_free = model.custom_queue().empty();
         if ((x_settled || y_settled) && queue_free) {
             if (c.auto_recompute_1d) {
                 // fix_x moved → Y-slices depend on fix_x. fix_y → X-slices.
-                cs.enqueue_level_1d_partial(model.custom_queue,
+                model.enqueue_custom_level_1d_partial(
                     /*x_slices*/ y_settled,
                     /*y_slices*/ x_settled);
             }
@@ -709,7 +709,7 @@ void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
             if (x_settled) pin_axis(esx, c.fix_x_value);
             if (y_settled) pin_axis(esy, c.fix_y_value);
             if (c.autorun_on_drilldown && c.level_phase_enabled) {
-                model.custom_queue.push_back({ c.level3_kind == 0
+                model.enqueue_custom({ c.level3_kind == 0
                     ? CustomQueueItem::Kind::Phase
                     : CustomQueueItem::Kind::Basins });
             }

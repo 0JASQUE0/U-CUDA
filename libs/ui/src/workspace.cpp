@@ -367,7 +367,6 @@ namespace ucuda::ui_detail {
 void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     (void)lib; (void)cb;
     auto& cs = model.custom_session;
-    auto& q  = model.custom_queue;
     auto& ws = cs.workspace;
     // Per-system suffix appended to every plot window title. imgui.ini keys
     // dock state per window name, so without a per-system suffix the same
@@ -646,7 +645,7 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                     hv.x_axis.log_scale = cs.ls_session.curves[0].log_scale;
                     hv.y_axis.log_scale = cs.ls_session.curves[0].log_scale_2;
                 }
-                wire_2d_heatmap_interaction(hv, cs, q);
+                wire_2d_heatmap_interaction(hv, cs, model);
 
                 // Export menu on right-click (parity with Parametric).
                 const bool bd_busy = (i == 0) && cs.bif_session.in_flight

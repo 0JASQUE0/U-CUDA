@@ -395,13 +395,11 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
         g.pick_id = "pfs_";
         g.n       = (int)s.configs.size();
         g.label   = [&s](int i) { return s.configs[i].label; };
-        g.enqueue = [&model](int i) { model.fastsync_queue.push_back({i}); };
+        g.enqueue = [&model](int i) { model.enqueue_fastsync(i); };
         draw_run_and_run_all("##run_all_fastsync", s.in_flight, no_cfg,
                              s.in_flight || no_cfg, 160.0f,
                              [&model, &s]() {
-                                 if (!model.parametric_engine)
-                                     model.parametric_engine = std::make_unique<ParametricEngine>();
-                                 s.run_async(*model.parametric_engine, s.active_config_index);
+                                 model.run_fastsync(s.active_config_index);
                              },
                              // Cancel — только у FastSync, между Run и Run all.
                              [&s]() {
@@ -410,7 +408,7 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
                              },
                              { g },
                              [&model]() { model.start_next_in_fastsync_queue(); },
-                             model.fastsync_queue.size());
+                             model.fastsync_queue().size());
     }
     ImGui::Separator();
 

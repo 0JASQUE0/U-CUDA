@@ -392,13 +392,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             // Queue suffix: prefer the queue that matches the running session
             // (parametric for Bif/LLE/LS, basins for Basins, fastsync for FastSync).
             size_t queue_n = 0;
-            if      (busy.kind == BusyKind::Basins)   queue_n = model.basins_queue.size();
-            else if (busy.kind == BusyKind::FastSync) queue_n = model.fastsync_queue.size();
-            else if (busy.kind == BusyKind::Dft1D)    queue_n = model.dft1d_queue.size();
-            else if (busy.kind == BusyKind::Custom)   queue_n = model.custom_queue.size();
-            else if (busy.kind == BusyKind::Order)    queue_n = model.order_queue.size();
-            else if (busy.kind == BusyKind::Neural)   queue_n = model.neural_queue.size();
-            else                                      queue_n = model.parametric_queue.size();
+            if      (busy.kind == BusyKind::Basins)   queue_n = model.basins_queue().size();
+            else if (busy.kind == BusyKind::FastSync) queue_n = model.fastsync_queue().size();
+            else if (busy.kind == BusyKind::Dft1D)    queue_n = model.dft1d_queue().size();
+            else if (busy.kind == BusyKind::Custom)   queue_n = model.custom_queue().size();
+            else if (busy.kind == BusyKind::Order)    queue_n = model.order_queue().size();
+            else if (busy.kind == BusyKind::Neural)   queue_n = model.neural_queue().size();
+            else                                      queue_n = model.parametric_queue().size();
             if (queue_n > 0)
                 std::snprintf(text, sizeof(text), "Computing %s%s... %.1fs (+%zu)",
                               busy.what.c_str(), phase_suffix, secs, queue_n);
@@ -465,13 +465,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     default: break;
                 }
                 // Drain all batch queues so remaining items don't auto-start.
-                model.parametric_queue.clear();
-                model.dft1d_queue.clear();
-                model.basins_queue.clear();
-                model.fastsync_queue.clear();
-                model.order_queue.clear();
-                model.neural_queue.clear();
-                model.custom_queue.clear();
+                model.clear_all_queues();
             }
             ImGui::PopStyleColor(3);
         }

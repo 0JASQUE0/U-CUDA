@@ -1513,13 +1513,11 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         g.pick_id = "porder_";
         g.n       = (int)s.configs.size();
         g.label   = [&s](int i) { return s.configs[i].label; };
-        g.enqueue = [&model](int i) { model.order_queue.push_back({ i }); };
+        g.enqueue = [&model](int i) { model.enqueue_order(i); };
         draw_run_and_run_all("##run_all_order", s.in_flight, no_cfg,
                              s.in_flight || no_cfg, 160.0f,
                              [&model, &s]() {
-                                 if (!model.parametric_engine)
-                                     model.parametric_engine = std::make_unique<ParametricEngine>();
-                                 s.run_async(*model.parametric_engine, s.active_config_index);
+                                 model.run_order(s.active_config_index);
                              },
                              [&s]() {
                                  // Локальный Stop остаётся рядом с Run: глобальный
@@ -1532,7 +1530,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                              },
                              { g },
                              [&model]() { model.start_next_in_order_queue(); },
-                             model.order_queue.size());
+                             model.order_queue().size());
     }
     ImGui::Separator();
 

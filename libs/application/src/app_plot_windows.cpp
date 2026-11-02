@@ -99,13 +99,13 @@ void AppModel::load_or_init_parametric_plot_windows(const std::string& json) {
 
 void AppModel::remove_dft1d_config(int i) {
     dft1d_session.remove_config(i);
-    // Cleanup dft1d_queue: drop items pointing at the removed index, shift
+    // Cleanup dft1d_queue_: drop items pointing at the removed index, shift
     // index > i down by one (same pattern as remove_basins_config).
-    for (auto it = dft1d_queue.begin(); it != dft1d_queue.end(); ) {
-        if (it->index == i) it = dft1d_queue.erase(it);
+    for (auto it = dft1d_queue_.begin(); it != dft1d_queue_.end(); ) {
+        if (it->index == i) it = dft1d_queue_.erase(it);
         else ++it;
     }
-    for (auto& it : dft1d_queue)
+    for (auto& it : dft1d_queue_)
         if (it.index > i) --it.index;
 
     // Plot windows: drop `i` from members, shift indices > i down by one;

@@ -25,7 +25,7 @@ void draw_custom_controls(AppModel& model, SystemLibrary& lib) ;
 
 
 void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
-                                 std::deque<CustomQueueItem>& q) ;
+                                 AppModel& model) ;
 
 
 [[nodiscard]] ImGuiID ws_dock_id(int tab_id, const std::string& sys) ;
