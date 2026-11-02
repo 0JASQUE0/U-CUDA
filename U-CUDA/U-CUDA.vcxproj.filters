@@ -1,0 +1,796 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="apps">
+      <UniqueIdentifier>{FB630C4A-8A55-5BEC-9EA2-E812ACE7336F}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="apps\desktop">
+      <UniqueIdentifier>{8F67AB9B-A945-57F5-84D3-6826393F4057}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="apps\legacy">
+      <UniqueIdentifier>{9533F4E3-537F-5299-8E24-21726AB19F15}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs">
+      <UniqueIdentifier>{3E602646-8452-50C5-A576-11DA572AE059}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\analysis">
+      <UniqueIdentifier>{4C5A9189-B45D-5C4C-BF2A-FE24649D4B97}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\analysis\include">
+      <UniqueIdentifier>{7513D31E-8BB5-5F90-853C-3C685BE76E07}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\analysis\src">
+      <UniqueIdentifier>{429D34FC-2A12-5537-BC23-5962B9EC67A3}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\application">
+      <UniqueIdentifier>{2C79ED37-202E-5759-9CC1-F9A801FEB670}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\application\include">
+      <UniqueIdentifier>{1BA88B87-C459-5F6E-AE7D-D8E87C9D52EB}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\application\src">
+      <UniqueIdentifier>{EF929D11-F954-5E4F-BA33-62F2CB530677}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\cuda">
+      <UniqueIdentifier>{89A949D8-555F-57D1-8447-C5F377E3C098}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\cuda\include">
+      <UniqueIdentifier>{D309843C-F781-5ED0-B160-EA8CAF47B64B}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\cuda\src">
+      <UniqueIdentifier>{848FAB8C-8D03-5212-9F4E-A9AD7A7C1404}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\domain">
+      <UniqueIdentifier>{7DF71C61-4EF3-51ED-8170-26A60B197BF6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\domain\include">
+      <UniqueIdentifier>{A4B33260-8722-51FB-AAFE-B9912973EA32}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\domain\src">
+      <UniqueIdentifier>{C70F2191-94AD-5889-9435-4E18664B59CE}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\equations">
+      <UniqueIdentifier>{2657BCEC-FF3B-5717-B1CF-75A324B362A6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\equations\include">
+      <UniqueIdentifier>{E89016F5-A7FA-5440-B416-304677594B42}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\equations\src">
+      <UniqueIdentifier>{8E6677D8-9AFD-5B8B-9D42-9CA23EDD39D2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\numerics">
+      <UniqueIdentifier>{34DC0E79-DFD5-576C-88A7-150E3512A7BD}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\numerics\include">
+      <UniqueIdentifier>{9BEAEF8B-E52A-57C4-92BC-65462CCF0A11}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\numerics\src">
+      <UniqueIdentifier>{04C05FE0-0E3D-5ED9-B71E-D310C86240F1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\ocr">
+      <UniqueIdentifier>{CB3898C5-7104-5092-87CF-1DC47532952D}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\ocr\include">
+      <UniqueIdentifier>{1C484FBB-596E-59FA-8321-1BB84E418B1C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\ocr\src">
+      <UniqueIdentifier>{7C66BE2E-9347-55C1-A840-8EAAF9E9265E}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\platform">
+      <UniqueIdentifier>{7ED42A20-471B-5B58-A5D1-781D4F7C64BB}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\platform\include">
+      <UniqueIdentifier>{C464DF94-E848-558A-BDF2-C4368601BC74}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\platform\src">
+      <UniqueIdentifier>{1670B457-17F0-56DC-AC9B-6D419211A9D6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\plotting">
+      <UniqueIdentifier>{31B14239-2065-559C-89C0-AA62654A718A}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\plotting\include">
+      <UniqueIdentifier>{53CF36C2-FEC1-5548-946A-DAC739D6E013}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\plotting\src">
+      <UniqueIdentifier>{000ECBD8-FE2F-51A7-9D3E-48436C208C16}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\storage">
+      <UniqueIdentifier>{1FE9E01A-0BAF-506E-B3AD-876237591225}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\storage\include">
+      <UniqueIdentifier>{3CD8EE28-FA01-5F06-9F5A-023A8F2223B2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\storage\src">
+      <UniqueIdentifier>{C1F4595B-A7A7-5D51-9F9D-AD36D6BDC710}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\ui">
+      <UniqueIdentifier>{02756A17-43E7-52F9-99BD-BA9A9FE4D6C1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\ui\include">
+      <UniqueIdentifier>{A263BFCF-A186-529E-9EC5-468DA6A924B0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="libs\ui\src">
+      <UniqueIdentifier>{5A41C39B-474D-5155-80CD-1FFE600354F7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="resources">
+      <UniqueIdentifier>{98112EDD-C8B7-516C-A23D-BA925501BC6E}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="resources\kernels">
+      <UniqueIdentifier>{9E17C76E-ABB5-57BE-AE5C-E92863722FAA}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="resources\windows">
+      <UniqueIdentifier>{CCF20D97-B39D-5357-8FC1-7D5BED85B007}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="third_party">
+      <UniqueIdentifier>{6D62FB2F-3268-53C4-AE20-5143F253BDF3}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <CudaCompile Include="..\libs\cuda\src\cudaMacros.cu">
+      <Filter>libs\cuda\src</Filter>
+    </CudaCompile>
+    <CudaCompile Include="..\libs\cuda\src\host_rqa.cu">
+      <Filter>libs\cuda\src</Filter>
+    </CudaCompile>
+    <CudaCompile Include="..\libs\cuda\src\cudaLibrary.cu">
+      <Filter>libs\cuda\src</Filter>
+    </CudaCompile>
+    <CudaCompile Include="..\libs\cuda\src\host_basins.cu">
+      <Filter>libs\cuda\src</Filter>
+    </CudaCompile>
+    <CudaCompile Include="..\libs\cuda\src\host_bifurcation.cu">
+      <Filter>libs\cuda\src</Filter>
+    </CudaCompile>
+    <CudaCompile Include="..\libs\cuda\src\host_dft.cu">
+      <Filter>libs\cuda\src</Filter>
+    </CudaCompile>
+    <CudaCompile Include="..\libs\cuda\src\host_fastsync.cu">
+      <Filter>libs\cuda\src</Filter>
+    </CudaCompile>
+    <CudaCompile Include="..\libs\cuda\src\host_lyapunov.cu">
+      <Filter>libs\cuda\src</Filter>
+    </CudaCompile>
+    <CudaCompile Include="..\libs\cuda\src\host_trajectory.cu">
+      <Filter>libs\cuda\src</Filter>
+    </CudaCompile>
+    <ClCompile Include="..\libs\domain\src\session_defaults.cpp">
+      <Filter>libs\domain\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\platform\src\image_source.cpp">
+      <Filter>libs\platform\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\equations\src\adaptive_codegen.cpp">
+      <Filter>libs\equations\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\equations\src\codegen.cpp">
+      <Filter>libs\equations\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\equations\src\dae_devices.cpp">
+      <Filter>libs\equations\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\equations\src\expression_parser.cpp">
+      <Filter>libs\equations\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\equations\src\scheme_codegen.cpp">
+      <Filter>libs\equations\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\equations\src\sysparse.cpp">
+      <Filter>libs\equations\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\equations\src\system_evaluator.cpp">
+      <Filter>libs\equations\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\numerics\src\circuit_codegen.cpp">
+      <Filter>libs\numerics\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\numerics\src\circuit_emit.cpp">
+      <Filter>libs\numerics\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\numerics\src\circuit_netlist.cpp">
+      <Filter>libs\numerics\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\numerics\src\circuit_solver.cpp">
+      <Filter>libs\numerics\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\numerics\src\circuit_synth.cpp">
+      <Filter>libs\numerics\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\numerics\src\integrator.cpp">
+      <Filter>libs\numerics\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\numerics\src\krs_cpu.cpp">
+      <Filter>libs\numerics\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\numerics\src\spice_parse.cpp">
+      <Filter>libs\numerics\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\numerics\src\kicad_import.cpp">
+      <Filter>libs\numerics\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\data_export.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\app_config.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_basins.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_custom.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_dft1d.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_dft1d_windows.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_fastsync.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_json.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_lle.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_ls.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_metrics.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_network.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_neural.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_order.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_parametric.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_parametric_windows.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_phase.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\system_library.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\circuit_nvrtc.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_basins.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_bifurcation.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_cpu.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_dft.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_fastsync.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_lle.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_neural.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_ls.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_order.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_results.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_runtime.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\nvrtc_engine.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\parametric_engine.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\phase_portrait_nvrtc.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\runtime_settings.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\basins_session.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\bifurcation_session.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\custom_session.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\dft_session.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\fastsync_session.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\lle_session.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\ls_session.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\metrics_session.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\network_session.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\neural_session.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\order_session.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\phase_session.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\session_helpers.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ocr\src\ocr_client_win.cpp">
+      <Filter>libs\ocr\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\application\src\app_model.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\application\src\tick.cpp">
+      <Filter>libs\application\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\plotting\src\digit_input.cpp">
+      <Filter>libs\plotting\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\plotting\src\gpu_line_series.cpp">
+      <Filter>libs\plotting\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\plotting\src\gpu_line_series_3d.cpp">
+      <Filter>libs\plotting\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\plotting\src\heatmap_view.cpp">
+      <Filter>libs\plotting\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\plotting\src\plot_axis.cpp">
+      <Filter>libs\plotting\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\plotting\src\plot_camera_3d.cpp">
+      <Filter>libs\plotting\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\plotting\src\plot_legend.cpp">
+      <Filter>libs\plotting\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\plotting\src\plot_renderer.cpp">
+      <Filter>libs\plotting\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\plotting\src\plot_view_2d.cpp">
+      <Filter>libs\plotting\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\plotting\src\plot_view_3d.cpp">
+      <Filter>libs\plotting\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\plotting\src\screenshot.cpp">
+      <Filter>libs\plotting\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\basins.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\bifurcation.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\custom.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\dft.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\fastsync.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\gui.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\library.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\lyapunov.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\network.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\neural.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\order.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\parametric_windows.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\phase.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\ui_resources.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\widgets.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\workspace.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\third_party\glad\src\glad.c">
+      <Filter>third_party</Filter>
+    </ClCompile>
+    <ClCompile Include="..\apps\desktop\app_main.cpp">
+      <Filter>apps\desktop</Filter>
+    </ClCompile>
+    <CudaCompile Include="..\apps\legacy\main_NonLinAnal.cu">
+      <Filter>apps\legacy</Filter>
+    </CudaCompile>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\adaptive_settings.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\analysis_session.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\analysis_types.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\circuit_solver.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\circuit_synth.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\configCUDA.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\custom_session.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\export_snapshot.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\grid_snap.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\network_session.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\neural_session.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\neural_types.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\num_parse.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\order_session.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\param_groups.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\plot_window.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\rqa.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\sparse_lu.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\system.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\system_record.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\traj_work.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\platform\include\ucuda\platform\image_source.h">
+      <Filter>libs\platform\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\platform\include\ucuda\platform\platform_paths.h">
+      <Filter>libs\platform\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\platform\include\ucuda\platform\platform_posix.h">
+      <Filter>libs\platform\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\equations\include\ucuda\equations\adaptive_params.h">
+      <Filter>libs\equations\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\equations\include\ucuda\equations\codegen.hpp">
+      <Filter>libs\equations\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\equations\include\ucuda\equations\dae_devices.h">
+      <Filter>libs\equations\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\equations\include\ucuda\equations\dae_ir.h">
+      <Filter>libs\equations\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\equations\include\ucuda\equations\krs_prep.h">
+      <Filter>libs\equations\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\equations\include\ucuda\equations\sysparse.hpp">
+      <Filter>libs\equations\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\equations\src\expression_internal.h">
+      <Filter>libs\equations\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\circuit_codegen.h">
+      <Filter>libs\numerics\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\circuit_netlist.h">
+      <Filter>libs\numerics\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\integrator.h">
+      <Filter>libs\numerics\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\kicad_import.h">
+      <Filter>libs\numerics\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\krs_cpu.h">
+      <Filter>libs\numerics\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\multistep_bdf.h">
+      <Filter>libs\numerics\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\neural_readout.h">
+      <Filter>libs\numerics\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\spice_parse.h">
+      <Filter>libs\numerics\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\storage\include\ucuda\storage\app_config.h">
+      <Filter>libs\storage\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\storage\include\ucuda\storage\data_export.h">
+      <Filter>libs\storage\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\storage\include\ucuda\storage\session_io.h">
+      <Filter>libs\storage\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\storage\include\ucuda\storage\system_library.h">
+      <Filter>libs\storage\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\storage\src\session_json_internal.h">
+      <Filter>libs\storage\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\circuit_nvrtc.h">
+      <Filter>libs\cuda\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\cudaLibrary.cuh">
+      <Filter>libs\cuda\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\cudaMacros.cuh">
+      <Filter>libs\cuda\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\hostLibrary.cuh">
+      <Filter>libs\cuda\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\nvrtc_engine.h">
+      <Filter>libs\cuda\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\parametric_engine.h">
+      <Filter>libs\cuda\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\phase_portrait_nvrtc.h">
+      <Filter>libs\cuda\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\runtime_settings.h">
+      <Filter>libs\cuda\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\src\device\clustering.cuh">
+      <Filter>libs\cuda\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\src\device\fastsync.cuh">
+      <Filter>libs\cuda\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\src\device\integration.cuh">
+      <Filter>libs\cuda\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\src\device\models.cuh">
+      <Filter>libs\cuda\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\src\device\peaks.cuh">
+      <Filter>libs\cuda\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\src\engine_helpers.h">
+      <Filter>libs\cuda\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\src\engine_impl.h">
+      <Filter>libs\cuda\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\src\host_internal.cuh">
+      <Filter>libs\cuda\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\src\module_lru.h">
+      <Filter>libs\cuda\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\src\perf_warmup.h">
+      <Filter>libs\cuda\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\analysis\include\ucuda\analysis\analysis_session.h">
+      <Filter>libs\analysis\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\analysis\include\ucuda\analysis\custom_session.h">
+      <Filter>libs\analysis\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\analysis\include\ucuda\analysis\network_session.h">
+      <Filter>libs\analysis\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\analysis\include\ucuda\analysis\neural_session.h">
+      <Filter>libs\analysis\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\analysis\include\ucuda\analysis\order_session.h">
+      <Filter>libs\analysis\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\analysis\src\session_internal.h">
+      <Filter>libs\analysis\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ocr\include\ucuda\ocr\ocr_client_win.h">
+      <Filter>libs\ocr\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\application\include\ucuda\application\app_model.h">
+      <Filter>libs\application\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\application\include\ucuda\application\prewarm_watch.h">
+      <Filter>libs\application\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\application\include\ucuda\application\session_persistence.h">
+      <Filter>libs\application\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\application\include\ucuda\application\time_estimate.h">
+      <Filter>libs\application\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\colormap_slancm_data.h">
+      <Filter>libs\plotting\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\digit_input.h">
+      <Filter>libs\plotting\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\gpu_line_series.h">
+      <Filter>libs\plotting\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\gpu_line_series_3d.h">
+      <Filter>libs\plotting\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\heatmap_view.h">
+      <Filter>libs\plotting\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\plot_axis.h">
+      <Filter>libs\plotting\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\plot_camera_3d.h">
+      <Filter>libs\plotting\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\plot_legend.h">
+      <Filter>libs\plotting\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\plot_renderer.h">
+      <Filter>libs\plotting\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\plot_view_2d.h">
+      <Filter>libs\plotting\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\plot_view_3d.h">
+      <Filter>libs\plotting\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\screenshot.h">
+      <Filter>libs\plotting\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\include\ucuda\ui\gui.h">
+      <Filter>libs\ui\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\include\ucuda\ui\gui_tree_state.h">
+      <Filter>libs\ui\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\gui_internal.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\ui_resources.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <None Include="..\resources\kernels\adaptive_part.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\basins.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\bifurcation1d.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\bifurcation1d_cont.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\bifurcation2d.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\circuit.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\dft1d_cont.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\dft1d_hsweep.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\fastsync_attr.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\fastsync_grid.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\lle1d.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\lle1d_cont.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\lle2d.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\ls1d.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\ls1d_cont.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\ls2d.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\lyapunov_adaptive_part.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\metrics_adaptive_part.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\network.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\neural.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\order.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\signal_metrics.template.cu">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\ucuda_adaptive.cuh">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\ucuda_bdf.cuh">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <None Include="..\resources\kernels\ucuda_hp.h">
+      <Filter>resources\kernels</Filter>
+    </None>
+    <ResourceCompile Include="..\resources\windows\U-CUDA.rc">
+      <Filter>resources\windows</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+</Project>

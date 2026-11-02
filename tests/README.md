@@ -25,6 +25,8 @@ Linux platform remain available. GoogleTest names start with numerical.
 `layer_rules` ([layer_rules.cmake](layer_rules.cmake)) checks module boundaries the
 compiler cannot see: domain includes no higher module, `<future>`/`<thread>` or engine
 names; storage includes no compute/application/GUI header; computation includes no GUI.
+`vcxproj_sync` ([vcxproj_sync.cmake](vcxproj_sync.cmake)) checks that the classic Visual Studio project
+`U-CUDA/U-CUDA.vcxproj` compiles exactly the library sources listed in `libs/*/CMakeLists.txt`.
 
 For frequent runs `UCUDA_TEST_SKIP_GGL=1` drops the "+ GGL" DAE methods from the DAE
 suite (their bodies build slowest); add `-E GGL` to skip their solver-matrix cases too.
