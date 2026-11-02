@@ -352,7 +352,7 @@ void metrics_finish(SignalMetricsResult& res, const SignalMetricsRequest& req) {
 }
 }
 
-int ParametricEngine::Impl::progress_stride_for(size_t stepsPerPoint) {
+int EngineContext::progress_stride_for(size_t stepsPerPoint) {
         int s = (int)(stepsPerPoint / 64);
         s -= s % kLoopCheckBlock;
         if (s < kLoopCheckBlock) s = kLoopCheckBlock;
@@ -389,7 +389,7 @@ ParametricEngine::Impl::~Impl() {
         }
     }
 
-bool ParametricEngine::Impl::ensure_init(std::string& err) {
+bool EngineContext::ensure_init(std::string& err) {
         if (inited) return true;
         CUresult r = cuInit(0);
         if (r != CUDA_SUCCESS) { err = "cuInit: " + cu_err(r); return false; }
@@ -407,7 +407,7 @@ bool ParametricEngine::Impl::ensure_init(std::string& err) {
         return true;
     }
 
-bool ParametricEngine::Impl::load_sources(std::string& err) {
+bool EngineSources::load_sources(std::string& err) {
         // Перечитывать файлы с диска надо один раз, а вот текст configCUDA.h
         // пересобирать — на каждую смену peak-настроек (см. peak_config_defines).
         const uint64_t ep = peak_config_epoch();
@@ -452,23 +452,23 @@ bool ParametricEngine::Impl::load_sources(std::string& err) {
         return true;
     }
 
-ParametricEngine::Impl::SrcSnapshot ParametricEngine::Impl::snapshot_sources(const std::string& tmpl) const {
+EngineSources::SrcSnapshot EngineSources::snapshot_sources(const std::string& tmpl) const {
         return { tmpl, src_cudaLibrary_cu, src_cudaLibrary_cuh, src_cudaMacros_cuh, src_configCUDA_h,
                  src_ucuda_adaptive_cuh, src_ucuda_bdf_cuh };
     }
 
-const ParametricEngine::Impl::KrsFn* ParametricEngine::Impl::krs_fn(const std::string& ph) {
+const EngineModuleBuilder::KrsFn* EngineModuleBuilder::krs_fn(const std::string& ph) {
         for (const KrsFn& f : kKrsFns) if (ph == f.ph) return &f;
         return nullptr;
     }
 
-const ParametricEngine::Impl::KrsFn* ParametricEngine::Impl::krs_fn(const std::string& ph, bool nonauto) {
+const EngineModuleBuilder::KrsFn* EngineModuleBuilder::krs_fn(const std::string& ph, bool nonauto) {
         if (nonauto)
             for (const KrsFn& f : kKrsFnsT) if (ph == f.ph) return &f;
         return krs_fn(ph);
     }
 
-bool ParametricEngine::Impl::compile_ptx(const std::string& src, const char* src_name,
+bool EngineModuleBuilder::compile_ptx(const std::string& src, const char* src_name,
                      const std::vector<const char*>& headers_src,
                      const std::vector<const char*>& headers_name,
                      const std::vector<const char*>& name_exprs,
@@ -478,7 +478,7 @@ bool ParametricEngine::Impl::compile_ptx(const std::string& src, const char* src
                                  name_exprs, rdc, out_ptx, lowered, err);
     }
 
-bool ParametricEngine::Impl::lib_ptx_for(const SrcSnapshot& snap, const char* src_name, const std::string& lib_key,
+bool EngineModuleBuilder::lib_ptx_for(const SrcSnapshot& snap, const char* src_name, const std::string& lib_key,
                      const std::vector<std::pair<std::string, std::string>>& subs,
                      const std::vector<const char*>& name_exprs,
                      CachedLibPtx& out, std::string& err) {
@@ -525,7 +525,7 @@ bool ParametricEngine::Impl::lib_ptx_for(const SrcSnapshot& snap, const char* sr
         return true;
     }
 
-bool ParametricEngine::Impl::krs_ptx_for(const SrcSnapshot& snap,
+bool EngineModuleBuilder::krs_ptx_for(const SrcSnapshot& snap,
                      const std::vector<std::pair<const KrsFn*, std::string>>& fns,
                      const std::string& amount_of_x, const std::string& krs_key,
                      std::string& out_ptx, std::string& err) {
@@ -554,7 +554,7 @@ bool ParametricEngine::Impl::krs_ptx_for(const SrcSnapshot& snap,
         return true;
     }
 
-bool ParametricEngine::Impl::link_and_load(const std::string& lib_ptx, const std::string& krs_ptx,
+bool EngineModuleBuilder::link_and_load(const std::string& lib_ptx, const std::string& krs_ptx,
                        CUmodule& out_module, std::string& err) {
         CUlinkState st = nullptr;
         // UCUDA_NVRTC_LINEINFO=1 (см. build_module): строки исходника переживают и линковку.
@@ -593,7 +593,7 @@ bool ParametricEngine::Impl::link_and_load(const std::string& lib_ptx, const std
         return true;
     }
 
-bool ParametricEngine::Impl::build_module(const SrcSnapshot& snap_in,
+bool EngineModuleBuilder::build_module(const SrcSnapshot& snap_in,
                       const char* src_name,
                       const std::vector<std::pair<std::string, std::string>>& subs,
                       const std::vector<const char*>& name_exprs,
@@ -806,7 +806,7 @@ bool ParametricEngine::Impl::build_module(const SrcSnapshot& snap_in,
         return true;
     }
 
-bool ParametricEngine::Impl::module_fn(CUmodule mod, const std::string& name, CUfunction& out, std::string& err) {
+bool EngineModuleBuilder::module_fn(CUmodule mod, const std::string& name, CUfunction& out, std::string& err) {
         CUresult r = cuModuleGetFunction(&out, mod, name.c_str());
         if (r != CUDA_SUCCESS) {
             err = "cuModuleGetFunction(" + name + "): " + cu_err(r);

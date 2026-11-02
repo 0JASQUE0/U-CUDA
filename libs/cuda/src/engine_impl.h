@@ -3,8 +3,13 @@
 using namespace ucuda::cuda_detail;
 // Ключ кэша модуля по телу КРС и размерности (engine_runtime.cpp).
 std::string hash_key(const std::string& krs_body, int amountOfX);
-struct ParametricEngine::Impl {
 
+// ParametricEngine::Impl собран из слоёв (имена членов те же, порядок создания тот же):
+// EngineContext <- EngineSources <- EngineModuleCache <- EngineModuleBuilder <- Impl.
+// В Impl — compile_*_if_needed и run_* по семействам анализа.
+
+// CUDA-контекст устройства, сигналы расчёта (отмена, прогресс) и ожидание потока.
+struct EngineContext {
     bool       inited   = false;
 
     CUcontext  context  = nullptr;
@@ -104,36 +109,11 @@ struct ParametricEngine::Impl {
     static int progress_stride_for(size_t stepsPerPoint) ;
 
 
-    // Ждём, пока отданная в stream работа закончится, обновляя прогресс из тиков
-    // и передавая Cancel в ядро. В теле цикла не должно быть синхронных вызовов CUDA:
-    // только cudaStreamQuery и асинхронная копия тиков в своём потоке (RunSignals).
-    bool wait_with_signals(cudaStream_t stream, RunSignals& sig,
-                           const std::shared_ptr<std::atomic<bool>>& cancel,
-                           const std::shared_ptr<std::atomic<float>>& progress,
-                           double ticksBefore, double ticksTotal, std::string& err)
-    ;
+    bool ensure_init(std::string& err) ;
+};
 
-
-    // Зеркало флага отмены (g_ucudaCancelMirror, cudaLibrary.cu: ядра читают его вместо
-    // mapped-страницы) после отменённого запуска остаётся 1 в том модуле, где его подняли, и
-    // следующий запуск этого модуля сразу «отменился» бы. Какой модуль работал, здесь не известно,
-    // поэтому сброс во всех: это раз на отмену, а модули без переменной (не из cudaLibrary.cu)
-    // пропускаются. Ядро к этому моменту закончилось, так что memset не встаёт в очередь за ним.
-    template <class T>
-    static void reset_cancel_mirror_pool(const ModuleLru<T>& pool) {
-        pool.for_each([](const T& e) {
-            if (!e.module) return;
-            CUdeviceptr p = 0;
-            size_t      sz = 0;
-            if (cuModuleGetGlobal(&p, &sz, e.module, "g_ucudaCancelMirror") == CUDA_SUCCESS && sz == sizeof(int))
-                cuMemsetD32(p, 0, 1);
-        });
-    }
-
-
-    void reset_cancel_mirrors() ;
-
-
+// Тексты шаблонов и заголовков NVRTC, их загрузка и снимок для сборки.
+struct EngineSources : EngineContext {
     // Закэшированные тексты NonLinAnal headers (читаются один раз)
     std::string src_cudaLibrary_cu;
 
@@ -199,6 +179,50 @@ struct ParametricEngine::Impl {
 
     uint64_t srcs_peak_epoch = 0;
    // != peak_config_epoch() -> пересобрать configCUDA.h
+
+    bool load_sources(std::string& err) ;
+
+
+    // Copy of everything build_module reads, taken under cache_mu. NVRTC then runs unlocked:
+    // load_sources() rewrites configCUDA.h whenever the peak settings change, and reading a
+    // std::string while another thread assigns it is a race no matter how rare.
+    struct SrcSnapshot {
+        std::string tmpl, lib_cu, lib_cuh, macros_cuh, config_h, adaptive_cuh, bdf_cuh;
+    };
+
+
+    SrcSnapshot snapshot_sources(const std::string& tmpl) const ;
+};
+
+// Кэши собранных модулей по семействам анализа: активные слоты, пулы LRU, блокировки, общий ход compile_into.
+struct EngineModuleCache : EngineSources {
+    // Зеркало флага отмены (g_ucudaCancelMirror, cudaLibrary.cu: ядра читают его вместо
+    // mapped-страницы) после отменённого запуска остаётся 1 в том модуле, где его подняли, и
+    // следующий запуск этого модуля сразу «отменился» бы. Какой модуль работал, здесь не известно,
+    // поэтому сброс во всех: это раз на отмену, а модули без переменной (не из cudaLibrary.cu)
+    // пропускаются. Ядро к этому моменту закончилось, так что memset не встаёт в очередь за ним.
+    template <class T>
+    static void reset_cancel_mirror_pool(const ModuleLru<T>& pool) {
+        pool.for_each([](const T& e) {
+            if (!e.module) return;
+            CUdeviceptr p = 0;
+            size_t      sz = 0;
+            if (cuModuleGetGlobal(&p, &sz, e.module, "g_ucudaCancelMirror") == CUDA_SUCCESS && sz == sizeof(int))
+                cuMemsetD32(p, 0, 1);
+        });
+    }
+
+
+    void reset_cancel_mirrors() ;
+
+    // Ждём, пока отданная в stream работа закончится, обновляя прогресс из тиков
+    // и передавая Cancel в ядро. В теле цикла не должно быть синхронных вызовов CUDA:
+    // только cudaStreamQuery и асинхронная копия тиков в своём потоке (RunSignals).
+    bool wait_with_signals(cudaStream_t stream, RunSignals& sig,
+                           const std::shared_ptr<std::atomic<bool>>& cancel,
+                           const std::shared_ptr<std::atomic<float>>& progress,
+                           double ticksBefore, double ticksTotal, std::string& err)
+    ;
 
     struct CachedModule {
         std::string key;
@@ -541,39 +565,10 @@ struct ParametricEngine::Impl {
         for (const T& e : pool.drain())
             if (e.module) cuModuleUnload(e.module);
     }
+};
 
-
-    ~Impl() ;
-
-
-
-
-
-
-
-
-
-
-
-
-
-    bool ensure_init(std::string& err) ;
-
-
-    bool load_sources(std::string& err) ;
-
-
-    // Copy of everything build_module reads, taken under cache_mu. NVRTC then runs unlocked:
-    // load_sources() rewrites configCUDA.h whenever the peak settings change, and reading a
-    // std::string while another thread assigns it is a race no matter how rare.
-    struct SrcSnapshot {
-        std::string tmpl, lib_cu, lib_cuh, macros_cuh, config_h, adaptive_cuh, bdf_cuh;
-    };
-
-
-    SrcSnapshot snapshot_sources(const std::string& tmpl) const ;
-
-
+// Сборка модуля: функции КРС при раздельной сборке, кэши PTX, NVRTC, линковка, загрузка.
+struct EngineModuleBuilder : EngineModuleCache {
     // Функции модуля КРС при раздельной сборке. Шаблон держит тело каждой под своим
     // плейсхолдером; в библиотечной половине плейсхолдер заменяется вызовом внешней функции
     // модуля КРС. Кроме шага с постоянным h, это четыре функции адаптивного шага (см.
@@ -698,7 +693,10 @@ struct ParametricEngine::Impl {
     // Достаёт функцию из загруженного модуля. Отдельная обёртка — чтобы у
     // вызывающих не размножалось одинаковое сообщение об ошибке.
     bool module_fn(CUmodule mod, const std::string& name, CUfunction& out, std::string& err) ;
+};
 
+struct ParametricEngine::Impl : EngineModuleBuilder {
+    ~Impl() ;
 
     bool compile_if_needed(const std::string& krs_body, int amountOfX,
                            int par_or_var, std::string& err, bool activate = true) ;

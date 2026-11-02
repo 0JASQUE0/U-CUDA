@@ -1,7 +1,7 @@
 ﻿#include "engine_impl.h"
 using namespace ucuda::cuda_detail;
 
-bool ParametricEngine::Impl::wait_with_signals(cudaStream_t stream, RunSignals& sig,
+bool EngineModuleCache::wait_with_signals(cudaStream_t stream, RunSignals& sig,
                            const std::shared_ptr<std::atomic<bool>>& cancel,
                            const std::shared_ptr<std::atomic<float>>& progress,
                            double ticksBefore, double ticksTotal, std::string& err)
@@ -42,7 +42,7 @@ bool ParametricEngine::Impl::wait_with_signals(cudaStream_t stream, RunSignals& 
         return true;
     }
 
-void ParametricEngine::Impl::reset_cancel_mirrors() {
+void EngineModuleCache::reset_cancel_mirrors() {
         std::lock_guard<std::recursive_mutex> lk(cache_mu);
         reset_cancel_mirror_pool(pool_bif1d);
         reset_cancel_mirror_pool(pool_lle);
