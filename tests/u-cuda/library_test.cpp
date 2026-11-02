@@ -6,12 +6,12 @@
 // Схема: RK4 (ОДУ), тело отображения (Map), DAE BDF1 (ДАУ). Свип — по первому параметру +-10 %.
 // ДАУ — только системы, чьё имя начинается с "DAE".
 #include "test_util.h"
-#include "codegen.hpp"
-#include "sysparse.hpp"
-#include "system_library.h"
-#include "dae_ir.h"
-#include "num_parse.h"
-#include "parametric_engine.h"
+#include "ucuda/equations/codegen.hpp"
+#include "ucuda/equations/sysparse.hpp"
+#include "ucuda/storage/system_library.h"
+#include "ucuda/equations/dae_ir.h"
+#include "ucuda/domain/num_parse.h"
+#include "ucuda/cuda/parametric_engine.h"
 #include <cuda.h>
 #include <filesystem>
 #include <fstream>
@@ -54,6 +54,18 @@ struct Sys {
 int g_fail = 0, g_runs = 0, g_vals = 0, g_finite = 0;
 std::vector<std::string> g_fails, g_warns;
 bool g_custom = false;   // идёт прогон пользовательской КРС: её поломка — данные записи, предупреждение
+std::string g_raw_model;
+void record_model(const Sys& y) {
+    g_raw_model = y.name;
+#ifdef UCUDA_TEST_ARTIFACTS
+    if (const char* output = std::getenv("UCUDA_TEST_RESULT_DIR")) {
+        static size_t index = 0;
+        regression::write_json(fs::path(output).parent_path() / "raw-library" / ("input-" + std::to_string(index++) + ".json"),
+            {{"model", y.name}, {"vars", y.s.vars}, {"parameters", y.s.params}, {"rhs", y.s.rhs},
+             {"initial", y.ic}, {"values", y.a}, {"h", y.h}, {"body", y.body}, {"map", y.map}, {"dae", y.dae}});
+    }
+#endif
+}
 
 // ok — расчёт прошёл; shape — длина результата и конечность там, где режим это обещает (why — что не так).
 void report(const Sys& y, const char* task, bool ok, bool shape, const std::string& err, const std::string& why = {}) {
@@ -66,9 +78,20 @@ void report(const Sys& y, const char* task, bool ok, bool shape, const std::stri
 }
 void count(const std::vector<double>& v) {
     for (double x : v) { ++g_vals; if (std::isfinite(x) && std::fabs(x) < 999) ++g_finite; }
+#ifdef UCUDA_TEST_ARTIFACTS
+    if (const char* output = std::getenv("UCUDA_TEST_RESULT_DIR")) {
+        static size_t index = 0;
+        regression::Json values = regression::Json::array();
+        for (double x : v) if (std::isfinite(x)) values.push_back(x);
+            else values.push_back(std::isnan(x) ? "NaN" : x > 0 ? "+Inf" : "-Inf");
+        regression::write_json(fs::path(output).parent_path() / "raw-library" / ("result-" + std::to_string(index++) + ".json"),
+            {{"model", g_raw_model}, {"values", values}});
+    }
+#endif
 }
 
 void run_custom(ParametricEngine& eng, const Sys& y) {
+    record_model(y);
     const int N = (int)y.s.vars.size();
     const bool has_p = !y.s.params.empty();
     const double lo = y.p0 == 0 ? -0.1 : y.p0 * 0.9, hi = y.p0 == 0 ? 0.1 : y.p0 * 1.1;
@@ -96,6 +119,7 @@ void run_custom(ParametricEngine& eng, const Sys& y) {
 }
 
 void run_system(ParametricEngine& eng, const Sys& y) {
+    record_model(y);
     const int N = (int)y.s.vars.size();
     const double lo = y.p0 == 0 ? -0.1 : y.p0 * 0.9, hi = y.p0 == 0 ? 0.1 : y.p0 * 1.1;
     const bool has_p = !y.s.params.empty();
@@ -170,7 +194,7 @@ int main() {
     return ut::run_main("library", []() -> int {
         if (cuInit(0) != CUDA_SUCCESS) { std::printf("no CUDA device: skipped\n"); return ut::kSkip; }
         set_nvrtc_rdc(true);
-        const fs::path lib = fs::u8path(exe_dir()) / ".." / ".." / ".." / "U-CUDA" / "library";   // exe лежит в tests/u-cuda/build
+        const fs::path lib = ut::fixture_library();   // exe лежит в tests/u-cuda/build
         std::vector<fs::path> dirs;
         for (auto& e : fs::directory_iterator(lib)) dirs.push_back(e.path());
         std::sort(dirs.begin(), dirs.end());
@@ -266,6 +290,8 @@ int main() {
         // Пользовательские КРС — данные записей library/, не код: их поломка печатается, но не валит тест.
         for (const auto& s : g_warns) std::printf("  WARNING (custom KRS of the record) %s\n", s.c_str());
         ut::require(g_fail == 0, std::to_string(g_fail) + " library runs failed");
+        ut::require(nsys > 0 && nskip == 0, "Versioned fixture systems must all execute; skipped fixtures are failures");
+        ut::require(g_warns.empty(), "Versioned custom-scheme fixtures must not produce warnings");
         return 0;
     });
 }

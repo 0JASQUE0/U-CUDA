@@ -1,0 +1,1 @@
+{"id":"upstream.krs_cpu.0","inputs":{"absolute_tolerance":1e-12,"assertion":"CPU step","execution":{"fma":true,"gpu_block_size":32,"rdc":false},"reference":1.5},"passed":true,"source":{"revision":"a9adf0d9a58ed421ffe9227c39eae95c504a0b7d\n","run":"E:\\progs\\CUDA\\U-CUDA\\build\\windows\\test-results\\1793543155109894600"},"tests":["upstream_krs_cpu"],"values":[1.5],"version":1}

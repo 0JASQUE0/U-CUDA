@@ -1,0 +1,997 @@
+﻿#include "ucuda/cuda/nvrtc_engine.h"
+#include "ucuda/cuda/runtime_settings.h"   // get_nvrtc_fmad(): режим FMA общий с картами
+#include "perf_warmup.h"
+#include "ucuda/equations/adaptive_params.h"       // прогрев GPU перед замером Performance
+#include "ucuda/equations/krs_prep.h"
+#include "ucuda/equations/codegen.hpp"
+#include <cuda.h>
+#include <nvrtc.h>
+#include <chrono>
+#include <cstdio>
+#include <sstream>
+#include <fstream>
+#include <thread>
+#include <type_traits>
+
+// exe_dir(): единственное внешнее определение живёт в app_main.cpp (Release) /
+// main_NonLinAnal.cu (Debug) — копия в parametric_engine.cpp лежит в
+// анонимном namespace и снаружи не видна.
+extern std::string exe_dir();
+
+// помощники проверки ошибок, пишут в error_
+#define NV_FAIL(msg) do { error_ = (msg); return false; } while(0)
+
+static bool nvrtc_ok(nvrtcResult r, std::string& err, const char* where) {
+    if (r != NVRTC_SUCCESS) { err = std::string("NVRTC: ") + nvrtcGetErrorString(r) + " @ " + where; return false; }
+    return true;
+}
+static bool cu_ok(CUresult r, std::string& err, const char* where) {
+    if (r != CUDA_SUCCESS) {
+        const char* m = nullptr; cuGetErrorString(r, &m);
+        err = std::string("CUDA: ") + (m ? m : "?") + " @ " + where; return false;
+    }
+    return true;
+}
+#define NVOK(x,w) do { if(!nvrtc_ok((x),error_,w)) return false; } while(0)
+#define CUOK(x,w) do { if(!cu_ok((x),error_,w)) return false; } while(0)
+
+// Ядра этого движка собираются без -I, и numb объявляется прямо в исходнике — тем же
+// типом, что в exe (configCUDA.h): UcudaAdaptParams уходит в ядро по значению с хостовой
+// раскладкой, а CPU-ветка Analysis считает в numb. Повторный typedef того же типа в
+// configCUDA.h (комплексные схемы) легален. Хостовый интерфейс движка остаётся в double,
+// буферы устройства — в numb (to_numb / from_numb).
+static const char* const kNumbTypedef =
+    std::is_same<numb, float>::value ? "typedef float numb;\n" : "typedef double numb;\n";
+
+static std::vector<numb> to_numb(const std::vector<double>& v) {
+    return std::vector<numb>(v.begin(), v.end());
+}
+static std::vector<double> from_numb(const std::vector<numb>& v) {
+    return std::vector<double>(v.begin(), v.end());
+}
+
+NvrtcEngine::NvrtcEngine() {}
+NvrtcEngine::~NvrtcEngine() {
+    unload_all();
+    if (cancel_host_) { cuMemFreeHost(cancel_host_); cancel_host_ = nullptr; cancel_dev_ = 0; }
+    if (context_) { cuCtxDestroy((CUcontext)context_); context_ = nullptr; }
+}
+
+bool NvrtcEngine::cancel_flag_reset() {
+    if (!cancel_host_) {
+        void* p = nullptr;
+        CUOK(cuMemHostAlloc(&p, sizeof(int), CU_MEMHOSTALLOC_DEVICEMAP | CU_MEMHOSTALLOC_PORTABLE), "cancelFlagAlloc");
+        CUdeviceptr d = 0;
+        if (!cu_ok(cuMemHostGetDevicePointer(&d, p, 0), error_, "cancelFlagDevPtr")) { cuMemFreeHost(p); return false; }
+        cancel_host_ = (int*)p;
+        cancel_dev_  = (unsigned long long)d;
+    }
+    *(volatile int*)cancel_host_ = 0;
+    return true;
+}
+
+bool NvrtcEngine::wait_default_stream(const std::shared_ptr<std::atomic<bool>>& cancel, bool& cancelled) {
+    // Первые миллисекунды — опрос с yield (короткие ядра Analysis не ждут кванта планировщика),
+    // дальше — сон по 1 мс.
+    const auto t0 = std::chrono::steady_clock::now();
+    for (;;) {
+        const CUresult r = cuStreamQuery(nullptr);
+        if (r == CUDA_SUCCESS) return true;
+        if (r != CUDA_ERROR_NOT_READY) return cu_ok(r, error_, "wait(ad)");
+        if (!cancelled && cancel && cancel->load(std::memory_order_relaxed)) {
+            *(volatile int*)cancel_host_ = 1;
+            cancelled = true;
+        }
+        if (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(5)) std::this_thread::yield();
+        else std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void NvrtcEngine::unload_all() {
+    for (auto& e : cache_) cuModuleUnload((CUmodule)e.module);
+    cache_.clear();
+    kernel_ = nullptr;
+    compiled_ = false;
+}
+
+bool NvrtcEngine::init() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (inited_) return true;
+    CUOK(cuInit(0), "cuInit");
+    CUdevice dev;
+    CUOK(cuDeviceGet(&dev, 0), "cuDeviceGet");
+    CUcontext ctx;
+    // В CUDA 13 у cuCtxCreate появился параметр CUctxCreateParams* перед flags.
+    // nullptr эквивалентен поведению старого 3-арг вызова.
+#if CUDA_VERSION >= 13000
+    CUOK(cuCtxCreate(&ctx, nullptr, 0, dev), "cuCtxCreate");
+#else
+    CUOK(cuCtxCreate(&ctx, 0, dev), "cuCtxCreate");
+#endif
+    context_ = ctx;
+    CUOK(cuDeviceGetAttribute(&cc_major_, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev), "ccMajor");
+    CUOK(cuDeviceGetAttribute(&cc_minor_, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev), "ccMinor");
+    inited_ = true;
+    return true;
+}
+
+bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!inited_ && !init()) return false;
+    // Если этот worker-thread унаследовал чужой текущий контекст (например от
+    // ParametricEngine, который работал в той же thread-pool ячейке), модуль
+    // и kernel из нашего контекста дадут "invalid resource handle @ launch".
+    // Жёстко выставляем НАШ контекст текущим перед любыми CU/NVRTC-вызовами.
+    cuCtxSetCurrent((CUcontext)context_);
+
+    // Ключ кэша: КРС-текст + размерность + режим FMA. 0x1F — разделитель (не
+    // встречается в сгенерированном коде), иначе "foo"+"12" неотличимо от
+    // "foo1"+"2".
+    // fmad меняет не текст, а опцию компиляции, т.е. при том же КРС даёт другой
+    // PTX. Без него в ключе переключатель в Settings молча не применялся бы к
+    // портретам до перезапуска — модуль отдавался бы из кэша.
+    const bool fmad = get_nvrtc_fmad();
+    std::string key = krs_body;
+    key += '\x1f';
+    key += std::to_string(amountOfX);
+    key += '\x1f';
+    key += (fmad ? '1' : '0');
+
+    // Cache hit: систему/метод уже компилировали в этой сессии — переключаемся
+    // на готовый модуль без обращения к NVRTC.
+    for (size_t i = 0; i < cache_.size(); ++i) {
+        if (cache_[i].key == key) {
+            kernel_ = cache_[i].kernel;
+            amountOfX_ = amountOfX;
+            compiled_ = true;
+            if (i + 1 != cache_.size()) {           // MRU: hit -> в конец
+                CacheEntry hit = cache_[i];
+                cache_.erase(cache_.begin() + i);
+                cache_.push_back(hit);
+            }
+            return true;
+        }
+    }
+
+    amountOfX_ = amountOfX;
+
+    // Схемы с комплексными коэффициентами (Complex CD) держат внутри шага
+    // ucmplx — тип объявлен в configCUDA.h. В отличие от параметрического
+    // движка, этот исходник самодостаточен и собирается вообще без -I, поэтому
+    // заголовок подаём текстом, и только когда он реально нужен: для остальных
+    // схем исходник и опции компиляции остаются прежними.
+    // Признак берём из самого тела — ucmplx в нём есть тогда и только тогда,
+    // когда схема комплексная, а тело и так является ключом кеша модулей, так
+    // что рассинхронизироваться тут нечему.
+    const bool needs_complex = krs_body.find("ucmplx") != std::string::npos;
+    std::string cfg_header;
+    if (needs_complex) {
+        const std::string path = exe_dir() + "/kernels/configCUDA.h";
+        std::ifstream f(path, std::ios::binary);
+        if (!f) NV_FAIL("missing " + path + " (needed for schemes with complex "
+                        "coefficients; check that kernels\\ was copied next to the .exe)");
+        std::ostringstream ss; ss << f.rdbuf();
+        cfg_header = ss.str();
+        // Санитайзинг — тот же, что в parametric_engine.cpp::read_text_file, и
+        // по той же причине. Все исходники проекта в UTF-8 С BOM
+        // (.editorconfig): файл, найденный по -I, NVRTC разбирает сам, но
+        // заголовок, поданный ТЕКСТОМ, попадает в препроцессор как есть, и BOM
+        // становится "unrecognized token" ещё до #pragma once (проверено: и в
+        // первой строке, и в любой другой). Не-ASCII байты глушим до пробела:
+        // весь не-ASCII в configCUDA.h живёт в комментариях, а исторически
+        // NVRTC спотыкался и о них.
+        if (cfg_header.size() >= 3 && (unsigned char)cfg_header[0] == 0xEF
+            && (unsigned char)cfg_header[1] == 0xBB && (unsigned char)cfg_header[2] == 0xBF)
+            cfg_header.erase(0, 3);
+        for (char& c : cfg_header) if ((unsigned char)c >= 0x80) c = ' ';
+    }
+
+    // Собираем полный CUDA-исходник: тип, КРС как __device__, ядро траектории.
+    // krs_body использует X[], a[], h (как выдаёт codegen). Тип numb — kNumbTypedef.
+    std::ostringstream src;
+    src << kNumbTypedef
+        << "#define AMOUNTOFX " << amountOfX << "\n";
+    // configCUDA.h сам объявляет numb и AMOUNTOFX (второе — под #ifndef, первое
+    // повторным typedef того же типа, что легально), поэтому порядок безопасен.
+    if (needs_complex) src << "#include \"configCUDA.h\"\n";
+    // Стадия предрасчёта (krs_prep.h, "CD fast"): константы шага — один раз до
+    // траектории. У прочих схем — пустая структура и прямой вызов шага.
+    KrsPrepSplit prep_sp;
+    std::string prep_defs;
+    // Неавтономная система (явное t): шаг получает время t_n = n*h вторым
+    // аргументом. Признак — в самом теле (оно же ключ кэша), автономный
+    // исходник ниже не меняется ни на байт.
+    const bool nonauto = step_body_uses_time(krs_body);
+    if (nonauto && krs_split_prep(krs_body, prep_sp))
+        NV_FAIL("explicit time t is not supported by schemes with a precompute stage (CD fast)");
+    if (nonauto)
+        prep_defs = "struct UcudaKrsPre {};\n"
+                    "__device__ __forceinline__ void ucudaKrsPrep(UcudaKrsPre&, const numb*, const numb) {}\n";
+    else if (krs_split_prep(krs_body, prep_sp))
+        prep_defs = krs_prep_inline_defs(prep_sp, true);
+    else
+        prep_defs = "struct UcudaKrsPre {};\n"
+                    "__device__ __forceinline__ void ucudaKrsPrep(UcudaKrsPre&, const numb*, const numb) {}\n"
+                    "__device__ __forceinline__ void calculateDiscreteModelP(numb* X, const numb* a, const numb h,"
+                    " const UcudaKrsPre&) { calculateDiscreteModel(X, a, h); }\n";
+    if (nonauto)
+        src << "__device__ __forceinline__ void calculateDiscreteModel(numb* X, const numb ucuda_t,"
+               " const numb* a, numb h) {\n"
+            << krs_body << "\n"
+            << "}\n"
+            << prep_defs
+            // t_n = n*h от целого счётчика: накопление t += h за 1e7 шагов
+            // уводит фазу воздействия.
+            << "extern \"C\" __global__ void phase_kernel("
+            "const numb* ic, const numb* values, numb h, int total, int skip, int N, numb* data) {\n"
+            << "    int tid = blockIdx.x*blockDim.x + threadIdx.x;\n"
+            << "    if (tid >= N) return;\n"
+            << "    numb X[AMOUNTOFX];\n"
+            << "    for (int i=0;i<AMOUNTOFX;++i) X[i]=ic[tid*AMOUNTOFX + i];\n"
+            << "    long long n = 0;\n"
+            << "    for (int s=0;s<skip;++s, ++n) calculateDiscreteModel(X, (numb)n * h, values, h);\n"
+            << "    numb* out = data + (size_t)tid*total*AMOUNTOFX;\n"
+            << "    for (int t=0;t<total;++t, ++n) {\n"
+            << "        for (int k=0;k<AMOUNTOFX;++k) out[t*AMOUNTOFX+k]=X[k];\n"
+            << "        calculateDiscreteModel(X, (numb)n * h, values, h);\n"
+            << "    }\n"
+            << "}\n";
+    else
+    src << "__device__ __forceinline__ void calculateDiscreteModel(numb* X, const numb* a, numb h) {\n"
+        << krs_body << "\n"
+        << "}\n"
+        << prep_defs
+        // Ядро на N траекторий: поток tid считает траекторию для НУ номер tid.
+        // Все траектории параллельны. Параметры values общие для всех потоков.
+        // Layout НУ:    ic[tid*AMOUNTOFX + k]
+        // Layout выхода: data[(tid*total + step)*AMOUNTOFX + k]
+        << "extern \"C\" __global__ void phase_kernel("
+        "const numb* ic, const numb* values, numb h, int total, int skip, int N, numb* data) {\n"
+        << "    int tid = blockIdx.x*blockDim.x + threadIdx.x;\n"
+        << "    if (tid >= N) return;\n"
+        << "    numb X[AMOUNTOFX];\n"
+        << "    for (int i=0;i<AMOUNTOFX;++i) X[i]=ic[tid*AMOUNTOFX + i];\n"
+        << "    UcudaKrsPre krsPre;\n"
+        << "    ucudaKrsPrep(krsPre, values, h);\n"
+        << "    for (int s=0;s<skip;++s) calculateDiscreteModelP(X, values, h, krsPre);\n"
+        << "    numb* out = data + (size_t)tid*total*AMOUNTOFX;\n"
+        << "    for (int t=0;t<total;++t) {\n"
+        << "        for (int k=0;k<AMOUNTOFX;++k) out[t*AMOUNTOFX+k]=X[k];\n"
+        << "        calculateDiscreteModelP(X, values, h, krsPre);\n"
+        << "    }\n"
+        << "}\n";
+    std::string code = src.str();
+
+    nvrtcProgram prog;
+    const char* hdr_src[]  = { cfg_header.c_str() };
+    const char* hdr_name[] = { "configCUDA.h" };
+    NVOK(nvrtcCreateProgram(&prog, code.c_str(), "model.cu",
+                            needs_complex ? 1 : 0,
+                            needs_complex ? hdr_src  : nullptr,
+                            needs_complex ? hdr_name : nullptr), "createProgram");
+    char arch[32];
+    snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major_, cc_minor_);
+    // FMA-контракция обязана совпадать с parametric_engine.cpp: фазовый портрет
+    // рисуется по ячейке уже посчитанной карты, и если карта считалась с
+    // контракцией, а портрет без — на фрактальной границе бассейнов траектория
+    // уходит в другой аттрактор. Раньше здесь стоял жёсткий --fmad=false с
+    // комментарием «см. parametric_engine.cpp», где этого флага не было вовсе.
+    // Теперь обе стороны читают одну настройку (Settings -> get_nvrtc_fmad).
+    const char* opts[] = { arch, fmad ? "--fmad=true" : "--fmad=false" };
+    nvrtcResult comp = nvrtcCompileProgram(prog, 2, opts);
+    // лог (при ошибке — в error_)
+    size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+    std::string log;
+    if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+    if (comp != NVRTC_SUCCESS) {
+        error_ = "NVRTC compile failed:\n" + log;
+        nvrtcDestroyProgram(&prog);
+        return false;
+    }
+    size_t ptxsz = 0; NVOK(nvrtcGetPTXSize(prog, &ptxsz), "ptxSize");
+    std::string ptx(ptxsz, '\0'); NVOK(nvrtcGetPTX(prog, &ptx[0]), "getPtx");
+    nvrtcDestroyProgram(&prog);
+
+    CUmodule mod;
+    CUOK(cuModuleLoadDataEx(&mod, ptx.c_str(), 0, nullptr, nullptr), "moduleLoad");
+    CUfunction fn;
+    CUOK(cuModuleGetFunction(&fn, mod, "phase_kernel"), "getFunction");
+
+    // При переполнении кэша вытесняем самый старый (LRU, начало вектора).
+    if (cache_.size() >= kCacheCapacity) {
+        cuModuleUnload((CUmodule)cache_.front().module);
+        cache_.erase(cache_.begin());
+    }
+    cache_.push_back({ key, mod, fn });
+    kernel_ = fn;
+    compiled_ = true;
+    return true;
+}
+
+bool NvrtcEngine::run_phase_portraits(const std::vector<double>& ic_flat, int N,
+    const std::vector<double>& values,
+    double h, int total, int skip,
+    std::vector<std::vector<std::vector<double>>>& out) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    out.clear();
+    // см. комментарий в compile() — нужно выставить НАШ контекст текущим.
+    cuCtxSetCurrent((CUcontext)context_);
+    if (!compiled_) NV_FAIL("not compiled");
+    if (N <= 0) NV_FAIL("N<=0");
+    if ((int)ic_flat.size() != N * amountOfX_) NV_FAIL("ic_flat size != N*amountOfX");
+    if (total <= 0) NV_FAIL("total<=0");
+
+    int nx = amountOfX_, nv = (int)values.size();
+    size_t data_count = (size_t)N * total * nx;
+    CUdeviceptr d_ic = 0, d_val = 0, d_data = 0;
+    const std::vector<numb> ic_n = to_numb(ic_flat), val_n = to_numb(values);
+    CUOK(cuMemAlloc(&d_ic, (size_t)N * nx * sizeof(numb)), "allocIc");
+    CUOK(cuMemAlloc(&d_val, (nv > 0 ? nv : 1) * sizeof(numb)), "allocVal");
+    CUOK(cuMemAlloc(&d_data, data_count * sizeof(numb)), "allocData");
+    CUOK(cuMemcpyHtoD(d_ic, ic_n.data(), (size_t)N * nx * sizeof(numb)), "cpyIc");
+    if (nv > 0) CUOK(cuMemcpyHtoD(d_val, val_n.data(), nv * sizeof(numb)), "cpyVal");
+
+    numb hh = (numb)h;
+    int tot = total, sk = skip, n = N;
+    void* args[] = { &d_ic, &d_val, &hh, &tot, &sk, &n, &d_data };
+    // N потоков: поток tid -> траектория tid. Раскладка под N.
+    int threads = 256, blocks = (N + threads - 1) / threads;
+    CUOK(cuLaunchKernel((CUfunction)kernel_, blocks, 1, 1, threads, 1, 1, 0, nullptr, args, nullptr), "launch");
+    CUOK(cuCtxSynchronize(), "sync");
+
+    std::vector<numb> flat(data_count);
+    CUOK(cuMemcpyDtoH(flat.data(), d_data, data_count * sizeof(numb)), "cpyOut");
+    cuMemFree(d_ic); cuMemFree(d_val); cuMemFree(d_data);
+
+    // раскладка: out[tid][step][coord]
+    out.resize(N);
+    for (int tid = 0; tid < N; ++tid) {
+        auto& traj = out[tid];
+        traj.resize(total);
+        const numb* base = flat.data() + (size_t)tid * total * nx;
+        for (int t = 0; t < total; ++t) { traj[t].resize(nx); for (int k = 0; k < nx; ++k) traj[t][k] = base[(size_t)t * nx + k]; }
+    }
+    return true;
+}
+
+// ---- Адаптивный шаг ------------------------------------------------------------
+
+// Текст kernels/ucuda_adaptive.cuh для NVRTC: заголовок подаётся ТЕКСТОМ, поэтому
+// BOM и не-ASCII снимаются так же, как у configCUDA.h выше.
+static bool read_kernel_text(const char* name, std::string& out, std::string& err) {
+    const std::string path = exe_dir() + "/kernels/" + name;
+    std::ifstream f(path, std::ios::binary);
+    if (!f) { err = "missing " + path + " (check that kernels\\ was copied next to the .exe)"; return false; }
+    std::ostringstream ss; ss << f.rdbuf();
+    out = ss.str();
+    if (out.size() >= 3 && (unsigned char)out[0] == 0xEF
+        && (unsigned char)out[1] == 0xBB && (unsigned char)out[2] == 0xBF)
+        out.erase(0, 3);
+    for (char& c : out) if ((unsigned char)c >= 0x80) c = ' ';
+    return true;
+}
+static bool read_adaptive_header(std::string& out, std::string& err) {
+    return read_kernel_text("ucuda_adaptive.cuh", out, err);
+}
+
+// Проверка тела пользовательского регулятора (редактор библиотеки): только компиляция
+// NVRTC, без контекста CUDA и без запуска. Функция — та же, что попадает в модули
+// (adaptive_ctrl_source), плюс ядро-обёртка, чтобы её тело действительно собиралось.
+bool nvrtc_check_ctrl_body(const std::string& body, std::string& log) {
+    log.clear();
+    std::string hdr, err;
+    if (!read_adaptive_header(hdr, err)) { log = err; return false; }
+    // #line 1 "prepare" / "controller" — в самом конце, поэтому номера ошибок — строки раздела
+    // подготовки и тела (body — оба, adaptive_ctrl_pack).
+    std::ostringstream src;
+    src << kNumbTypedef
+        << "#define AMOUNTOFX 3\n"
+        << "#define UCUDA_ADAPT_LAYOUT_ONLY\n#include \"ucuda_adaptive.cuh\"\n#undef UCUDA_ADAPT_LAYOUT_ONLY\n"
+        << "extern \"C\" __global__ void ucuda_ctrl_check(const UcudaCtlIn* in, UcudaCtlMem* m, UcudaCtlOut* o);\n"
+        << "extern \"C\" __global__ void ucuda_ctrl_check_prep(const numb* c, int q, numb* k);\n"
+        << adaptive_ctrl_source(body, true)
+        << "extern \"C\" __global__ void ucuda_ctrl_check(const UcudaCtlIn* in, UcudaCtlMem* m, UcudaCtlOut* o) {\n"
+           "    ucuda_ctrl_custom(*in, *m, *o);\n"
+           "}\n"
+           "extern \"C\" __global__ void ucuda_ctrl_check_prep(const numb* c, int q, numb* k) {\n"
+           "    ucuda_ctrl_custom_prep(c, q, k);\n"
+           "}\n";
+    const std::string code = src.str();
+    nvrtcProgram prog = nullptr;
+    const char* hdr_src[]  = { hdr.c_str() };
+    const char* hdr_name[] = { "ucuda_adaptive.cuh" };
+    if (nvrtcCreateProgram(&prog, code.c_str(), "controller_check.cu", 1, hdr_src, hdr_name) != NVRTC_SUCCESS) {
+        log = "nvrtcCreateProgram failed";
+        return false;
+    }
+    const char* opts[] = { "--std=c++17" };
+    const nvrtcResult comp = nvrtcCompileProgram(prog, 1, opts);
+    size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+    if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+    while (!log.empty() && (log.back() == '\0' || log.back() == '\n' || log.back() == '\r')) log.pop_back();
+    nvrtcDestroyProgram(&prog);
+    return comp == NVRTC_SUCCESS;
+}
+
+// Ядро замера (variant 1): нить интегрирует [0, T] и пишет y(T); статистика — нить 0.
+// Все нити пишут свой y, иначе компилятор вправе выбросить их работу целиком.
+// Отмена — флаг cancel (mapped-память хоста) раз в 1024 принятых шага, как у ядра Analysis.
+// Время — %globaltimer (нс) вокруг init + цикла шагов (init подбирает h0 вызовами f — это
+// часть расчёта, CPU-ветка меряет так же); tspan[0] — atomicMin старта, tspan[1] — atomicMax
+// конца по нитям; запуск ядра, загрузка НУ и запись результата в замер не входят.
+static const char* const kEndpointKernelAd =
+    "extern \"C\" __global__ void endpoint_kernel_ad(const numb* ic, const numb* values,\n"
+    "    UCUDA_GRID_CONST const UcudaAdaptParams P, numb T, int N, numb* yout, numb* stats,\n"
+    "    const volatile int* cancel, unsigned long long* tspan) {\n"
+    "    int tid = blockIdx.x * blockDim.x + threadIdx.x;\n"
+    "    if (tid >= N) return;\n"
+    "    const UcudaKrsFns K{};\n"
+    "    UcudaAdaptState S;\n"
+    "    numb X0[AMOUNTOFX];\n"
+    "    for (int i = 0; i < AMOUNTOFX; ++i) X0[i] = ic[i];\n"
+    "    unsigned long long t0, t1;\n"
+    "    asm volatile(\"mov.u64 %0, %%globaltimer;\" : \"=l\"(t0) :: \"memory\");\n"
+    "    ucuda_ad_init(S, K, AMOUNTOFX, X0, (numb)0, values, P, nullptr, 0);\n"
+    "    while (S.t < T && !S.diverged) {\n"
+    "        ucuda_ad_step(S, K, values, P, T);\n"
+    "        if ((S.st.nacc & 1023ULL) == 0 && *cancel != 0) break;\n"
+    "    }\n"
+    "    asm volatile(\"mov.u64 %0, %%globaltimer;\" : \"=l\"(t1) : \"d\"((double)S.X[0]) : \"memory\");\n"
+    "    if (tspan != nullptr) { atomicMin(&tspan[0], t0); atomicMax(&tspan[1], t1); }\n"
+    "    for (int k = 0; k < AMOUNTOFX; ++k) yout[(size_t)tid * AMOUNTOFX + k] = S.X[k];\n"
+    "    if (tid == 0) {\n"
+    "        stats[0] = (numb)S.st.nacc; stats[1] = (numb)S.st.nrej; stats[2] = (numb)S.st.nforced;\n"
+    "        stats[3] = (numb)S.st.nrhs; stats[4] = S.st.hmin; stats[5] = S.st.hmax;\n"
+    "        stats[6] = S.st.nacc > 0 ? S.st.hsum / (numb)S.st.nacc : (numb)0;\n"
+    "        stats[7] = (numb)S.diverged;\n"
+    "    }\n"
+    "}\n";
+
+bool NvrtcEngine::compile_adaptive(const PhaseAdaptiveRequest& rq, void** fn, int variant) {
+    const bool fmad = get_nvrtc_fmad();
+    std::string key = variant == 1 ? "upstream-v1:adaptive_end" : "upstream-v1:adaptive";
+    for (const std::string* b : { &rq.rhs, &rq.emb, &rq.dprep, &rq.deval, &rq.ctrl_body }) { key += '\x1f'; key += *b; }
+    key += '\x1f'; key += std::to_string(rq.amountOfX);
+    key += '\x1f'; key += (fmad ? '1' : '0');
+    for (size_t i = 0; i < cache_.size(); ++i) {
+        if (cache_[i].key == key) {
+            *fn = cache_[i].kernel;
+            if (i + 1 != cache_.size()) {
+                CacheEntry hit = cache_[i];
+                cache_.erase(cache_.begin() + i);
+                cache_.push_back(hit);
+            }
+            return true;
+        }
+    }
+
+    std::string hdr;
+    if (!read_adaptive_header(hdr, error_)) return false;
+    // Адаптивный экстраполятор над базой с комплексными коэффициентами держит в emb ucmplx —
+    // тип из configCUDA.h; признак и подача текстом — как у ядра постоянного шага (compile).
+    const bool needs_complex = rq.emb.find("ucmplx") != std::string::npos;
+    std::string cfg;
+    if (needs_complex && !read_kernel_text("configCUDA.h", cfg, error_)) return false;
+
+    // Функции схемы — __host__ __device__, как calculateDiscreteModel в шаблонах:
+    // их зовут __host__ __device__ методы провайдера UcudaKrsFns.
+    // Неавтономная система (явное t): функции получают ucuda_t перед a, драйвер
+    // передаёт им S.t (UCUDA_NONAUTONOMOUS). Тела — ключ кэша, признак берётся из них.
+    const bool nonauto = step_body_uses_time(rq.rhs);
+    const char* tp = nonauto ? "const numb ucuda_t, " : "";
+    std::ostringstream src;
+    src << kNumbTypedef
+        << "#define AMOUNTOFX " << rq.amountOfX << "\n"
+        << (needs_complex ? "#include \"configCUDA.h\"\n" : "")
+        << (nonauto ? "#define UCUDA_NONAUTONOMOUS\n" : "")
+        << "#define UCUDA_AD_KRS_FUNCS\n"
+        << "#define UCUDA_AD_STATIC_N\n"   // поток на траекторию, потоков мало: состояние — в регистры
+        << (variant == 1 ? "#define UCUDA_AD_NO_DENSE 1\n" : "")
+        << "__device__ __host__ __forceinline__ void ucuda_krs_rhs(const numb* X, " << tp << "const numb* a, numb* F) {\n"
+        << rq.rhs << "\n}\n"
+        << "__device__ __host__ __forceinline__ void ucuda_krs_emb(const numb* X, const numb* F0, " << tp << "const numb* a,\n"
+           "    const numb h, numb* Y, numb* E, numb* F1, numb* W) {\n"
+        << rq.emb << "\n}\n"
+        << "__device__ __host__ __forceinline__ void ucuda_krs_dprep(const numb* X, const numb* Y, const numb* F0,\n"
+           "    const numb* F1, " << tp << "const numb* a, const numb h, numb* W, numb* D) {\n"
+        << rq.dprep << "\n}\n"
+        << "__device__ __host__ __forceinline__ void ucuda_krs_deval(const numb* D, const numb th, numb* Yo) {\n"
+        << rq.deval << "\n}\n"
+        // Пользовательский регулятор — между раскладкой драйвера и им самим.
+        << "#define UCUDA_ADAPT_LAYOUT_ONLY\n#include \"ucuda_adaptive.cuh\"\n#undef UCUDA_ADAPT_LAYOUT_ONLY\n"
+        << adaptive_ctrl_source(rq.ctrl_body)
+        << "#include \"ucuda_adaptive.cuh\"\n";
+    if (variant == 1) src << kEndpointKernelAd;
+    else src
+        // Поток на траекторию. Параметры шага P — по значению, __grid_constant__ (с compute_70,
+        // UCUDA_GRID_CONST): поля читаются из банка параметров ядра (константный кэш), без копии
+        // в локальную память и без повторных загрузок из глобальной на каждой попытке шага.
+        // Отмена — флаг cancel (mapped-память хоста) раз в 1024 принятых шага: шагов у
+        // траектории сколько угодно (жёсткий допуск), и без флага ядро не прервать.
+        // Сетка — шаги до отсчёта и плотный выход (ucuda_ad_advance_to, развёрнутый ради
+        // проверки отмены между шагами; те же вызовы, тот же результат).
+        // Раскладка выхода:
+        //   data[(tid*cap + i)*AMOUNTOFX + k], cap = total (сетка) или max_pts (узлы),
+        //   times[tid*max_pts + i] — только для узлов, stats[tid*9 + ...].
+        << "#define UCUDA_PH_CANCELLED() ((S.st.nacc & 1023ULL) == 0 && *cancel != 0)\n"
+           "extern \"C\" __global__ void phase_kernel_ad(const numb* ic, const numb* values,\n"
+           "    UCUDA_GRID_CONST const UcudaAdaptParams P, numb t_skip, numb t_rec, numb dt, int total, int raw,\n"
+           "    int max_pts, int log_cap, int N, numb* data, numb* times, int* counts,\n"
+           "    numb* logs, int* log_counts, numb* stats, numb* final_h, const volatile int* cancel) {\n"
+           "    int tid = blockIdx.x * blockDim.x + threadIdx.x;\n"
+           "    if (tid >= N) return;\n"
+           "    const UcudaKrsFns K{};\n"
+           "    UcudaAdaptState S;\n"
+           "    numb X0[AMOUNTOFX];\n"
+           "    for (int i = 0; i < AMOUNTOFX; ++i) X0[i] = ic[tid * AMOUNTOFX + i];\n"
+           "    numb* lg = log_cap > 0 ? logs + (size_t)tid * log_cap * 4 : nullptr;\n"
+           "    ucuda_ad_init(S, K, AMOUNTOFX, X0, (numb)0, values, P, lg, log_cap);\n"
+           "    const numb tEnd = t_skip + t_rec;\n"
+           "    bool cut = false;\n"
+           "    while (S.t < t_skip && !S.diverged && !cut) {\n"
+           "        ucuda_ad_step(S, K, values, P, t_skip);\n"
+           "        cut = UCUDA_PH_CANCELLED();\n"
+           "    }\n"
+           "    int c = 0;\n"
+           "    if (!raw) {\n"
+           "        numb* out = data + (size_t)tid * total * AMOUNTOFX;\n"
+           "        numb y[AMOUNTOFX];\n"
+           "        for (; c < total && !S.diverged && !cut; ++c) {\n"
+           "            numb tt = t_skip + (numb)c * dt;\n"
+           "            if (tt > tEnd) tt = tEnd;\n"
+           "            while (S.t < tt && !S.diverged && !cut) {\n"
+           "                ucuda_ad_step(S, K, values, P, tEnd);\n"
+           "                cut = UCUDA_PH_CANCELLED();\n"
+           "            }\n"
+           "            if (S.diverged || cut) break;\n"
+           "            ucuda_ad_eval(S, K, values, P, tt, y);\n"
+           "            for (int k = 0; k < AMOUNTOFX; ++k) out[(size_t)c * AMOUNTOFX + k] = y[k];\n"
+           "        }\n"
+           "    } else {\n"
+           "        numb* out = data + (size_t)tid * max_pts * AMOUNTOFX;\n"
+           "        numb* tm = times + (size_t)tid * max_pts;\n"
+           "        if (!S.diverged && !cut && max_pts > 0) {\n"
+           "            for (int k = 0; k < AMOUNTOFX; ++k) out[k] = S.X[k];\n"
+           "            tm[0] = S.t; c = 1;\n"
+           "        }\n"
+           "        while (S.t < tEnd && c < max_pts && !S.diverged && !cut) {\n"
+           "            ucuda_ad_step(S, K, values, P, tEnd);\n"
+           "            if (S.diverged) break;\n"
+           "            for (int k = 0; k < AMOUNTOFX; ++k) out[(size_t)c * AMOUNTOFX + k] = S.X[k];\n"
+           "            tm[c] = S.t; ++c;\n"
+           "            cut = UCUDA_PH_CANCELLED();\n"
+           "        }\n"
+           "    }\n"
+           "    counts[tid] = c;\n"
+           "    log_counts[tid] = S.log_n;\n"
+           "    numb* st = stats + (size_t)tid * 9;\n"
+           "    st[0] = (numb)S.st.nacc; st[1] = (numb)S.st.nrej; st[2] = (numb)S.st.nforced;\n"
+           "    st[3] = (numb)S.st.nrhs; st[4] = S.st.hmin; st[5] = S.st.hmax;\n"
+           "    st[6] = S.st.nacc > 0 ? S.st.hsum / (numb)S.st.nacc : (numb)0;\n"
+           "    st[7] = (numb)S.diverged;\n"
+           "    st[8] = (numb)(raw && !S.diverged && S.t < tEnd);\n"
+           "    final_h[tid] = S.h;\n"
+           "}\n";
+    const std::string code = src.str();
+
+    nvrtcProgram prog;
+    const char* hdr_src[]  = { hdr.c_str(), cfg.c_str() };
+    const char* hdr_name[] = { "ucuda_adaptive.cuh", "configCUDA.h" };
+    NVOK(nvrtcCreateProgram(&prog, code.c_str(), "model_ad.cu", needs_complex ? 2 : 1, hdr_src, hdr_name),
+         "createProgram(ad)");
+    char arch[32];
+    snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major_, cc_minor_);
+    const char* opts[] = { arch, fmad ? "--fmad=true" : "--fmad=false", "--std=c++17" };
+    nvrtcResult comp = nvrtcCompileProgram(prog, 3, opts);
+    size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+    std::string log;
+    if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+    if (comp != NVRTC_SUCCESS) {
+        error_ = "NVRTC compile failed (adaptive):\n" + log;
+        nvrtcDestroyProgram(&prog);
+        return false;
+    }
+    size_t ptxsz = 0; NVOK(nvrtcGetPTXSize(prog, &ptxsz), "ptxSize(ad)");
+    std::string ptx(ptxsz, '\0'); NVOK(nvrtcGetPTX(prog, &ptx[0]), "getPtx(ad)");
+    nvrtcDestroyProgram(&prog);
+
+    CUmodule mod;
+    CUOK(cuModuleLoadDataEx(&mod, ptx.c_str(), 0, nullptr, nullptr), "moduleLoad(ad)");
+    CUfunction f;
+    CUOK(cuModuleGetFunction(&f, mod, variant == 1 ? "endpoint_kernel_ad" : "phase_kernel_ad"), "getFunction(ad)");
+    if (cache_.size() >= kCacheCapacity) {
+        // Вытесняемый модуль может держать ядро постоянного шага: тогда compile()
+        // обязан пересобрать его заново, а не звать выгруженное.
+        if (cache_.front().kernel == kernel_) { kernel_ = nullptr; compiled_ = false; }
+        cuModuleUnload((CUmodule)cache_.front().module);
+        cache_.erase(cache_.begin());
+    }
+    cache_.push_back({ key, mod, f });
+    *fn = f;
+    return true;
+}
+
+bool NvrtcEngine::prewarm_adaptive(const PhaseAdaptiveRequest& rq) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!inited_ && !init()) return false;
+    cuCtxSetCurrent((CUcontext)context_);
+    void* fn = nullptr;
+    return compile_adaptive(rq, &fn, 0);
+}
+
+bool NvrtcEngine::run_adaptive_endpoint(const AdaptiveEndpointRequest& rq, AdaptiveEndpointResult& out) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    out = AdaptiveEndpointResult();
+    if (!inited_ && !init()) return false;
+    cuCtxSetCurrent((CUcontext)context_);
+    const int nx = rq.amountOfX, N = rq.replicas;
+    if (nx < 1 || nx > UCUDA_AD_MAXN) NV_FAIL("adaptive: dimension out of range");
+    if ((int)rq.ic.size() != nx) NV_FAIL("adaptive: ic size != amountOfX");
+    if (N < 1 || rq.repeats < 1 || rq.warmup < 0) NV_FAIL("adaptive: bad replicas / repeats / warmup");
+    if (!(rq.T > 0)) NV_FAIL("adaptive: T must be > 0");
+
+    PhaseAdaptiveRequest cr;
+    cr.rhs = rq.rhs; cr.emb = rq.emb; cr.ctrl_body = rq.ctrl_body; cr.amountOfX = nx;
+    void* fn = nullptr;
+    if (!compile_adaptive(cr, &fn, 1)) return false;
+
+    const int nv = (int)rq.values.size();
+    CUdeviceptr d_ic = 0, d_val = 0, d_y = 0, d_st = 0, d_ts = 0;
+    auto free_all = [&]() {
+        for (CUdeviceptr p : { d_ic, d_val, d_y, d_st, d_ts }) if (p) cuMemFree(p);
+    };
+    const std::vector<numb> ic_n = to_numb(rq.ic), val_n = to_numb(rq.values);
+    bool ok = cu_ok(cuMemAlloc(&d_ic, (size_t)nx * sizeof(numb)), error_, "allocIc(end)")
+           && cu_ok(cuMemAlloc(&d_val, (size_t)(nv > 0 ? nv : 1) * sizeof(numb)), error_, "allocVal(end)")
+           && cu_ok(cuMemAlloc(&d_y, (size_t)N * nx * sizeof(numb)), error_, "allocY(end)")
+           && cu_ok(cuMemAlloc(&d_st, 8 * sizeof(numb)), error_, "allocStats(end)")
+           && cu_ok(cuMemAlloc(&d_ts, 2 * sizeof(unsigned long long)), error_, "allocTimer(end)")
+           && cu_ok(cuMemcpyHtoD(d_ic, ic_n.data(), (size_t)nx * sizeof(numb)), error_, "cpyIc(end)")
+           && (nv == 0 || cu_ok(cuMemcpyHtoD(d_val, val_n.data(), (size_t)nv * sizeof(numb)), error_, "cpyVal(end)"));
+    numb T = (numb)rq.T;
+    int n = N;
+    UcudaAdaptParams par = rq.params;
+    ok = ok && cancel_flag_reset();
+    CUdeviceptr d_cancel = (CUdeviceptr)cancel_dev_;
+    CUdeviceptr ts_none = 0;
+    void* args_warm[] = { &d_ic, &d_val, &par, &T, &n, &d_y, &d_st, &d_cancel, &ts_none };
+    void* args[]      = { &d_ic, &d_val, &par, &T, &n, &d_y, &d_st, &d_cancel, &d_ts };
+    const int threads = 32, blocks = (N + threads - 1) / threads;
+    auto launch_with = [&](void** a) {
+        return cu_ok(cuLaunchKernel((CUfunction)fn, blocks, 1, 1, threads, 1, 1, 0, nullptr, a, nullptr),
+                     error_, "launch(end)");
+    };
+    // Ожидание — опросом потока: пока ядро идёт, запрос отмены уходит в его флаг. Время
+    // меряет само ядро (%globaltimer), опрос и запуск в него не входят.
+    bool cancelled = false;
+    // Прогрев по времени (perf_warmup.h): частота GPU поднимается только под сплошной
+    // нагрузкой. ~300 мс перед первым узлом замера процесса, ~20 мс перед остальными.
+    static std::chrono::steady_clock::time_point last_endpoint_run{};
+    const bool cold = std::chrono::steady_clock::now() - last_endpoint_run > std::chrono::seconds(1);
+    ok = ok && perf_burst_warmup(cold ? 300.0 : 20.0, [&]() { return launch_with(args_warm); },
+                                 [&]() { return wait_default_stream(rq.cancel, cancelled); });
+    for (int w = 0; ok && !cancelled && w < rq.warmup; ++w)
+        ok = launch_with(args_warm) && wait_default_stream(rq.cancel, cancelled);
+    double tsum = 0;
+    for (int r = 0; ok && !cancelled && r < rq.repeats; ++r) {
+        const unsigned long long ts_init[2] = { ~0ULL, 0ULL };
+        unsigned long long ts[2] = { 0, 0 };
+        ok = cu_ok(cuMemcpyHtoD(d_ts, ts_init, sizeof(ts_init)), error_, "cpyTimer(end)")
+          && launch_with(args)
+          && wait_default_stream(rq.cancel, cancelled)
+          && (cancelled || cu_ok(cuMemcpyDtoH(ts, d_ts, sizeof(ts)), error_, "cpyTimer(end)"));
+        if (!ok || cancelled) break;
+        const double us = ts[1] >= ts[0] ? (double)(ts[1] - ts[0]) * 1.0e-3 : 0.0;
+        if (r == 0) { out.t_min = out.t_max = us; }
+        else { if (us < out.t_min) out.t_min = us; if (us > out.t_max) out.t_max = us; }
+        tsum += us;
+    }
+    if (ok && cancelled) { free_all(); error_ = kNvrtcCancelled; return false; }
+    std::vector<numb> y((size_t)nx), st(8);
+    if (ok)
+        ok = cu_ok(cuMemcpyDtoH(y.data(), d_y, (size_t)nx * sizeof(numb)), error_, "cpyY(end)")
+          && cu_ok(cuMemcpyDtoH(st.data(), d_st, 8 * sizeof(numb)), error_, "cpyStats(end)");
+    free_all();
+    if (!ok) return false;
+    out.t_avg = tsum / (double)rq.repeats;
+    out.y_end = from_numb(y);
+    out.stats.nacc = st[0]; out.stats.nrej = st[1]; out.stats.nforced = st[2]; out.stats.nrhs = st[3];
+    out.stats.hmin = st[4]; out.stats.hmax = st[5]; out.stats.hmean = st[6];
+    out.stats.diverged = st[7] != 0;
+    last_endpoint_run = std::chrono::steady_clock::now();
+    return true;
+}
+
+// BDF 1-5 на GPU: тела F и J — функции модуля, алгоритм — kernels/ucuda_bdf.cuh (тот же, что у CPU).
+// Рабочая память DASSL — массив в локальной памяти нити (AMOUNTOFX известен при сборке).
+static const char* const kBdfPhaseKernel =
+    "struct UcudaBdfGpu {\n"
+    "    const numb* a; numb* out; numb* tm; int raw; const volatile int* cancel;\n"
+    "    __device__ void res(const numb* y, numb t, numb* F) { ucuda_bdf_res(y, t, a, F); }\n"
+    "    __device__ void jac(const numb* y, numb t, numb* J) { ucuda_bdf_jac(y, t, a, J); }\n"
+    "    __device__ void emit(int i, numb t, const numb* y) {\n"
+    "        for (int k = 0; k < AMOUNTOFX; ++k) out[(size_t)i * AMOUNTOFX + k] = y[k];\n"
+    "        if (raw) tm[i] = t;\n"
+    "    }\n"
+    "    __device__ bool cancelled() const { return *cancel != 0; }\n"
+    "};\n"
+    "extern \"C\" __global__ void bdf_phase_kernel(const numb* ic, const numb* values, const int* kidx,\n"
+    "    const numb* atol, UcudaBdfParams P, int nx, numb t_skip, numb t_rec, numb dt, int total, int raw,\n"
+    "    int max_pts, int cap, int N, numb* data, numb* times, int* counts, numb* stats, const volatile int* cancel,\n"
+    "    int log_cap, numb* logs, int* log_counts) {\n"
+    "    const int tid = blockIdx.x * blockDim.x + threadIdx.x;\n"
+    "    if (tid >= N) return;\n"
+    "    numb ws[UCUDA_BDF_WS(AMOUNTOFX)];\n"
+    "    UcudaBdfGpu fn{ values, data + (size_t)tid * cap * AMOUNTOFX, times + (size_t)tid * cap, raw, cancel };\n"
+    "    UcudaBdfStats st;\n"
+    "    int nlog = 0;\n"
+    "    const int c = ucuda_bdf_run(fn, AMOUNTOFX, nx, kidx, ic + (size_t)tid * AMOUNTOFX, atol, P, t_skip, t_rec,\n"
+    "                                dt, total, raw, max_pts, ws, st,\n"
+    "                                log_cap > 0 ? logs + (size_t)tid * log_cap * 4 : nullptr, log_cap, &nlog);\n"
+    "    counts[tid] = c;\n"
+    "    log_counts[tid] = nlog;\n"
+    "    numb* s = stats + (size_t)tid * 10;\n"
+    "    s[0] = (numb)st.nacc; s[1] = (numb)st.nrej; s[2] = (numb)st.hmin_fail; s[3] = (numb)st.nrhs;\n"
+    "    s[4] = st.hmin; s[5] = st.hmax; s[6] = st.nacc > 0 ? st.hsum / (numb)st.nacc : (numb)0;\n"
+    "    s[7] = (numb)st.diverged; s[8] = (numb)st.truncated; s[9] = (numb)st.nforced;\n"
+    "}\n";
+
+bool NvrtcEngine::run_phase_portraits_bdf(const BdfGpuRequest& rq, PhaseAdaptiveResult& out) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    out = PhaseAdaptiveResult();
+    if (!inited_ && !init()) return false;
+    cuCtxSetCurrent((CUcontext)context_);
+    const int nx = rq.amountOfX, N = rq.N;
+    if (N <= 0) NV_FAIL("N<=0");
+    if (nx < 1 || nx > 512) NV_FAIL("BDF: dimension out of range");
+    if ((int)rq.ic_flat.size() != N * nx || (int)rq.kidx.size() != nx || (int)rq.atol.size() != nx)
+        NV_FAIL("BDF: ic / kidx / atol size");
+    if (rq.raw ? rq.max_pts <= 0 : rq.total <= 0) NV_FAIL("BDF: no output points");
+
+    // модуль (кэш — по телам, размерности и fmad)
+    const bool fmad = get_nvrtc_fmad();
+    std::string key = "bdf\x1f" + rq.res + '\x1f' + rq.jac + '\x1f' + std::to_string(nx) + '\x1f' + (fmad ? '1' : '0');
+    CUfunction fn = nullptr;
+    for (size_t i = 0; i < cache_.size() && !fn; ++i)
+        if (cache_[i].key == key) fn = (CUfunction)cache_[i].kernel;
+    if (!fn) {
+        std::string hdr;
+        if (!read_kernel_text("ucuda_bdf.cuh", hdr, error_)) return false;
+        std::ostringstream src;
+        src << kNumbTypedef
+            << "#define AMOUNTOFX " << nx << "\n"
+            << "__device__ __forceinline__ void ucuda_bdf_res(const numb* X, const numb ucuda_t, const numb* a, numb* F) {\n"
+            << "    (void)ucuda_t;\n" << rq.res << "\n}\n"
+            << "__device__ __forceinline__ void ucuda_bdf_jac(const numb* X, const numb ucuda_t, const numb* a, numb* J) {\n"
+            << "    (void)ucuda_t;\n" << rq.jac << "\n}\n"
+            << "#include \"ucuda_bdf.cuh\"\n"
+            << kBdfPhaseKernel;
+        const std::string code = src.str();
+        nvrtcProgram prog;
+        const char* hdr_src[]  = { hdr.c_str() };
+        const char* hdr_name[] = { "ucuda_bdf.cuh" };
+        NVOK(nvrtcCreateProgram(&prog, code.c_str(), "model_bdf.cu", 1, hdr_src, hdr_name), "createProgram(bdf)");
+        char arch[32];
+        snprintf(arch, sizeof(arch), "--gpu-architecture=compute_%d%d", cc_major_, cc_minor_);
+        const char* opts[] = { arch, fmad ? "--fmad=true" : "--fmad=false", "--std=c++17" };
+        const nvrtcResult comp = nvrtcCompileProgram(prog, 3, opts);
+        size_t logsz = 0; nvrtcGetProgramLogSize(prog, &logsz);
+        std::string log;
+        if (logsz > 1) { log.resize(logsz); nvrtcGetProgramLog(prog, &log[0]); }
+        if (comp != NVRTC_SUCCESS) {
+            error_ = "NVRTC compile failed (BDF):\n" + log;
+            nvrtcDestroyProgram(&prog);
+            return false;
+        }
+        size_t ptxsz = 0; NVOK(nvrtcGetPTXSize(prog, &ptxsz), "ptxSize(bdf)");
+        std::string ptx(ptxsz, '\0'); NVOK(nvrtcGetPTX(prog, &ptx[0]), "getPtx(bdf)");
+        nvrtcDestroyProgram(&prog);
+        CUmodule mod;
+        CUOK(cuModuleLoadDataEx(&mod, ptx.c_str(), 0, nullptr, nullptr), "moduleLoad(bdf)");
+        CUOK(cuModuleGetFunction(&fn, mod, "bdf_phase_kernel"), "getFunction(bdf)");
+        if (cache_.size() >= kCacheCapacity) {
+            if (cache_.front().kernel == kernel_) { kernel_ = nullptr; compiled_ = false; }
+            cuModuleUnload((CUmodule)cache_.front().module);
+            cache_.erase(cache_.begin());
+        }
+        cache_.push_back({ key, mod, fn });
+    }
+
+    const int cap = rq.raw ? rq.max_pts : rq.total;
+    const int nv = (int)rq.values.size();
+    CUdeviceptr d_ic = 0, d_val = 0, d_k = 0, d_at = 0, d_data = 0, d_times = 0, d_cnt = 0, d_st = 0, d_log = 0, d_lcnt = 0;
+    auto free_all = [&]() {
+        for (CUdeviceptr p : { d_ic, d_val, d_k, d_at, d_data, d_times, d_cnt, d_st, d_log, d_lcnt }) if (p) cuMemFree(p);
+    };
+    const int log_cap = rq.log_cap > 0 ? rq.log_cap : 0;   // журнал попыток на траекторию
+    auto alloc = [&](CUdeviceptr& p, size_t bytes, const char* what) {
+        const CUresult r = cuMemAlloc(&p, bytes > 0 ? bytes : 8);
+        if (r != CUDA_SUCCESS) { cu_ok(r, error_, what); return false; }
+        return true;
+    };
+    if (!alloc(d_ic, (size_t)N * nx * sizeof(numb), "allocIc(bdf)") || !alloc(d_val, (size_t)(nv > 0 ? nv : 1) * sizeof(numb), "allocVal(bdf)")
+        || !alloc(d_k, (size_t)nx * sizeof(int), "allocK(bdf)") || !alloc(d_at, (size_t)nx * sizeof(numb), "allocAtol(bdf)")
+        || !alloc(d_data, (size_t)N * cap * nx * sizeof(numb), "allocData(bdf)")
+        || !alloc(d_times, rq.raw ? (size_t)N * cap * sizeof(numb) : 0, "allocTimes(bdf)")
+        || !alloc(d_cnt, (size_t)N * sizeof(int), "allocCnt(bdf)") || !alloc(d_st, (size_t)N * 10 * sizeof(numb), "allocStats(bdf)")
+        || !alloc(d_log, (size_t)N * log_cap * 4 * sizeof(numb), "allocLog(bdf)")
+        || !alloc(d_lcnt, (size_t)N * sizeof(int), "allocLogCnt(bdf)")) {
+        free_all();
+        return false;
+    }
+    const std::vector<numb> ic_n = to_numb(rq.ic_flat), val_n = to_numb(rq.values), at_n = to_numb(rq.atol);
+    bool ok = cu_ok(cuMemcpyHtoD(d_ic, ic_n.data(), ic_n.size() * sizeof(numb)), error_, "cpyIc(bdf)")
+           && (nv == 0 || cu_ok(cuMemcpyHtoD(d_val, val_n.data(), (size_t)nv * sizeof(numb)), error_, "cpyVal(bdf)"))
+           && cu_ok(cuMemcpyHtoD(d_k, rq.kidx.data(), (size_t)nx * sizeof(int)), error_, "cpyK(bdf)")
+           && cu_ok(cuMemcpyHtoD(d_at, at_n.data(), (size_t)nx * sizeof(numb)), error_, "cpyAtol(bdf)");
+    bool cancelled = false;
+    if (ok) ok = cancel_flag_reset();
+    if (ok) {
+        // = UcudaBdfParams (тот же порядок и типы полей)
+        struct { numb rtol, h0, hmax; int maxk; numb hmin; int nmax, nfull; numb ntol, hfix; } par = {
+            (numb)rq.rtol, (numb)rq.h0, (numb)rq.hmax, rq.maxk, (numb)rq.hmin,
+            rq.newton_max, rq.newton_full ? 1 : 0, (numb)rq.newton_tol, (numb)rq.hfix };
+        int nxd = rq.nx, total = rq.total, raw = rq.raw ? 1 : 0, max_pts = rq.max_pts, capv = cap, n = N, lcap = log_cap;
+        numb t_skip = (numb)rq.t_skip, t_rec = (numb)rq.t_rec, dt = (numb)rq.dt;
+        CUdeviceptr d_cancel = (CUdeviceptr)cancel_dev_;
+        void* args[] = { &d_ic, &d_val, &d_k, &d_at, &par, &nxd, &t_skip, &t_rec, &dt, &total, &raw, &max_pts, &capv,
+                         &n, &d_data, &d_times, &d_cnt, &d_st, &d_cancel, &lcap, &d_log, &d_lcnt };
+        const int threads = 32, blocks = (N + threads - 1) / threads;
+        ok = cu_ok(cuLaunchKernel(fn, blocks, 1, 1, threads, 1, 1, 0, nullptr, args, nullptr), error_, "launch(bdf)")
+          && wait_default_stream(rq.cancel, cancelled);
+    }
+    if (ok && cancelled) { free_all(); error_ = kNvrtcCancelled; return false; }
+    std::vector<numb> st((size_t)N * 10);
+    std::vector<int> cnt(N), lcnt(N, 0);
+    if (ok)
+        ok = cu_ok(cuMemcpyDtoH(cnt.data(), d_cnt, (size_t)N * sizeof(int)), error_, "cpyCnt(bdf)")
+          && cu_ok(cuMemcpyDtoH(st.data(), d_st, st.size() * sizeof(numb)), error_, "cpyStats(bdf)")
+          && cu_ok(cuMemcpyDtoH(lcnt.data(), d_lcnt, (size_t)N * sizeof(int)), error_, "cpyLogCnt(bdf)");
+    out.traj.resize(N);
+    if (rq.raw) out.times.resize(N);
+    out.log.resize(N);
+    out.stats.resize(N);
+    out.final_h.assign(N, 0.0);
+    out.hmin_fail.assign(N, 0);
+    std::vector<numb> buf;
+    for (int tid = 0; ok && tid < N; ++tid) {
+        const int c = cnt[tid] < 0 ? 0 : (cnt[tid] > cap ? cap : cnt[tid]);
+        buf.resize((size_t)c * nx);
+        if (c > 0)
+            ok = cu_ok(cuMemcpyDtoH(buf.data(), d_data + (size_t)tid * cap * nx * sizeof(numb), buf.size() * sizeof(numb)),
+                       error_, "cpyData(bdf)");
+        if (!ok) break;
+        auto& tr = out.traj[tid];
+        tr.resize(c);
+        for (int i = 0; i < c; ++i) tr[i].assign(buf.data() + (size_t)i * nx, buf.data() + (size_t)(i + 1) * nx);
+        if (rq.raw) {
+            buf.resize((size_t)c);
+            if (c > 0)
+                ok = cu_ok(cuMemcpyDtoH(buf.data(), d_times + (size_t)tid * cap * sizeof(numb), (size_t)c * sizeof(numb)),
+                           error_, "cpyTimes(bdf)");
+            out.times[tid].assign(buf.begin(), buf.end());
+        }
+        const int nl = lcnt[tid] < 0 ? 0 : (lcnt[tid] > log_cap ? log_cap : lcnt[tid]);
+        if (ok && nl > 0) {
+            buf.resize((size_t)nl * 4);
+            ok = cu_ok(cuMemcpyDtoH(buf.data(), d_log + (size_t)tid * log_cap * 4 * sizeof(numb), buf.size() * sizeof(numb)),
+                       error_, "cpyLog(bdf)");
+            out.log[tid].assign(buf.begin(), buf.end());
+        }
+        AdaptiveStats& as = out.stats[tid];
+        const numb* s = &st[(size_t)tid * 10];
+        as.nacc = s[0]; as.nrej = s[1]; as.nforced = s[9]; as.nrhs = s[3];
+        out.hmin_fail[tid] = s[2] != 0;
+        as.hmin = s[4]; as.hmax = s[5]; as.hmean = s[6];
+        as.diverged = s[7] != 0; as.truncated = s[8] != 0;
+    }
+    free_all();
+    return ok;
+}
+
+bool NvrtcEngine::run_phase_portraits_adaptive(const PhaseAdaptiveRequest& rq, PhaseAdaptiveResult& out) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    out = PhaseAdaptiveResult();
+    if (!inited_ && !init()) return false;
+    cuCtxSetCurrent((CUcontext)context_);
+    const int nx = rq.amountOfX, N = rq.N;
+    if (N <= 0) NV_FAIL("N<=0");
+    if (nx < 1 || nx > UCUDA_AD_MAXN) NV_FAIL("adaptive: dimension out of range");
+    if ((int)rq.ic_flat.size() != N * nx) NV_FAIL("ic_flat size != N*amountOfX");
+    if (rq.raw ? rq.max_pts <= 0 : rq.total <= 0) NV_FAIL("adaptive: no output points");
+
+    void* fn = nullptr;
+    if (!compile_adaptive(rq, &fn)) return false;
+
+    const int cap = rq.raw ? rq.max_pts : rq.total;
+    const int nv = (int)rq.values.size();
+    const size_t data_count = (size_t)N * cap * nx;
+    const size_t log_count  = (size_t)N * (rq.log_cap > 0 ? rq.log_cap : 0) * 4;
+    CUdeviceptr d_ic = 0, d_val = 0, d_data = 0, d_times = 0, d_cnt = 0,
+                d_log = 0, d_logc = 0, d_st = 0, d_fh = 0;
+    auto free_all = [&]() {
+        for (CUdeviceptr p : { d_ic, d_val, d_data, d_times, d_cnt, d_log, d_logc, d_st, d_fh })
+            if (p) cuMemFree(p);
+    };
+    auto alloc = [&](CUdeviceptr& p, size_t bytes, const char* what) {
+        CUresult r = cuMemAlloc(&p, bytes > 0 ? bytes : 8);
+        if (r != CUDA_SUCCESS) { cu_ok(r, error_, what); return false; }
+        return true;
+    };
+    if (!alloc(d_ic, (size_t)N * nx * sizeof(numb), "allocIc(ad)")
+        || !alloc(d_val, (size_t)(nv > 0 ? nv : 1) * sizeof(numb), "allocVal(ad)")
+        || !alloc(d_data, data_count * sizeof(numb), "allocData(ad)")
+        || !alloc(d_times, rq.raw ? (size_t)N * cap * sizeof(numb) : 0, "allocTimes(ad)")
+        || !alloc(d_cnt, (size_t)N * sizeof(int), "allocCnt(ad)")
+        || !alloc(d_log, log_count * sizeof(numb), "allocLog(ad)")
+        || !alloc(d_logc, (size_t)N * sizeof(int), "allocLogc(ad)")
+        || !alloc(d_st, (size_t)N * 9 * sizeof(numb), "allocStats(ad)")
+        || !alloc(d_fh, (size_t)N * sizeof(numb), "allocFh(ad)")) {
+        free_all();
+        return false;
+    }
+    const std::vector<numb> ic_n = to_numb(rq.ic_flat), val_n = to_numb(rq.values);
+    bool ok = cu_ok(cuMemcpyHtoD(d_ic, ic_n.data(), (size_t)N * nx * sizeof(numb)), error_, "cpyIc(ad)")
+           && (nv == 0 || cu_ok(cuMemcpyHtoD(d_val, val_n.data(), (size_t)nv * sizeof(numb)), error_, "cpyVal(ad)"));
+    bool cancelled = false;
+    if (ok) ok = cancel_flag_reset();
+    if (ok) {
+        numb t_skip = (numb)rq.t_skip, t_rec = (numb)rq.t_rec, dt = (numb)rq.dt;
+        int total = rq.total, raw = rq.raw ? 1 : 0, max_pts = rq.max_pts, log_cap = rq.log_cap, n = N;
+        UcudaAdaptParams par = rq.params;
+        CUdeviceptr d_cancel = (CUdeviceptr)cancel_dev_;
+        void* args[] = { &d_ic, &d_val, &par, &t_skip, &t_rec, &dt, &total, &raw, &max_pts, &log_cap, &n,
+                         &d_data, &d_times, &d_cnt, &d_log, &d_logc, &d_st, &d_fh, &d_cancel };
+        const int threads = 32, blocks = (N + threads - 1) / threads;
+        ok = cu_ok(cuLaunchKernel((CUfunction)fn, blocks, 1, 1, threads, 1, 1, 0, nullptr, args, nullptr), error_, "launch(ad)")
+          && wait_default_stream(rq.cancel, cancelled);
+    }
+    if (ok && cancelled) { free_all(); error_ = kNvrtcCancelled; return false; }
+    std::vector<numb> st((size_t)N * 9), fh(N);
+    std::vector<int> cnt(N), logc(N);
+    if (ok) {
+        ok = cu_ok(cuMemcpyDtoH(cnt.data(), d_cnt, (size_t)N * sizeof(int)), error_, "cpyCnt(ad)")
+          && cu_ok(cuMemcpyDtoH(logc.data(), d_logc, (size_t)N * sizeof(int)), error_, "cpyLogc(ad)")
+          && cu_ok(cuMemcpyDtoH(st.data(), d_st, st.size() * sizeof(numb)), error_, "cpyStats(ad)")
+          && cu_ok(cuMemcpyDtoH(fh.data(), d_fh, (size_t)N * sizeof(numb)), error_, "cpyFh(ad)");
+    }
+
+    out.traj.resize(N);
+    if (rq.raw) out.times.resize(N);
+    out.log.resize(N);
+    out.stats.resize(N);
+    out.final_h = from_numb(fh);
+    // Только записанное нитью (counts / log_counts): буфер — под потолок max points, заполнен обычно малой частью.
+    std::vector<numb> buf;
+    for (int tid = 0; ok && tid < N; ++tid) {
+        const int c = cnt[tid] < 0 ? 0 : (cnt[tid] > cap ? cap : cnt[tid]);
+        buf.resize((size_t)c * nx);
+        if (c > 0)
+            ok = cu_ok(cuMemcpyDtoH(buf.data(), d_data + (size_t)tid * cap * nx * sizeof(numb),
+                                    buf.size() * sizeof(numb)), error_, "cpyData(ad)");
+        if (!ok) break;
+        auto& tr = out.traj[tid];
+        tr.resize(c);
+        for (int i = 0; i < c; ++i) tr[i].assign(buf.data() + (size_t)i * nx, buf.data() + (size_t)(i + 1) * nx);
+        if (rq.raw) {
+            buf.resize((size_t)c);
+            if (c > 0)
+                ok = cu_ok(cuMemcpyDtoH(buf.data(), d_times + (size_t)tid * cap * sizeof(numb),
+                                        (size_t)c * sizeof(numb)), error_, "cpyTimes(ad)");
+            out.times[tid].assign(buf.begin(), buf.end());
+        }
+        const int lc = rq.log_cap > 0 ? (logc[tid] < 0 ? 0 : (logc[tid] < rq.log_cap ? logc[tid] : rq.log_cap)) : 0;
+        buf.resize((size_t)lc * 4);
+        if (ok && lc > 0)
+            ok = cu_ok(cuMemcpyDtoH(buf.data(), d_log + (size_t)tid * rq.log_cap * 4 * sizeof(numb),
+                                    (size_t)lc * 4 * sizeof(numb)), error_, "cpyLog(ad)");
+        out.log[tid].assign(buf.begin(), buf.end());
+        const numb* s = st.data() + (size_t)tid * 9;
+        AdaptiveStats& a = out.stats[tid];
+        a.nacc = s[0]; a.nrej = s[1]; a.nforced = s[2]; a.nrhs = s[3];
+        a.hmin = s[4]; a.hmax = s[5]; a.hmean = s[6];
+        a.diverged = s[7] != 0; a.truncated = s[8] != 0;
+    }
+    free_all();
+    return ok;
+}

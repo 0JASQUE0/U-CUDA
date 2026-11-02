@@ -1,0 +1,60 @@
+﻿#pragma once
+#include "imgui.h"
+#include <map>
+#include <string>
+#include <vector>
+// Одна строка легенды: подпись и цвет образца.
+struct LegendEntry {
+    std::string label;
+    ImVec4      color;
+};
+
+// Режим прохода draw_legend. Позволяет вызвать функцию дважды: первый раз
+// для взаимодействия (клики → toggle visible[]) в старом месте рендера,
+// второй раз для визуала поверх линий данных (когда те рисуются через
+// ImDrawList в custom line style). Так легенда всегда оказывается сверху,
+// не ломая клики.
+enum class LegendPass {
+    Both,       // текущее поведение: submit InvisibleButtons + рисуем визуал
+    Interact,   // только InvisibleButtons + hover/click, без dl-> draw
+    Draw,       // только визуал через dl->; hover highlight через
+                // IsMouseHoveringRect (InvisibleButton не создаём заново).
+};
+
+// Рисует легенду в правом верхнем углу поля графика.
+// visible        - локальное гашение: строка остаётся, но тускнеет (клик по ней).
+// global_visible - внешний фильтр: записи с false в легенду не попадают вовсе
+//                  и места в ней не занимают. Короче visible - хвост считаем видимым.
+// owner_id       - идентификатор владельца, чтобы ID кнопок ImGui не совпали между плотами.
+// out_clicks     - опционально: куда сложить результат ПКМ по легенде (см.
+//                  LegendRightClick). Сам факт non-null указателя означает
+//                  «у вызывающего есть меню цвета»: в Draw-проходе (где кликов
+//                  не ловим) по нему рисуется рамка-подсказка на наведении
+//                  квадрата. Поэтому передавать его следует в ОБА прохода, а
+//                  легенда без такого меню (Plot3DView) оставляет nullptr —
+//                  и подсказки не получает.
+
+// Результат правого клика по легенде. Легенда подаёт свои InvisibleButton'ы
+// РАНЬШЕ плотовского и забирает hover себе, поэтому плот про эти клики иначе
+// не узнаёт вообще — а меню он показать обязан.
+struct LegendRightClick {
+    int  swatch_index = -1;     // ПКМ по цветному квадрату строки k -> меню цвета
+    bool row_other    = false;  // ПКМ по строке мимо квадрата  -> обычное меню плота
+};
+
+void draw_legend(ImDrawList* dl,
+    ImVec2 plot_pos, float plot_w,
+    const std::vector<LegendEntry>& entries,
+    std::vector<bool>& visible,
+    const std::vector<bool>& global_visible,
+    int owner_id,
+    LegendPass pass = LegendPass::Both,
+    LegendRightClick* out_clicks = nullptr);
+
+// Меню цвета серии (ПКМ по квадрату легенды), общее для 2D и 3D. Редактор — ColorEdit3, как у
+// цвета области предпочтительности (поля RGB/HSV/Hex, пикер по клику на образец), без альфы:
+// прозрачностью рулят слайдеры Alpha у графика. Вызывать каждый кадр; открывает его вызывающий
+// (ImGui::OpenPopup(pop_id), target — подпись серии). current — нынешний цвет серии. Правка пишет
+// overrides[target] (ключ — подпись, а не индекс: серии сдвигаются).
+void legend_color_popup(const char* pop_id, const std::string& target,
+                        std::map<std::string, ImVec4>& overrides, const ImVec4& current);

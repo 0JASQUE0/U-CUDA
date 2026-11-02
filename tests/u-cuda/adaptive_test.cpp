@@ -6,12 +6,12 @@
 //    композиционные схемы — точность на x' = -x.
 // Без CUDA проверяется только CPU-часть, код выхода 77.
 #include "test_util.h"
-#include "adaptive_settings.h"
-#include "codegen.hpp"
-#include "integrator.h"
-#include "krs_cpu.h"
-#include "nvrtc_engine.h"
-#include "parametric_engine.h"
+#include "ucuda/equations/adaptive_params.h"
+#include "ucuda/equations/codegen.hpp"
+#include "ucuda/numerics/integrator.h"
+#include "ucuda/numerics/krs_cpu.h"
+#include "ucuda/cuda/nvrtc_engine.h"
+#include "ucuda/cuda/parametric_engine.h"
 #include <cuda.h>
 
 namespace {

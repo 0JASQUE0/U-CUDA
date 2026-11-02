@@ -1,0 +1,222 @@
+﻿// lle1d_cont.template.cu
+//
+// NVRTC template for 1D LLE in continuation mode: every parameter point starts
+// from the state left by the previous one. Single-threaded on the GPU -- the
+// sweep is a dependency chain by construction, so it cannot be parallelised
+// without breaking the hysteresis that continuation exists to capture. Mirrors
+// bifurcation1d_cont.template.cu in shape and run_lle1d_cpu in numerics.
+//
+// Carried between points: the trajectory x[] AND the perturbation probe y[].
+// By the end of a point the probe is already aligned with the direction of
+// strongest stretching, so the next point does not have to re-align it from a
+// random direction.
+//
+// Placeholders:
+//   AMOUNT_OF_X -- system dimension.
+//   KRS_BODY    -- body of calculateDiscreteModel from codegen.
+
+#define AMOUNTOFX {{AMOUNT_OF_X}}
+#define par_or_var 1   // continuation sweeps a parameter (or h), never an IC
+
+#ifdef __CUDACC_RTC__
+typedef signed char        int8_t;
+typedef unsigned char      uint8_t;
+typedef short              int16_t;
+typedef unsigned short     uint16_t;
+typedef int                int32_t;
+typedef unsigned int       uint32_t;
+typedef long long          int64_t;
+typedef unsigned long long uint64_t;
+#endif
+
+// curand_kernel.h interception -- see lle1d.template.cu. The stub RNG below is
+// the one run_lle1d_cpu copies verbatim, so CPU and GPU pick the same initial
+// probe direction.
+#ifdef __CUDACC_RTC__
+#define CURAND_KERNEL_H_
+#define CURAND_KERNEL_H
+typedef struct { unsigned long long state; } curandState_t;
+typedef curandState_t curandStateXORWOW_t;
+__device__ __forceinline__ void curand_init(
+    unsigned long long seed, unsigned long long sequence, unsigned long long offset, curandState_t* s) {
+    unsigned long long z = seed + sequence * 0x9E3779B97F4A7C15ULL + offset;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    s->state = z ^ (z >> 31);
+}
+__device__ __forceinline__ float curand_uniform(curandState_t* s) {
+    s->state = s->state * 6364136223846793005ULL + 1442695040888963407ULL;
+    return (float)(((s->state >> 40) & 0xFFFFFFULL) + 1ULL) / 16777216.0f;
+}
+#endif
+
+#include "cudaLibrary.cuh"
+
+__device__ __host__ __forceinline__
+void calculateDiscreteModel(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h) {
+{{KRS_BODY}}
+}
+
+#include "cudaLibrary.cu"
+
+// Single-thread kernel, launched with gridDim = blockDim = 1.
+//   sweepIsH  != 0 -> the swept quantity is the step h itself; a[] stays put and
+//                     the per-point step counts are recomputed from h.
+//   logScale  != 0 -> points are distributed logarithmically over [lo, hi].
+//   result[j]      -- lambda for point j, or NaN when the point did not survive.
+// Сигналы: ядро однопоточное и само идёт по точкам, поэтому тик — ровно
+//   точка, а проверка отмены стоит на границе точек. Прерывание оставляет
+//   хвост точек непосчитанным, но отменённый прогон хост выбрасывает целиком.
+extern "C" __global__ void lle1dContinuationKernel(
+    int nPts,
+    numb lo,
+    numb hi,
+    int reverse,
+    int logScale,
+    int sweepIsH,
+    int mutParamIdx,                 // 1-based index into a[]; ignored if sweepIsH
+    const numb* baseValues,
+    int amountOfValues,
+    const numb* baseX,
+    int amountOfX,
+    numb hBase,
+    numb NT,
+    numb tMax,
+    numb transientTime,
+    numb eps,
+    numb maxValue,
+    numb* result,
+    const volatile int* cancelFlag,
+    int*  progressCounter,
+    numb  vectorTransient)          // tangent-vector transient: blocks renormalised, not summed
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    numb x[AMOUNTOFX];
+    numb y[AMOUNTOFX];
+    numb a[64];   // kMaxAmountOfValues in the engine
+
+    for (int i = 0; i < amountOfX; ++i)      x[i] = baseX[i];
+    for (int i = 0; i < amountOfValues; ++i) a[i] = baseValues[i];
+    UCUDA_NVAR(ucudaStep, 0)   // время идёт по всей цепочке, как и x; щуп начинает блок с ним же
+
+    curandState_t rng;
+    unsigned long long rngSeq = 0ULL;
+    curand_init(1234567891ULL, rngSeq, 0ULL, &rng);
+
+    // Fresh random unit direction for the probe.
+    numb zPower = 0;
+    for (int i = 0; i < UCUDA_LYAP_K(amountOfX); ++i) { y[i] = curand_uniform(&rng) - (numb)0.5; zPower += y[i] * y[i]; }
+#ifdef UCUDA_LYAP_NX
+    for (int i = UCUDA_LYAP_NX; i < amountOfX; ++i) y[i] = 0;   // ДАУ: щуп только по x
+#endif
+    zPower = sqrt(zPower);
+    for (int i = 0; i < amountOfX; ++i) y[i] = (zPower == 0) ? (numb)0 : y[i] / zPower;
+
+    int probeAttached = 0;
+    const numb denom = (numb)(nPts > 1 ? nPts - 1 : 1);
+    const int nBlocks = (int)(tMax / NT);
+    const int nWarm   = vectorTransient > 0 ? (int)ucuda_steps_per_block(vectorTransient, NT) : 0;   // h-independent
+
+    for (int j = 0; j < nPts; ++j) {
+        // Stop: недосчитанный хвост цепочки помечаем — хост покажет посчитанное.
+        if (cancelFlag != nullptr && *cancelFlag != 0) {
+            for (int r = j; r < nPts; ++r) result[r] = (numb)UCUDA_CANCELLED_VALUE;
+            return;
+        }
+        if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
+        // Общая с host'ом функция, см. configCUDA.h (была третьей копией).
+        const numb p = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, reverse);
+
+        numb hLocal = hBase;
+        if (sweepIsH) hLocal = p;
+        else          a[mutParamIdx] = p;
+
+        if (hLocal <= 0 || nBlocks <= 0) { result[j] = nan(""); continue; }
+#ifdef UCUDA_LYAP_NX
+        // ДАУ (этап 7): z — на связь при новом параметре; старт — z прошлой точки (та же ветвь).
+        calculateDiscreteModel(x, UCUDA_TA((numb)ucudaStep * hLocal) a, (numb)0);
+#endif
+
+        // Round to nearest, divide by k*h*nBlocks -- see ucuda_steps_per_block (configCUDA.h).
+        const int ntSteps   = (int)ucuda_steps_per_block(NT, hLocal);
+        const int skipSteps = (int)ucuda_steps_per_block(transientTime, hLocal);   // round, as the blocks
+        if (ntSteps <= 0) { result[j] = nan(""); continue; }
+        // The loop adds one more step after its iterations (see ucuda_steps_per_block).
+        const int blockIters = ntSteps - 1;
+
+        int alive = 1;
+        // settleBlocks: warm-up for a point that CARRIED the probe over -- run
+        // in NT-blocks so the probe stays attached and keeps its orientation.
+        // A point that attaches a fresh probe has already warmed up on the
+        // trajectory alone (skipSteps below), so it gets no extra blocks.
+        int settleBlocks = (int)(transientTime / NT);
+        if (!probeAttached) {
+            settleBlocks = 0;
+            // Exactly skipSteps steps: the loop adds one more after its iterations.
+            if (skipSteps > 0 && loopCalculateDiscreteModel_int(x, a, hLocal, skipSteps - 1, amountOfX,
+                                               1, 0, maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaStep)) == 0) {
+                alive = 0;
+            } else {
+                for (int i = 0; i < amountOfX; ++i) y[i] = y[i] * eps + x[i];
+                probeAttached = 1;
+            }
+        }
+
+        // Tangent-vector transient: a fresh probe gets nWarm unsummed blocks too, a carried
+        // one the larger of its settle blocks and nWarm.
+        if (settleBlocks < nWarm) settleBlocks = nWarm;
+#ifdef UCUDA_LYAP_NX
+        // z клона — на связь при новом параметре (и после постановки щупа).
+        if (alive) ucudaDaeProject(y, x, UCUDA_TA((numb)ucudaStep * hLocal) a, amountOfX);
+#endif
+        numb sum = 0;
+        const int totalBlocks = settleBlocks + nBlocks;
+        for (int b = 0; alive && b < totalBlocks; ++b) {
+            UCUDA_NVAR(ucudaClone, ucudaStep)
+            if (loopCalculateDiscreteModel_int(x, a, hLocal, blockIters, amountOfX,
+                                               1, 0, maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaStep)) == 0) { alive = 0; break; }
+            if (loopCalculateDiscreteModel_int(y, a, hLocal, blockIters, amountOfX,
+                                               1, 0, maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaClone)) == 0) { alive = 0; break; }
+
+            numb d = 0;
+            for (int l = 0; l < UCUDA_LYAP_K(amountOfX); ++l) {
+                numb q = (x[l] - y[l]) / eps;
+                d += q * q;
+            }
+            d = sqrt(d);
+            if (d <= (numb)1e-14) d = (numb)1e-14;
+
+            // The first settleBlocks blocks only orient the probe; their growth
+            // must not enter the average.
+            if (b >= settleBlocks) sum += log(d);
+
+            const numb inv = (numb)1.0 / d;
+            for (int l = 0; l < amountOfX; ++l)
+                y[l] = x[l] - ((x[l] - y[l] + (numb)1e-14) * inv);
+#ifdef UCUDA_LYAP_NX
+            ucudaDaeProject(y, x, UCUDA_TA((numb)ucudaStep * hLocal) a, amountOfX);
+#endif
+        }
+
+        if (alive) {
+            result[j] = sum / ((numb)nBlocks * (numb)ntSteps * hLocal);
+        } else {
+            result[j] = nan("");
+            // Break the chain: restart from the initial conditions with a fresh
+            // probe direction so the next point does not inherit garbage.
+            probeAttached = 0;
+            for (int i = 0; i < amountOfX; ++i) x[i] = baseX[i];
+            UCUDA_NSET(ucudaStep, 0)
+            rngSeq = (unsigned long long)j + 1ULL;
+            curand_init(1234567891ULL, rngSeq, 0ULL, &rng);
+            numb zp = 0;
+            for (int i = 0; i < UCUDA_LYAP_K(amountOfX); ++i) { y[i] = curand_uniform(&rng) - (numb)0.5; zp += y[i] * y[i]; }
+#ifdef UCUDA_LYAP_NX
+            for (int i = UCUDA_LYAP_NX; i < amountOfX; ++i) y[i] = 0;
+#endif
+            zp = sqrt(zp);
+            for (int i = 0; i < amountOfX; ++i) y[i] = (zp == 0) ? (numb)0 : y[i] / zp;
+        }
+    }
+}

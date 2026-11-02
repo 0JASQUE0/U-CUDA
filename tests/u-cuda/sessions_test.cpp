@@ -3,8 +3,8 @@
 // Analysis) и проходит круг "разбор -> запись -> разбор -> запись": вторая запись равна первой
 // (запись идемпотентна, ни одно поле не теряется и не искажается при повторном сохранении).
 #include "test_util.h"
-#include "session_io.h"
-#include "system_library.h"
+#include "ucuda/application/session_persistence.h"
+#include "ucuda/storage/system_library.h"
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -39,7 +39,7 @@ std::function<bool(const std::string&, std::string&)> rt(bool (*from)(const std:
 
 int main() {
     return ut::run_main("sessions", []() -> int {
-        const fs::path lib = fs::u8path(exe_dir()) / ".." / ".." / ".." / "U-CUDA" / "library";
+        const fs::path lib = ut::fixture_library();
         std::map<std::string, std::function<bool(const std::string&, std::string&)>> by_name = {
             { "_last_parametric", rt(session_from_json_parametric, session_to_json_parametric) },
             { "_last_lle", rt(session_from_json_lle, session_to_json_lle) },

@@ -5,8 +5,8 @@
 // включая продолжения (у них все вызовы pow идут с основанием 10, без держателя NVVM специализировал бы pow);
 // печатается время сборки обоих вариантов.
 #include "test_util.h"
-#include "codegen.hpp"
-#include "parametric_engine.h"
+#include "ucuda/equations/codegen.hpp"
+#include "ucuda/cuda/parametric_engine.h"
 #include <cuda.h>
 #include <chrono>
 #include <cstring>
@@ -70,11 +70,11 @@ Run run_all(const std::string& body, int N, const std::vector<double>& ic, const
 
 void compare(const char* name, const std::string& body, int N, const std::vector<double>& ic,
              const std::vector<double>& a, double lo, double hi, double h) {
-    SetEnvironmentVariableA("UCUDA_NVRTC_PRUNE", "1");
+    ut::set_environment("UCUDA_NVRTC_PRUNE", "1");
     const Run p = run_all(body, N, ic, a, lo, hi, h);
-    SetEnvironmentVariableA("UCUDA_NVRTC_PRUNE", "0");
+    ut::set_environment("UCUDA_NVRTC_PRUNE", "0");
     const Run f = run_all(body, N, ic, a, lo, hi, h);
-    SetEnvironmentVariableA("UCUDA_NVRTC_PRUNE", nullptr);
+    ut::set_environment("UCUDA_NVRTC_PRUNE", nullptr);
     ut::require(p.v.size() == f.v.size(), std::string(name) + ": result sizes differ");
     size_t diff = 0;
     for (size_t i = 0; i < p.v.size(); ++i) diff += std::memcmp(&p.v[i], &f.v[i], sizeof(double)) != 0;
@@ -87,7 +87,7 @@ void compare(const char* name, const std::string& body, int N, const std::vector
 
 int main() {
     return ut::run_main("prune", []() -> int {
-        SetEnvironmentVariableA("CUDA_CACHE_DISABLE", "1");   // время сборки — без кэша JIT драйвера (до cuInit)
+        ut::set_environment("CUDA_CACHE_DISABLE", "1");   // время сборки — без кэша JIT драйвера (до cuInit)
         if (cuInit(0) != CUDA_SUCCESS) { std::printf("no CUDA device: skipped\n"); return ut::kSkip; }
         set_nvrtc_rdc(false);
         System lor;

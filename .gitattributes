@@ -1,0 +1,4 @@
+# Keep generated baseline JSON portable and byte-stable across checkouts.
+tests/baselines/*-data/*.json text eol=lf
+tests/baselines/*-history/*.json text eol=lf
+tests/baselines/*.json text eol=lf

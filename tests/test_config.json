@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "performance": {
+    "slowdown_limit": 0.10,
+    "warmup_seconds": 1.0,
+    "minimum_seconds": 1.0,
+    "series": 3,
+    "repetitions": 9,
+    "max_relative_spread": 0.10
+  },
+  "numerical": { "absolute": 1e-11, "relative": 1e-10 },
+  "cases": {
+    "fixed.cpu.32": {"absolute": 0, "relative": 0},
+    "fixed.gpu.32": {"absolute": 0, "relative": 0},
+    "precision.cpu.1": {"absolute": 0, "relative": 0},
+    "precision.cpu.2": {"absolute": 0, "relative": 0}
+  }
+}

@@ -7,12 +7,11 @@
 //    методы, alpha уровня C) переживают круг через JSON.
 // Линкуется со всем приложением (сессии тянут типы окон графиков), поэтому собирается с /DUT_FULL_APP.
 #include "test_util.h"
-#include "app_model.h"
-#include "gui_internal.h"
-#include "dae_ir.h"
-#include "num_parse.h"
-#include "session_io.h"
-#include "system_library.h"
+#include "ucuda/application/app_model.h"
+#include "ucuda/equations/dae_ir.h"
+#include "ucuda/domain/num_parse.h"
+#include "ucuda/storage/session_io.h"
+#include "ucuda/storage/system_library.h"
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -117,7 +116,7 @@ void records() {
                 "older DAE record defaults");
 
     // Импорт схемы в модель (вкладка DAE): поля ДАУ, номиналы, НУ, шаг и копия netlist'а.
-    const std::filesystem::path cir = std::filesystem::temp_directory_path() / "ucuda_arch_rc.cir";
+    const std::filesystem::path cir = ut::fixture_library() / "ucuda_arch_rc.cir";
     {
         std::ofstream f(cir, std::ios::binary);
         f << "* rc from a file\nV1 in 0 DC 5\nR1 in out 1k\nC1 out 0 1m IC=1\n.tran 1m 5\n";
@@ -139,11 +138,11 @@ void records() {
 
 void generated_method_selection() {
     AppModel m([](const std::vector<unsigned char>&) { return std::string{}; });
+    m.clear();   // все scheme_* = false (таблица kBuiltinSchemes — приватная у UI)
     m.mode = InputMode::Plain;
     m.plain_text = "x' = -x";
     m.vars_text = "x";
     m.params_text.clear();
-    for (const auto& b : kBuiltinSchemes) m.*b.flag = false;
     m.scheme_euler = m.scheme_rk4 = true;
     m.hidden_schemes = { "Euler" };
     ut::require(m.generate(), "selected visible method must generate: " + m.error_message);

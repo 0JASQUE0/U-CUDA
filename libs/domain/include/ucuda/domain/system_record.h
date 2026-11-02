@@ -1,0 +1,173 @@
+﻿#pragma once
+#include <string>
+#include <vector>
+#include <map>
+#include "ucuda/domain/param_groups.h"
+
+// Именованная пользовательская КРС. Это "ещё один scheme" — встаёт в scheme
+// combo рядом с Euler/Cromer/Midpoint/RK4. Имя не должно совпадать с built-in.
+// body — сырой C/CUDA-текст, подставляется напрямую в NVRTC-шаблон вместо
+// codegen-вывода. Доступны X[0..N-1], a[1..M], h, AMOUNTOFX, обычная математика.
+struct CustomScheme {
+    std::string name;
+    std::string body;
+
+    // Паспорт схемы — нужен ТОЛЬКО когда эта КРС берётся опорной для
+    // экстраполяционной обёртки "Extr(<имя>|...)": из порядка и симметричности
+    // считаются веса стадий. У встроенных схем то же самое отдаёт
+    // builtin_scheme_traits, но про кастомную КРС кодоген не знает ничего —
+    // текст тела он не разбирает, так что сказать может только автор.
+    // Ошибиться не страшно: неверные order/symmetric не дают неправильных
+    // чисел, они лишь гасят не те члены разложения, и порядок обёртки
+    // опускается до порядка самой базы.
+    // symmetric = разложение ошибки идёт только по ЧЁТНЫМ степеням h; это
+    // верно для самосопряжённых схем (Phi* ∘ Phi), и каждая стадия тогда
+    // добавляет не один порядок, а два.
+    int  order     = 1;
+    bool symmetric = false;
+
+    // Галочка "предлагать эту схему": выключенная не показывается в комбо
+    // выбора схемы (кроме уже выбранной — сессия не должна осиротеть) и не
+    // попадает в Generate. Тело и паспорт при этом живут, и опорной для
+    // обёртки выключенная КРС быть может.
+    bool enabled   = true;
+};
+
+// Полная запись системы в библиотеке: весь ввод (для редактирования) +
+// значения по умолчанию (все опциональны: пустая строка = не задано).
+struct SystemRecord {
+    // метаданные
+    std::string name;            // имя (для списка); если пусто — автоимя при сохранении
+    std::string note;            // заметка/ссылка на статью
+
+    // ввод (для редактирования)
+    // Discrete map x_{n+1} = f(x_n): no integration scheme, h is pinned to 1.
+    bool        is_map = false;
+    // DAE: x' = f(x,z,t), 0 = g(x,z,t). vars_text — x, alg_text — z.
+    // В system.json это "kind": "dae"; нет поля или "ode"/"map" — не ДАУ.
+    bool        is_dae = false;
+    std::string alg_text;
+    // Индексы переменных ДАУ, "x=1, lambda=3" (как nind1/2/3 в RADAU5); не
+    // названные — по умолчанию (см. parse_dae в dae_ir.h).
+    std::string dae_index_text;
+    // Решать как ОДУ (этап 3, уровень A): z выражается из связей и подставляется в f —
+    // система идёт во все вкладки со схемами ОДУ. Только если сведение удаётся.
+    bool        dae_as_ode = false;
+    // Уровень C (индекс 2-3 при dae_as_ode): связи дифференцируются и стабилизируются
+    // (d/dt + alpha)^m g = 0 — alpha здесь (см. dae_stabilized_index1).
+    std::string dae_stab_alpha = "10";
+    // ДАУ из схемы (этап 8): путь к .kicad_sch / .cir и копия netlist'а на момент
+    // импорта — запись воспроизводится и без исходного файла. Пусто — уравнения введены руками.
+    std::string circuit_source;
+    std::string circuit_netlist;
+    bool        circuit_ideal_opamps = false;   // ОУ — идеальные нуллоры, а не их .subckt (копия на идеальных)
+    // Упрощения приборов при импорте (SpiceImportOptions): без ёмкостей переходов, идеальные диоды / LED,
+    // идеальные биполярные транзисторы.
+    bool        circuit_no_jcaps = false;
+    bool        circuit_ideal_diodes = false;
+    bool        circuit_ideal_bjts = false;
+    std::string mode;        // "Image" | "LaTeX" | "Plain"
+    std::string latex_text;
+    std::string plain_text;
+    std::string alphabet_text;       // legacy: один список (vars + params вперемешку)
+    // Явные списки переменных и параметров. Приоритет над alphabet_text:
+    // если оба непустые — используются они напрямую; alphabet_text остаётся
+    // у старых записей как legacy fallback (либо когда equations должны
+    // сами вывести vars/params).
+    std::string vars_text;
+    std::string params_text;
+    bool        use_aux_funcs = false;
+    std::string func_defs_text;
+    std::string param_order;     // "AsInAlphabet" | "AsInSystem"
+
+    // выбранные методы
+    bool scheme_euler    = false;
+    bool scheme_cromer   = false;
+    bool scheme_midpoint = false;
+    bool scheme_rk4      = false;
+    bool scheme_dopri78  = false;
+    bool scheme_dopri78_legacy = false;   // DOPRI78 (legacy) — дроби статьи без уточнения
+    bool scheme_rk45     = false;         // RK45 — Dormand-Prince 5(4)
+    bool scheme_dop853   = false;         // DOP853 — Хайрер 8(5,3)
+    bool scheme_cd       = false;
+    bool scheme_cdfast   = false;   // CD fast (CD с предрасчётом констант шага)
+    // CD FP, CD fast FP: неявная половина простыми итерациями (cd_fp_iters)
+    bool scheme_cdfp     = false;
+    bool scheme_cdfastfp = false;
+    bool scheme_ccd      = false;   // Complex CD (комплексные полушаги)
+    bool scheme_ccd4     = false;   // Complex CD4 (два CD с шагами gamma*h / conj)
+    bool scheme_ccd4s3   = false;   // CCD4 (o4s3) — симметричная тройка (a, 1-2a, a)
+    bool scheme_ccd4s4   = false;   // CCD4 (o4s4) — симметричная четвёрка (g/2, gc/2, gc/2, g/2)
+    bool scheme_ccd4ss01 = false;   // CCD4 (s-split)_{0-1} — два CD по h/2, s1 = (1-i)/3, s2 = 1 - s1
+    bool scheme_ccd4ss10 = false;   // CCD4 (s-split)_{1-0} — то же, неявная половина первой
+    // Варианты {1-0} схем на CD: в каждом проходе неявная половина первой.
+    bool scheme_cd10 = false;   // CD_{1-0}
+    bool scheme_ccd10 = false;   // Complex CD_{1-0}
+    bool scheme_ccd4_10 = false;   // Complex CD4_{1-0}
+    bool scheme_ccd4s3_10 = false;   // CCD4 (o4s3)_{1-0}
+    bool scheme_ccd4s4_10 = false;   // CCD4 (o4s4)_{1-0}
+    bool scheme_ieuler   = false;   // Implicit Euler (Ньютон по символьному якобиану)
+    bool scheme_imidpoint = false;  // Implicit Midpoint (то же, стадия Y = (X + X_next)/2)
+    bool scheme_semp     = false;   // SEMP (средняя точка, явная стадия на h1 = s*h)
+    bool scheme_simp     = false;   // SIMP (то же, стадия диагонально-неявная)
+    bool scheme_dmethod  = false;   // D (диагонально-неявный шаг на полный h)
+    bool scheme_cieuler  = false;   // Complex Implicit Euler (два неявных Эйлера, tau = h*(1±i)/2)
+    // ГБШ: опорная модифицированная средняя точка Грэгга (n = 2) и экстраполяторы
+    // по n = 2,4,...,2K, K = 2..6 (одна цепочка leapfrog на стадию, порядок 2K).
+    bool scheme_gbs         = false;   // GBS (n=2)
+    bool scheme_gbs24       = false;   // GBS 2-4
+    bool scheme_gbs246      = false;   // GBS 2-4-6
+    bool scheme_gbs2468     = false;   // GBS 2-4-6-8
+    bool scheme_gbs246810   = false;   // GBS 2-4-6-8-10
+    bool scheme_gbs24681012 = false;   // GBS 2-4-6-8-10-12
+
+    // Настройки Ньютона для двух неявных схем. Живут на уровне системы, а не
+    // конфига анализа: AppModel::build_system() — единственная фабрика System,
+    // и её результат копируется во все сессии, так что кодген видит их сам.
+    // newton_full: false = якобиан и LU один раз за шаг (модифицированный Ньютон),
+    // true = пересчёт на каждой итерации (полный Ньютон).
+    bool        newton_full      = false;
+    std::string newton_tol       = "1e-10";
+    std::string newton_max_iters = "8";
+    // Число простых итераций CD FP / CD fast FP.
+    std::string cd_fp_iters      = "4";
+
+    // Коэффициент симметрии s для CD-методов (передаётся в kernel как a[0]).
+    // 0.5 = классический симметричный CD. Читается схемами "CD" и "Complex CD"
+    // (а также пользовательскими КРС, чьё тело обращается к a[0]).
+    std::string symmetry_s = "0.5";
+
+    // Пользовательские именованные КРС (см. CustomScheme выше).
+    std::vector<CustomScheme> custom_schemes;
+
+    // Собранные пользователем обёртки — ТОЛЬКО имена вида "Extr(RK4|1,2,4)"
+    // или "Comp(CD|g1,g2,g1)". Хранить рядом нечего: имя самоописательно, и тело
+    // пересобирается резолвером при каждой правке системы (в отличие от
+    // custom_schemes, где текст заморожен). Опорной может быть и встроенная
+    // схема, и кастомная КРС из списка выше.
+    std::vector<std::string> wrapper_schemes;
+    // Выключенные обёртки — тот же смысл, что у CustomScheme::enabled. Имена
+    // КАНОНИЧЕСКИЕ (wrapper_canonical_name, без метки): переименование галочку
+    // не сбрасывает. Хранится список выключенных, а не включённых, чтобы у
+    // старых system.json все обёртки остались включены.
+    std::vector<std::string> disabled_wrappers;
+    // ДАУ: выключенные методы ДАУ (имена dae_scheme_names). Тоже список выключенных — у старых
+    // записей ДАУ включены все. При dae_as_ode действуют обычные scheme_* (схемы ОДУ).
+    std::vector<std::string> dae_schemes_off;
+
+    // значения по умолчанию (всё опционально, пустое = не задано)
+    std::string step_h;          // шаг дискретизации (строка, пустая = не задано)
+
+    // начальные условия по имени переменной: "x" -> "1.0" (пустое = не задано)
+    std::map<std::string, std::string> init_conditions;
+
+    // значения параметров по имени: "sigma" -> "10" (пустое = не задано)
+    std::map<std::string, std::string> param_values;
+
+    // Группы параметров в полях вкладок (только интерфейс, см. param_groups.h).
+    ParamGroups param_groups;
+    // То же для начальных условий (импорт схемы: конденсаторы, приборы, алгебраические z).
+    ParamGroups ic_groups;
+    // Свои подписи полей параметров и НУ: имя -> LaTeX (пусто — автоматическая, см. param_groups.h).
+    FieldLabels field_labels;
+};

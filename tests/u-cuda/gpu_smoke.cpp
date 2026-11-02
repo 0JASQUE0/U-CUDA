@@ -1,8 +1,8 @@
 ﻿// GPU smoke: NVRTC компилирует тело шага, модуль грузится, считается минимальная траектория;
 // комплексный путь находит configCUDA.h в kernels\ рядом с exe; свип БД собирается и считает.
 #include "test_util.h"
-#include "nvrtc_engine.h"
-#include "parametric_engine.h"
+#include "ucuda/cuda/nvrtc_engine.h"
+#include "ucuda/cuda/parametric_engine.h"
 #include <cuda.h>
 
 int main() {

@@ -1,0 +1,13 @@
+{
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": true,
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "files.associations": {
+    "*.cu": "cuda-cpp",
+    "*.cuh": "cuda-cpp"
+  },
+  "cmake.copyCompileCommands": "${workspaceFolder}/build/compile_commands.json",
+  "clangd.arguments": [
+    "--compile-commands-dir=${workspaceFolder}/build"
+  ]
+}

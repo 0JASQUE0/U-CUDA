@@ -1,0 +1,41 @@
+# Keep the U-CUDA coding context focused. These overrides apply only when the
+# trusted repository root is opened as the Codex project.
+project_doc_max_bytes = 16384
+tool_output_token_limit = 8000
+model_verbosity = "low"
+
+[skills]
+max_context_tokens = 1600
+
+[mcp_servers.blender]
+enabled = false
+
+[plugins."documents@openai-primary-runtime"]
+enabled = false
+
+[plugins."spreadsheets@openai-primary-runtime"]
+enabled = false
+
+[plugins."presentations@openai-primary-runtime"]
+enabled = false
+
+[plugins."pdf@openai-primary-runtime"]
+enabled = false
+
+[plugins."template-creator@openai-primary-runtime"]
+enabled = false
+
+[plugins."visualize@openai-bundled"]
+enabled = false
+
+[plugins."chrome@openai-bundled"]
+enabled = false
+
+[plugins."computer-use@openai-bundled"]
+enabled = false
+
+[plugins."unified-computer-use@openai-bundled"]
+enabled = false
+
+[plugins."unity@unity-agent-plugin"]
+enabled = false

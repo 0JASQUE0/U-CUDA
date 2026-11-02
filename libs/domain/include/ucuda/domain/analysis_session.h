@@ -1,0 +1,1456 @@
+﻿#pragma once
+#include "ucuda/domain/system_record.h"
+#include "ucuda/domain/system.h"
+#include "ucuda/domain/analysis_types.h"
+#include "ucuda/domain/circuit_solver.h"
+#include "ucuda/domain/adaptive_settings.h"
+#include "ucuda/domain/traj_work.h"
+
+// Настройки Ньютона новой вкладки — из записи системы (поля Newton solver в редакторе
+// системы задают значения по умолчанию, как symmetry s).
+inline NewtonSettings newton_from_record(const SystemRecord& r) {
+    NewtonSettings n;
+    n.full      = r.newton_full;
+    n.tol       = r.newton_tol.empty()       ? std::string("1e-10") : r.newton_tol;
+    n.max_iters = r.newton_max_iters.empty() ? std::string("8")     : r.newton_max_iters;
+    return n;
+}
+
+// Names of built-in schemes enabled in SystemRecord (order matches kBuiltinSchemeNames).
+// Empty when nothing is ticked; combo callers fall back to "show all built-ins".
+std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r);
+
+// Резолвер имени схемы (compute_krs_for_scheme и соседи) идёт через кодоген и живёт в
+// analysis/analysis_session.h.
+
+// Session start step. Hard-pinned to 1 for a map: the engine derives "time" as
+// t/h, so with h = 1 the computing time is exactly the iteration count.
+std::string default_h_from_record(const SystemRecord& r);
+
+// Session start scheme: "Map" for a map, otherwise left untouched.
+std::string default_scheme_from_record(const SystemRecord& r, std::string current);
+
+// Start value for BifurcationDiagramConfig::plot_all_iterates: a map's diagram
+// is built from every iterate, a flow's from peaks (a Poincare section).
+bool default_all_iterates_from_record(const SystemRecord& r);
+#include <atomic>
+#include <chrono>
+#include <functional>
+#include <string>
+#include <vector>
+#include <map>
+#include <deque>
+
+
+
+#include "ucuda/domain/rqa.h"
+#include <memory>
+
+// Одно начальное условие: имя (для легенды) + значения по переменным.
+// values[varName] = строка ("" = 0). Храним строки для единообразия с GUI.
+struct InitialConditionSet {
+    std::string label;                          // "IC 1", можно переименовать
+    std::map<std::string, std::string> values;  // var -> значение
+    bool visible = true;                        // показывать ли эту траекторию
+};
+
+// Одна проекция (окно-график): какие оси показывать.
+// Пока только 2D: ось X = переменная axis_x, ось Y = axis_y.
+// Тип проекции/графика.
+enum class ProjType {
+    Phase2D,    // фазовая плоскость: ось X = var, ось Y = var
+    TimeDomain, // временная развёртка: ось X = время, Y = выбранные переменные
+    Phase3D,    // 3D фазовый портрет (нужен ImPlot3D)
+    // Диаграмма признаков: scatter (значение пика; интервал до него) по переменной axis_x. Это
+    // ровно та пара, которую 2D-бифуркация отдаёт в DBSCAN, поэтому по ней видно, на что реально
+    // смотрит кластеризация периода. Порядок в enum = порядок в комбо-боксе и в сохранённых
+    // сессиях (пишется как int) — добавлять только в конец.
+    FeatureDiagram,
+    // Recurrence plot + RQA. Рисуется HeatmapView'ом, а не Plot2DView: данные — скалярное поле
+    // n x n, ровно то, что он и умеет (colormap, colorbar, rect-zoom, tooltip, экспорт).
+    RecurrencePlot,
+    // Continuation diagram: scatter of peak values vs absolute simulated time.
+    ContinuationDiagram,
+    // Адаптивный шаг: h(t) принятых шагов линией, отвергнутые и вынужденные попытки —
+    // маркерами (лог попыток AnalysisResult::step_log).
+    StepSize,
+    // Адаптивный шаг: число отвергнутых попыток на каждом принятом шаге (маркеры) и его
+    // скользящее среднее — как часто регулятор пересчитывает шаг. Тот же лог попыток.
+    Rejections
+};
+
+inline std::uint64_t next_projection_id() {
+    static std::atomic<std::uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
+
+struct Projection {
+    // Runtime identity follows moves and is intentionally absent from saved JSON.
+    std::uint64_t runtime_id = next_projection_id();
+    std::string label;       // заголовок окна
+    ProjType type = ProjType::Phase2D;
+    int axis_x = 0;          // индекс переменной по X (Phase2D/3D)
+    int axis_y = 1;          // индекс переменной по Y
+    int axis_z = 2;          // индекс переменной по Z (Phase3D)
+    // для TimeDomain: какие переменные выводить (по индексу). Размер синхр. с vars.
+    std::vector<bool> show_var;
+    bool open = true;        // окно открыто (крестик)
+    // Автоскейл ждёт ИМЕННО это окно. Раньше запрос жил один на сессию
+    // (PhaseAnalysisSession::fit_request) и гасился после прохода по всем
+    // проекциям — но окно, чей ImGui::Begin вернул false (свёрнуто или это
+    // невыбранная вкладка дока), в том кадре не рисовалось и автоскейл
+    // пропускало, а флаг уже был снят за него. В Custom все проекции
+    // сложены в один док, то есть видима всегда одна: остальные оставались
+    // неотмасштабированными. Теперь запрос сессии раздаётся по проекциям, и
+    // каждая гасит свой, когда действительно отрисовалась.
+    bool fit_pending = false;
+
+    // Опционально: per-projection line styling. По дефолту false → быстрый GL shader-line путь
+    // (glLineWidth клампится драйвером, alpha = 1). При true → ImDrawList::AddLine на сегмент с
+    // заданными толщиной и α (живые, но медленнее на длинных траекториях). Toolbar над плотом
+    // переключает и показывает слайдеры.
+    bool  custom_line_style = false;
+    float line_width        = 1.5f;
+    float alpha             = 1.0f;
+
+    // Draw the trajectory as markers rather than a polyline (Phase2D/Phase3D).
+    // Consecutive iterates of a discrete map are not joined by a continuous
+    // path, so the connecting segments are an artefact: a Clifford attractor
+    // turns into a tangle of chords. Defaulted from the system type when the
+    // projection is created.
+    bool  draw_points     = false;
+    float point_size      = 2.0f;
+    // Альфа точек при Custom line style (своя, у линии — alpha выше).
+    float point_alpha     = 1.0f;
+    // Step size: ось Y в log10 (Plot2DView лог-оси Y не умеет — в буфер идёт log10 h).
+    bool  y_log           = false;
+
+    int prev_ax = -1, prev_ay = -1;
+
+    // ---------------------------- RQA (ProjType::RecurrencePlot) ----------------------------
+    // Числовые поля — строками, как во всём остальном GUI (InputNumStr + digit_step_callback,
+    // где шагает разряд под курсором). Парсятся один раз в snapshot_phase.
+    //
+    // Дефолта у источника НЕТ намеренно (rqa::Source::None): для ОДУ честнее полный вектор
+    // состояния, в публикациях по RQA принят эмбеддинг Такенса, и молчаливый выбор за
+    // пользователя врал бы о методе. Пока не выбрано — окно просит выбрать и ничего не считает.
+    rqa::Source  rqa_source = rqa::Source::None;
+    int          rqa_ic     = 0;   // по какой траектории считать (индекс в ic_sets)
+    int          rqa_var    = 0;   // переменная для эмбеддинга
+    std::string  rqa_m_text   = "3";
+    std::string  rqa_tau_text = "1";
+    rqa::Norm    rqa_norm     = rqa::Norm::Euclidean;
+    rqa::EpsMode rqa_eps_mode = rqa::EpsMode::TargetRR;
+    std::string  rqa_eps_text      = "0.1";   // Absolute
+    std::string  rqa_eps_frac_text = "0.1";   // FracMaxDist / FracStd
+    std::string  rqa_rr_text       = "5";     // TargetRR, В ПРОЦЕНТАХ (так их и пишут в статьях)
+    std::string  rqa_theiler_text  = "1";
+    std::string  rqa_lmin_text     = "2";
+    std::string  rqa_vmin_text     = "2";
+    std::string  rqa_points_text   = "2048";  // сторона матрицы; потолок — kRqaMaxPoints
+    bool         rqa_network       = false;   // clustering/transitivity: O(RR*n^3), по умолчанию нет
+    // Считать ли RQA в continuation-режиме. Там кадр идёт раз в 50 мс, а RQA на 2048 точках
+    // столько не стоит — но при большой матрице бюджет пробивается, и тогда это выключают.
+    bool         rqa_in_continuation = true;
+    // 0 = матрица расстояний (непрерывная шкала), 1 = матрица рекуррентности (бинарная).
+    // Переключение НЕ трогает GPU: бинарная строится порогом по уже посчитанной dist.
+    int          rqa_view_mode = 0;
+    // Выбранный colormap, -1 = не выбирали (тогда HeatmapView берёт kDefaultColormap). Хранится
+    // в проекции и пишется в сессию — так же, как colormap_idx у бифуркационных конфигов, и в
+    // отличие от сессионных toggle'ов самого HeatmapView (swap_axes, reverse_colormap).
+    int          rqa_colormap = -1;
+    // Инверсия шкалы. Живёт тут, а не только в HeatmapView (где это сессионный toggle), потому
+    // что её же показывает попап RQA settings — а настройка в попапе обязана переживать
+    // сохранение сессии. Значение применяется к вью при СОЗДАНИИ и зеркалится обратно каждый
+    // кадр: тот же флаг переключается ещё и из right-click меню самой хитмапы, и форсить его
+    // каждый кадр значило бы сделать тот чекбокс мёртвым.
+    bool         rqa_reverse_cmap = false;
+    // Диапазон цветовой шкалы. autoscale = true — берётся из данных (0..max расстояния, либо
+    // 0..1 у бинарной матрицы); false — вручную из полей ниже. Персистится по той же причине,
+    // что и rqa_reverse_cmap: показано в попапе settings, значит обязано пережить сохранение.
+    // Границы — строками, как все числовые поля GUI (InputNumStr с шагом разряда по стрелкам).
+    // Имена с префиксом cbar_ не случайны: rqa_vmin_text выше — это v_min, МИНИМАЛЬНАЯ ДЛИНА
+    // вертикальной линии, совсем другая величина. Первая попытка назвать эти поля vmin/vmax
+    // столкнулась с ней и в структуре, и в ключах сессии.
+    bool         rqa_autoscale = true;
+    std::string  rqa_cbar_vmin_text = "0";
+    std::string  rqa_cbar_vmax_text = "1";
+    // Последний режим, под который уже выставлены discrete/levels во вью. Нужен, чтобы форсить
+    // их ТОЛЬКО при переключении: иначе каждый кадр затирался бы ручной toggle "Discrete
+    // colorbar" из right-click меню HeatmapView.
+    int          rqa_view_mode_applied = -1;
+
+    // Кэш бинарной матрицы. Живёт в проекции, а не в результате: у двух окон с одним конфигом
+    // режимы показа независимы. Заполняется лениво — только когда реально включён режим 1.
+    std::vector<double> rqa_binary;
+    int                 rqa_binary_gen = -1;
+
+    Projection() = default;
+    Projection(Projection&&) = default;
+    Projection& operator=(Projection&&) = default;
+    Projection(const Projection&) = delete;
+    Projection& operator=(const Projection&) = delete;
+};
+
+// Пики одной переменной одной траектории: параллельные массивы «значение пика»
+// и «интервал от предыдущего удержанного пика». Ровно то, что GPU-peakFinder
+// оставляет в outPeaks/timeOfPeaks после фильтра eps_interPeak_delta, т.е. та
+// же пара, что уходит в DBSCAN 2D-бифуркации. Длины всегда равны.
+struct FeaturePoints {
+    std::vector<double> peaks;
+    std::vector<double> intervals;
+};
+
+// Один запрошенный RQA-расчёт: конфиг + чья траектория. Собирается в snapshot_phase по всем
+// открытым проекциям типа RecurrencePlot и дедуплицируется — два окна с одинаковыми
+// настройками считаются один раз.
+struct RqaJob {
+    int         ic = 0;
+    rqa::Config cfg;
+};
+inline bool operator==(const RqaJob& a, const RqaJob& b) { return a.ic == b.ic && a.cfg == b.cfg; }
+
+// Результат по одному job'у. Хранится ВМЕСТЕ с job'ом, чтобы GUI искал своё по конфигу, а не по
+// индексу: индексы разъезжаются, если пользователь добавил/удалил окно, пока шёл расчёт.
+struct RqaOutcome {
+    RqaJob      job;
+    rqa::Result res;
+};
+
+// Результат расчёта: по одной траектории на каждое НУ.
+// trajectories[k] = траектория для k-го НУ (точки {x,y,z,...}).
+struct AnalysisResult {
+    std::vector<std::vector<std::vector<double>>> trajectories; // [ic][step][coord]
+    std::vector<std::string> labels;   // подписи (из НУ)
+    std::vector<bool> visible;         // видимость (из НУ)
+    std::vector<std::string> ic_text;  // текстовое представление НУ (для легенды)
+    // Признаки для ProjType::FeatureDiagram: [ic][var]. Считаются на worker'е сразу после
+    // интегрирования по ПОЛНОЙ (непрореженной) траектории — иначе decimator прореживал бы и сами
+    // пики, и интервалы между ними. Сразу по всем переменным: объём мал (<= max_amount_of_peaks на
+    // переменную), зато переключение переменной в комбо не требует пересчёта.
+    std::vector<std::vector<FeaturePoints>> features;
+    // Final integrator state per IC (pre-decimation), so continuation mode can
+    // seed the next chunk from the true X[] rather than a decimated sample.
+    std::vector<std::vector<double>> final_states;
+    // Адаптивный шаг (при постоянном всё пусто). times[k] — моменты точек trajectories[k]
+    // на узлах шага, уже прореженные decimator'ом; на равномерной сетке пусто: там, как и
+    // при постоянном шаге, t = i * h * decimator.
+    bool adaptive = false;
+    bool raw_nodes = false;
+    std::vector<std::vector<double>> times;
+    // Лог попыток шага [ic][4*k]: t, h, err, код (1 — принят, 0 — отвергнут, 2 — вынужденный).
+    std::vector<std::vector<double>> step_log;
+    std::vector<AdaptiveStats> step_stats;
+    bool ok = false;
+    bool cancelled = false;            // расчёт отменён (PhaseAnalysisSession::request_cancel)
+    std::string error;
+    int generation = 0;
+    // Диагностика схемного прогона (фаза 4a); пусто, если схема не считалась.
+    std::string circuit_status;
+    // ДАУ: что стало с начальными z (согласованы по g или оставлены как заданы и почему);
+    // пусто у ОДУ.
+    std::string dae_status;
+    // Сама синтезированная схема — чтобы экспорт netlist'а выдавал РОВНО ТО,
+    // что считалось, а не пересобирал её заново по текущим полям UI.
+    bool                circuit_valid = false;
+    CircuitGraph        circuit_graph;
+    std::vector<double> circuit_scale;
+    std::vector<double> circuit_x0;
+    OpAmpModel          circuit_opamp;
+    double              circuit_h_ode = 0.0;
+    double              circuit_t_end_ode = 0.0;
+
+    // RQA по проекциям типа RecurrencePlot. Пусто, если таких проекций нет или расчёт был
+    // пропущен (continuation при снятой галочке). Внутри каждого — своя матрица n*n doubles,
+    // поэтому список короткий по построению (дедуп по конфигу).
+    std::vector<RqaOutcome> rqa_out;
+
+    // Snapshot of the inputs that produced this trajectory set — used by
+    // right-click "Export data..." in the GUI to write the same scheme/IC
+    // metadata into <path>_config.csv that drove the compute.
+    data_export::PhaseSnapshot snapshot;
+};
+
+// Найти результат под конкретный job. nullptr, если такого расчёта в результате нет
+// (конфиг поменяли после Run, или расчёт пропустили).
+const rqa::Result* find_rqa(const AnalysisResult& res, const RqaJob& job);
+
+// Собрать RqaJob из проекции: разбор текстовых полей + перевод RR из процентов в долю.
+// Возвращает false, если проекция не RecurrencePlot или источник ещё не выбран.
+bool make_rqa_job(const Projection& pr, RqaJob& out);
+
+// Сессия анализа фазовых портретов: общие параметры системы +
+// список НУ + список проекций. Параметры общие на все проекции.
+// Это "песочница": при загрузке из библиотеки сюда копируются настройки,
+// изменения тут НЕ сохраняются обратно в библиотеку.
+struct PhaseAnalysisState {
+    // система (для расчёта нужны имена переменных/параметров и КРС-движок)
+    std::vector<std::string> vars;     // имена переменных (порядок = индексы X[])
+    std::vector<std::string> params;   // имена параметров (порядок = a[1..])
+    // Наблюдаемые вне состояния: ДАУ, сведённая к ОДУ ("Solve as ODE"), — z(x) как выражения над
+    // x и a[]. После счёта их значения дописываются к каждой точке траектории (координаты
+    // vars.size() + j), и проекции Phase 2D / 3D выбирают их по этим номерам. Пусто у ОДУ.
+    std::vector<std::string> observables;   // имена
+    std::vector<std::string> obs_exprs;     // выражения (как rhs System), по одному на имя
+
+    // Пользовательские КРС из текущей системы (копия из SystemRecord).
+    // Доступны в scheme combo вместе с built-in именами.
+    std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
+    // Enabled built-in schemes for this system; empty = combo shows all built-ins.
+    std::vector<std::string> enabled_builtin_schemes;
+
+    // общие параметры системы (строки, "" = не задано/0)
+    std::map<std::string, std::string> param_values; // param -> значение
+    std::string step_h = "0.01";
+    std::string sim_time = "250";       // время моделирования (с)
+    std::string skip_time = "100";      // transient (с)
+    std::string scheme = "Euler";      // выбор метода (Euler/EulerCromer/Midpoint/RK4)
+    std::string symmetry_s = "0.5";    // коэф. симметрии s для CD (a[0])
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
+    std::string decimation = "1";      // выводить каждую N-ю точку
+    // Адаптивный шаг. При нём step_h — шаг вывода равномерной сетки (плотный выход); на
+    // узлах шага step_h не участвует, а decimator берёт каждый N-й узел.
+    AdaptiveSettings adaptive;
+    bool auto_recompute = false;       // пересчитывать сразу при изменении
+    bool legend_show_ic = false;       // в легенде показывать НУ вместо имён графиков
+
+    // Схемная траектория поверх ОДУ (фаза 4a плана): та же система, посчитанная как
+    // аналоговая схема на ОУ. Расхождение с идеальной ОДУ видно глазом, и сразу ясно,
+    // режет ли полоса ОУ, насыщается ли выход, или дело в масштабах.
+    //
+    // Считает CPU-решатель: GPU-путь компилирует ядро на каждый запуск, что для одной
+    // траектории дороже самого счёта. Его место — ансамбль фазы 6.
+    bool        circuit_show        = false;
+    bool        circuit_ideal_opamp = true;   // идеальный ОУ даёт ровно исходную ОДУ
+    std::string circuit_target_volt = "3";    // желаемая амплитуда переменной, В
+    // Шаг схемы НЕ равен шагу ОДУ: у схемы BDF2 второго порядка против RK4
+    // четвёртого, и на общем h=0.01 идеальная схема разошлась бы с ОДУ на
+    // величину порядка самого аттрактора — чисто из-за метода.
+    std::string circuit_substeps    = "10";
+    std::string circuit_gbw_mhz     = "3";
+    std::string circuit_vsat        = "13";
+    // Диалект экспорта. Multisim отбрасывает B-источники при импорте, и узлы
+    // умножителей остаются без источника — резисторы от них повисают.
+    bool        circuit_netlist_poly = false;
+
+    // Continuation (live) mode — timer-driven chain of async recomputes that
+    // seeds each new chunk from the last integrator state, so the attractor
+    // visually "flows". Only the two persisted toggles below are saved; the
+    // runtime state resets on load.
+    bool        continuation_mode      = false;   // persisted UI toggle
+    std::string continuation_delay_ms  = "50";    // persisted frame delay text
+
+    // Runtime: separate from continuation_mode so a load never resurrects a
+    // running loop. GUI sets active = mode on Start, back to false on Stop.
+    bool continuation_active      = false;
+    bool continuation_paused      = false;        // freezes the timer; state/elapsed preserved
+    bool continuation_first_frame = true;         // apply skip_time on frame 0 only
+    std::vector<std::vector<double>> continuation_state;  // [ic][coord] carried across frames
+
+    // Accumulated recorded time (seconds) since continuation started; not persisted.
+    double continuation_elapsed = 0.0;
+    // [ic][var] xy-pairs: X = global time, Y = peak. Fed to ProjType::ContinuationDiagram.
+    std::vector<std::vector<std::vector<double>>> continuation_peaks;
+    // Pairs per (ic, var); oldest drop on overflow. Persisted, set in the
+    // Continuation row. Clamped to [kContPeaksCapMin, kContPeaksCapMax]: every
+    // variable is buffered, so memory = cap * 16 B * ICs * vars.
+    static constexpr int kContPeaksCapMin = 1000;
+    static constexpr int kContPeaksCapMax = 10000000;
+    int continuation_peaks_cap = 200000;
+    int continuation_peaks_gen = 0;        // bumped on every accumulation → Plot2DView reuploads
+
+    // система (уравнения) для генерации КРС под NVRTC, и сама готовая КРС.
+    System sys;                        // правые части и т.д.
+    std::string krs_code;              // тело calculateDiscreteModel (для NVRTC)
+    std::string krs_error;             // почему krs_code пуст (отказ кодгена), см. compute_krs_for_scheme
+    bool use_gpu = true;              // расчёт через NVRTC на GPU (CPU оставлен в коде)
+
+
+    // несколько начальных условий (мультистабильность)
+    std::vector<InitialConditionSet> ic_sets;
+
+    // несколько проекций
+    std::vector<Projection> projections;
+
+    // Имя системы, под которую сессия инициализирована (через load_from_record).
+    // Используется в GUI: при переключении радио-кнопок в один и тот же режим
+    // не сбрасывать пользовательские правки, если система не менялась.
+    std::string loaded_system_name;
+
+    // последний результат расчёта
+    AnalysisResult result;
+
+    // Настройки RQA правятся в окне проекции, а кнопка Recompute и флаг auto_recompute живут
+    // в панели слева — это разные функции GUI. Флаг переносит "что-то поменяли" из окна в панель,
+    // которая на следующем кадре подмешает его в свой `changed`.
+    bool rqa_dirty = false;
+
+    // запрос автоскейла осей после пересчёта (взводится в recompute,
+    // сбрасывается в GUI после применения)
+    bool fit_request = false;
+
+
+
+
+    // поколение раскладки окон: увеличивается кнопкой "Reset layout",
+    // входит в ID окон проекций -> docking забывает их позиции, окна
+    // появляются заново (можно сделать новую раскладку).
+    int layout_generation = 0;
+
+    void add_projection();      // добавить проекцию (x-y по умолчанию)
+
+
+
+
+
+    int data_generation = 0;
+};
+
+// Сводка режимов по flags для строки статуса (draw_regime_summary в gui.cpp). Обход flags стоит
+// ~0.2 с на 10000², поэтому он делается раз на данные, а не на каждый кадр. Ключ — generation и
+// сам буфер (data/size): копия конфига или буфер другого режима (1D / 2D) не выдаст чужие числа.
+struct RegimeCounts {
+    int         gen  = -1;
+    const void* data = nullptr;
+    size_t      size = 0;
+    int         fp = 0, unb = 0, osc = 0, stopped = 0;
+};
+
+// Одна бифуркационная диаграмма (БД) на параметрическом графике:
+// независимый свип, свои IC/scheme/range/CSV/peaks-vs-inter-peaks.
+// Несколько БД оверлеятся на один график с легендой (см. BifurcationAnalysisSession).
+struct BifurcationDiagramConfig {
+    std::string label   = "BD 1";   // подпись для легенды, редактируется
+    // Если false, label регенерируется каждый кадр из свипа (компактный
+    // итог: `sigma [0..30]` / `sigma x rho`). Ставится в true при ручной
+    // правке; сбрасывается в false, если пользователь очистил поле.
+    // Дефолт true — старые сохранения без ключа не перезатираем.
+    bool        label_is_manual = true;
+
+    // Схема интегрирования: built-in имя или имя custom-схемы (resolve через
+    // session.custom_schemes на момент Run).
+    std::string scheme         = "Euler";
+    std::string symmetry_s     = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
+
+    // Свип: какой параметр, его диапазон, число точек.
+    int         param_index    = 0;
+    // Если sweep_over_var=true — БД строится по начальному условию переменной
+    // vars[var_sweep_index] вместо параметра. Дефолт false → param-свип (старое
+    // поведение). NonLinAnal-kernel принимает par_or_var runtime-аргументом,
+    // переключаем только индекс + флаг в engine — никакой пересборки PTX.
+    bool        sweep_over_var = false;
+    int         var_sweep_index = 0;
+    // dt-sweep: если true — по этой оси свипуется шаг интегрирования h, а не параметр/НУ
+    // (взаимоисключающе с sweep_over_var). Диапазон переиспользует param_lo_text/param_hi_text.
+    // t_max/transient остаются фиксированными: число итераций пересчитывается на GPU из h
+    // per-thread (hSweepAxis в calculateDiscreteModelCUDA), а буфер данных/пиков выделяется под
+    // худший случай — минимальный h в диапазоне.
+    bool        sweep_over_h   = false;
+    // Log-масштаб сетки по этой оси (любой sweep target — param/IC/h).
+    // Требует lo>0 и hi>0 (валидатор отказывает иначе) — см. run_bif1d/2d.
+    bool        log_scale = false;
+    // Continuation: следующая точка параметра стартует с конечного x[] предыдущей. Требует
+    // sweep_over_var=false и sweep_over_h=false (это отдельный single-thread sequential kernel, где
+    // dt-sweep не поддержан). Reverse — направление обхода (forward lo→hi vs backward hi→lo) для
+    // показа гистерезиса: forward и reverse BD на одном плоте.
+    bool        continuation = false;
+    bool        continuation_reverse = false;
+    // Где считать continuation. true (дефолт) — GPU, как было. false — CPU:
+    // continuation последователен по построению, GPU гоняет его в одном потоке,
+    // и обычное ядро процессора на такой цепочке кратно быстрее. На классический
+    // (не continuation) свип не влияет — там всегда GPU.
+    bool        use_gpu = true;
+    std::string param_lo_text  = "0";
+    std::string param_hi_text  = "1";
+    std::string n_pts_text     = "500";
+
+    // По какой переменной строим диаграмму.
+    int         writable_var   = 0;
+
+    // Интегрирование.
+    std::string h_text             = "0.01";
+    std::string t_max_text         = "100";
+    std::string transient_text     = "100";
+    std::string pre_scaller_text   = "1";
+    std::string max_value_text     = "1e6";
+    // Адаптивный шаг (блок Integration). ad_axis / ad_axis_2 — ось свипает не систему, а
+    // настройку шага (AdaptiveAxisKind движка: rtol, atol, tol, параметр регулятора);
+    // 0 — обычная цель свипа.
+    AdaptiveSettings adaptive;
+    int         ad_axis   = 0;
+    int         ad_axis_2 = 0;
+
+    // CSV — путь хранится отдельно от флага, чтобы можно было выключить запись,
+    // не удаляя сам путь (для повторного включения).
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    // false → точки = значения пиков (bifurcation_points). true → межпиковые
+    // интервалы (peak_times). Колонка 3 vs 2 в CSV.
+    bool        plot_inter_peaks = false;
+
+    // true -> EVERY recorded iterate goes into the diagram, not only the local
+    // maxima. That is how diagrams for discrete maps are built: the peak filter
+    // (a Poincare section, which makes sense for flows) would drop the lower
+    // branch of every period-2 orbit, halve the period-doubling cascade and
+    // leave the periodic windows empty. The default comes from the system type
+    // - see default_all_iterates_from_record.
+    bool        plot_all_iterates = false;
+
+    // Custom point style (аналог Projection::custom_line_style)
+    // Действует на классическую 1D-scatter БД; к 2D- и Colored-1D-хитмапам
+    // неприменим. false → прежний вид: сплошной квадратный GL-пойнт 2px, α=1.
+    // Живёт в конфиге БД (а не в окне), поэтому одинаково работает и в
+    // Parametric, и в Custom, и персистится вместе с сессией.
+    bool        custom_point_style = false;
+    int         point_marker       = 0;      // PointMarker (0 = Circle)
+    float       point_size         = 2.0f;   // px
+    float       point_alpha        = 1.0f;
+
+    // Per-БД базовые значения параметров и НУ.
+    std::map<std::string, std::string> initial_conditions;
+    std::map<std::string, std::string> param_values;
+
+    // Per-БД результат + GUI-флаги.
+    Bifurcation1DResult result;
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+
+    // 2D-режим (хитмап «период»(p1, p2) через DBSCAN)
+    bool        mode_2d           = false;
+    int         param_index_2     = 0;
+    bool        sweep_over_var_2  = false;
+    int         var_sweep_index_2 = 0;
+    bool        sweep_over_h_2    = false;  // см. sweep_over_h; не может быть true одновременно с sweep_over_h
+    bool        log_scale_2       = false;  // см. log_scale
+    std::string param_lo_2_text   = "0";
+    std::string param_hi_2_text   = "1";
+    std::string eps_dbscan_text   = "0.1";
+    // Множители осей DBSCAN (пик / межпиковый интервал), см.
+    // Bifurcation2DRequest::mult_peak. Дефолты — константы configCUDA.h.
+    std::string mult_peak_text     = "1";
+    std::string mult_interval_text = "0";
+
+    Bifurcation2DResult result_2d;
+    bool        last_run_2d_ok    = false;
+    int         data_generation_2d = 0;
+    RegimeCounts regime_counts_2d;
+    bool        fit_request_2d    = false;
+    // Persisted heatmap colormap choice for this diagram (-1 = unset, falls
+    // back to AppModel::heatmap_colormap on first HeatmapView creation).
+    // Shared with colored_1d ниже (диаграмма всегда только в одном из двух
+    // heatmap-режимов одновременно).
+    int         colormap_idx      = -1;
+
+    // Colored 1D diagram (density heatmap поверх классической БД)
+    // Мутуально исключает mode_2d (см. config editor). Использует уже
+    // посчитанный `result` (bifurcation_points/peak_times) — доп. Run не
+    // нужен, гистограмма строится лениво в draw_bifurcation_plot.
+    bool        colored_1d           = false;
+    std::string colored_1d_b_text    = "601";  // Y-resolution (число бинов); X — существующий n_pts_text
+    bool        colored_1d_custom_y  = false;  // false → авто min/max±2.5% (см. MATLAB Sup/Slow)
+    std::string colored_1d_ymin_text = "0";
+    std::string colored_1d_ymax_text = "1";
+    bool        colored_1d_log       = true;   // логарифмическая плотность (см. isItLog)
+
+    // Кэш density-хитмапы (B x n_pts, row-major: idx = row*n_pts + col). Перестраивается лениво,
+    // когда расходится с текущими настройками, а не каждый кадр. colored_1d_cache_gen — монотонный
+    // счётчик, бампается на каждой перестройке и отдаётся в HeatmapView::render как
+    // data_generation (отдельно от built_from, т.к. rebuild бывает и без нового Run).
+    std::vector<double> colored_1d_cache;
+    double      colored_1d_cache_vmin = 0.0;
+    double      colored_1d_cache_vmax = 1.0;
+    int         colored_1d_cache_gen  = 0;
+    int         colored_1d_built_from = -1;    // data_generation, из которого построен кэш
+    int         colored_1d_cache_b            = -1;
+    bool        colored_1d_cache_log          = false;
+    bool        colored_1d_cache_custom_y     = false;
+    bool        colored_1d_cache_inter_peaks  = false;
+    double      colored_1d_cache_ymin_used = 0.0;
+    double      colored_1d_cache_ymax_used = 1.0;
+};
+
+// Сессия параметрического анализа: одна система + список БД, каждая со своим
+// конфигом и результатом. Async-очередь одна на сессию (одна БД в полёте за раз).
+struct BifurcationAnalysisState {
+    // Идентичность системы — общая на все БД.
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
+    std::string loaded_system_name;
+
+    // Список бифуркационных диаграмм. После load_from_record содержит как
+    // минимум один дефолтный элемент.
+    std::vector<BifurcationDiagramConfig> diagrams;
+
+    // Какая вкладка сейчас открыта — для Ctrl+R (последняя видимая).
+    int active_diagram_index = 0;
+    // Запрос «переключить вкладку на эту БД», выставляется не самим таб-баром, а внешним кодом.
+    // Нужен тулбару над плотом: он переключает colored_1d у диаграммы win.members[0], а панель
+    // настроек показывает диаграмму АКТИВНОЙ вкладки — когда это разные БД, галка включалась, а
+    // блок настроек Colored 1D не появлялся. Таб-бар потребляет запрос и сбрасывает в -1.
+    int request_select_diagram = -1;
+    // Индекс БД, чей расчёт сейчас идёт в worker'е; -1 = ничего.
+    int running_diagram_index = -1;
+
+    bool is_2d_run = false;
+
+    // Persistent info about the last finished run — shown in the busy bar
+    // after completion until the next run_async clears it. last_run_label
+    // empty == no completion to display.
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+
+
+
+    // Добавить БД: глубокая копия последней (если есть), иначе дефолт из vars/params.
+    // Label автоматически "BD <N+1>", результат и флаги обнуляются.
+    void add_diagram();
+
+
+
+
+
+
+};
+
+// Одна кривая LLE(param) на параметрическом LLE-графике — структурно зеркалит
+// BifurcationDiagramConfig (тот же UX). Отличия: нет writable_var (LLE — скаляр на точку
+// параметра), нет plot_inter_peaks, зато есть eps (возмущение Wolf/Benettin) и NT (длина блока
+// интегрирования между ренормализациями, в единицах времени).
+struct LLECurveConfig {
+    std::string label   = "LLE 1";
+    bool        label_is_manual = true;   // см. BifurcationDiagramConfig::label_is_manual
+
+    std::string scheme         = "Euler";
+    std::string symmetry_s     = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
+
+    int         param_index    = 0;
+    // IC sweep: если sweep_over_var=true, кривая считается по нач. условию
+    // переменной vars[var_sweep_index] вместо параметра. Engine выберет
+    // соответствующий par_or_var compile-time через template substitution.
+    bool        sweep_over_var = false;
+    int         var_sweep_index = 0;
+    // dt-sweep: если true — по этой оси свипуется шаг интегрирования h, а не параметр/НУ
+    // (взаимоисключающе с sweep_over_var). Диапазон переиспользует param_lo_text/param_hi_text.
+    // t_max/transient/NT остаются фиксированными: число итераций пересчитывается на GPU из h
+    // per-thread (hSweepAxis в LLEKernelCUDA).
+    bool        sweep_over_h   = false;
+    bool        log_scale      = false;  // см. BifurcationDiagramConfig::log_scale
+    std::string param_lo_text  = "0";
+    std::string param_hi_text  = "1";
+    std::string n_pts_text     = "500";
+
+    std::string h_text             = "0.01";
+    std::string t_max_text         = "100";
+    std::string transient_text     = "100";
+    std::string max_value_text     = "1e6";
+    // Адаптивный шаг (блок Integration). ad_axis / ad_axis_2 — ось свипает не систему, а
+    // настройку шага (AdaptiveAxisKind движка: rtol, atol, tol, параметр регулятора);
+    // 0 — обычная цель свипа.
+    AdaptiveSettings adaptive;
+    int         ad_axis   = 0;
+    int         ad_axis_2 = 0;
+
+    // LLE-специфика.
+    std::string eps_text       = "1e-4";
+    std::string nt_text        = "1";       // NT (в единицах времени)
+    std::string vtr_text       = "0";       // транзиент касательных векторов (время), 0 — нет
+
+    // Continuation: точка стартует с состояния предыдущей. В отличие от БД
+    // переносится не только траектория, но и вектор возмущения («щуп») —
+    // см. run_lle1d_cpu. Считается только на CPU: свип последователен,
+    // GPU-ветки для него нет. Требует param-свипа.
+    bool        continuation         = false;
+    bool        continuation_reverse = false;
+    // Где считать КЛАССИЧЕСКИЙ свип. true (дефолт) — GPU, он там массово
+    // параллелен и быстрее. false — CPU: счёт без GPU и сверка CPU-ядра с
+    // GPU-веткой. При continuation игнорируется (там всегда CPU).
+    bool        use_gpu              = true;
+
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    std::map<std::string, std::string> initial_conditions;
+    std::map<std::string, std::string> param_values;
+
+    LLE1DResult result;
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+
+    // 2D-режим (LLE по двум параметрам/IC, рисуется хитмапой)
+    // mode_2d=true → Run собирает LLE2DRequest вместо LLE1DRequest, результат
+    // ложится в result_2d (не затирает result, чтобы переключение туда-обратно
+    // не теряло последний 1D-расчёт). См. analysis_session.cpp:run_async.
+    // Смешанный свип (одна ось param, другая IC) разруливается engine'ом
+    // автоматически по sweep_over_var/_2 — отдельного флага не требуется.
+    bool        mode_2d = false;
+    // Sweep target для второй оси (структурно зеркалит param_index/sweep_over_var).
+    int         param_index_2 = 0;
+    bool        sweep_over_var_2 = false;
+    int         var_sweep_index_2 = 0;
+    bool        sweep_over_h_2   = false;  // см. sweep_over_h; не может быть true одновременно с sweep_over_h
+    bool        log_scale_2      = false;  // см. log_scale
+    std::string param_lo_2_text = "0";
+    std::string param_hi_2_text = "1";
+    // n_pts_2_text не нужен: kernel-getValueByIdx работает только на квадратной
+    // сетке (cudaLibrary.cu:1276), используется n_pts_text для обеих осей.
+
+    LLE2DResult result_2d;
+    bool        last_run_2d_ok = false;
+    int         data_generation_2d = 0;
+    RegimeCounts regime_counts_2d;
+    bool        fit_request_2d = false;
+    // Persisted heatmap colormap choice for this curve (-1 = unset, falls
+    // back to AppModel::heatmap_colormap on first HeatmapView creation).
+    int         colormap_idx = -1;
+};
+
+// Сессия LLE-анализа. Структура и API — копия BifurcationAnalysisSession
+// (другие request/result и другая терминология «curve» вместо «diagram»).
+struct LLEAnalysisState {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
+    std::string loaded_system_name;
+
+    std::vector<LLECurveConfig> curves;
+    int active_curve_index  = 0;
+    int running_curve_index = -1;
+
+    bool is_2d_run = false;
+
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+
+
+    void add_curve();
+
+};
+
+// 1D DFT — параметрическое дискретное преобразование Фурье. Структурно зеркалит
+// BasinsConfig/BasinsAnalysisSession (один "kind", несколько конфигов в списке, своя очередь), а
+// НЕ Bifurcation/LLE/LS-паттерн с общим табом на три kind'а. Sweep/Integration/IC/Parameters-поля
+// зеркалят BifurcationDiagramConfig (тот же UX для этой части).
+
+struct Dft1DConfig {
+    std::string label = "DFT 1";
+    bool        label_is_manual = true;   // см. BifurcationDiagramConfig::label_is_manual
+
+    std::string scheme     = "Euler";
+    std::string symmetry_s = "0.5";       // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
+
+    // Свип — см. BifurcationDiagramConfig (то же самое: параметр или НУ,
+    // с опциональным continuation). Continuation требует sweep_over_var=false
+    // (то же ограничение, что и у Bifurcation1D).
+    int         param_index     = 0;
+    bool        sweep_over_var  = false;
+    int         var_sweep_index = 0;
+    bool        sweep_over_h    = false;  // свип по шагу; см. Bifurcation1DRequest
+    bool        log_scale       = false;  // log-сетка по оси параметра (не по частоте)
+    bool        continuation         = false;
+    bool        continuation_reverse = false;
+    // Где считать: true (дефолт) — GPU. Для continuation это реальный выбор,
+    // GPU-ветка там однопоточная и медленнее.
+    bool        use_gpu              = true;
+    std::string param_lo_text = "0";
+    std::string param_hi_text = "1";
+    std::string n_pts_text    = "500";    // Resolution X
+
+    int         writable_var  = 0;        // переменная, чью траекторию преобразуем
+
+    // Частотная ось (Resolution Y) — обязательные поля для rangesFreq,
+    // без auto-режима (в отличие от colored_1d_custom_y): частотный диапазон
+    // всегда физически осмыслен только если задан явно.
+    std::string n_freq_text  = "200";
+    std::string freq_lo_text = "0";
+    std::string freq_hi_text = "10";
+    // Лог-сетка по оси Y (частота) — см. BifurcationDiagramConfig::log_scale.
+    // Требует freq_lo/hi > 0 (валидатор отказывает иначе).
+    bool        freq_log_scale = false;
+    // Оконная функция перед DFT: 0=None (rectangular), 1=Hanning (default),
+    // 2=Hamming, 3=Blackman, 4=Blackman-Harris — см.
+    // parametric_engine.cpp::cpu_build_window. Значение сохраняется в JSON
+    // числом, поэтому новые окна дописываются только в конец списка.
+    int         window_type = 1;
+
+    // Интегрирование — см. BifurcationDiagramConfig.
+    std::string h_text           = "0.01";
+    std::string t_max_text       = "100";
+    std::string transient_text   = "100";
+    std::string pre_scaller_text = "1";
+    std::string max_value_text   = "1e6";
+
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    std::map<std::string, std::string> initial_conditions;
+    std::map<std::string, std::string> param_values;
+
+    // Режим отображения хитмапы: 0=power spectrum (ak²+bk²), 1=amplitude
+    // (sqrt), 2=phase (atan2(bk,ak)). Normalize — деление каждой колонки
+    // (по параметру) на её максимум по частоте, см. draw_dft1d_plot.
+    int         display_mode = 0;
+    bool        normalize    = true;
+    // Логарифмическая шкала для power/amplitude. В дБ эти два режима тождественны
+    // (20*log10(sqrt(P)) == 10*log10(P)) и различаются только здесь, в линейной шкале: мощность
+    // давит слабые пики квадратично, амплитуда — нет. На phase не влияет.
+    bool        db_scale = true;
+    // Нижний порог шкалы в дБ. Power/amplitude уходят в лог перед отрисовкой, и без порога
+    // нулевая ячейка дала бы -inf; всё, что ниже, прижимается к этому значению. Раньше порог был
+    // зашит как max(v,1e-12), то есть ровно -120 дБ, и задавал нижний край цветовой шкалы
+    // независимо от данных. На phase (display_mode==2) не влияет — там радианы, а не дБ.
+    std::string db_floor_text = "-120";
+
+    Dft1DResult result;
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+
+    // Persisted heatmap colormap choice (-1 = unset, falls back to
+    // AppModel::heatmap_colormap on first HeatmapView creation).
+    int         colormap_idx = -1;
+
+    // Кэш хитмапы для отображения (freq-major/param-minor: idx = f*n_pts+pt, т.е. nx=n_pts,
+    // ny=n_freq — конвенция HeatmapView::render). Строится лениво в draw_dft1d_plot из
+    // result.ak_cos/bk_sin по display_mode/normalize; колонки с result.flags[pt] <= 0 получают
+    // sentinel 999.0 — тот же, что в draw_bifurcation_plot::colored_1d_cache.
+    std::vector<double> display_cache;
+    double      display_cache_vmin = 0.0;
+    double      display_cache_vmax = 1.0;
+    int         display_cache_gen  = 0;
+    int         display_built_from = -1;      // data_generation, из которого построен кэш
+    int         display_cache_mode      = -1;
+    bool        display_cache_normalize = false;
+    double      display_cache_db_floor  = 0.0;   // распарсенный db_floor_text, из которого построен кэш
+    bool        display_cache_db_scale  = true;
+};
+
+struct Dft1DAnalysisState {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
+    std::string loaded_system_name;
+
+    std::vector<Dft1DConfig> configs;
+    int active_config_index = 0;
+    int running_config_index = -1;
+
+
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+
+
+
+
+};
+
+// Basins of Attraction — карта классификации траекторий на сетке IC.
+// Одна конфигурация на сессию (без inner tab-bar — basin расчёт тяжёлый).
+// 5 плотов в окне результата переключаются внутренним tab-bar'ом.
+
+// Mirror BF_* кодов из configCUDA.h — для type-safe использования в GUI/host
+// коде. Значения должны совпадать с BF_* (static_assert'ы в analysis_session.cpp
+// ловят drift). Передаётся в kernel как plain int.
+enum class BasinFeature : int {
+    AvgPeaks            = 0,
+    AvgIntervals        = 1,
+    RMSPeaks            = 2,
+    RMSIntervals        = 3,
+    StDevPeaks          = 4,
+    StDevIntervals      = 5,
+    LogAvgPeaks         = 6,
+    LogAvgIntervals     = 7,
+    LogRMSPeaks         = 8,
+    LogRMSIntervals     = 9,
+    LogStDevPeaks       = 10,
+    LogStDevIntervals   = 11,
+    SLogAvgPeaks        = 12,
+};
+
+// Названия признаков, индексируемые кодом BF_* / BasinFeature. ЕДИНСТВЕННЫЙ список на проект:
+// его читают и комбо «Feature 1/2» с подписями осей scatter'а (gui.cpp), и запись _config.csv
+// (data_export.cpp). Порядок обязан совпадать с enum выше.
+//
+// Только ASCII, и это требование, а не стиль: те же строки уходят в _config.csv, а его читают
+// Excel, MATLAB и прочие парсеры, открывающие файл в системной однобайтовой кодировке, а не в
+// UTF-8. Здесь стоял "\xc2\xb7" (UTF-8 middle dot ·) — в CP1251 эти два байта показывались как
+// "signВ·log10|avg peaks|". ImGui рисует UTF-8, поэтому в интерфейсе точка выглядела правильно и
+// расхождение вылезало только в экспорте.
+//
+// inline constexpr, а не extern + определение в .cpp: только так static_assert ниже может прочитать
+// строки на этапе компиляции (у constexpr-переменной в namespace scope внутренняя линковка, и с
+// extern-объявлением она конфликтует).
+inline constexpr const char* kBasinFeatureNames[BF_FEATURE_COUNT] = {
+    "Avg peaks",             "Avg intervals",
+    "RMS peaks",             "RMS intervals",
+    "StDev peaks",           "StDev intervals",
+    "sign*log10|avg peaks|", "sign*log10|avg intervals|",
+    "log10 RMS peaks",       "log10 RMS intervals",
+    "log10 StDev peaks",     "log10 StDev intervals",
+    "sign*log10(|avg peaks|/1e-12)",
+};
+
+// Страховка от возврата не-ASCII: подпись обязана пережить чтение файла в любой однобайтовой
+// кодировке. Проверяем компилятором, а не глазами при ревью.
+constexpr bool basin_feature_names_are_ascii() {
+    for (const char* s : kBasinFeatureNames)
+        for (const char* p = s; *p; ++p)
+            if (static_cast<unsigned char>(*p) > 0x7F) return false;
+    return true;
+}
+static_assert(basin_feature_names_are_ascii(),
+              "kBasinFeatureNames: ASCII only - the strings go into _config.csv");
+
+// Безопасный доступ по коду из снапшота/сессии: вне [0, BF_FEATURE_COUNT) отдаёт "unknown".
+// Нужен там, где код приходит из файла и мог быть записан другой версией приложения.
+const char* basin_feature_name(int feature_code);
+
+struct BasinsConfig {
+    std::string label = "Basins";
+    std::string scheme = "Euler";
+    std::string symmetry_s = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
+
+    int axis_x_var = 0;
+    int axis_y_var = 1;
+    std::string axis_x_lo_text = "-10";
+    std::string axis_x_hi_text = "10";
+    std::string axis_y_lo_text = "-10";
+    std::string axis_y_hi_text = "10";
+    // ±log-сетка по оси (BasinsRequest::axis_*_symlog): lo/hi тогда — границы |x| (> 0).
+    bool axis_x_symlog = false;
+    bool axis_y_symlog = false;
+    std::string n_pts_text = "100";
+
+    int writable_var = 0;
+
+    std::string h_text           = "0.01";
+    std::string t_max_text       = "200";
+    std::string transient_text   = "50";
+    std::string pre_scaller_text = "1";
+    std::string max_value_text   = "1e6";
+    AdaptiveSettings adaptive;              // адаптивный шаг (оси сетки — всегда НУ)
+    std::string eps_dbscan_text  = "0.5";
+
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    std::map<std::string, std::string> initial_conditions;
+    std::map<std::string, std::string> param_values;
+
+    // Какие фичи пишутся в outAvgPeaks / AvgTimeOfPeaks из avgPeakFinderCUDA. Значения 0..11
+    // (enum BasinFeature / BF_* в configCUDA.h). Множители mult_feature*_text применяются к
+    // финальному значению фичи, для подстройки масштаба DBSCAN-кластеризации. Хранятся как text
+    // для единообразия с остальными числовыми полями BasinsConfig.
+    int         feature1 = BF_FEATURE1_DEFAULT;
+    int         feature2 = BF_FEATURE2_DEFAULT;
+    std::string mult_feature1_text = "1.0";
+    std::string mult_feature2_text = "1.0";
+
+    BasinsResult result;
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    RegimeCounts regime_counts;
+    bool        fit_request = false;
+
+    // Активный внутренний таб плотов (0..4 = Basins/AvgPk/AvgInt/States/Scatter).
+    int         active_plot_tab = 0;
+
+    // Persisted colormap на КАЖДЫЙ heatmap-таб (0..3 = Basins/Feature1/Feature2/States; Scatter —
+    // Plot2DView, без colormap). -1 = не задан, тогда падаем на app-дефолт из Settings
+    // (AppModel::basins_*_colormap) — та же схема «-1 → общий дефолт», что у
+    // BifurcationDiagramConfig. Раньше выбор жил ТОЛЬКО глобально в AppModel, поэтому два
+    // basins-config'а не могли иметь разные колормапы, в отличие от Bif/LLE/LS/DFT1D.
+    int         colormap_idx[4] = { -1, -1, -1, -1 };
+
+    // Перенумерация cluster id'ов через spiral-from-center порядок (порт MATLAB
+    // renumber_basins_spiral): положительные id (Osc) → 1,2,3... в порядке первого появления при
+    // обходе спиралью из центра, отрицательные (FP) → -1,-2,-3... аналогично; нули (diverged) не
+    // трогаем. Влияет на heatmap "Basins" (tab 0) и его colorbar, на scatter (tab 4 — цвет и
+    // подпись кластера) и на Export data... (пишет перенумерованный basin_idx в .csv).
+    bool        renumber_spiral = false;
+
+    // Транзиентный кэш перенумерованного basin_idx. Не сериализуется. Перезалив
+    // ленивый: если basin_idx_spiral_gen != data_generation, пересчитываем.
+    std::vector<int> basin_idx_spiral;
+    int         basin_idx_spiral_gen      = -1;
+    int         n_clusters_spiral          = 0;
+    int         min_cluster_idx_spiral     = 0;
+
+    // Фазовые портреты по найденным бассейнам (см. BasinsPhaseSlot)
+    // Свои transient / computing time / прореживание: карту бассейнов считают
+    // грубо и долго, а одну траекторию — подробно и быстро. Всё остальное
+    // (scheme, h, symmetry, параметры, НУ не-осевых переменных) берётся из
+    // ЭТОГО же config'а, иначе траектория не обязана попасть в тот же
+    // аттрактор, что и ячейка сетки.
+    std::string pp_t_max_text          = "100";
+    std::string pp_transient_text      = "100";
+    std::string pp_prescaller_text     = "1";
+    std::string pp_max_attractors_text = "20";
+    bool        pp_use_gpu     = true;
+    bool        pp_autorun     = false;
+    float       pp_marker_size = 6.0f;   // px, маркер бассейнов-равновесий
+
+    // Стиль точек Scatter (облако признаков, вкладка 4). Выключенный стиль —
+    // прежний вид: сплошной квадратный GL-пойнт 3 px без смешивания.
+    bool        scatter_custom_style = false;
+    int         scatter_marker       = 0;      // PointMarker
+    float       scatter_point_size   = 4.0f;   // px
+    float       scatter_alpha        = 0.6f;
+};
+
+// Перенумерация бассейнов (spiral-from-center, порт MATLAB)
+// Положительные id → 1,2,3... в порядке первого появления при обходе спиралью
+// из центра, отрицательные → -1,-2,-3... Нули (diverged) не трогаются.
+std::vector<int> renumber_basins_spiral(const std::vector<int>& src, int N,
+                                        int& out_n_pos, int& out_n_neg);
+// Лениво (пере)заполнить c.basin_idx_spiral для текущего data_generation.
+// Безопасно звать каждый кадр — пересчёт только при смене поколения данных.
+void ensure_basins_spiral_cache(BasinsConfig& c);
+// Массив id'ов в ТЕКУЩЕЙ нумерации (учитывает renumber_spiral).
+// nullptr, если результата ещё нет.
+const int* basins_display_ids(BasinsConfig& c);
+// Подпись только тех входов, что влияют на ФОРМУ траекторий (интегратор,
+// время, параметры, НУ не-осевых переменных, устройство). Сюда намеренно НЕ
+// входят data_generation / renumber_spiral / max_attractors: они меняют лишь
+// НАБОР представительных ячеек, а он сравнивается напрямую.
+std::string build_basins_phase_run_signature(const BasinsConfig& c);
+// Полная подпись (run-подпись + то, что влияет на набор ячеек). Равные строки
+// ⇔ портреты актуальны.
+std::string build_basins_phase_signature(const BasinsConfig& c);
+
+struct BasinsAnalysisState {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
+    std::string loaded_system_name;
+
+    // Список Basins-конфигов. После load_from_record содержит как минимум
+    // один дефолтный элемент. Структура зеркалит BifurcationAnalysisSession::diagrams.
+    std::vector<BasinsConfig> configs;
+
+    // Какая вкладка сейчас открыта — для Ctrl+R (последняя видимая).
+    int active_config_index = 0;
+    // Индекс config'а, чей расчёт сейчас идёт в worker'е; -1 = ничего.
+    int running_config_index = -1;
+
+
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+
+
+
+
+
+
+    // Фазовые портреты по бассейнам: слоты (BasinsPhaseSlot, analysis) живут в
+    // BasinsAnalysisSession. Очередь пересчёта портретов (индексы configs). Драйнится ПО ОДНОМУ:
+    // фазовый NVRTC-движок и движок бассейнов делят одну видеокарту.
+    std::deque<int> phase_queue;
+    // Взводится при правке pp_*-полей; draw_gui раз в кадр пишет _last_basins.
+    bool phase_settings_dirty = false;
+};
+
+// Fast Synchro — анализ возвратной (recurrent) синхронизации. Два режима:
+//   mode 0 (On Attractor) — синхро-ошибка вдоль одной мастер-траектории;
+//   mode 1 (On Grid)      — синхро-ошибка на 2D-сетке slave IC.
+// Зеркалит BasinsConfig в стиле (multi-config, text-storage, futures worker).
+struct FastSyncConfig {
+    std::string label  = "FastSync 1";
+    std::string scheme = "Euler";
+    std::string symmetry_s = "0.5"; // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
+
+    // Режим:
+    int mode = 0;   // 0 = On Attractor, 1 = On Grid
+
+    // Общие параметры алгоритма (text-storage; parse при build_request)
+    std::string h_text              = "0.01";
+    std::string iter_of_synchr_text = "100";
+    std::string pre_scaller_text    = "1";
+    std::string max_value_text      = "1e6";
+
+    // Per-var значения. Все 4 секции инициализируются нулями в load_from_record.
+    std::map<std::string, std::string> ic_master;
+    std::map<std::string, std::string> ic_slave;
+    // Общий для обоих режимов переключатель НУ второй системы:
+    // false (legacy) — ic_slave фиксированы на весь расчёт;
+    // true           — старт от точки первой системы (уже на аттракторе) со
+    //                  случайным отступом в кубе [-eps, +eps]. См.
+    //                  FastSyncRequest::ic_random_offset.
+    bool        ic_random_offset = false;
+    std::string ic_eps_text  = "1e-3";
+    std::string ic_seed_text = "12345";
+    // error_estim == 7: сколько первых циклов Беннеттина не идёт в среднее.
+    std::string gs_warmup_text = "0";
+    std::map<std::string, std::string> k_forward;
+    std::map<std::string, std::string> k_backward;
+    std::map<std::string, std::string> param_values;
+
+    // mode == 0 (On Attractor)
+    std::string t_max_text         = "100";
+    std::string transient_text     = "0";
+    // Окно синхронизации (раньше называлось n_time). Хранится как text;
+    // парсится в numb при build_request.
+    std::string window_text        = "50";
+    // Производное поле (UI-only, не сериализуется): суммарное время всей
+    // fast-sync траектории = (2*iter_of_synchr - 1) * window. Правка любого
+    // из трёх полей (window / iter_of_synchr / total_time) пересчитывает
+    // оставшиеся — см. gui.cpp Integration-секцию FastSync-панели.
+    std::string total_time_text    = "9950";
+
+    // mode == 1 (On Grid)
+    int         axis_x_var       = 0;
+    int         axis_y_var       = 1;
+    std::string axis_x_lo_text   = "-10";
+    std::string axis_x_hi_text   = "10";
+    std::string axis_y_lo_text   = "-10";
+    std::string axis_y_hi_text   = "10";
+    std::string n_pts_text       = "200";
+    // TT слейва. Мастеру служит общее transient_text (в режиме On Attractor
+    // оно же досаживает master-траекторию).
+    std::string transient_slave_text = "0";
+    // false — grid перебирает НУ мастера (legacy default).
+    // true  — grid перебирает НУ слейва, мастер фикс.
+    bool        grid_swap_master_slave = false;
+
+    // Runtime knobs (substituted в NVRTC #define)
+    int         type_of_synch    = 0;     // 0=unidir, 1=bidir
+    int         error_estim      = 2;     // 0..7, см. configCUDA.h
+    std::string fs_error_trs_text = "1e-12";
+
+    // CSV export
+    // mode 0 (On Attractor): один файл, строки = decimated trajectory points,
+    //   столбцы = vars[0..N-1] + sync_error.
+    // mode 1 (On Grid): один файл, две строки заголовка (X/Y ranges) + матрица
+    //   ошибок n_pts × n_pts row-major.
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    // Визуализация
+    int         colormap_idx     = 2;     // Turbo
+    bool        autoscale_color  = true;  // true → cmin/cmax = result.min_val/max_val
+    std::string c_min_text       = "-12";
+    std::string c_max_text       = "0";
+    float       line_width       = 1.0f;
+    // α=0.5 по дефолту — overlapping segments дают illusion глубины
+    // (при α=1 далёкие/близкие проекции сливаются в одну плотную линию).
+    float       alpha            = 0.5f;
+    bool        swap_axes        = false; // grid mode: transpose heatmap
+    // Painter's algorithm для attractor-mode: сегменты сортируются по средней координате
+    // НЕпоказываемой оси (z = первая var, не равная axis_x_var / axis_y_var). invert_depth=false →
+    // дальние (малый z) рисуются первыми, ближние сверху (взгляд «сверху», z↑); при true — взгляд
+    // «снизу» (z↓).
+    bool        invert_depth     = false;
+    // Attractor-mode: траектория в 3D (Plot3DView), третья ось — axis_z_var. Цвет, Line width
+    // и Alpha — те же, что у 2D. Глубина там честная (depth test), invert_depth не нужен.
+    bool        plot_3d          = false;
+    int         axis_z_var       = 2;
+
+    // Состояние
+    FastSyncResult result;
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+};
+
+struct FastSyncAnalysisState {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
+    std::string loaded_system_name;
+
+    std::vector<FastSyncConfig> configs;
+    int active_config_index = 0;
+    int running_config_index = -1;
+
+
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+
+
+
+
+};
+
+// Одна спектр-кривая на параметрическом LS-графике — конфиг идентичен
+// LLECurveConfig (тот же UX), но результат — матрица: N экспонент на
+// каждую точку параметра, где N == |vars|.
+struct LSCurveConfig {
+    std::string label   = "LS 1";
+    bool        label_is_manual = true;   // см. BifurcationDiagramConfig::label_is_manual
+
+    std::string scheme         = "Euler";
+    std::string symmetry_s     = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
+
+    int         param_index    = 0;
+    // IC sweep: если sweep_over_var=true, кривая считается по нач. условию
+    // переменной vars[var_sweep_index] вместо параметра. Engine выберет
+    // соответствующий par_or_var compile-time через template substitution.
+    bool        sweep_over_var = false;
+    int         var_sweep_index = 0;
+    // dt-sweep: если true — по этой оси свипуется шаг интегрирования h, а не параметр/НУ
+    // (взаимоисключающе с sweep_over_var). Диапазон переиспользует param_lo_text/param_hi_text.
+    // t_max/transient/NT остаются фиксированными: число итераций пересчитывается на GPU из h
+    // per-thread (hSweepAxis в LSKernelCUDA).
+    bool        sweep_over_h   = false;
+    bool        log_scale      = false;  // см. BifurcationDiagramConfig::log_scale
+    std::string param_lo_text  = "0";
+    std::string param_hi_text  = "1";
+    std::string n_pts_text     = "500";
+
+    std::string h_text             = "0.01";
+    std::string t_max_text         = "100";
+    std::string transient_text     = "100";
+    std::string max_value_text     = "1e6";
+    // Адаптивный шаг (блок Integration). ad_axis / ad_axis_2 — ось свипает не систему, а
+    // настройку шага (AdaptiveAxisKind движка: rtol, atol, tol, параметр регулятора);
+    // 0 — обычная цель свипа.
+    AdaptiveSettings adaptive;
+    int         ad_axis   = 0;
+    int         ad_axis_2 = 0;
+
+    std::string eps_text       = "1e-4";
+    std::string nt_text        = "1";
+    std::string vtr_text       = "0";       // транзиент касательных векторов (время), 0 — нет
+
+    // Continuation + выбор устройства — семантика как в LLECurveConfig
+    // (переносятся траектория и ВСЕ N щупов; continuation только на CPU).
+    bool        continuation         = false;
+    bool        continuation_reverse = false;
+    bool        use_gpu              = true;
+
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    std::map<std::string, std::string> initial_conditions;
+    std::map<std::string, std::string> param_values;
+
+    LS1DResult result;
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+
+    // 2D-режим (LS по двум параметрам/IC, хитмап одной экспоненты)
+    // mode_2d=true → Run собирает LS2DRequest вместо LS1DRequest, результат
+    // (полный спектр N экспонент на каждую ячейку) ложится в result_2d.
+    // Combo над хитмапой переключает display_exponent_idx без повторного Run.
+    bool        mode_2d = false;
+    int         param_index_2 = 0;
+    bool        sweep_over_var_2 = false;
+    int         var_sweep_index_2 = 0;
+    bool        sweep_over_h_2   = false;  // см. sweep_over_h; не может быть true одновременно с sweep_over_h
+    bool        log_scale_2      = false;  // см. log_scale
+    std::string param_lo_2_text = "0";
+    std::string param_hi_2_text = "1";
+
+    LS2DResult result_2d;
+    bool        last_run_2d_ok = false;
+    int         data_generation_2d = 0;
+    RegimeCounts regime_counts_2d;
+    bool        fit_request_2d = false;
+
+    // Какую экспоненту показывать в heatmap (0-based, default λ₁); -1 = "sum
+    // L_i" (поэлементная сумма всех N плоскостей, см. sum_cache ниже).
+    int         display_exponent_idx = 0;
+    // Persisted heatmap colormap choice for this curve (-1 = unset, falls
+    // back to AppModel::heatmap_colormap on first HeatmapView creation).
+    int         colormap_idx = -1;
+
+    // Кэш "sum L_i" — считается лениво в draw_ls_plot (gui.cpp) при первом
+    // выборе, не при каждом Run/кадре. sum_cache_gen хранит data_generation_2d,
+    // для которого кэш валиден (-1 = ещё не считан). Общий для всех окон,
+    // т.к. сами данные не зависят от того, какое окно на них смотрит.
+    std::vector<double> sum_cache;
+    double      sum_cache_min = 0.0;
+    double      sum_cache_max = 0.0;
+    int         sum_cache_gen = -1;
+};
+
+// LS-сессия — структура та же что у LLE-сессии, но другая Request/Result и
+// per-«прогон» — это «спектр» (curves).
+struct LyapunovSpectrumAnalysisState {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
+    // Wrapper scheme names, "Extr(RK4|1,2,4)" or "Comp(CD|g1,g2,g1)". Needed
+    // by the scheme combo only: the body resolves from the name itself.
+    std::vector<std::string>  wrapper_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
+    std::string loaded_system_name;
+
+    std::vector<LSCurveConfig> curves;
+    int active_curve_index  = 0;
+    int running_curve_index = -1;
+
+    bool is_2d_run = false;
+
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+
+
+    void add_curve();
+
+};
+
+// Signal metrics — вкладка Parametric -> Metrics. Числовые характеристики
+// записанного сигнала writable_var на каждой точке свипа: max / min / размах /
+// среднее, средняя и медианная частота по пикам, параметры Хьорта. UX зеркалит
+// LLECurveConfig (тот же свип, те же 1D-кривые и 2D-хитмапы), результат —
+// сразу несколько величин на точку, их выбирает таб-бар окна графика
+// (ParametricPlotWindow::metric).
+struct SignalMetricsConfig {
+    std::string label   = "Metrics 1";
+    bool        label_is_manual = true;   // см. BifurcationDiagramConfig::label_is_manual
+
+    std::string scheme         = "Euler";
+    std::string symmetry_s     = "0.5";    // a[0] для CD
+    std::string cd_fp_iters = "4";   // CD FP: число простых итераций, a[M+1]
+    NewtonSettings newton;          // Ньютон неявных схем: a[M+2..M+4] (см. codegen.hpp)
+
+    // Свип по X — см. BifurcationDiagramConfig.
+    int         param_index     = 0;
+    bool        sweep_over_var  = false;
+    int         var_sweep_index = 0;
+    bool        sweep_over_h    = false;
+    bool        log_scale       = false;
+    std::string param_lo_text   = "0";
+    std::string param_hi_text   = "1";
+    std::string n_pts_text      = "500";
+
+    // Continuation и устройство — как у LLECurveConfig: цепочка только в 1D и
+    // только по параметру или h; CPU тоже только в 1D (в 2D выбор заблокирован).
+    bool        continuation         = false;
+    bool        continuation_reverse = false;
+    bool        use_gpu              = true;
+
+    // Какой сигнал меряем (-1 = x0 + pi*x1 + e*x2, как у БД).
+    int         writable_var   = 0;
+
+    std::string h_text             = "0.01";
+    std::string t_max_text         = "100";
+    std::string transient_text     = "100";
+    std::string pre_scaller_text   = "1";
+    std::string max_value_text     = "1e6";
+    // Адаптивный шаг (блок Integration). ad_axis / ad_axis_2 — ось свипает не систему, а
+    // настройку шага (AdaptiveAxisKind движка: rtol, atol, tol, параметр регулятора);
+    // 0 — обычная цель свипа.
+    AdaptiveSettings adaptive;
+    int         ad_axis   = 0;
+    int         ad_axis_2 = 0;
+
+    // Биты SignalMetric (parametric_engine.h): какие метрики считать и
+    // показывать. По умолчанию все.
+    int         metric_mask = kSignalMetricAllMask;
+
+    bool        csv_save_enabled = false;
+    std::string csv_output_path;
+
+    std::map<std::string, std::string> initial_conditions;
+    std::map<std::string, std::string> param_values;
+
+    SignalMetricsResult result;           // 1D
+    bool        last_run_ok = false;
+    std::string last_error;
+    int         data_generation = 0;
+    bool        fit_request = false;
+
+    // 2D-режим — квадратная сетка, Resolution на обе оси (см. LLECurveConfig).
+    bool        mode_2d           = false;
+    int         param_index_2     = 0;
+    bool        sweep_over_var_2  = false;
+    int         var_sweep_index_2 = 0;
+    bool        sweep_over_h_2    = false;
+    bool        log_scale_2       = false;
+    std::string param_lo_2_text   = "0";
+    std::string param_hi_2_text   = "1";
+
+    SignalMetricsResult result_2d;
+    bool        last_run_2d_ok     = false;
+    int         data_generation_2d = 0;
+    RegimeCounts regime_counts;   // 1D и 2D различаются по буферу (RegimeCounts::data)
+    bool        fit_request_2d     = false;
+    int         colormap_idx       = -1;   // -1 = AppModel::heatmap_colormap
+};
+
+// Сессия Metrics — копия LLEAnalysisSession по устройству (одна задача в
+// полёте, свой future). 1D и 2D отдаёт один и тот же run_signal_metrics,
+// поэтому future один.
+struct SignalMetricsAnalysisState {
+    std::vector<std::string> vars;
+    std::vector<std::string> params;
+    System sys;
+    std::vector<CustomScheme> custom_schemes;
+    std::vector<std::string>  wrapper_schemes;
+    std::vector<std::string> enabled_builtin_schemes;
+    std::string loaded_system_name;
+
+    std::vector<SignalMetricsConfig> configs;
+    int active_config_index  = 0;
+    int running_config_index = -1;
+
+    bool is_2d_run = false;
+
+    std::string last_run_label;
+    double last_run_seconds = 0.0;
+    bool last_run_succeeded = false;
+
+    // Добавить config: глубокая копия последнего (если есть), иначе дефолт; результат и флаги
+    // обнуляются. Зовёт и загрузчик сессии (storage), поэтому живёт в состоянии.
+    void add_config();
+};

@@ -2,13 +2,13 @@
 //   - каждая демо-схема share\kicad\demos\simulation: .kicad_sch -> kicad-cli (spice netlist) -> spice_import;
 //     печатается, что импортировано и что отвергнуто (с причиной); простые схемы обязаны импортироваться;
 //   - сверка переходного процесса с ngspice: ngspice.dll из KiCad (shared ngspice, грузится в рантайме).
-#include "num_parse.h"
+#include "ucuda/domain/num_parse.h"
 #include "test_util.h"
-#include "kicad_import.h"
-#include "spice_parse.h"
-#include "dae_devices.h"
-#include "dae_ir.h"
-#include "krs_cpu.h"
+#include "ucuda/numerics/kicad_import.h"
+#include "ucuda/numerics/spice_parse.h"
+#include "ucuda/equations/dae_devices.h"
+#include "ucuda/equations/dae_ir.h"
+#include "ucuda/numerics/krs_cpu.h"
 #include <windows.h>
 #include <filesystem>
 #include <map>
@@ -297,7 +297,7 @@ int main() {
         std::printf("  kicad-cli: %s\n", cli.c_str());
         survey();
         g_ng_ok = g_ng.load(g_kicad_root / "bin" / "ngspice.dll");
-        if (!g_ng_ok) { std::printf("  ngspice.dll not loaded: comparison skipped\n"); return 0; }
+        if (!g_ng_ok) { std::printf("  ngspice.dll not loaded: comparison skipped\n"); return ut::kSkip; }
         // Отладка: UCUDA_NG_PROBE=<netlist> UCUDA_NG_NODE=<узел> UCUDA_NG_T=<tstop> — узел по ngspice на 40 точках.
         if (const char* pf = std::getenv("UCUDA_NG_PROBE")) {
             std::ifstream f(pf);

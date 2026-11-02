@@ -7,16 +7,16 @@
 //     цепь Чуа на встречных диодах = та же система, выписанная как ОДУ;
 //   - круговой тест: Лоренц -> синтез -> netlist (B и POLY) -> обратно в граф (та же топология)
 //     -> импорт в ДАУ -> траектория = CircuitSolver (идеальные ОУ).
-#include "num_parse.h"
+#include "ucuda/domain/num_parse.h"
 #include "test_util.h"
-#include "spice_parse.h"
-#include "circuit_netlist.h"
-#include "circuit_solver.h"
-#include "circuit_synth.h"
-#include "dae_devices.h"
-#include "dae_ir.h"
-#include "krs_cpu.h"
-#include "system_library.h"
+#include "ucuda/numerics/spice_parse.h"
+#include "ucuda/numerics/circuit_netlist.h"
+#include "ucuda/domain/circuit_solver.h"
+#include "ucuda/domain/circuit_synth.h"
+#include "ucuda/equations/dae_devices.h"
+#include "ucuda/equations/dae_ir.h"
+#include "ucuda/numerics/krs_cpu.h"
+#include "ucuda/storage/system_library.h"
 #include <algorithm>
 #include <fstream>
 #include <functional>
@@ -223,7 +223,7 @@ void round_trip() {
     }
 
     // Эталон фазы 0, написанный руками: ОУ — E с усилением 1E6 (-> нуллоры), умножители — B.
-    std::ifstream f("../../fixtures/lorenz_reference.cir", std::ios::binary);
+    std::ifstream f(std::filesystem::path(UCUDA_TEST_SOURCE) / "tests/fixtures/lorenz_reference.cir", std::ios::binary);
     ut::require((bool)f, "tests/fixtures/lorenz_reference.cir found");
     std::stringstream ss;
     ss << f.rdbuf();

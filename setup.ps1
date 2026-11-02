@@ -1,5 +1,5 @@
 # setup.ps1 -- bootstrap Python environment for the U-CUDA OCR server.
-# Creates .venv in the repo root, installs requirements.txt, sets U_CUDA_PYTHON.
+# Creates .venv in the repo root, installs tools/ocr/requirements.txt, sets U_CUDA_PYTHON.
 # CUDA and vcpkg are not touched here -- see README.md.
 #
 # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 reads .ps1 as ANSI
@@ -10,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = $PSScriptRoot
 $venvDir  = Join-Path $repoRoot '.venv'
 $venvPy   = Join-Path $venvDir  'Scripts\python.exe'
-$reqFile  = Join-Path $repoRoot 'requirements.txt'
+$reqFile  = Join-Path $repoRoot 'tools\ocr\requirements.txt'
 
 Write-Host "=== U-CUDA setup ===" -ForegroundColor Cyan
 Write-Host "Repo root: $repoRoot"
@@ -54,7 +54,7 @@ if (Test-Path $venvPy) {
 
 # 3. Install dependencies (heavy: torch + pix2text, ~5 GB)
 if (-not (Test-Path $reqFile)) {
-    Write-Host "requirements.txt not found at $reqFile" -ForegroundColor Red
+    Write-Host "OCR requirements not found at $reqFile" -ForegroundColor Red
     exit 1
 }
 Write-Host "Installing dependencies (this takes a while, ~5 GB: torch + onnx) ..." -ForegroundColor Cyan
@@ -71,4 +71,4 @@ Write-Host ""
 Write-Host "=== Done ===" -ForegroundColor Green
 Write-Host "U_CUDA_PYTHON = $venvPy"
 Write-Host "Restart Visual Studio / terminal so the env var is picked up."
-Write-Host "Next: open U-CUDA.sln in Visual Studio and build Release | x64."
+Write-Host "Next: open the repository folder in Visual Studio or run cmake --preset windows."

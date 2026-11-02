@@ -4,11 +4,11 @@
 //   - Network: кольцо из 16 узлов Лоренца с диффузионной связью — расчёт проходит, траектории конечны.
 // FastSync покрыт тестом adaptive, остальные вкладки — library / dae / adaptive.
 #include "test_util.h"
-#include "order_session.h"
-#include "network_session.h"
-#include "parametric_engine.h"
-#include "system_library.h"
-#include "sysparse.hpp"
+#include "ucuda/analysis/order_session.h"
+#include "ucuda/analysis/network_session.h"
+#include "ucuda/cuda/parametric_engine.h"
+#include "ucuda/storage/system_library.h"
+#include "ucuda/equations/sysparse.hpp"
 #include <cuda.h>
 #include <filesystem>
 #include <fstream>
@@ -51,14 +51,21 @@ int main() {
         set_nvrtc_rdc(true);
         // Запись библиотеки и её система — как AppModel::build_system для ОДУ (GUI кладёт её в sys сессии)
         auto load = [](const char* dir, SystemRecord& rec, System& out) {
-            const fs::path p = fs::u8path(exe_dir()) / ".." / ".." / ".." / "U-CUDA" / "library" / dir / "system.json";
+            const fs::path p = ut::fixture_library() / dir / "system.json";
             std::ifstream f(p, std::ios::binary);
             std::stringstream ss;
             ss << f.rdbuf();
             rec = record_from_json(ss.str());
             out = parse_system_from_latex(rec.mode == "Plain" ? rec.plain_text : rec.latex_text,
-                split(rec.vars_text + "," + rec.params_text),
+                split(rec.alphabet_text.empty() ? rec.vars_text + "," + rec.params_text : rec.alphabet_text),
                 rec.param_order == "AsInSystem" ? ParamOrder::AsInSystem : ParamOrder::AsInAlphabet, {}, false);
+            const auto join = [](const std::vector<std::string>& names) {
+                std::string text; for (const auto& name : names) { if (!text.empty()) text += ','; text += name; }
+                return text;
+            };
+            // Factory fixtures retain the older alphabet-only record format.
+            if (rec.vars_text.empty()) rec.vars_text = join(out.vars);
+            if (rec.params_text.empty()) rec.params_text = join(out.params);
         };
         SystemRecord r, rd;
         System sys, sysd;

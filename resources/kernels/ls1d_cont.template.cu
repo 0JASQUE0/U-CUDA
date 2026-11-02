@@ -1,0 +1,242 @@
+﻿// ls1d_cont.template.cu
+//
+// NVRTC template for the 1D Lyapunov spectrum in continuation mode. Same shape
+// as lle1d_cont.template.cu, but the tangent space is N-dimensional: N probes
+// plus Gram-Schmidt re-orthogonalisation every NT time units. Mirrors
+// run_ls1d_cpu in numerics.
+//
+// Carried between parameter points: the trajectory x[] AND all N probes y[].
+//
+// Placeholders:
+//   AMOUNT_OF_X -- system dimension.
+//   KRS_BODY    -- body of calculateDiscreteModel from codegen.
+
+#define AMOUNTOFX {{AMOUNT_OF_X}}
+#define par_or_var 1
+
+#ifdef __CUDACC_RTC__
+typedef signed char        int8_t;
+typedef unsigned char      uint8_t;
+typedef short              int16_t;
+typedef unsigned short     uint16_t;
+typedef int                int32_t;
+typedef unsigned int       uint32_t;
+typedef long long          int64_t;
+typedef unsigned long long uint64_t;
+#endif
+
+#ifdef __CUDACC_RTC__
+#define CURAND_KERNEL_H_
+#define CURAND_KERNEL_H
+typedef struct { unsigned long long state; } curandState_t;
+typedef curandState_t curandStateXORWOW_t;
+__device__ __forceinline__ void curand_init(
+    unsigned long long seed, unsigned long long sequence, unsigned long long offset, curandState_t* s) {
+    unsigned long long z = seed + sequence * 0x9E3779B97F4A7C15ULL + offset;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    s->state = z ^ (z >> 31);
+}
+__device__ __forceinline__ float curand_uniform(curandState_t* s) {
+    s->state = s->state * 6364136223846793005ULL + 1442695040888963407ULL;
+    return (float)(((s->state >> 40) & 0xFFFFFFULL) + 1ULL) / 16777216.0f;
+}
+#endif
+
+#include "cudaLibrary.cuh"
+
+__device__ __host__ __forceinline__
+void calculateDiscreteModel(numb* X, UCUDA_TP(const numb ucuda_t) const numb* a, const numb h) {
+{{KRS_BODY}}
+}
+
+#include "cudaLibrary.cu"
+
+// Single-thread kernel, launched with gridDim = blockDim = 1.
+// result[j * amountOfX + k] -- k-th exponent at point j, NaN if the point died.
+// Сигналы: ядро однопоточное и само идёт по точкам, поэтому тик — ровно
+//   точка, а проверка отмены стоит на границе точек. Прерывание оставляет
+//   хвост точек непосчитанным, но отменённый прогон хост выбрасывает целиком.
+extern "C" __global__ void ls1dContinuationKernel(
+    int nPts,
+    numb lo,
+    numb hi,
+    int reverse,
+    int logScale,
+    int sweepIsH,
+    int mutParamIdx,
+    const numb* baseValues,
+    int amountOfValues,
+    const numb* baseX,
+    int amountOfX,
+    numb hBase,
+    numb NT,
+    numb tMax,
+    numb transientTime,
+    numb eps,
+    numb maxValue,
+    numb* result,
+    const volatile int* cancelFlag,
+    int*  progressCounter,
+    numb  vectorTransient)          // tangent-vector transient: blocks renormalised, not summed
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    numb x[AMOUNTOFX];
+    numb y[AMOUNTOFX * AMOUNTOFX];   // N probes, absolute coordinates
+    numb z[AMOUNTOFX * AMOUNTOFX];   // Gram-Schmidt scratch
+    numb denominators[AMOUNTOFX];
+    numb sum[AMOUNTOFX];
+    numb a[64];
+
+    for (int i = 0; i < amountOfX; ++i)      x[i] = baseX[i];
+    for (int i = 0; i < amountOfValues; ++i) a[i] = baseValues[i];
+    UCUDA_NVAR(ucudaStep, 0)   // время идёт по всей цепочке, как и x; клоны начинают блок с ним же
+
+    curandState_t rng;
+    curand_init(1234567891ULL, 0ULL, 0ULL, &rng);
+
+    // Fresh random basis of N unit vectors (DAE: K = UCUDA_LYAP_NX vectors in x).
+    for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) {
+        numb zp = 0;
+        for (int i = 0; i < UCUDA_LYAP_K(amountOfX); ++i) {
+            y[k * amountOfX + i] = curand_uniform(&rng) - (numb)0.5;
+            zp += y[k * amountOfX + i] * y[k * amountOfX + i];
+        }
+#ifdef UCUDA_LYAP_NX
+        for (int i = UCUDA_LYAP_NX; i < amountOfX; ++i) y[k * amountOfX + i] = 0;
+#endif
+        zp = sqrt(zp);
+        for (int i = 0; i < amountOfX; ++i)
+            y[k * amountOfX + i] = (zp == 0) ? (numb)0 : y[k * amountOfX + i] / zp;
+    }
+
+    int probesAttached = 0;
+    const numb denom = (numb)(nPts > 1 ? nPts - 1 : 1);
+    const int nBlocks = (int)(tMax / NT);
+    const int nWarm   = vectorTransient > 0 ? (int)ucuda_steps_per_block(vectorTransient, NT) : 0;
+
+    for (int j = 0; j < nPts; ++j) {
+        // Stop: недосчитанный хвост цепочки помечаем — хост покажет посчитанное.
+        if (cancelFlag != nullptr && *cancelFlag != 0) {
+            for (int r = j; r < nPts; ++r)
+                for (int k = 0; k < amountOfX; ++k) result[r * amountOfX + k] = (numb)UCUDA_CANCELLED_VALUE;
+            return;
+        }
+        if (progressCounter != nullptr) atomicAdd(progressCounter, 1);
+        // Общая с host'ом функция, см. configCUDA.h (была третьей копией).
+        const numb p = ucuda_node_value_cont(j, nPts, lo, hi, logScale != 0, reverse);
+
+        numb hLocal = hBase;
+        if (sweepIsH) hLocal = p;
+        else          a[mutParamIdx] = p;
+
+        const int badPoint = (hLocal <= 0 || nBlocks <= 0);
+        // Round to nearest, divide by k*h*nBlocks -- see ucuda_steps_per_block (configCUDA.h).
+        const int ntSteps   = badPoint ? 0 : (int)ucuda_steps_per_block(NT, hLocal);
+        const int skipSteps = badPoint ? 0 : (int)ucuda_steps_per_block(transientTime, hLocal);   // round, as the blocks
+        if (badPoint || ntSteps <= 0) {
+            for (int k = 0; k < amountOfX; ++k) result[j * amountOfX + k] = nan("");
+            continue;
+        }
+#ifdef UCUDA_LYAP_NX
+        // ДАУ (этап 7): z — на связь при новом параметре; старт — z прошлой точки (та же ветвь).
+        calculateDiscreteModel(x, UCUDA_TA((numb)ucudaStep * hLocal) a, (numb)0);
+#endif
+        // The loop adds one more step after its iterations (see ucuda_steps_per_block).
+        const int blockIters = ntSteps - 1;
+
+        int alive = 1;
+        int settleBlocks = (int)(transientTime / NT);
+        if (!probesAttached) {
+            settleBlocks = 0;
+            // Exactly skipSteps steps: the loop adds one more after its iterations.
+            if (skipSteps > 0 && loopCalculateDiscreteModel_int(x, a, hLocal, skipSteps - 1, amountOfX,
+                                               1, 0, maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaStep)) == 0) {
+                alive = 0;
+            } else {
+                // Orthonormalise the random basis, then place the probes at
+                // distance eps around the current trajectory point.
+#ifdef UCUDA_LYAP_NX
+                ucudaGramSchmidtDae(y, z, amountOfX);
+#else
+                gramSchmidtProcess(y, z, amountOfX);
+#endif
+                for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k)
+                    for (int i = 0; i < amountOfX; ++i)
+                        y[k * amountOfX + i] = z[k * amountOfX + i] * eps + x[i];
+                probesAttached = 1;
+            }
+        }
+
+        // Tangent-vector transient: a fresh probe gets nWarm unsummed blocks too, a carried
+        // one the larger of its settle blocks and nWarm.
+        if (settleBlocks < nWarm) settleBlocks = nWarm;
+#ifdef UCUDA_LYAP_NX
+        // z клонов — на связь при новом параметре (и после постановки щупов).
+        if (alive)
+            for (int k = 0; k < UCUDA_LYAP_NX; ++k)
+                ucudaDaeProject(y + k * amountOfX, x, UCUDA_TA((numb)ucudaStep * hLocal) a, amountOfX);
+#endif
+        for (int k = 0; k < amountOfX; ++k) sum[k] = 0;
+
+        const int totalBlocks = settleBlocks + nBlocks;
+        for (int b = 0; alive && b < totalBlocks; ++b) {
+            UCUDA_NVAR(ucudaBlock0, ucudaStep)
+            if (loopCalculateDiscreteModel_int(x, a, hLocal, blockIters, amountOfX,
+                                               1, 0, maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaStep)) == 0) { alive = 0; break; }
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) {
+                UCUDA_NVAR(ucudaClone, ucudaBlock0)
+                if (loopCalculateDiscreteModel_int(y + k * amountOfX, a, hLocal, blockIters, amountOfX,
+                                                   1, 0, maxValue, nullptr, 0, 1 UCUDA_NA_AFTER_WS(&ucudaClone)) == 0) { alive = 0; break; }
+            }
+            if (!alive) break;
+
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k)
+                for (int l = 0; l < amountOfX; ++l)
+                    y[k * amountOfX + l] -= x[l];
+
+#ifdef UCUDA_LYAP_NX
+            ucudaGramSchmidtDae(y, z, amountOfX, denominators);
+#else
+            gramSchmidtProcess(y, z, amountOfX, denominators);
+#endif
+
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) {
+                if (b >= settleBlocks) sum[k] += log(denominators[k] / eps);
+                for (int i = 0; i < amountOfX; ++i)
+                    y[k * amountOfX + i] = x[i] + z[k * amountOfX + i] * eps;
+#ifdef UCUDA_LYAP_NX
+                ucudaDaeProject(y + k * amountOfX, x, UCUDA_TA((numb)ucudaStep * hLocal) a, amountOfX);
+#endif
+            }
+        }
+
+        if (alive) {
+            const numb tIntegrated = (numb)nBlocks * (numb)ntSteps * hLocal;
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) result[j * amountOfX + k] = sum[k] / tIntegrated;
+#ifdef UCUDA_LYAP_NX
+            for (int k = UCUDA_LYAP_NX; k < amountOfX; ++k) result[j * amountOfX + k] = nan("");   // хост обрезает
+#endif
+        } else {
+            for (int k = 0; k < amountOfX; ++k) result[j * amountOfX + k] = nan("");
+            probesAttached = 0;
+            for (int i = 0; i < amountOfX; ++i) x[i] = baseX[i];
+            UCUDA_NSET(ucudaStep, 0)
+            curand_init(1234567891ULL, (unsigned long long)j + 1ULL, 0ULL, &rng);
+            for (int k = 0; k < UCUDA_LYAP_K(amountOfX); ++k) {
+                numb zp = 0;
+                for (int i = 0; i < UCUDA_LYAP_K(amountOfX); ++i) {
+                    y[k * amountOfX + i] = curand_uniform(&rng) - (numb)0.5;
+                    zp += y[k * amountOfX + i] * y[k * amountOfX + i];
+                }
+#ifdef UCUDA_LYAP_NX
+                for (int i = UCUDA_LYAP_NX; i < amountOfX; ++i) y[k * amountOfX + i] = 0;
+#endif
+                zp = sqrt(zp);
+                for (int i = 0; i < amountOfX; ++i)
+                    y[k * amountOfX + i] = (zp == 0) ? (numb)0 : y[k * amountOfX + i] / zp;
+            }
+        }
+    }
+}

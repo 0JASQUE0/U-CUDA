@@ -2,7 +2,7 @@
 // из кэша, индекс за пределами X отвергается до компиляции, ошибка компилятора — с номером строки.
 // (В CMake-форке это часть platform_test; процессы/OCR там Linux-only и здесь не проверяются.)
 #include "test_util.h"
-#include "krs_cpu.h"
+#include "ucuda/numerics/krs_cpu.h"
 
 int main() {
     return ut::run_main("krs_cpu", []() -> int {
