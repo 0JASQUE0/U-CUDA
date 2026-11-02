@@ -22,7 +22,7 @@ Analysis submits typed requests and generated source. CUDA resolves runtime temp
 
 ## Change this when
 
-Use `engine_*` files for modern analysis families, `host_*` files for legacy entry points, runtime/engine files for compilation and caches, and `device/*.cuh` plus kernel templates for device algorithms.
+Use `engine_*` files for modern analysis families (`engine_runtime.cpp` holds shared helpers, source loading and module builds; `engine_metrics.cpp`, `engine_network.cpp`, `engine_order.cpp` with Stability and Performance, and so on per family), `host_*` files for legacy entry points, runtime/engine files for compilation and caches, and `device/*.cuh` plus kernel templates for device algorithms.
 
 ## Build and checks
 

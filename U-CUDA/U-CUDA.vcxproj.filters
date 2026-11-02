@@ -282,6 +282,12 @@
     <ClCompile Include="..\libs\cuda\src\engine_lle.cpp">
       <Filter>libs\cuda\src</Filter>
     </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_metrics.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\engine_network.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
     <ClCompile Include="..\libs\cuda\src\engine_neural.cpp">
       <Filter>libs\cuda\src</Filter>
     </ClCompile>

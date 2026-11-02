@@ -1,5 +1,14 @@
 # U-CUDA architecture
 
+## Two build definitions
+
+Both describe the same sources and the same module graph below.
+
+- `U-CUDA.sln` / `U-CUDA/U-CUDA.vcxproj` (Windows, Visual Studio): one project that compiles every `libs/` source into the executable. Release builds the desktop app (`apps/desktop`), Debug the legacy entry (`apps/legacy`); output goes to `x64\<Configuration>\`. The post-build step runs [cmake/PackRuntime.cmake](cmake/PackRuntime.cmake) to pack `kernels/` and the other runtime files.
+- CMake: one library target per module, so the dependency arrows below are enforced by the linker; used for tests (`ctest`), Linux and the headless configuration.
+
+[tests/vcxproj_sync.cmake](tests/vcxproj_sync.cmake) checks that both list the same `libs/` sources. A single Visual Studio project does not enforce module boundaries, so [tests/layer_rules.cmake](tests/layer_rules.cmake) checks the include direction instead.
+
 ## Dependency direction
 
 ```mermaid
@@ -80,7 +89,7 @@ When device helpers, `configCUDA.h` or kernel includes change, update the packer
 - Domain owns serializable types, settings, request/result values, plot descriptions, and export snapshots. Each session's persistent part is a domain `<Name>State`.
 - Analysis owns futures, progress/cancellation tokens, session transitions, and computation orchestration: each session is `<Name> : <Name>State` in analysis.
 - Storage owns JSON, settings, system-library layout, and CSV formatting. It serializes `<Name>State`; sessions owning other sessions (Basins phase slots, Custom) pass the owned parts explicitly.
-- Application owns the active system, cross-analysis queues, dirty/save decisions, and global ticking, and wraps storage's state serializers for whole sessions (`session_persistence.h`).
+- Application owns the active system, cross-analysis queues, dirty/save decisions, and global ticking, and wraps storage's state serializers for whole sessions (`session_persistence.h`). `AppModel` is layered: `AppSettings` (mirror of `AppConfig`) <- `SystemEditor` (the edited system, its code generation and library record) <- `AppModel` (sessions, engine, queues, plot windows, broadcast and undo). The Library editor's scratch buffer is a `SystemEditor`, not a second `AppModel`.
 - UI owns widget state and plot-view instances.
 - Plotting owns OpenGL buffers, textures, cameras, renderers, and framebuffer capture.
 - Platform owns clipboard transfer and OS-specific paths/processes/dialogs.
