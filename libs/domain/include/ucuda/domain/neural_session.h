@@ -56,8 +56,6 @@ struct NeuralDeviceModel {
     std::string initial_text = "0.5", min_text = "0", max_text = "1";
 };
 enum class NeuralDevicePreset { Vteam = 0, Team };
-const char* neural_device_preset_name(NeuralDevicePreset p);
-NeuralDeviceModel neural_device_preset(NeuralDevicePreset p);
 
 struct NeuralProjection {
     int from = 0, to = 0;

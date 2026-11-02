@@ -1,4 +1,4 @@
-﻿#include "ucuda/domain/circuit_synth.h"
+﻿#include "ucuda/numerics/circuit_synth.h"
 #include "ucuda/equations/codegen.hpp"   // SystemEvaluator
 
 #include <algorithm>
@@ -237,11 +237,6 @@ void apply_amplitude_scaling(const std::vector<PolyRhs>& in, const ScalePlan& sp
 }
 
 // --- синтез графа -------------------------------------------------------------
-
-int CircuitGraph::add_node(const std::string& name) {
-    nodes.push_back(CircuitNode{ name });
-    return (int)nodes.size() - 1;
-}
 
 bool synthesize_circuit(const System& sys,
                         const std::vector<PolyRhs>& rhs,

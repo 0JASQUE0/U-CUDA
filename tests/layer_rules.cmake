@@ -43,6 +43,32 @@ foreach(f IN LISTS domain_files)
         endif()
     endforeach()
 endforeach()
+# Domain declares only what domain defines. A free function declared in a domain header but
+# implemented in analysis, cuda or numerics is an upward dependency the include check cannot see
+# and a single-project build links silently: its declaration belongs in the implementing module's
+# header. A non-inline top-level declaration in a domain header needs a definition in libs/domain/src.
+file(GLOB domain_headers "${ROOT}/libs/domain/include/ucuda/domain/*.h")
+file(GLOB domain_sources "${ROOT}/libs/domain/src/*.cpp")
+set(domain_defs "")
+foreach(f IN LISTS domain_sources)
+    file(READ "${f}" txt)
+    string(APPEND domain_defs "${txt}")
+endforeach()
+foreach(f IN LISTS domain_headers)
+    file(STRINGS "${f}" decls REGEX "^[A-Za-z_][A-Za-z0-9_:<>,*& ]*[ *&][A-Za-z_][A-Za-z0-9_]*[ \t]*\\([^{]*$")
+    foreach(d IN LISTS decls)
+        if(d MATCHES "^(inline|static|constexpr|template|typedef|using|struct|class|enum|return|friend|extern|namespace)[ \t]"
+           OR d MATCHES "^[^(]*[ \t](inline|constexpr)[ \t]")   # UCUDA_HD inline ...
+            continue()
+        endif()
+        string(REGEX REPLACE "^[^(]*[ *&]([A-Za-z_][A-Za-z0-9_]*)[ \t]*\\(.*$" "\\1" name "${d}")
+        string(FIND "${domain_defs}" "${name}(" at)
+        if(at EQUAL -1)
+            file(RELATIVE_PATH rel "${ROOT}" "${f}")
+            set(failures "${failures}\n  domain declares ${name} without defining it in libs/domain/src: ${rel}")
+        endif()
+    endforeach()
+endforeach()
 
 # Storage serializes domain values only: no compute, application or GUI headers.
 rule("storage includes compute/GUI" "libs/storage/*.h"

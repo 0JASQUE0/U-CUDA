@@ -1,4 +1,5 @@
-﻿#include "ucuda/domain/circuit_solver.h"
+﻿#include "ucuda/numerics/circuit_solver.h"
+#include "ucuda/numerics/circuit_synth.h"
 
 #include <algorithm>
 #include <cmath>

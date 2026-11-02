@@ -62,3 +62,32 @@ struct CustomSession : CustomState {
 std::string build_l2d_signature(const CustomTabSharedConfig& s, const CustomSession& cs);
 std::string build_l1d_signature(const CustomTabSharedConfig& s, const CustomSession& cs);
 std::string build_l3_signature (const CustomTabSharedConfig& s, const CustomSession& cs);
+
+// Вспомогательные функции сессий (реализация в analysis; типы — в ucuda/domain).
+
+// Shared -> sub-session field synchronisation
+//
+// Called exactly once immediately BEFORE run_async for each sub-item; never
+// on every frame (would clobber per-type options the user edits in the
+// detail panel — LS::display_exponent_idx, LLE::eps, etc.).
+//
+// dir semantics for 1D variants:
+//   0 = X-slice (sweep along shared X, Y fixed at fix_y_value)
+//   1 = Y-slice (sweep along shared Y, X fixed at fix_x_value)
+void apply_shared_to_bif2d(const CustomTabSharedConfig& s, BifurcationDiagramConfig& c);
+void apply_shared_to_bif1d(const CustomTabSharedConfig& s, BifurcationDiagramConfig& c, int dir);
+void apply_shared_to_lle2d(const CustomTabSharedConfig& s, LLECurveConfig& c);
+// c2d — слот [0] (2D-конфиг) той же подсессии. Специфика LLE/LS (eps, NT) живёт только там и
+// редактируется в панели Level 2D, поэтому срез обязан забирать её оттуда — ровно как
+// bif_writable_var. Без этого слоты [1]/[2] считались с тем, что им досталось от add_curve при
+// загрузке системы, и правка «eps» / «NT» действовала на карту, но не на срез.
+void apply_shared_to_lle1d(const CustomTabSharedConfig& s, const LLECurveConfig& c2d,
+                           LLECurveConfig& c, int dir);
+void apply_shared_to_ls2d (const CustomTabSharedConfig& s, LSCurveConfig&  c);
+void apply_shared_to_ls1d (const CustomTabSharedConfig& s, const LSCurveConfig& c2d,
+                           LSCurveConfig&  c, int dir);   // c2d — см. apply_shared_to_lle1d
+void apply_shared_to_phase (const CustomTabSharedConfig& s, PhaseAnalysisState& ph, const std::vector<std::string>& vars);
+void apply_shared_to_basins(const CustomTabSharedConfig& s, BasinsConfig& c);
+
+EffectiveSweep effective_sweep_x(const CustomTabSharedConfig& s);
+EffectiveSweep effective_sweep_y(const CustomTabSharedConfig& s);

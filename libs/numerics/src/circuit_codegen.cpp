@@ -1,4 +1,5 @@
 ﻿#include "ucuda/numerics/circuit_codegen.h"
+#include "ucuda/numerics/circuit_synth.h"
 
 #include <algorithm>
 #include <cstdio>

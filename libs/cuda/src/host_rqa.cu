@@ -1,5 +1,5 @@
 ﻿#include "ucuda/domain/configCUDA.h"
-#include "ucuda/domain/rqa.h"
+#include "ucuda/cuda/rqa.h"
 #include "cuda_runtime.h"
 #include <algorithm>
 #include <cmath>

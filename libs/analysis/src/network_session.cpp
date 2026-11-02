@@ -70,15 +70,6 @@ const char* net_topology_name(NetTopology t) {
     return "Custom";
 }
 
-NetCouplingLaw net_default_law(const std::vector<std::string>& vars) {
-    NetCouplingLaw law;
-    law.name = "diffusive";
-    law.expr.assign(vars.size(), std::string());
-    if (!vars.empty())
-        law.expr[0] = "K*(" + vars[0] + "_j - " + vars[0] + "_i)";
-    return law;
-}
-
 std::string net_coupling_body(const System& sys, const std::vector<NetCouplingLaw>& laws) {
     std::string out;
     for (size_t i = 0; i < laws.size(); ++i) {

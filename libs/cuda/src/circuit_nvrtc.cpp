@@ -1,4 +1,6 @@
 ﻿#include "ucuda/cuda/circuit_nvrtc.h"
+#include "ucuda/numerics/circuit_solver.h"
+#include "ucuda/numerics/circuit_synth.h"
 
 #include "ucuda/platform/platform_paths.h"
 

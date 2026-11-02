@@ -49,7 +49,7 @@ target_compile_definitions(ucuda_regression PRIVATE UCUDA_TEST_SOURCE="${PROJECT
 add_executable(ucuda_parity_compare parity/compare.cpp)
 target_link_libraries(ucuda_parity_compare PRIVATE nlohmann_json::nlohmann_json)
 add_executable(ucuda_parity_observations parity/observations.cpp)
-target_link_libraries(ucuda_parity_observations PRIVATE nlohmann_json::nlohmann_json ucuda::application ucuda::numerics ucuda::storage ucuda::platform CUDA::cuda_driver)
+target_link_libraries(ucuda_parity_observations PRIVATE nlohmann_json::nlohmann_json ucuda::application ucuda::cuda ucuda::numerics ucuda::storage ucuda::platform CUDA::cuda_driver)
 ucuda_runtime(ucuda_parity_observations)
 add_test(NAME parity_observations COMMAND ucuda_parity_observations)
 set_tests_properties(parity_observations PROPERTIES LABELS "regression;gpu" RUN_SERIAL TRUE TIMEOUT 120)
