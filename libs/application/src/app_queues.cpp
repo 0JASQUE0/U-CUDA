@@ -380,79 +380,45 @@ void cleanup_plot_windows_after_removal(std::vector<ParametricPlotWindow>& wins,
 } // namespace
 
 
-bool AppModel::start_next_in_basins_queue() {
-    if (basins_session.in_flight) return false;
-    if (basins_queue.empty()) return false;
-    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
-    while (!basins_queue.empty()) {
-        BasinsQueueItem it = basins_queue.front();
-        basins_queue.pop_front();
-        if (it.index >= 0 && it.index < (int)basins_session.configs.size()) {
-            if (basins_session.run_async(*parametric_engine, it.index)) return true;
+// Общий ход очередей вкладок с одной сессией: снять следующий элемент и запустить его.
+// Элемент с устаревшим индексом или отказом run_async (last_error уже выставлен) пропускается.
+template <class Session, class Item>
+static bool run_next_queued(Session& s, std::deque<Item>& q, std::unique_ptr<ParametricEngine>& engine) {
+    if (s.in_flight) return false;
+    if (q.empty()) return false;
+    if (!engine) engine = std::make_unique<ParametricEngine>();
+    while (!q.empty()) {
+        Item it = q.front();
+        q.pop_front();
+        if (it.index >= 0 && it.index < (int)s.configs.size()) {
+            if (s.run_async(*engine, it.index)) return true;
         }
-        // ok == false (krs пуст / индекс плохой) — last_error выставлен;
-        // идём дальше.
     }
     return false;
+}
+
+bool AppModel::start_next_in_dft1d_queue() {
+    return run_next_queued(dft1d_session, dft1d_queue, parametric_engine);
+}
+
+bool AppModel::start_next_in_basins_queue() {
+    return run_next_queued(basins_session, basins_queue, parametric_engine);
 }
 
 bool AppModel::start_next_in_order_queue() {
-    if (order_session.in_flight) return false;
-    if (order_queue.empty()) return false;
-    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
-    while (!order_queue.empty()) {
-        OrderQueueItem it = order_queue.front();
-        order_queue.pop_front();
-        if (it.index >= 0 && it.index < (int)order_session.configs.size()) {
-            if (order_session.run_async(*parametric_engine, it.index)) return true;
-        }
-        // ok == false — last_error выставлен run_async; идём дальше.
-    }
-    return false;
+    return run_next_queued(order_session, order_queue, parametric_engine);
 }
 
 bool AppModel::start_next_in_network_queue() {
-    if (network_session.in_flight) return false;
-    if (network_queue.empty()) return false;
-    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
-    while (!network_queue.empty()) {
-        NetworkQueueItem it = network_queue.front();
-        network_queue.pop_front();
-        if (it.index >= 0 && it.index < (int)network_session.configs.size()) {
-            if (network_session.run_async(*parametric_engine, it.index)) return true;
-        }
-        // ok == false — last_error выставлен run_async; идём дальше.
-    }
-    return false;
+    return run_next_queued(network_session, network_queue, parametric_engine);
 }
 
 bool AppModel::start_next_in_neural_queue() {
-    if (neural_session.in_flight) return false;
-    if (neural_queue.empty()) return false;
-    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
-    while (!neural_queue.empty()) {
-        NeuralQueueItem it = neural_queue.front();
-        neural_queue.pop_front();
-        if (it.index >= 0 && it.index < (int)neural_session.configs.size()) {
-            if (neural_session.run_async(*parametric_engine, it.index)) return true;
-        }
-    }
-    return false;
+    return run_next_queued(neural_session, neural_queue, parametric_engine);
 }
 
 bool AppModel::start_next_in_fastsync_queue() {
-    if (fastsync_session.in_flight) return false;
-    if (fastsync_queue.empty()) return false;
-    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
-    while (!fastsync_queue.empty()) {
-        FastSyncQueueItem it = fastsync_queue.front();
-        fastsync_queue.pop_front();
-        if (it.index >= 0 && it.index < (int)fastsync_session.configs.size()) {
-            if (fastsync_session.run_async(*parametric_engine, it.index)) return true;
-        }
-        // ok == false — last_error выставлен соответствующим run_async; идём дальше.
-    }
-    return false;
+    return run_next_queued(fastsync_session, fastsync_queue, parametric_engine);
 }
 
 void AppModel::remove_bifurcation_diagram(int i) {

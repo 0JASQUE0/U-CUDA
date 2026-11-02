@@ -159,23 +159,6 @@ void AppModel::load_or_init_dft1d_plot_windows(const std::string& json) {
         add_dft1d_plot_window({ (int)i });
 }
 
-bool AppModel::start_next_in_dft1d_queue() {
-    if (dft1d_session.in_flight) return false;
-    if (dft1d_queue.empty()) return false;
-    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
-    while (!dft1d_queue.empty()) {
-        Dft1DQueueItem it = dft1d_queue.front();
-        dft1d_queue.pop_front();
-        if (it.index >= 0 && it.index < (int)dft1d_session.configs.size()) {
-            if (dft1d_session.run_async(*parametric_engine, it.index)) return true;
-        }
-        // ok == false (krs пуст / индекс плохой) — last_error выставлен;
-        // идём дальше.
-    }
-    return false;
-}
-
-
 void AppModel::add_order_plot_window(OrderPlotWindow::Kind kind, std::vector<int> initial_members) {
     OrderPlotWindow w;
     w.kind    = kind;
