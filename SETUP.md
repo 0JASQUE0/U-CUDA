@@ -64,7 +64,22 @@ cmake --build build/headless --config Debug
 ctest --test-dir build/headless -C Debug --output-on-failure
 ```
 
-CMake — единственное определение сборки. Visual Studio может открыть корень как CMake-проект или сгенерированный `build/windows/U_CUDA.sln`. Рукописные `.vcxproj` и `.sln` не добавляются.
+### Классическая сборка из Visual Studio (без CMake)
+
+Открыть `U-CUDA.sln` в корне и собрать **Release|x64** (приложение) или **Debug|x64** (старое пакетное
+приложение `apps/legacy/main_NonLinAnal.cu`). То же из командной строки:
+
+```powershell
+& "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe" U-CUDA.sln /p:Configuration=Release /p:Platform=x64 /m
+& .\x64\Release\U-CUDA.exe
+```
+
+ImGui, ImPlot, ImPlot3D и GLFW ставит vcpkg по `vcpkg.json` (manifest mode, первый раз — несколько минут). Post-build
+упаковывает рантайм в `x64\<Configuration>\` тем же `cmake/PackRuntime.cmake`, что и CMake (cmake берётся из VS 2022).
+Библиотека систем — `U-CUDA\library` в корне репозитория. Новый `.cpp` / `.cu` в `libs/` добавляется и в
+`libs/<модуль>/CMakeLists.txt`, и в `U-CUDA/U-CUDA.vcxproj`; тест `vcxproj_sync` проверяет, что списки совпадают.
+
+CMake остаётся для тестов (`ctest`), Linux и сборки без GUI.
 
 ### Linux
 

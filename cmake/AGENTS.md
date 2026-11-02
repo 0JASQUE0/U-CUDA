@@ -1,6 +1,6 @@
 # CMake agent rules
 
-- CMake is the only build system; do not add handwritten project files.
+- CMake builds tests, Linux and the headless configuration; the classic Visual Studio solution (`U-CUDA.sln`, `U-CUDA/U-CUDA.vcxproj`) builds the Windows app from the same sources. A source added to a library `CMakeLists.txt` goes into the `.vcxproj` too (`vcxproj_sync` checks it).
 - Keep target includes scoped and dependencies explicit.
 - Use PUBLIC only for public-header requirements.
 - Keep U_CUDA_BUILD_GUI=OFF free of GUI dependency discovery.

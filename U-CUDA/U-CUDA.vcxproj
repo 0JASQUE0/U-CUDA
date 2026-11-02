@@ -1,0 +1,393 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{E15CE919-C114-2D27-8FA9-C1A5B67E6DC6}</ProjectGuid>
+    <RootNamespace>U_CUDA</RootNamespace>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <!-- /GL + LTCG выключены: хостовый C++ не горячий (счёт идёт на GPU через NVRTC),
+         а LTCG переносит кодогенерацию всей программы в однопоточную компоновку. -->
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <!-- CUDA build customization: the toolkit CUDA_PATH points to (any version), else the newest known one
+       installed into this Visual Studio. Override with /p:UcudaCudaVer=12.8. -->
+  <PropertyGroup Label="UcudaCuda">
+    <UcudaCudaDir>$(CUDA_PATH.TrimEnd('\'))</UcudaCudaDir>
+    <UcudaCudaVer Condition="'$(UcudaCudaVer)' == '' And '$(UcudaCudaDir)' != ''">$([System.IO.Path]::GetFileName('$(UcudaCudaDir)').TrimStart('v'))</UcudaCudaVer>
+    <UcudaCudaVer Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA $(UcudaCudaVer).props') And Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.props')">13.0</UcudaCudaVer>
+    <UcudaCudaVer Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA $(UcudaCudaVer).props') And Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 12.8.props')">12.8</UcudaCudaVer>
+    <UcudaCudaVer Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA $(UcudaCudaVer).props') And Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.props')">12.6</UcudaCudaVer>
+    <UcudaCudaBase>$(VCTargetsPath)\BuildCustomizations\CUDA $(UcudaCudaVer)</UcudaCudaBase>
+  </PropertyGroup>
+  <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(UcudaCudaBase).props" Condition="Exists('$(UcudaCudaBase).props')" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Label="Vcpkg">
+    <VcpkgEnableManifest>true</VcpkgEnableManifest>
+    <VcpkgManifestInstall>true</VcpkgManifestInstall>
+    <VcpkgTriplet>x64-windows</VcpkgTriplet>
+    <VcpkgManifestRoot>$(SolutionDir)</VcpkgManifestRoot>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <LinkIncremental>true</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>Disabled</Optimization>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>WIN32;WIN64;_DEBUG;_CONSOLE;NOMINMAX;WIN32_LEAN_AND_MEAN;U_CUDA_PROJECT_DIR="$(SolutionDir.TrimEnd('\').Replace('\','/'))";U_CUDA_RESOURCE_DIR="$(SolutionDir.TrimEnd('\').Replace('\','/'))/resources";U_CUDA_TOOLKIT_INCLUDE="$(CUDA_PATH.TrimEnd('\').Replace('\','/'))/include";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <!-- /utf-8 = /source-charset:utf-8 /execution-charset:utf-8. Обязателен:
+           русские строковые литералы уходят в ImGui, который рисует UTF-8. Без
+           него MSVC кодирует их в системную ANSI (CP1251) и UI показывает ромбики.
+           /bigobj: крупные файлы UI в Debug превышают 65279 секций объектного файла (C1128). -->
+      <AdditionalOptions>/utf-8 /bigobj %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(SolutionDir)libs\domain\include;$(SolutionDir)libs\platform\include;$(SolutionDir)libs\equations\include;$(SolutionDir)libs\numerics\include;$(SolutionDir)libs\storage\include;$(SolutionDir)libs\cuda\include;$(SolutionDir)libs\analysis\include;$(SolutionDir)libs\ocr\include;$(SolutionDir)libs\application\include;$(SolutionDir)libs\plotting\include;$(SolutionDir)libs\ui\include;$(SolutionDir)libs\cuda\include\ucuda\cuda;$(SolutionDir)resources\kernels;$(SolutionDir)third_party\glad\include;$(SolutionDir)third_party\stb;$(CUDA_PATH)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <SubSystem>Console</SubSystem>
+      <AdditionalDependencies>cudart_static.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;opengl32.lib;nvrtc.lib;cuda.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+    <CudaCompile>
+      <TargetMachinePlatform>64</TargetMachinePlatform>
+      <!-- Ядра cudaLibrary.cu зовутся из host_*.cu других файлов: нужен relocatable device code
+           (в CMake — CUDA_SEPARABLE_COMPILATION). Архитектура — как CMAKE_CUDA_ARCHITECTURES. -->
+      <GenerateRelocatableDeviceCode>true</GenerateRelocatableDeviceCode>
+      <CodeGeneration>compute_75,sm_75</CodeGeneration>
+      <CudaRuntime>Static</CudaRuntime>
+      <AdditionalOptions>-Xcompiler="/utf-8" %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
+    <CudaLink>
+      <PerformDeviceLink>true</PerformDeviceLink>
+    </CudaLink>
+    <PostBuildEvent>
+      <!-- Тот же сценарий упаковки рантайма, что у CMake (cmake/PackRuntime.cmake): шаблоны NVRTC,
+           плоские заголовки для NVRTC, ocr_server.py, library_template, шрифты. cmake — из VS 2022. -->
+      <Command>set "UC_CMAKE=$(VsInstallRoot)\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
+"%UC_CMAKE%" "-Dsource_root=$(SolutionDir.TrimEnd('\').Replace('\','/'))" "-Ddestination=$(OutDir.TrimEnd('\').Replace('\','/'))" -P "$(SolutionDir)cmake\PackRuntime.cmake"</Command>
+      <Message>Packing runtime (kernels\, NVRTC headers, ocr_server.py, library_template, fonts) into $(OutDir)</Message>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PreprocessorDefinitions>WIN32;WIN64;NDEBUG;_CONSOLE;NOMINMAX;WIN32_LEAN_AND_MEAN;U_CUDA_PROJECT_DIR="$(SolutionDir.TrimEnd('\').Replace('\','/'))";U_CUDA_RESOURCE_DIR="$(SolutionDir.TrimEnd('\').Replace('\','/'))/resources";U_CUDA_TOOLKIT_INCLUDE="$(CUDA_PATH.TrimEnd('\').Replace('\','/'))/include";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <!-- /utf-8 = /source-charset:utf-8 /execution-charset:utf-8. Обязателен:
+           русские строковые литералы уходят в ImGui, который рисует UTF-8. Без
+           него MSVC кодирует их в системную ANSI (CP1251) и UI показывает ромбики.
+           /bigobj: крупные файлы UI в Debug превышают 65279 секций объектного файла (C1128). -->
+      <AdditionalOptions>/utf-8 /bigobj %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(SolutionDir)libs\domain\include;$(SolutionDir)libs\platform\include;$(SolutionDir)libs\equations\include;$(SolutionDir)libs\numerics\include;$(SolutionDir)libs\storage\include;$(SolutionDir)libs\cuda\include;$(SolutionDir)libs\analysis\include;$(SolutionDir)libs\ocr\include;$(SolutionDir)libs\application\include;$(SolutionDir)libs\plotting\include;$(SolutionDir)libs\ui\include;$(SolutionDir)libs\cuda\include\ucuda\cuda;$(SolutionDir)resources\kernels;$(SolutionDir)third_party\glad\include;$(SolutionDir)third_party\stb;$(CUDA_PATH)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <SubSystem>Console</SubSystem>
+      <AdditionalDependencies>cudart_static.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;opengl32.lib;nvrtc.lib;cuda.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+    <CudaCompile>
+      <TargetMachinePlatform>64</TargetMachinePlatform>
+      <!-- Ядра cudaLibrary.cu зовутся из host_*.cu других файлов: нужен relocatable device code
+           (в CMake — CUDA_SEPARABLE_COMPILATION). Архитектура — как CMAKE_CUDA_ARCHITECTURES. -->
+      <GenerateRelocatableDeviceCode>true</GenerateRelocatableDeviceCode>
+      <CodeGeneration>compute_75,sm_75</CodeGeneration>
+      <CudaRuntime>Static</CudaRuntime>
+      <AdditionalOptions>-Xcompiler="/utf-8" %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
+    <CudaLink>
+      <PerformDeviceLink>true</PerformDeviceLink>
+    </CudaLink>
+    <PostBuildEvent>
+      <!-- Тот же сценарий упаковки рантайма, что у CMake (cmake/PackRuntime.cmake): шаблоны NVRTC,
+           плоские заголовки для NVRTC, ocr_server.py, library_template, шрифты. cmake — из VS 2022. -->
+      <Command>set "UC_CMAKE=$(VsInstallRoot)\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
+"%UC_CMAKE%" "-Dsource_root=$(SolutionDir.TrimEnd('\').Replace('\','/'))" "-Ddestination=$(OutDir.TrimEnd('\').Replace('\','/'))" -P "$(SolutionDir)cmake\PackRuntime.cmake"</Command>
+      <Message>Packing runtime (kernels\, NVRTC headers, ocr_server.py, library_template, fonts) into $(OutDir)</Message>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <CudaCompile Include="..\libs\cuda\src\cudaMacros.cu" />
+    <CudaCompile Include="..\libs\cuda\src\host_rqa.cu" />
+    <CudaCompile Include="..\libs\cuda\src\cudaLibrary.cu" />
+    <CudaCompile Include="..\libs\cuda\src\host_basins.cu" />
+    <CudaCompile Include="..\libs\cuda\src\host_bifurcation.cu" />
+    <CudaCompile Include="..\libs\cuda\src\host_dft.cu" />
+    <CudaCompile Include="..\libs\cuda\src\host_fastsync.cu" />
+    <CudaCompile Include="..\libs\cuda\src\host_lyapunov.cu" />
+    <CudaCompile Include="..\libs\cuda\src\host_trajectory.cu" />
+    <CudaCompile Include="..\apps\legacy\main_NonLinAnal.cu">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+    </CudaCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\libs\domain\src\session_defaults.cpp" />
+    <ClCompile Include="..\libs\platform\src\image_source.cpp" />
+    <ClCompile Include="..\libs\equations\src\adaptive_codegen.cpp" />
+    <ClCompile Include="..\libs\equations\src\codegen.cpp" />
+    <ClCompile Include="..\libs\equations\src\dae_devices.cpp" />
+    <ClCompile Include="..\libs\equations\src\expression_parser.cpp" />
+    <ClCompile Include="..\libs\equations\src\scheme_codegen.cpp" />
+    <ClCompile Include="..\libs\equations\src\sysparse.cpp" />
+    <ClCompile Include="..\libs\equations\src\system_evaluator.cpp" />
+    <ClCompile Include="..\libs\numerics\src\circuit_codegen.cpp" />
+    <ClCompile Include="..\libs\numerics\src\circuit_emit.cpp" />
+    <ClCompile Include="..\libs\numerics\src\circuit_netlist.cpp" />
+    <ClCompile Include="..\libs\numerics\src\circuit_solver.cpp" />
+    <ClCompile Include="..\libs\numerics\src\circuit_synth.cpp" />
+    <ClCompile Include="..\libs\numerics\src\integrator.cpp" />
+    <ClCompile Include="..\libs\numerics\src\krs_cpu.cpp" />
+    <ClCompile Include="..\libs\numerics\src\spice_parse.cpp" />
+    <ClCompile Include="..\libs\numerics\src\kicad_import.cpp" />
+    <ClCompile Include="..\libs\storage\src\data_export.cpp" />
+    <ClCompile Include="..\libs\storage\src\app_config.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_basins.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_custom.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_dft1d.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_dft1d_windows.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_fastsync.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_json.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_lle.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_ls.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_metrics.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_network.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_neural.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_order.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_parametric.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_parametric_windows.cpp" />
+    <ClCompile Include="..\libs\storage\src\session_phase.cpp" />
+    <ClCompile Include="..\libs\storage\src\system_library.cpp" />
+    <ClCompile Include="..\libs\cuda\src\circuit_nvrtc.cpp" />
+    <ClCompile Include="..\libs\cuda\src\engine_basins.cpp" />
+    <ClCompile Include="..\libs\cuda\src\engine_bifurcation.cpp" />
+    <ClCompile Include="..\libs\cuda\src\engine_cpu.cpp" />
+    <ClCompile Include="..\libs\cuda\src\engine_dft.cpp" />
+    <ClCompile Include="..\libs\cuda\src\engine_fastsync.cpp" />
+    <ClCompile Include="..\libs\cuda\src\engine_lle.cpp" />
+    <ClCompile Include="..\libs\cuda\src\engine_neural.cpp" />
+    <ClCompile Include="..\libs\cuda\src\engine_ls.cpp" />
+    <ClCompile Include="..\libs\cuda\src\engine_order.cpp" />
+    <ClCompile Include="..\libs\cuda\src\engine_results.cpp" />
+    <ClCompile Include="..\libs\cuda\src\engine_runtime.cpp" />
+    <ClCompile Include="..\libs\cuda\src\nvrtc_engine.cpp" />
+    <ClCompile Include="..\libs\cuda\src\parametric_engine.cpp" />
+    <ClCompile Include="..\libs\cuda\src\phase_portrait_nvrtc.cpp" />
+    <ClCompile Include="..\libs\cuda\src\runtime_settings.cpp" />
+    <ClCompile Include="..\libs\analysis\src\basins_session.cpp" />
+    <ClCompile Include="..\libs\analysis\src\bifurcation_session.cpp" />
+    <ClCompile Include="..\libs\analysis\src\custom_session.cpp" />
+    <ClCompile Include="..\libs\analysis\src\dft_session.cpp" />
+    <ClCompile Include="..\libs\analysis\src\fastsync_session.cpp" />
+    <ClCompile Include="..\libs\analysis\src\lle_session.cpp" />
+    <ClCompile Include="..\libs\analysis\src\ls_session.cpp" />
+    <ClCompile Include="..\libs\analysis\src\metrics_session.cpp" />
+    <ClCompile Include="..\libs\analysis\src\network_session.cpp" />
+    <ClCompile Include="..\libs\analysis\src\neural_session.cpp" />
+    <ClCompile Include="..\libs\analysis\src\order_session.cpp" />
+    <ClCompile Include="..\libs\analysis\src\phase_session.cpp" />
+    <ClCompile Include="..\libs\analysis\src\session_helpers.cpp" />
+    <ClCompile Include="..\libs\ocr\src\ocr_client_win.cpp" />
+    <ClCompile Include="..\libs\application\src\app_model.cpp" />
+    <ClCompile Include="..\libs\application\src\tick.cpp" />
+    <ClCompile Include="..\libs\plotting\src\digit_input.cpp" />
+    <ClCompile Include="..\libs\plotting\src\gpu_line_series.cpp" />
+    <ClCompile Include="..\libs\plotting\src\gpu_line_series_3d.cpp" />
+    <ClCompile Include="..\libs\plotting\src\heatmap_view.cpp" />
+    <ClCompile Include="..\libs\plotting\src\plot_axis.cpp" />
+    <ClCompile Include="..\libs\plotting\src\plot_camera_3d.cpp" />
+    <ClCompile Include="..\libs\plotting\src\plot_legend.cpp" />
+    <ClCompile Include="..\libs\plotting\src\plot_renderer.cpp" />
+    <ClCompile Include="..\libs\plotting\src\plot_view_2d.cpp" />
+    <ClCompile Include="..\libs\plotting\src\plot_view_3d.cpp" />
+    <ClCompile Include="..\libs\plotting\src\screenshot.cpp" />
+    <ClCompile Include="..\libs\ui\src\basins.cpp" />
+    <ClCompile Include="..\libs\ui\src\bifurcation.cpp" />
+    <ClCompile Include="..\libs\ui\src\custom.cpp" />
+    <ClCompile Include="..\libs\ui\src\dft.cpp" />
+    <ClCompile Include="..\libs\ui\src\fastsync.cpp" />
+    <ClCompile Include="..\libs\ui\src\gui.cpp" />
+    <ClCompile Include="..\libs\ui\src\library.cpp" />
+    <ClCompile Include="..\libs\ui\src\lyapunov.cpp" />
+    <ClCompile Include="..\libs\ui\src\network.cpp" />
+    <ClCompile Include="..\libs\ui\src\neural.cpp" />
+    <ClCompile Include="..\libs\ui\src\order.cpp" />
+    <ClCompile Include="..\libs\ui\src\parametric_windows.cpp" />
+    <ClCompile Include="..\libs\ui\src\phase.cpp" />
+    <ClCompile Include="..\libs\ui\src\ui_resources.cpp" />
+    <ClCompile Include="..\libs\ui\src\widgets.cpp" />
+    <ClCompile Include="..\libs\ui\src\workspace.cpp" />
+    <ClCompile Include="..\third_party\glad\src\glad.c" />
+    <ClCompile Include="..\apps\desktop\app_main.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\adaptive_settings.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\analysis_session.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\analysis_types.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\circuit_solver.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\circuit_synth.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\configCUDA.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\custom_session.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\export_snapshot.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\grid_snap.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\network_session.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\neural_session.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\neural_types.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\num_parse.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\order_session.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\param_groups.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\plot_window.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\rqa.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\sparse_lu.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\system.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\system_record.h" />
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\traj_work.h" />
+    <ClInclude Include="..\libs\platform\include\ucuda\platform\image_source.h" />
+    <ClInclude Include="..\libs\platform\include\ucuda\platform\platform_paths.h" />
+    <ClInclude Include="..\libs\platform\include\ucuda\platform\platform_posix.h" />
+    <ClInclude Include="..\libs\equations\include\ucuda\equations\adaptive_params.h" />
+    <ClInclude Include="..\libs\equations\include\ucuda\equations\codegen.hpp" />
+    <ClInclude Include="..\libs\equations\include\ucuda\equations\dae_devices.h" />
+    <ClInclude Include="..\libs\equations\include\ucuda\equations\dae_ir.h" />
+    <ClInclude Include="..\libs\equations\include\ucuda\equations\krs_prep.h" />
+    <ClInclude Include="..\libs\equations\include\ucuda\equations\sysparse.hpp" />
+    <ClInclude Include="..\libs\equations\src\expression_internal.h" />
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\circuit_codegen.h" />
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\circuit_netlist.h" />
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\integrator.h" />
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\kicad_import.h" />
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\krs_cpu.h" />
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\multistep_bdf.h" />
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\neural_readout.h" />
+    <ClInclude Include="..\libs\numerics\include\ucuda\numerics\spice_parse.h" />
+    <ClInclude Include="..\libs\storage\include\ucuda\storage\app_config.h" />
+    <ClInclude Include="..\libs\storage\include\ucuda\storage\data_export.h" />
+    <ClInclude Include="..\libs\storage\include\ucuda\storage\session_io.h" />
+    <ClInclude Include="..\libs\storage\include\ucuda\storage\system_library.h" />
+    <ClInclude Include="..\libs\storage\src\session_json_internal.h" />
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\circuit_nvrtc.h" />
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\cudaLibrary.cuh" />
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\cudaMacros.cuh" />
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\hostLibrary.cuh" />
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\nvrtc_engine.h" />
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\parametric_engine.h" />
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\phase_portrait_nvrtc.h" />
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\runtime_settings.h" />
+    <ClInclude Include="..\libs\cuda\src\device\clustering.cuh" />
+    <ClInclude Include="..\libs\cuda\src\device\fastsync.cuh" />
+    <ClInclude Include="..\libs\cuda\src\device\integration.cuh" />
+    <ClInclude Include="..\libs\cuda\src\device\models.cuh" />
+    <ClInclude Include="..\libs\cuda\src\device\peaks.cuh" />
+    <ClInclude Include="..\libs\cuda\src\engine_helpers.h" />
+    <ClInclude Include="..\libs\cuda\src\engine_impl.h" />
+    <ClInclude Include="..\libs\cuda\src\host_internal.cuh" />
+    <ClInclude Include="..\libs\cuda\src\module_lru.h" />
+    <ClInclude Include="..\libs\cuda\src\perf_warmup.h" />
+    <ClInclude Include="..\libs\analysis\include\ucuda\analysis\analysis_session.h" />
+    <ClInclude Include="..\libs\analysis\include\ucuda\analysis\custom_session.h" />
+    <ClInclude Include="..\libs\analysis\include\ucuda\analysis\network_session.h" />
+    <ClInclude Include="..\libs\analysis\include\ucuda\analysis\neural_session.h" />
+    <ClInclude Include="..\libs\analysis\include\ucuda\analysis\order_session.h" />
+    <ClInclude Include="..\libs\analysis\src\session_internal.h" />
+    <ClInclude Include="..\libs\ocr\include\ucuda\ocr\ocr_client_win.h" />
+    <ClInclude Include="..\libs\application\include\ucuda\application\app_model.h" />
+    <ClInclude Include="..\libs\application\include\ucuda\application\prewarm_watch.h" />
+    <ClInclude Include="..\libs\application\include\ucuda\application\session_persistence.h" />
+    <ClInclude Include="..\libs\application\include\ucuda\application\time_estimate.h" />
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\colormap_slancm_data.h" />
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\digit_input.h" />
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\gpu_line_series.h" />
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\gpu_line_series_3d.h" />
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\heatmap_view.h" />
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\plot_axis.h" />
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\plot_camera_3d.h" />
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\plot_legend.h" />
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\plot_renderer.h" />
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\plot_view_2d.h" />
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\plot_view_3d.h" />
+    <ClInclude Include="..\libs\plotting\include\ucuda\plotting\screenshot.h" />
+    <ClInclude Include="..\libs\ui\include\ucuda\ui\gui.h" />
+    <ClInclude Include="..\libs\ui\include\ucuda\ui\gui_tree_state.h" />
+    <ClInclude Include="..\libs\ui\src\gui_internal.h" />
+    <ClInclude Include="..\libs\ui\src\ui_resources.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\resources\kernels\adaptive_part.cu" />
+    <None Include="..\resources\kernels\basins.template.cu" />
+    <None Include="..\resources\kernels\bifurcation1d.template.cu" />
+    <None Include="..\resources\kernels\bifurcation1d_cont.template.cu" />
+    <None Include="..\resources\kernels\bifurcation2d.template.cu" />
+    <None Include="..\resources\kernels\circuit.template.cu" />
+    <None Include="..\resources\kernels\dft1d_cont.template.cu" />
+    <None Include="..\resources\kernels\dft1d_hsweep.template.cu" />
+    <None Include="..\resources\kernels\fastsync_attr.template.cu" />
+    <None Include="..\resources\kernels\fastsync_grid.template.cu" />
+    <None Include="..\resources\kernels\lle1d.template.cu" />
+    <None Include="..\resources\kernels\lle1d_cont.template.cu" />
+    <None Include="..\resources\kernels\lle2d.template.cu" />
+    <None Include="..\resources\kernels\ls1d.template.cu" />
+    <None Include="..\resources\kernels\ls1d_cont.template.cu" />
+    <None Include="..\resources\kernels\ls2d.template.cu" />
+    <None Include="..\resources\kernels\lyapunov_adaptive_part.cu" />
+    <None Include="..\resources\kernels\metrics_adaptive_part.cu" />
+    <None Include="..\resources\kernels\network.template.cu" />
+    <None Include="..\resources\kernels\neural.template.cu" />
+    <None Include="..\resources\kernels\order.template.cu" />
+    <None Include="..\resources\kernels\signal_metrics.template.cu" />
+    <None Include="..\resources\kernels\ucuda_adaptive.cuh" />
+    <None Include="..\resources\kernels\ucuda_bdf.cuh" />
+    <None Include="..\resources\kernels\ucuda_hp.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="..\resources\windows\U-CUDA.rc" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(UcudaCudaBase).targets" Condition="Exists('$(UcudaCudaBase).targets')" />
+  </ImportGroup>
+  <!-- Without the customization every CudaCompile item is skipped silently and the build fails only at link time. -->
+  <Target Name="UcudaCheckCuda" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Error Condition="!Exists('$(UcudaCudaBase).targets')" Text="CUDA build customization not found: '$(UcudaCudaBase).targets' (CUDA_PATH='$(CUDA_PATH)'). The MSBuild running this build has no CUDA integration for that version: build with the Visual Studio 2022 MSBuild, or install the toolkit's Visual Studio integration." />
+  </Target>
+</Project>

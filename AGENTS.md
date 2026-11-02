@@ -12,7 +12,7 @@ Use [README.md](README.md) to locate the owning module. Consult [ARCHITECTURE.md
 ## Project invariants
 
 - Use C++17 and CUDA C++17 as configured by CMake. Match local naming, formatting, includes, and error-handling conventions. Follow `.editorconfig`; keep `setup.ps1` ASCII-only.
-- CMake is the only build definition. Public headers belong in `include/ucuda/<module>/`; implementation details belong in `src/`. Use `PUBLIC` dependencies only when exposed by a public header.
+- Two build definitions describe the same sources: CMake (tests, Linux, headless) and the classic Visual Studio solution `U-CUDA.sln` / `U-CUDA/U-CUDA.vcxproj` (Windows: Release = desktop app, Debug = legacy). Add every new `libs/` source to both; `vcxproj_sync` checks it. Public headers belong in `include/ucuda/<module>/`; implementation details belong in `src/`. Use `PUBLIC` dependencies only when exposed by a public header.
 - Keep dependencies one-way. Domain is independent of CUDA, storage, application, plotting, and UI. Storage and computation build without GUI.
 - Sessions contain serializable computation state, never ImGui/OpenGL resources. UI owns views; plotting owns GL objects and releases them before the GL context.
 - Background work uses request snapshots, result objects, and existing cancellation/progress mechanisms. Polling, queue advancement, persistence, and cancellation run through `AppModel::tick`; worker threads do not access UI/GL state.

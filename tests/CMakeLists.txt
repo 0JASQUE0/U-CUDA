@@ -11,6 +11,8 @@ set_tests_properties(adaptive_gpu PROPERTIES TIMEOUT 600)
 
 # Module boundaries the compiler cannot see (includes that compile through a transitive path).
 add_test(NAME layer_rules COMMAND ${CMAKE_COMMAND} -DROOT=${PROJECT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/layer_rules.cmake)
+# The classic Visual Studio project compiles the same library sources as CMake.
+add_test(NAME vcxproj_sync COMMAND ${CMAKE_COMMAND} -DROOT=${PROJECT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/vcxproj_sync.cmake)
 
 add_executable(architecture_test architecture_test.cpp)
 target_link_libraries(architecture_test PRIVATE ucuda::application ucuda::storage)

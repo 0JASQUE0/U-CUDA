@@ -32,7 +32,7 @@ Every documented directory also has an `AGENTS.md` with short, scoped rules for 
 | Linux Debug | GCC 15 | nvcc with GCC host | `cmake --preset linux-debug` | `cmake --build --preset linux-debug` |
 | Linux Release | GCC 15 | nvcc with GCC host | `cmake --preset linux-release` | `cmake --build --preset linux-release` |
 
-CUDA Toolkit is required in every configuration. CMake is the only source-controlled build system. Visual Studio can open the repository as a CMake project or open the generated `build/windows/U_CUDA.sln`.
+CUDA Toolkit is required in every configuration. On Windows the classic Visual Studio solution [U-CUDA.sln](U-CUDA.sln) (`U-CUDA/U-CUDA.vcxproj`) builds the same sources without CMake: open it and build **Release|x64** (desktop app) or **Debug|x64** (legacy batch `main_NonLinAnal.cu`); the exe and its runtime land in `x64\<Configuration>\`, GUI libraries come from the vcpkg manifest. CMake builds the test suite, Linux and the headless configuration. The `vcxproj_sync` test keeps both build definitions on the same library sources.
 
 The repository does not define a MinGW/GCC-on-Windows preset. The supported Windows CUDA host compiler is MSVC; GCC is used by the Linux presets.
 
