@@ -8,6 +8,7 @@ ucuda_library(analysis
     src/ls_session.cpp
     src/metrics_session.cpp
     src/network_session.cpp
+    src/neural_session.cpp
     src/order_session.cpp
     src/phase_session.cpp
     src/session_helpers.cpp

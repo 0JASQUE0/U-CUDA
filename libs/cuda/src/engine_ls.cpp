@@ -65,6 +65,7 @@ void ParametricEngine::Impl::reset_cancel_mirrors() {
         reset_cancel_mirror_pool(pool_fs_grid);
         reset_cancel_mirror_pool(pool_order);
         reset_cancel_mirror_pool(pool_network);
+        reset_cancel_mirror_pool(pool_neural);
         reset_cancel_mirror_pool(pool_metrics);
     }
 

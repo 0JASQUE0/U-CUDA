@@ -492,6 +492,7 @@ static const ModeTab kModeTabs[] = {
     { "Custom",     "Custom",         AppModel::AppMode::Custom,     false },
     { "Order",      "Order",          AppModel::AppMode::Order,      false },
     { "Network",    "Network",        AppModel::AppMode::Network,    false },
+    { "Neural",     "Neural",         AppModel::AppMode::Neural,     false },
     { "Settings",   "Settings",       AppModel::AppMode::Settings,   true  },
 };
 
@@ -1128,8 +1129,12 @@ std::string net_validate_laws(const NetworkSession& s, const NetworkConfig& c);
 
 
 void draw_network_controls(AppModel& model, SystemLibrary& /*lib*/);
-
-
+// Neural — большие сети: окно настроек и кривые (means: средние по популяциям, иначе выбранные узлы).
+void draw_neural_controls(AppModel& model, SystemLibrary& lib);
+enum { kNeuralMeans = 0, kNeuralNodes, kNeuralSync, kNeuralSweep, kNeuralInput, kNeuralLyap, kNeuralRate, kNeuralRaster, kNeuralWeights, kNeuralReadout, kNeuralWindowCount };
+void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DView& view, int what);
+// Карта свипа по двум осям; клик по ячейке выбирает сеть в окнах от времени.
+void draw_neural_map_window(AppModel& model, PlotRenderer& renderer, std::map<int, std::unique_ptr<HeatmapView>>& maps);
 void draw_network_graph_window(AppModel& model);
 
 
@@ -1177,8 +1182,11 @@ void draw_custom_mode_layout(AppModel& model, SystemLibrary& lib,
                                     const GuiCallbacks& cb,
                                     ImVec2 area_pos, ImVec2 area_size);
 
-
-enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync, Custom, Order, Metrics };
+// Индикатор компьюта в верхней строке. Раньше состояние снималось лестницей из двенадцати
+// почти одинаковых веток: каждая доставала из своей сессии одну и ту же четвёрку — подпись
+// запущенного конфига, время старта, cancel_token, progress_token. Ветки успели разойтись:
+// три подставляли запасное имя только при выходе индекса за границы, три — ещё и при пустом label.
+enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync, Custom, Order, Metrics, Neural };
 
 
 struct BusyInfo {

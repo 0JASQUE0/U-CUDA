@@ -1,11 +1,13 @@
 ﻿#include "ucuda/analysis/network_session.h"
 #include "ucuda/domain/num_parse.h"
 #include "ucuda/equations/codegen.hpp"   // codegen_coupling
+#include "ucuda/equations/sysparse.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <set>
 #include <stdexcept>
+#include <sstream>
 
 namespace {
 
@@ -341,10 +343,158 @@ NetworkRequest build_network_request(const NetworkSession& s, const NetworkConfi
 
 } // namespace
 
+NetworkMonolithic net_monolithic_snapshot(const NetworkState& s, const NetworkConfig& c) {
+    auto require = [](bool ok, const std::string& msg) {
+        if (!ok) throw std::runtime_error("Monolithic export: " + msg);
+    };
+    require(!s.sys.is_map && s.sys.dae_nx < 0 && s.sys.out_exprs.empty() && s.sys.zb_g.empty(),
+            "only ordinary ODE systems are supported");
+    require(s.vars == s.sys.vars && s.params == s.sys.params, "system symbol order is inconsistent");
+    const size_t n = c.nodes.size(), dim = s.vars.size();
+    require(n > 0 && dim > 0 && s.sys.rhs.size() == dim, "empty or incomplete system/network");
+    require(n <= 32 / dim, "the snapshot exceeds the limit of 32 state variables");
+    auto number = [&](const std::string& text, double fallback, const std::string& what) {
+        double value = fallback;
+        require(text.empty() || parse_num_checked(text, value), "invalid numeric value for " + what);
+        return value;
+    };
+    // Validate rather than silently dropping malformed edges or changing a law.
+    for (const auto& e : c.edges) {
+        require(e.from >= 0 && (size_t)e.from < n && e.to >= 0 && (size_t)e.to < n, "edge outside node list");
+        require(e.law >= 0 && (size_t)e.law < c.laws.size(), "invalid coupling law index");
+        number(e.weight_text, 1.0, "edge weight");
+    }
+    NetworkMonolithic out;
+    auto& sys = out.sys;
+    auto& r = out.record;
+    r.name = (s.loaded_system_name.empty() ? "Network" : s.loaded_system_name)
+        + " - " + c.label + " (monolithic)";
+    r.mode = "Plain"; r.param_order = "AsInAlphabet";
+    r.note = "Independent Network snapshot. Node indices start at 1. Coupling is included in every integration stage.\n"
+             "Weights and incoming-degree normalization are fixed; K is the global coupling parameter.\n"
+             "Initial spread is realized and stored. Later Network changes do not affect this record.";
+    r.step_h = c.h_text; r.symmetry_s = c.symmetry_s; r.cd_fp_iters = c.cd_fp_iters;
+    r.newton_tol = c.newton.tol; r.newton_max_iters = c.newton.max_iters; r.newton_full = c.newton.full;
+    r.scheme_euler = r.scheme_cromer = r.scheme_midpoint = r.scheme_rk4 = true;
+    r.scheme_dopri78 = r.scheme_dopri78_legacy = r.scheme_rk45 = r.scheme_dop853 = true;
+    r.scheme_cd = r.scheme_cdfast = r.scheme_cdfp = r.scheme_cdfastfp = true;
+    r.scheme_ccd = r.scheme_ccd4 = r.scheme_ccd4s3 = r.scheme_ccd4s4 = true;
+    r.scheme_ccd4ss01 = r.scheme_ccd4ss10 = r.scheme_cd10 = r.scheme_ccd10 = true;
+    r.scheme_ccd4_10 = r.scheme_ccd4s3_10 = r.scheme_ccd4s4_10 = true;
+    r.scheme_ieuler = r.scheme_imidpoint = r.scheme_semp = r.scheme_simp = r.scheme_dmethod = r.scheme_cieuler = true;
+    r.scheme_gbs = r.scheme_gbs24 = r.scheme_gbs246 = r.scheme_gbs2468 = r.scheme_gbs246810 = r.scheme_gbs24681012 = true;
+
+    std::set<std::string> used{"K", "pi", "t"};
+    // Reserve common names first: e.g. parameter x1 must not become a node variable.
+    for (const auto& p : s.params) if (p != "K") used.insert(p);
+    auto unique = [&](const std::string& preferred) {
+        std::string name = preferred;
+        for (int suffix = 2; !used.insert(name).second; ++suffix) name = preferred + "_" + std::to_string(suffix);
+        return name;
+    };
+    std::vector<std::vector<std::string>> vars(n), params(n);
+    for (size_t i = 0; i < n; ++i)
+        for (const auto& v : s.vars) {
+            const auto name = unique(v + std::to_string(i + 1));
+            vars[i].push_back(name); sys.vars.push_back(name);
+        }
+    auto add_parameter = [&](const std::string& name, double value) {
+        sys.params.push_back(name); r.param_values[name] = fmt_num_shortest(value);
+    };
+    for (const auto& p : s.params) {
+        std::string shared;
+        for (const auto& node : c.nodes) {
+            const auto it = node.param_values.find(p);
+            if (it == node.param_values.end() || it->second.empty()) {
+                shared = p == "K" ? unique("K_model") : p;
+                const auto base = c.param_values.find(p);
+                add_parameter(shared, number(base == c.param_values.end() ? "" : base->second, 0.0, p));
+                break;
+            }
+        }
+        for (size_t i = 0; i < n; ++i) {
+            const auto own = c.nodes[i].param_values.find(p);
+            std::string name = shared;
+            if (own != c.nodes[i].param_values.end() && !own->second.empty()) {
+                name = unique(p + std::to_string(i + 1));
+                add_parameter(name, number(own->second, 0.0, name));
+            }
+            params[i].push_back(name);
+        }
+    }
+    add_parameter("K", number(c.coupling_text, 1.0, "global coupling"));
+    require(sys.params.size() <= 64 - 1 - kSchemeTailSlots, "the snapshot exceeds the limit of 59 parameters");
+
+    const double spread = number(c.ic_spread_text, 0.0, "initial spread");
+    const auto seed = (unsigned long long)std::max(0, parse_i(c.ic_seed_text, 1));
+    for (size_t i = 0; i < n; ++i) {
+        std::map<std::string, std::string> names{{"pi", "pi"}, {"t", "t"}};
+        for (size_t k = 0; k < dim; ++k) names[s.vars[k]] = vars[i][k];
+        for (size_t j = 0; j < s.params.size(); ++j) names[s.params[j]] = params[i][j];
+        names["pi"] = "pi"; // Same constant precedence as build_namemap in codegen.
+        for (size_t k = 0; k < dim; ++k) {
+            sys.rhs.push_back(codegen_substitute_expression(s.sys.rhs[k], s.sys.latex, names));
+            double x = number(node_value(c.nodes[i].initial_conditions, c.initial_conditions, s.vars[k]), 0.0, vars[i][k]);
+            const auto own = c.nodes[i].initial_conditions.find(s.vars[k]);
+            if ((own == c.nodes[i].initial_conditions.end() || own->second.empty()) && spread != 0.0)
+                x += spread * (2.0 * rand01(seed, i, k) - 1.0);
+            require(std::isfinite(x), "initial spread overflow");
+            r.init_conditions[vars[i][k]] = fmt_num_shortest(x);
+        }
+    }
+    // Reuse Network's arc order and direction, but print division by degree explicitly.
+    NetworkConfig raw;
+    raw.nodes.resize(n); raw.edges = c.edges; raw.laws = c.laws;
+    raw.normalize_coupling = false;
+    std::vector<int> start, src, law;
+    std::vector<double> weight;
+    net_build_csr(raw, 1.0, start, src, weight, law);
+    for (size_t i = 0; i < n; ++i) {
+        const int degree = start[i + 1] - start[i];
+        for (int e = start[i]; e < start[i + 1]; ++e) {
+            const size_t j = (size_t)src[e];
+            std::string w = "(K*(" + fmt_num_shortest(weight[e]) + "))";
+            if (c.normalize_coupling) w = "(" + w + "/" + std::to_string(degree) + ")";
+            std::map<std::string, std::string> names{{"K", w}, {"w", w}, {"pi", "pi"}};
+            for (size_t k = 0; k < dim; ++k) {
+                names[s.vars[k]] = names[s.vars[k] + "_i"] = vars[i][k];
+                names[s.vars[k] + "_j"] = vars[j][k];
+            }
+            // Same shadowing order as codegen_coupling, including a model parameter K/w.
+            for (size_t p = 0; p < s.params.size(); ++p) {
+                names[s.params[p]] = names[s.params[p] + "_i"] = params[i][p];
+                names[s.params[p] + "_j"] = params[j][p];
+            }
+            const auto& expr = c.laws[(size_t)law[e]].expr;
+            require(expr.size() <= dim, "coupling expression count exceeds node dimension");
+            for (size_t k = 0; k < expr.size(); ++k) if (!expr[k].empty())
+                sys.rhs[i * dim + k] += "+(" + codegen_substitute_expression(expr[k], false, names) + ")";
+        }
+    }
+    auto list = [](const std::vector<std::string>& names) {
+        std::string text;
+        for (const auto& name : names) { if (!text.empty()) text += ", "; text += name; }
+        return text;
+    };
+    r.vars_text = list(sys.vars); r.params_text = list(sys.params);
+    // The common input parser separates equations with two backslashes.
+    for (size_t k = 0; k < sys.vars.size(); ++k)
+        r.plain_text += sys.vars[k] + "' = " + sys.rhs[k] + " " + std::string(2, '\\') + "\n";
+    std::vector<std::string> alphabet = sys.vars;
+    alphabet.insert(alphabet.end(), sys.params.begin(), sys.params.end());
+    const auto parsed = parse_system_from_latex(r.plain_text, alphabet);
+    require(parsed.vars == sys.vars && parsed.params == sys.params, "record parser changed the symbol layout");
+    // Validate the complete mathematical system before allowing a library write.
+    codegen_rhs(sys);
+    return out;
+}
+
 void NetworkSession::load_from_record(const SystemRecord& r,
     const std::vector<std::string>& vars_,
     const std::vector<std::string>& params_)
 {
+    monolithic_saved_name.clear();
+    monolithic_error.clear();
     vars   = vars_;
     params = params_;
     custom_schemes = r.custom_schemes;

@@ -20,6 +20,7 @@
 #include "ucuda/application/session_persistence.h"
 #include "ucuda/plotting/plot_axis.h"
 #include "ucuda/ui/gui.h"
+#include "ucuda/ui/gui_tree_state.h"
 #include "ucuda/storage/system_library.h"
 #include "ucuda/ocr/ocr_client_win.h"   // OcrClient + b64encode
 #include "ucuda/plotting/screenshot.h"
@@ -391,6 +392,7 @@ int main() {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    tree_state::install();
     ImPlot::CreateContext();
     ImPlot3D::CreateContext();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
@@ -624,6 +626,7 @@ int main() {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        tree_state::apply();
 
         // Once the async OCR ctor finishes, peek at the result so we can show
         // a warning banner if it failed. .get() is safe to call repeatedly on

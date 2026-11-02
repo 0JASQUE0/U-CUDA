@@ -1,6 +1,8 @@
 ﻿#pragma once
 #include "engine_helpers.h"
 using namespace ucuda::cuda_detail;
+// Ключ кэша модуля по телу КРС и размерности (engine_runtime.cpp).
+std::string hash_key(const std::string& krs_body, int amountOfX);
 struct ParametricEngine::Impl {
 
     bool       inited   = false;
@@ -190,6 +192,7 @@ struct ParametricEngine::Impl {
    // order.template.cu
     std::string src_template_network;
  // network.template.cu
+    std::string src_template_neural;   // neural.template.cu
     std::string src_template_metrics;
  // signal_metrics.template.cu
     bool     srcs_loaded     = false;
@@ -377,6 +380,18 @@ struct ParametricEngine::Impl {
 
     CachedNetworkModule cached_network;
 
+    // Neural — модуль на расписание: шаг выбирается в шаблоне, а не ветвлением в ядре.
+    struct CachedNeuralModule {
+        CUfunction order = nullptr;
+        std::string key;
+        CUmodule    module = nullptr;
+        CUfunction  step = nullptr;          // neuralStepKernel
+        CUfunction  observe = nullptr;       // neuralObserveKernel
+        CUfunction  mean = nullptr;          // neuralMeanKernel
+        CUfunction  lyap = nullptr;          // neuralLyapKernel
+        CUfunction  weight = nullptr;        // neuralWeightKernel
+    };
+    CachedNeuralModule cached_neural;
 
     // Signal metrics — свой шаблон и одно ядро; ключ как у bif2d (+ par_or_var).
     struct CachedMetricsModule {
@@ -444,6 +459,7 @@ struct ParametricEngine::Impl {
     ModuleLru<CachedOrderModule>       pool_order     { kModuleCacheCapacity };
 
     ModuleLru<CachedNetworkModule>     pool_network   { kModuleCacheCapacity };
+    ModuleLru<CachedNeuralModule>      pool_neural    { kModuleCacheCapacity };
 
     ModuleLru<CachedMetricsModule>     pool_metrics   { kModuleCacheCapacity };
 
@@ -1361,4 +1377,10 @@ struct ParametricEngine::Impl {
 
 
     NetworkResult run_network(const NetworkRequest& req) ;
+
+    // -----------------------------------------------------------------------
+    // Neural — одна сеть на много блоков (resources/kernels/neural.template.cu), engine_neural.cpp.
+    bool compile_neural_module(bool activate, const NeuralRequest& req, std::string& err);
+    NeuralResult run_neural_spike(const NeuralRequest& req);
+    NeuralResult run_neural(const NeuralRequest& req);
 };

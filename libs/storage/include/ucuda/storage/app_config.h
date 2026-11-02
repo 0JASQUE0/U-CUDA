@@ -88,7 +88,7 @@ struct AppConfig {
     // изменится. Тот же дефолт продублирован в AppModel::hidden_tabs — туда
     // конфиг не доезжает, когда файла нет вовсе. На свежей установке видны
     // Phase analysis, Parametric, Basins и Custom.
-    std::vector<std::string> hidden_tabs { "Dft1D", "FastSync", "Order", "Network" };
+    std::vector<std::string> hidden_tabs { "Dft1D", "FastSync", "Order", "Network", "Neural" };
 
     // Встроенные схемы, СКРЫТЫЕ из списка "Schemes to generate" (Settings ->
     // Integration schemes). Элементы — имена из kBuiltinSchemes в gui.cpp

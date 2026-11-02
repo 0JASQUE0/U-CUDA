@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include "ucuda/domain/analysis_types.h"
+#include "ucuda/domain/neural_types.h"     // NeuralRequest / NeuralResult: большие сети
 #include "ucuda/cuda/runtime_settings.h"
 class ParametricEngine {
 public:
@@ -55,6 +56,7 @@ public:
 
     // Network — интегрирование сети связанных осцилляторов.
     NetworkResult run_network(const NetworkRequest& req);
+    NeuralResult run_neural(const NeuralRequest& req);
 
     // Signal metrics — max/min/mean, частоты по пикам и параметры Хьорта
     // на 1D-отрезке или 2D-сетке свипа.

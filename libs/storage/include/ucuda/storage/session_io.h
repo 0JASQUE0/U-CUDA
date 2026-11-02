@@ -2,6 +2,7 @@
 #include "ucuda/domain/analysis_session.h"
 #include "ucuda/domain/custom_session.h"
 #include "ucuda/domain/network_session.h"
+#include "ucuda/domain/neural_session.h"
 #include "ucuda/domain/order_session.h"
 #include "ucuda/domain/plot_window.h"
 #include <string>
@@ -78,6 +79,9 @@ bool session_from_json_fastsync(const std::string& json, FastSyncAnalysisState& 
 // Result не пишется: он на порядки больше сессии и восстанавливается одним Run.
 std::string session_to_json_network(const NetworkState& s);
 bool session_from_json_network(const std::string& json, NetworkState& s);
+// Neural-сессия: рецепт сети (популяции, проекции, seed) с хешем графа; рёбер в файле нет.
+std::string session_to_json_neural(const NeuralState& s);
+bool session_from_json_neural(const std::string& json, NeuralState& s);
 
 // Parametric plot windows (AppModel::parametric_plot_windows) — the dynamic
 // window list, spans all 3 sessions so it's its own file (`_last_parametric_windows.json`)

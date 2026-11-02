@@ -13,6 +13,10 @@ NetworkResult ParametricEngine::run_network(const NetworkRequest& req) {
     return impl_->run_network(req);
 }
 
+NeuralResult ParametricEngine::run_neural(const NeuralRequest& req) {
+    return impl_->run_neural(req);
+}
+
 std::string stability_validate(const StabilityRequest& req) {
     if (req.krs_body.empty()) return "krs_body is empty";
     if (req.amountOfX != 2)

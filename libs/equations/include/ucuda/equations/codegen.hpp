@@ -220,6 +220,8 @@ constexpr int kAdaptMaxLow    = 2;
 bool scheme_supports_adaptive(Scheme sch);
 // Бросает std::runtime_error для схемы без встроенной оценки.
 AdaptiveCode codegen_adaptive(const System& s, Scheme sch);
+// Тело F[i] = f_i(X) без шага: связь внутри стадий в движке больших сетей.
+std::string codegen_rhs_body(const System& s);
 
 // Адаптивный шаг экстраполяторов: вложенная пара из одних и тех же стадий. Y — по всем K
 // стадиям (веса и порядок постоянного шага), младшее решение — по первым K-1 (свои веса,
@@ -283,6 +285,11 @@ std::string codegen_scheme_cpu_equivalent(const System& s, Scheme sch);
 // отдельный путь, — превью в Library показывает ровно то, что уйдёт в ядро.
 // std::runtime_error при ошибке разбора.
 std::vector<std::string> codegen_rhs(const System& s);
+
+// Parse and substitute whole symbols, returning a plain expression (not CUDA).
+// Replacement values are plain expressions; unknown source symbols are rejected.
+std::string codegen_substitute_expression(const std::string& expr, bool latex,
+    const std::map<std::string, std::string>& replacements);
 
 // Явное время t (этап 2 плана DAE). Правая часть с символом t, который не
 // переменная и не параметр, делает систему неавтономной: тело шага читает
@@ -420,6 +427,14 @@ std::string codegen_coupling(const System& s,
                              const std::string& weight     = "w",
                              const std::string& dst        = "C",
                              const std::string& indent     = "        ");
+
+// Правило спайка импульсной сети: X[var] >= threshold, затем сброс. reset[i] = новое значение переменной i, пусто = не
+// меняется. Имена как у codegen_coupling, синтаксис обычный. Тело функции neuralSpikeRule шаблона neural.template.cu.
+std::string codegen_spike_body(const System& s, int var, const std::string& threshold, const std::vector<std::string>& reset);
+// Система импульсной сети: правые части в обычном синтаксисе, к переменной target[k] дописан terms[k], синапс names[k] идёт
+// отдельной переменной с нулевой правой частью: её значения задаёт ядро.
+System codegen_spike_system(const System& s, const std::vector<std::string>& names, const std::vector<int>& target,
+                            const std::vector<std::string>& terms);
 
 // Maps UI scheme name ("Euler" / "RK4" / "CD" / ...) to the Scheme enum.
 // Unknown names fall back to Scheme::Euler.

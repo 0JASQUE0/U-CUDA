@@ -685,20 +685,7 @@ void draw_builtin_scheme_checkboxes(AppModel& model) {
         }
     }
 
-    // Маска из Settings — фильтр интерфейса, флаги системы она не трогает.
-    // Поэтому скрытая схема может остаться включённой у системы, и Generate
-    // её выпустит, хотя чекбокса рядом уже нет — об этом надо сказать прямо.
-    {
-        std::string hidden_on;
-        for (const auto& b : kBuiltinSchemes) {
-            if (!model.scheme_hidden(b.name) || !(model.*b.flag)) continue;
-            if (!hidden_on.empty()) hidden_on += ", ";
-            hidden_on += b.name;
-        }
-        if (!hidden_on.empty())
-            ImGui::TextDisabled("Hidden in Settings, still enabled for this system: %s",
-                                hidden_on.c_str());
-    }
+    ImGui::TextDisabled("Generate includes only methods selected here and visible in Settings.");
 }
 }
 
@@ -749,14 +736,10 @@ void draw_dae_method_checkboxes(AppModel& model) {
                                                "multistep" };
     int group = 0, shown_group = -1;
     bool first_in_line = true;
-    std::string hidden_on;
     for (const std::string& n : all) {
         if (n == "DAE CD") group = 1;
         if (n == kBdfSchemeDae) group = 2;
-        if (model.dae_method_hidden(n)) {
-            if (model.dae_scheme_on(n)) hidden_on += (hidden_on.empty() ? "" : ", ") + n;
-            continue;
-        }
+        if (model.dae_method_hidden(n)) continue;
         if (group != shown_group) { ImGui::SeparatorText(kGroupTitle[group]); shown_group = group; first_in_line = true; }
         if (!first_in_line) ImGui::SameLine();
         first_in_line = false;
@@ -765,8 +748,7 @@ void draw_dae_method_checkboxes(AppModel& model) {
         auto tip = kTips.find(n);
         if (tip != kTips.end() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip->second);
     }
-    if (!hidden_on.empty())
-        ImGui::TextDisabled("Hidden in Settings, still enabled for this system: %s", hidden_on.c_str());
+    ImGui::TextDisabled("Generate includes only methods selected here and visible in Settings.");
 }
 }
 

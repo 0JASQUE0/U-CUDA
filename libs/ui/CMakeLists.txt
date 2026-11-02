@@ -8,6 +8,7 @@ ucuda_library(ui
     src/library.cpp
     src/lyapunov.cpp
     src/network.cpp
+    src/neural.cpp
     src/order.cpp
     src/parametric_windows.cpp
     src/phase.cpp

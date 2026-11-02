@@ -383,6 +383,7 @@ ParametricEngine::Impl::~Impl() {
             drain_pool(pool_fs_grid);
             drain_pool(pool_order);
             drain_pool(pool_network);
+            drain_pool(pool_neural);
             drain_pool(pool_metrics);
             cuCtxDestroy(context);
         }
@@ -434,6 +435,7 @@ bool ParametricEngine::Impl::load_sources(std::string& err) {
         src_template_fs_grid  = read_text_file(root + "fastsync_grid.template.cu",     e); if (!e.empty()) { err = e; return false; }
         src_template_order    = read_text_file(root + "order.template.cu",            e); if (!e.empty()) { err = e; return false; }
         src_template_network  = read_text_file(root + "network.template.cu",          e); if (!e.empty()) { err = e; return false; }
+        src_template_neural   = read_text_file(root + "neural.template.cu",           e); if (!e.empty()) { err = e; return false; }
         src_template_metrics  = read_text_file(root + "signal_metrics.template.cu",   e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cu    = read_text_file(root + "cudaLibrary.cu",            e); if (!e.empty()) { err = e; return false; }
         src_cudaLibrary_cuh   = read_text_file(root + "cudaLibrary.cuh",           e); if (!e.empty()) { err = e; return false; }

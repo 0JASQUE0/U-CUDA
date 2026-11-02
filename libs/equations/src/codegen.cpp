@@ -1236,6 +1236,9 @@ AdaptiveCode codegen_adaptive_dae(const System& s, DaeScheme sch) {
 }
 
 
+std::string codegen_rhs_body(const System& s) { return adaptive_rhs_body(s); }
+
+
 void codegen_bdf_bodies(const System& s, std::string& res, std::string& jac, const char* jname) {
     const int N = (int)s.vars.size();
     res = adaptive_rhs_body(s);   // F[i] = [f; g](X, ucuda_t)

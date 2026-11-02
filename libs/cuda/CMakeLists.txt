@@ -7,6 +7,7 @@ ucuda_library(cuda
     src/engine_dft.cpp
     src/engine_fastsync.cpp
     src/engine_lle.cpp
+    src/engine_neural.cpp
     src/engine_ls.cpp
     src/engine_order.cpp
     src/engine_results.cpp

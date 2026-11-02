@@ -1051,6 +1051,27 @@ AdaptiveCode codegen_adaptive(const System& s, Scheme sch) {
 }
 
 
+std::string codegen_substitute_expression(const std::string& expr, bool latex,
+    const std::map<std::string, std::string>& replacements) {
+    Parser parser(expr, latex);
+    const PN root = parser.parse();
+    std::map<std::string, PN> subst;
+    for (const auto& entry : replacements) {
+        Parser value(entry.second, false);
+        subst[entry.first] = value.parse();
+    }
+    std::function<void(const PN&)> check = [&](const PN& node) {
+        if (!node) return;
+        if (node->kind == Node::Sym && subst.find(node->name) == subst.end())
+            throw std::runtime_error("unknown symbol: " + node->name);
+        check(node->a); check(node->b);
+        for (const auto& arg : node->args) check(arg);
+    };
+    check(root);
+    return pn_print(pn_subst(root, subst), false);
+}
+
+
 std::string codegen_coupling(const System& s, const std::vector<std::string>& exprs,
                              const std::string& self_state, const std::string& nbr_state,
                              const std::string& self_par, const std::string& nbr_par,
@@ -1084,6 +1105,40 @@ std::string codegen_coupling(const System& s, const std::vector<std::string>& ex
         emit(ast, nm, o);
         o << ");\n";
     }
+    return o.str();
+}
+
+
+System codegen_spike_system(const System& s, const std::vector<std::string>& names, const std::vector<int>& target,
+                            const std::vector<std::string>& terms) {
+    System o = s;
+    o.latex = false;
+    for (size_t i = 0; i < o.rhs.size(); ++i) {
+        Parser p(s.rhs[i], s.latex);
+        o.rhs[i] = pn_print(p.parse(), false);
+    }
+    for (size_t k = 0; k < names.size(); ++k) {
+        if (target[k] < 0 || target[k] >= (int)s.vars.size()) throw std::runtime_error("spike: a synapse points to a missing variable");
+        o.rhs[(size_t)target[k]] += " + " + terms[k];
+        o.vars.push_back(names[k]);
+    }
+    for (size_t k = 0; k < names.size(); ++k) o.rhs.push_back("0");
+    return o;
+}
+
+
+std::string codegen_spike_body(const System& s, int var, const std::string& threshold, const std::vector<std::string>& reset) {
+    if (var < 0 || var >= (int)s.vars.size()) throw std::runtime_error("spike: threshold variable out of range");
+    if (reset.size() != s.vars.size()) throw std::runtime_error("spike: reset count != number of variables");
+    std::vector<std::string> thr(s.vars.size());
+    thr[(size_t)var] = threshold;
+    std::ostringstream o;
+    o << "    numb T[AMOUNTOFX] = { (numb)0 };\n" << codegen_coupling(s, thr, "X", "X", "a", "a", "(numb)0", "T", "    ");
+    o << "    if (!(X[" << var << "] >= T[" << var << "])) return;\n    spiked = true;\n";
+    // Сброс одновременный: правые части читают состояние до него.
+    o << "    numb R[AMOUNTOFX] = { (numb)0 };\n" << codegen_coupling(s, reset, "X", "X", "a", "a", "(numb)0", "R", "    ");
+    for (size_t i = 0; i < reset.size(); ++i)
+        if (!reset[i].empty()) o << "    X[" << i << "] = R[" << i << "];\n";
     return o.str();
 }
 

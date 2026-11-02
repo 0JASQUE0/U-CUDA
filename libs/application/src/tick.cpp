@@ -82,6 +82,7 @@ void AppModel::tick(SystemLibrary& lib) {
     model.fastsync_session.custom_schemes    = model.custom_schemes;
     model.order_session.custom_schemes       = model.custom_schemes;
     model.network_session.custom_schemes     = model.custom_schemes;
+    model.neural_session.custom_schemes      = model.custom_schemes;
     // Custom tab owns 5 isolated sub-sessions — same per-frame sync applies.
     model.custom_session.custom_schemes                = model.custom_schemes;
     model.custom_session.bif_session.custom_schemes    = model.custom_schemes;
@@ -100,7 +101,8 @@ void AppModel::tick(SystemLibrary& lib) {
     model.fastsync_session.wrapper_schemes    = model.enabled_wrapper_schemes();
     model.order_session.wrapper_schemes       = model.enabled_wrapper_schemes();
     model.network_session.wrapper_schemes     = model.enabled_wrapper_schemes();
-    model.custom_session.wrapper_schemes                = model.enabled_wrapper_schemes();
+    model.neural_session.wrapper_schemes      = model.enabled_wrapper_schemes();
+    model.custom_session.wrapper_schemes               = model.enabled_wrapper_schemes();
     model.custom_session.bif_session.wrapper_schemes    = model.enabled_wrapper_schemes();
     model.custom_session.lle_session.wrapper_schemes    = model.enabled_wrapper_schemes();
     model.custom_session.ls_session.wrapper_schemes     = model.enabled_wrapper_schemes();
@@ -122,7 +124,7 @@ void AppModel::tick(SystemLibrary& lib) {
         *destination = enabled;
     for (auto* destination : {&model.dft1d_session.enabled_builtin_schemes,
              &model.fastsync_session.enabled_builtin_schemes, &model.order_session.enabled_builtin_schemes,
-             &model.network_session.enabled_builtin_schemes})
+             &model.network_session.enabled_builtin_schemes, &model.neural_session.enabled_builtin_schemes})
         *destination = fixed;
 
     // Auto-labels: pre-frame refresh so all label-consumers (tab-bar names,
@@ -265,6 +267,11 @@ void AppModel::tick(SystemLibrary& lib) {
             lib.save_session(model.loaded_name, "_last_network",
                              session_to_json_network(model.network_session));
     }
+    if (model.neural_session.poll()) {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_neural",
+                             session_to_json_neural(model.neural_session));
+    }
     // Custom tab: aggregate poll of all 5 sub-sessions; one bundle save on any completion, чтобы
     // не переписывать _last_custom.json пять раз. Сохраняем и на любой мутации workspace
     // (add/close/rename таба, drag сплиттера, перенос окна между табами) — с одним лишь
@@ -299,6 +306,7 @@ void AppModel::tick(SystemLibrary& lib) {
     model.start_next_in_order_queue();
     // То же для network-очереди (независимая).
     model.start_next_in_network_queue();
+    model.start_next_in_neural_queue();
     // Custom tab has its own queue (2D → 1D → Phase/Basins pipeline).
     model.start_next_in_custom_queue();
     // Фоновая компиляция под текущие настройки параметрики, чтобы первый Run не ждал NVRTC.

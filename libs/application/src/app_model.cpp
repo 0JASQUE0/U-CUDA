@@ -735,6 +735,20 @@ bool AppModel::start_network_analysis() {
     return true;
 }
 
+bool AppModel::start_neural_analysis() {
+    if (!refresh_symbols()) return false;
+    SystemRecord r = to_record();
+    neural_session.load_from_record(r, known_vars, known_params);
+    try {
+        System built = build_system();
+        neural_session.sys = built;
+    }
+    catch (...) {}
+    neural_session.loaded_system_name = name;
+    ++session_epoch[(int)AppMode::Neural];
+    return true;
+}
+
 bool AppModel::start_fastsync_analysis() {
     if (!refresh_symbols()) return false;
     SystemRecord r = to_record();
@@ -1428,6 +1442,7 @@ void AppModel::propagate_to_sessions() {
     custom_session.basins_session.enabled_builtin_schemes = enabled_now;
     order_session.enabled_builtin_schemes                 = enabled_now;
     network_session.enabled_builtin_schemes               = enabled_now;
+    neural_session.enabled_builtin_schemes                = enabled_now;
 
     // sys обновляем для built-in схем (Euler/RK4/...): они используют
     // sys.rhs внутри compute_krs_for_scheme → codegen_scheme. Если уравнения
@@ -1443,6 +1458,7 @@ void AppModel::propagate_to_sessions() {
         dft1d_session.sys       = built;
         basins_session.sys      = built;
         fastsync_session.sys    = built;
+        neural_session.sys      = built;
         custom_session.sys                = built;
         custom_session.bif_session.sys    = built;
         custom_session.lle_session.sys    = built;
@@ -2173,6 +2189,16 @@ void AppModel::remove_network_config(int i) {
         if (it.index > i) --it.index;
 }
 
+void AppModel::remove_neural_config(int i) {
+    neural_session.remove_config(i);
+    for (auto it = neural_queue.begin(); it != neural_queue.end(); ) {
+        if (it->index == i) it = neural_queue.erase(it);
+        else ++it;
+    }
+    for (auto& it : neural_queue)
+        if (it.index > i) --it.index;
+}
+
 bool AppModel::start_next_in_basins_queue() {
     if (basins_session.in_flight) return false;
     if (basins_queue.empty()) return false;
@@ -2215,6 +2241,20 @@ bool AppModel::start_next_in_network_queue() {
             if (network_session.run_async(*parametric_engine, it.index)) return true;
         }
         // ok == false — last_error выставлен run_async; идём дальше.
+    }
+    return false;
+}
+
+bool AppModel::start_next_in_neural_queue() {
+    if (neural_session.in_flight) return false;
+    if (neural_queue.empty()) return false;
+    if (!parametric_engine) parametric_engine = std::make_unique<ParametricEngine>();
+    while (!neural_queue.empty()) {
+        NeuralQueueItem it = neural_queue.front();
+        neural_queue.pop_front();
+        if (it.index >= 0 && it.index < (int)neural_session.configs.size()) {
+            if (neural_session.run_async(*parametric_engine, it.index)) return true;
+        }
     }
     return false;
 }

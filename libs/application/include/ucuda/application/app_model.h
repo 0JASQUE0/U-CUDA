@@ -8,6 +8,7 @@
 #include "ucuda/analysis/custom_session.h"
 #include "ucuda/analysis/order_session.h"
 #include "ucuda/analysis/network_session.h"
+#include "ucuda/analysis/neural_session.h"
 #include "ucuda/application/prewarm_watch.h"
 #include "ucuda/application/time_estimate.h"
 #include <map>
@@ -99,10 +100,26 @@ struct OrderQueueItem {
 struct NetworkQueueItem {
     int index = 0;
 };
+using NeuralQueueItem = NetworkQueueItem;
 
 // Состояние ОТОБРАЖЕНИЯ вкладки Network. В конфиг ему нельзя: конфиг — это
 // то, что уходит в расчёт, а выбранный узел, курсор времени и набор кривых
 // результат не меняют (и в очередь "Run all" не должны попадать).
+// Отображение вкладки Neural; в расчёт не входит, как у Network.
+struct NeuralViewState {
+    int series_var = 0;
+    int instance = 0;    // экземпляр в окнах от времени
+    int sync_kind = 0;   // 0 = R, 1 = разброс по узлам
+    int sweep_kind = 0;  // Neural Sweep: то же, 2 = показатель Ляпунова
+    bool spread_log[2] = { true, true };   // окна Synchronisation и Neural Sweep; у R оси всегда линейная
+    int lyap_kind = 0;   // 0 = показатель от значения свипа, 1 = накопленное среднее одной сети
+    int map_kind = 0;    // Neural Map: 0 = R, 1 = разброс, 2 = показатель Ляпунова
+    int map_pop = 0;
+    bool map_log = true; // разброс в log10: он меняется на 7 порядков
+    std::string rate_bin_text = "0";   // окно Population Rate, 0 = авто
+    int readout_target = 0;            // окно Neural Readout
+};
+
 struct NetworkViewState {
     int   selected_node = -1;
     int   selected_edge = -1;
@@ -529,13 +546,13 @@ public:
     // Order добавлен В КОНЕЦ намеренно: last_app_mode сериализуется в app_config
     // целым числом, и вставка в середину сбросила бы всем сохранённую вкладку.
     // Порядок кнопок в UI задаётся отдельно (см. draw_gui).
-    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings, Order, Network };
+    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings, Order, Network, Neural };
     AppMode app_mode = AppMode::Library;
 
     // Число элементов AppMode. Нужно для клампа last_app_mode из конфига:
     // литерал в app_main.cpp отставал от enum'а (стоял 8 при девяти режимах,
     // из-за чего Order не восстанавливался на старте).
-    static constexpr int kAppModeCount = 10;
+    static constexpr int kAppModeCount = 11;
 
     // Номер пересоздания сессий вкладки (++ в start_*_analysis). Сессия грузится с
     // data_generation = 0, а static-вью вкладки помнят поколение прошлой: по смене номера gui сбрасывает их.
@@ -552,7 +569,7 @@ public:
     // того, у кого конфиг уже есть, список берётся из него и этот дефолт не
     // применяется вовсе. Тот же дефолт продублирован в AppConfig::hidden_tabs —
     // на случай конфига без ключа.
-    std::vector<std::string> hidden_tabs { "Dft1D", "FastSync", "Order", "Network" };
+    std::vector<std::string> hidden_tabs { "Dft1D", "FastSync", "Order", "Network", "Neural" };
     std::vector<std::string> hidden_schemes;
     // Методы ДАУ, скрытые из списка редактора ДАУ (Settings -> DAE methods). Зеркалит
     // AppConfig::hidden_dae_methods; дефолт свежей установки ставит app_main.
@@ -604,6 +621,9 @@ public:
     // Network — сеть связанных осцилляторов на задаваемой топологии.
     NetworkSession             network_session;
     NetworkViewState           network_view;
+    // Neural — большие сети: популяции и проекции, kernels/neural.template.cu.
+    NeuralSession              neural_session;
+    NeuralViewState            neural_view;
 
     // Custom pipeline — hierarchical 2D → 1D → Phase/Basins with a shared
     // config layer and drill-down click bindings. Owns its OWN Bif/LLE/LS/
@@ -853,6 +873,8 @@ public:
     // Network batch queue — независимая (см. NetworkQueueItem).
     std::deque<NetworkQueueItem> network_queue;
     bool start_next_in_network_queue();
+    std::deque<NeuralQueueItem> neural_queue;
+    bool start_next_in_neural_queue();
 
     // Custom-tab pipeline queue — drives the 2D→1D→Phase/Basins ordering.
     // Items are pushed by the Run buttons and by drill-down clicks; drained
@@ -874,6 +896,7 @@ public:
     void remove_fastsync_config(int i);
     void remove_order_config(int i);
     void remove_network_config(int i);
+    void remove_neural_config(int i);
 
     // Подготовить сессию анализа из ТЕКУЩЕЙ системы (после refresh_symbols).
     // Копирует параметры/НУ в сессию; изменения в сессии не идут в библиотеку.
@@ -887,6 +910,7 @@ public:
     bool start_basins_analysis();
     bool start_order_analysis();
     bool start_network_analysis();
+    bool start_neural_analysis();
     bool start_fastsync_analysis();
     // Initialise the Custom pipeline: seeds shared config from the record and
     // populates each sub-session with the fixed 3-slot layout (2D/1D-X/1D-Y).
@@ -1069,7 +1093,7 @@ public:
             if (dae_native()) {
                 bool any = false;
                 for (const auto& n : dae_scheme_names()) {
-                    if (!dae_scheme_on(n)) continue;
+                    if (!dae_scheme_on(n) || dae_method_hidden(n)) continue;
                     any = true;
                     DaeScheme ds;
                     dae_scheme_from_name(n, &ds);
@@ -1079,7 +1103,7 @@ public:
                     out += "\n";
                 }
                 // BDF 1-5: тела постоянного шага нет — драйвер (kernels/ucuda_bdf.cuh) берёт невязку и якобиан
-                if (dae_scheme_on(kBdfSchemeDae)) {
+                if (dae_scheme_on(kBdfSchemeDae) && !dae_method_hidden(kBdfSchemeDae)) {
                     any = true;
                     out += "// ===== " + std::string(kBdfSchemeDae) + " (multistep driver kernels/ucuda_bdf.cuh: "
                            "residual F = [f; g] and Jacobian J; adaptive step only) =====\n";
@@ -1149,7 +1173,7 @@ public:
             };
             bool any = false;
             for (const auto& it : items) {
-                if (!it.on) continue;
+                if (!it.on || scheme_hidden(it.name)) continue;
                 any = true;
                 out += "// ===== ";
                 out += it.name;

@@ -74,6 +74,12 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
             apply_session_json(model, jn, model.network_session, session_from_json_network, "_last_network");
             break;
         }
+        case AppModel::AppMode::Neural: {
+            model.start_neural_analysis();
+            std::string jn = lib.load_session(model.loaded_name, "_last_neural");
+            apply_session_json(model, jn, model.neural_session, session_from_json_neural, "_last_neural");
+            break;
+        }
         case AppModel::AppMode::Library:
         case AppModel::AppMode::Settings:
         default:

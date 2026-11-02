@@ -143,6 +143,10 @@ struct NetworkState {
     std::vector<std::string>  enabled_builtin_schemes;
     std::string loaded_system_name;
 
+    // Last monolithic export feedback; UI state, not part of a saved calculation.
+    std::string monolithic_saved_name;
+    std::string monolithic_error;
+
     std::vector<NetworkConfig> configs;
 
     int active_config_index  = 0;
@@ -184,3 +188,12 @@ std::string net_coupling_body(const System& sys, const std::vector<NetCouplingLa
 
 // Человекочитаемое имя топологии (для комбо и подписей).
 const char* net_topology_name(NetTopology t);
+
+struct NetworkMonolithic {
+    System sys;
+    SystemRecord record;
+};
+
+// Independent ODE snapshot. Coupling is part of the RHS and therefore every
+// stage of a generated scheme. Throws on unsupported input or engine limits.
+NetworkMonolithic net_monolithic_snapshot(const NetworkState& s, const NetworkConfig& c);

@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "ucuda/cuda/parametric_engine.h"
 #include "ucuda/analysis/order_session.h"
+#include "ucuda/analysis/network_session.h"   // net_coupling_body, NetCouplingLaw: законы связи Neural
 #include "ucuda/equations/codegen.hpp"
 #include "builtin_cases.h"
 #include <chrono>
@@ -19,7 +20,7 @@ inline const std::vector<AnalysisCase>& analysis_cases() {
         {"lle_1d", true, true}, {"lle_2d", false, true}, {"ls_1d", true, true}, {"ls_2d", false, true},
         {"dft", true, true}, {"metrics", true, true}, {"basins", false, true}, {"basins_recluster", true, false},
         {"fastsync", false, true}, {"order", true, true}, {"performance", true, true},
-        {"stability", true, true}, {"network", false, true}};
+        {"stability", true, true}, {"network", false, true}, {"neural", false, true}};
     return cases;
 }
 template<class R> inline void valid_result(const R& r) {
@@ -140,6 +141,23 @@ inline std::vector<double> analysis_workload(ParametricEngine& engine, const std
                     throw std::runtime_error("Network batched analytic solution");
         }
         if (kernel_seconds) *kernel_seconds = r.gpu_ms / 1000;
+    } else if (name == "neural") {
+        // Несвязанные узлы (дуг нет): каждый узел — та же линейная релаксация, расписание stage всегда RK4.
+        NeuralRequest q; q.schedule = NeuralSchedule::Stage; q.krs_body = body; q.rhs_body = codegen_rhs_body(sys);
+        q.coupling_body = net_coupling_body(sys, {NetCouplingLaw{}});
+        q.amountOfX = 2; q.n_nodes = 64; q.amountOfValues = (int)a.size();
+        q.h = .01; q.t_max = 1; q.transient = 0; q.pre_scaller = 10; q.keep_final_state = true;
+        q.edge_start.assign(q.n_nodes + 1, 0);
+        for (int i = 0; i < q.n_nodes; ++i) { q.values.insert(q.values.end(), a.begin(), a.end()); q.initial_conditions.insert(q.initial_conditions.end(), {1, 1}); }
+        q.observe.nodes = {0, q.n_nodes - 1}; q.observe.vars = {0, 1}; q.observe.pop_start = {0, q.n_nodes};
+        const auto r = engine.run_neural(q); valid_result(r);
+        if (verify && (r.n_diverged || r.n_points < 2 || r.n_nodes != q.n_nodes || r.final_state.size() != (size_t)q.n_nodes * 2))
+            throw std::runtime_error("Neural shape/divergence");
+        if (verify)
+            for (int node = 0; node < q.n_nodes; ++node)
+                if (std::fabs(r.final_state[node * 2] - std::exp(-1.0)) > 1e-7 || std::fabs(r.final_state[node * 2 + 1] - std::exp(-2.0)) > 1e-7)
+                    throw std::runtime_error("Neural analytic solution");
+        values = r.final_state; values.insert(values.end(), r.means.begin(), r.means.end());
     } else if (name == "order" || name == "performance" || name == "stability") {
         const bool stability = name == "stability";
         SystemRecord record; record.vars_text = "x, y"; record.params_text = stability ? "a, b, c, d" : "p";
