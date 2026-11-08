@@ -128,8 +128,17 @@ enum class NeuralProtocol { Continuous = 0, Trials };
 
 // Задача: по отклику сети на вход восстановить или предсказать переменные той же системы-источника. Отсчёт = отсчёт входа.
 // Разбиение по времени: прогрев, обучение, пропуск, валидация, пропуск, тест; нормировка входа только по обучению.
+// Классификация: попытка протокола Trials = образец, класс = источник входа. Во время стимула все источники-классы несут
+// сигнал класса попытки, у системы это очередной кусок её траектории (между кусками она идёт и в паузе, невидимо).
+// Метки сбалансированы в каждой части разбиения и перемешаны data_seed; части идут по времени: обучение, валидация, тест.
+enum class NeuralTaskKind { Regression = 0, Classification };
+
 struct NeuralTask {
     bool enabled = false;
+    NeuralTaskKind kind = NeuralTaskKind::Regression;
+    std::vector<int> classes;              // классификация: источники-классы
+    std::string bins_text = "1";           // классификация: точек признаков на стимул, последняя в его конце
+    std::string data_seed_text = "1";      // классификация: метки и их порядок, не зависит от seed сети
     int source = 0;
     std::vector<int> targets;              // переменные источника
     std::string horizon_text = "0";        // на сколько отсчётов вперёд, 0 = наблюдатель
@@ -176,6 +185,12 @@ struct NeuralTaskResult {
     std::vector<double> truth;             // [point][target], тест
     std::vector<double> predicted;         // [instance][point][target]
     std::string note;                      // первый отказ экземпляра свипа
+    // Классификация: names = {"accuracy"}, val/test это доли верных ответов [instance], points = попыток теста,
+    // truth = их классы, predicted = ответ [instance][попытка], delay_test = ridge по сигналу стимула, delay_length его точек.
+    bool classify = false;
+    std::vector<std::string> class_names;  // [C]
+    std::vector<double> confusion;         // [instance][истинный][ответ], тест, число попыток
+    double chance = 0.0;                   // доля самого частого класса в тесте
 };
 
 struct NeuralConfig {

@@ -191,7 +191,18 @@ void fill_input(const NeuralConfig& c, const NeuralGraph& g, uint64_t seed, Neur
     };
     size_t n_active = 0;
     for (long long row = 0; row < rows; ++row) { long long tau, trial; n_active += active_at(row, tau, trial); }
-    for (int q = 0; q < in.channels; ++q) {
+    const bool classify = c.task.enabled && c.task.kind == NeuralTaskKind::Classification;
+    std::vector<int> class_of((size_t)in.channels, -1), labels;
+    if (classify) {
+        if (!trials) throw std::runtime_error("classification needs the protocol of separate trials");
+        for (size_t k = 0; k < c.task.classes.size(); ++k) {
+            const int q = c.task.classes[k];
+            if (q < 0 || q >= in.channels) throw std::runtime_error("a class points to a missing input source");
+            class_of[(size_t)q] = (int)k;
+        }
+        labels = neural_class_labels(c);
+    }
+    const auto make_series = [&](int q) {
         const NeuralSource& s = c.sources[(size_t)q];
         SourceSeries v;
         v.src = &s; v.index = q; v.seed = seed;
@@ -210,10 +221,17 @@ void fill_input(const NeuralConfig& c, const NeuralGraph& g, uint64_t seed, Neur
             if (v.half_steps % in.hold_steps != 0 || v.shift % in.hold_steps != 0)
                 throw std::runtime_error("input source '" + s.name + "': the edges fall inside an input sample");
         }
-        if (s.kind == NeuralSourceKind::System) {
-            const double dt = (double)in.hold_steps * r.h * num_or(s.time_scale_text, 1.0);
-            v.series = source_system_series(s, three ? 2 * n_active + 1 : n_active, three ? 0.5 * dt : dt, three ? 2 : 1);
-        }
+        return v;
+    };
+    const auto system_series = [&](const NeuralSource& s, size_t n) {
+        const double dt = (double)in.hold_steps * r.h * num_or(s.time_scale_text, 1.0);
+        return source_system_series(s, three ? 2 * n + 1 : n, three ? 0.5 * dt : dt, three ? 2 : 1);
+    };
+    for (int q = 0; q < in.channels; ++q) {
+        if (class_of[(size_t)q] >= 0) continue;
+        const NeuralSource& s = c.sources[(size_t)q];
+        SourceSeries v = make_series(q);
+        if (s.kind == NeuralSourceKind::System) v.series = system_series(s, n_active);
         size_t active = 0;
         for (long long row = 0; row < rows; ++row) {
             long long tau, trial;
@@ -221,6 +239,33 @@ void fill_input(const NeuralConfig& c, const NeuralGraph& g, uint64_t seed, Neur
             for (int j = 0; j < in.stage_rows; ++j)
                 in.samples[((size_t)row * in.stage_rows + j) * in.channels + q] = v.value(tau, j, three, row, active);
             ++active;
+        }
+    }
+    if (classify) {
+        // Попытка j класса берёт кусок его траектории с отсчёта j * cycle_rows + rest_rows: система идёт и в паузе, невидимо.
+        if (rest % in.hold_steps != 0 || stim % in.hold_steps != 0)
+            throw std::runtime_error("the rest and the stimulus must be multiples of the input sample time");
+        const long long rest_rows = rest / in.hold_steps, cycle_rows = cycle / in.hold_steps;
+        const int C = (int)c.task.classes.size();
+        std::vector<long long> segment((size_t)n_trials), count((size_t)C, 0);
+        for (long long i = 0; i < n_trials; ++i) segment[(size_t)i] = count[(size_t)labels[(size_t)i]]++;
+        std::vector<SourceSeries> cls((size_t)C);
+        for (int k = 0; k < C; ++k) {
+            const int q = c.task.classes[(size_t)k];
+            cls[(size_t)k] = make_series(q);
+            if (c.sources[(size_t)q].kind == NeuralSourceKind::System)
+                cls[(size_t)k].series = system_series(c.sources[(size_t)q], (size_t)(std::max(1LL, count[(size_t)k]) * cycle_rows));
+        }
+        for (long long row = 0; row < rows; ++row) {
+            long long tau, trial;
+            if (!active_at(row, tau, trial)) continue;
+            const int L = labels[(size_t)trial];
+            const SourceSeries& v = cls[(size_t)L];
+            const size_t at = (size_t)(segment[(size_t)trial] * cycle_rows + rest_rows + tau / in.hold_steps);
+            for (int j = 0; j < in.stage_rows; ++j) {
+                const double x = v.value(tau, j, three, row, at);
+                for (int q : c.task.classes) in.samples[((size_t)row * in.stage_rows + j) * in.channels + (size_t)q] = x;
+            }
         }
     }
 
@@ -989,10 +1034,88 @@ static long long task_hold(const NeuralConfig& c) {
     return hold > 0.0 ? (std::max)(1LL, steps_of(hold, parse_num(c.h_text, 0.01), "the input sample time")) : 1;
 }
 
+// Классификация: части по попыткам, без прогрева и пропуска: пауза перед стимулом уже отделяет попытки.
+static ReadoutSplit class_split(const NeuralConfig& c) {
+    const long long n = int_or(c.trials_text, 0);
+    if (n < 3) throw std::runtime_error("classification needs more trials");
+    return readout_split((size_t)n, 0, num_or(c.task.train_text, 0.6), num_or(c.task.val_text, 0.2), 0);
+}
+
+std::vector<int> neural_class_labels(const NeuralConfig& c) {
+    const int C = (int)c.task.classes.size();
+    if (C < 2) throw std::runtime_error("classification needs at least two classes");
+    const ReadoutSplit sp = class_split(c);
+    std::vector<int> labels(sp.test1);
+    Stream g((uint64_t)int_or(c.task.data_seed_text, 1), 0x4C4142454CULL, 0);
+    const size_t cut[4] = { 0, sp.train1, sp.val1, sp.test1 };
+    for (int part = 0; part < 3; ++part) {
+        const size_t lo = cut[part], n = cut[part + 1] - lo;
+        if (n < (size_t)C) throw std::runtime_error("every part of the split needs a trial of every class: raise the number of trials");
+        for (size_t i = 0; i < n; ++i) labels[lo + i] = (int)(i % (size_t)C);
+        for (size_t i = n; i > 1; --i) std::swap(labels[lo + i - 1], labels[lo + (size_t)g.below((int)i)]);
+    }
+    return labels;
+}
+
+struct ClassSteps { long long rest = 0, stim = 0, cycle = 0, bins = 1, bin = 0; };
+static ClassSteps class_steps(const NeuralConfig& c) {
+    const double h = parse_num(c.h_text, 0.01);
+    ClassSteps s;
+    s.rest = steps_of(num_or(c.rest_text, 0.0), h, "the rest time");
+    s.stim = steps_of(num_or(c.stimulus_text, 0.0), h, "the stimulus time");
+    s.cycle = s.rest + s.stim;
+    s.bins = int_or(c.task.bins_text, 1);
+    if (s.bins < 1 || s.stim < s.bins || s.stim % s.bins != 0) throw std::runtime_error("the stimulus must split into the feature points by whole steps");
+    s.bin = s.stim / s.bins;
+    return s;
+}
+
+static NeuralConfig class_config(const NeuralConfig& c) {
+    NeuralConfig o = c;
+    const NeuralTask& t = c.task;
+    if (c.protocol != NeuralProtocol::Trials) throw std::runtime_error("classification needs the protocol of separate trials");
+    if (num_or(c.transient_text, 0.0) != 0.0) throw std::runtime_error("set the transient to 0: the rest before each stimulus is the washout");
+    if (c.lyap_on) throw std::runtime_error("a readout does not work with the Lyapunov exponent");
+    // Галочка сохранённого выхода остаётся от режима восстановления и здесь не видна: классификация её не читает.
+    o.task.use_saved = false;
+    for (size_t k = 0; k < t.classes.size(); ++k) {
+        if (t.classes[k] < 0 || t.classes[k] >= (int)c.sources.size()) throw std::runtime_error("a class points to a missing input source");
+        if (std::count(t.classes.begin(), t.classes.end(), t.classes[k]) > 1) throw std::runtime_error("a source is a class twice");
+    }
+    bool linked = false;
+    for (const NeuralLink& l : c.links) linked = linked || std::count(t.classes.begin(), t.classes.end(), l.source) > 0;
+    if (!linked) throw std::runtime_error("link one of the class sources to the network");
+    const ClassSteps s = class_steps(c);
+    const std::vector<int> labels = neural_class_labels(c);
+    const ReadoutSplit sp = class_split(c);
+    const long long hold = task_hold(c);
+    // Нормировка системы-класса только по её кускам в попытках обучения: они у класса первые.
+    for (size_t k = 0; k < t.classes.size(); ++k) {
+        long long n_train = 0;
+        for (size_t i = 0; i < sp.train1; ++i) n_train += labels[i] == (int)k;
+        o.sources[(size_t)t.classes[k]].normalize_first = n_train * (s.cycle / hold);
+    }
+    const bool spike = c.schedule == NeuralSchedule::Spike;
+    const int M = (std::max)(1, int_or(t.features_text, 1000));
+    // Точки признаков: s.rest + (b + 1) * s.bin внутри каждой попытки, сетка записи кратна обоим.
+    const long long pre = std::gcd(s.rest, s.bin);
+    o.pre_scaller_text = std::to_string(pre);
+    o.order_var = -1;
+    o.observed_per_pop_text = spike ? "0" : std::to_string(M);
+    o.obs_vars_off.clear();
+    for (int k = 0; k < 64; ++k) if (k != c.input_var || spike) o.obs_vars_off.push_back(k);
+    const double nets = (double)(std::max<size_t>)(1, neural_sweep_values(c).size()) * (double)(std::max<size_t>)(1, neural_sweep2_values(c).size());
+    const double points = (double)labels.size() * (double)s.cycle / (double)pre + 1.0;
+    const double mb = spike ? 16.0 : points * M * (double)c.populations.size() * nets * sizeof(double) / (1024.0 * 1024.0) * 1.2 + 16.0;
+    o.output_limit_text = fmt_num_shortest((std::max)(num_or(c.output_limit_text, 1024.0), mb));
+    return o;
+}
+
 NeuralConfig neural_task_config(const NeuralConfig& c) {
     NeuralConfig o = c;
     const NeuralTask& t = c.task;
     if (!t.enabled) return o;
+    if (t.kind == NeuralTaskKind::Classification) return class_config(c);
     if (c.protocol != NeuralProtocol::Continuous) throw std::runtime_error("a readout needs the continuous protocol");
     if (num_or(c.transient_text, 0.0) != 0.0) throw std::runtime_error("a readout has its own washout: set the transient to 0");
     if (c.lyap_on) throw std::runtime_error("a readout does not work with the Lyapunov exponent");
@@ -1045,7 +1168,120 @@ static std::vector<double> task_delays(const NeuralRequest& r, int channel, size
     return F;
 }
 
+// Классификация: строка признаков на попытку, точка b стимула даёт столбцы i * B + b.
+static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralRequest& r, const NeuralResult& res) {
+    const NeuralTask& t = c.task;
+    NeuralTaskResult out;
+    out.classify = true;
+    out.names = { "accuracy" };
+    const int C = (int)t.classes.size();
+    for (int q : t.classes) out.class_names.push_back(c.sources[(size_t)q].name);
+    const std::vector<int> labels = neural_class_labels(c);
+    const ReadoutSplit sp = class_split(c);
+    const ClassSteps s = class_steps(c);
+    const size_t n = labels.size(), B = (size_t)s.bins;
+    std::vector<double> Y(n * (size_t)C, 0.0);
+    for (size_t i = 0; i < n; ++i) Y[i * C + (size_t)labels[i]] = 1.0;
+    const bool spike = c.schedule == NeuralSchedule::Spike;
+    if (spike && res.spikes_dropped > 0) throw std::runtime_error("the spike log was cut, the features would be wrong");
+    const std::vector<int> inst = r.instance_start.empty() ? std::vector<int>{ 0, r.n_nodes } : r.instance_start;
+    const int nInst = (int)inst.size() - 1, P = (int)c.populations.size();
+    const auto features = [&](int q, std::vector<double>& F) {
+        if (spike) {
+            // Спайки в отрезке (начало, конец] точки: прошлая попытка в признаки не протекает.
+            const int want = (std::max)(1, int_or(t.features_text, 1000));
+            int node0 = -1, M = 0;
+            for (int p = 0; p < P && node0 < 0; ++p)
+                if (!c.populations[(size_t)p].spike_source) {
+                    node0 = r.observe.pop_start[(size_t)(q * P + p)];
+                    M = (std::min)(want, r.observe.pop_start[(size_t)(q * P + p + 1)] - node0);
+                }
+            if (node0 < 0 || M < 1) throw std::runtime_error("the readout needs a population that is not a spike source");
+            F.assign(n * (size_t)M * B, 0.0);
+            for (size_t e = 0; e < res.spike_step.size(); ++e) {
+                const int i = res.spike_node[e] - node0;
+                if (i < 0 || i >= M) continue;
+                const long long at = res.spike_step[e] + 1, tr = (at - 1) / s.cycle, o = at - tr * s.cycle;
+                if (tr >= (long long)n || o <= s.rest) continue;
+                F[((size_t)tr * M + (size_t)i) * B + (size_t)((o - s.rest - 1) / s.bin)] += 1.0;
+            }
+            return M;
+        }
+        const size_t nSel = res.observed.size();
+        std::vector<size_t> cols;
+        for (size_t i = 0; i < nSel; ++i) if (res.observed[i] >= inst[(size_t)q] && res.observed[i] < inst[(size_t)q + 1]) cols.push_back(i);
+        const int M = (int)cols.size();
+        if (M < 1) throw std::runtime_error("the network has no observed nodes");
+        F.assign(n * (size_t)M * B, 0.0);
+        for (size_t tr = 0; tr < n; ++tr)
+            for (size_t b = 0; b < B; ++b) {
+                const long long step = (long long)tr * s.cycle + s.rest + (long long)(b + 1) * s.bin;
+                const size_t p = (size_t)(step / r.pre_scaller);
+                if (res.traces.size() < (p + 1) * nSel) throw std::runtime_error("the record is shorter than the trials");
+                for (int i = 0; i < M; ++i) F[(tr * M + (size_t)i) * B + b] = res.traces[p * nSel + cols[(size_t)i]];
+            }
+        return M;
+    };
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const size_t T = sp.test1 - sp.test0;
+    out.instances = nInst;
+    out.points = (int)T;
+    for (size_t i = sp.test0; i < sp.test1; ++i) out.truth.push_back((double)labels[i]);
+    std::vector<size_t> share((size_t)C, 0);
+    for (size_t i = sp.test0; i < sp.test1; ++i) ++share[(size_t)labels[i]];
+    out.chance = (double)*std::max_element(share.begin(), share.end()) / (double)T;
+    out.val.assign((size_t)nInst, nan); out.test.assign((size_t)nInst, nan); out.lambda.assign((size_t)nInst, nan);
+    out.predicted.assign((size_t)nInst * T, nan);
+    out.confusion.assign((size_t)nInst * C * C, nan);
+    const std::vector<double> lambdas = {1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0};
+    const auto score = [&](const ReadoutModel& m, const std::vector<double>& F, double* predicted, double* confusion) {
+        const std::vector<int> cls = readout_argmax(readout_predict(m, F, sp.test0, sp.test1), C);
+        size_t right = 0;
+        for (size_t i = 0; i < T; ++i) {
+            right += cls[i] == labels[sp.test0 + i];
+            if (predicted) predicted[i] = (double)cls[i];
+        }
+        if (confusion) {
+            std::fill(confusion, confusion + (size_t)C * C, 0.0);
+            for (size_t i = 0; i < T; ++i) confusion[(size_t)labels[sp.test0 + i] * C + (size_t)cls[i]] += 1.0;
+        }
+        return (double)right / (double)T;
+    };
+    for (int q = 0; q < nInst; ++q) {
+        try {
+            if (nInst > 1 && q < (int)res.instance_stop.size() && res.instance_stop[(size_t)q] >= 0) throw std::runtime_error("the network diverged");
+            std::vector<double> F;
+            const int M = features(q, F);
+            if (q == 0) out.features = M;
+            const ReadoutModel m = readout_fit(F, Y, M * (int)B, C, sp, lambdas, true);
+            out.val[(size_t)q] = m.val_accuracy;
+            out.lambda[(size_t)q] = m.lambda[0];
+            out.test[(size_t)q] = score(m, F, out.predicted.data() + (size_t)q * T, out.confusion.data() + (size_t)q * C * C);
+        } catch (const std::exception& e) {
+            if (nInst == 1) throw;
+            if (out.note.empty()) out.note = "network " + std::to_string(q) + ": " + e.what();
+        }
+    }
+    // Простая модель: тот же ridge на самих отсчётах стимула, до 50 равномерно; канал класса у всех сетей свипа общий.
+    const long long hold = r.input.hold_steps, stim_rows = s.stim / hold;
+    const int D = (int)(std::min)(stim_rows, 50LL);
+    const size_t sub = (size_t)r.input.stage_rows, ch = (size_t)r.input.channels;
+    std::vector<double> G(n * (size_t)D);
+    for (size_t tr = 0; tr < n; ++tr)
+        for (int d = 0; d < D; ++d) {
+            const long long row = ((long long)tr * s.cycle + s.rest) / hold + ((long long)(d + 1) * stim_rows) / D - 1;
+            G[tr * D + (size_t)d] = r.input.samples[(size_t)row * sub * ch + (size_t)t.classes[0]];
+        }
+    try {
+        const ReadoutModel m = readout_fit(G, Y, D, C, sp, lambdas, true);
+        out.delay_test = { score(m, G, nullptr, nullptr) };
+        out.delay_length = D;
+    } catch (const std::exception&) {}
+    return out;
+}
+
 NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest& r, const NeuralResult& res) {
+    if (c.task.kind == NeuralTaskKind::Classification) return class_evaluate(c, r, res);
     const NeuralTask& t = c.task;
     NeuralTaskResult out;
     const int horizon = int_or(t.horizon_text, 0), K = (int)t.targets.size();
@@ -1235,7 +1471,7 @@ std::string neural_sweep_csv(const NeuralConfig& c) {
     const int T = task.instances == nInst ? (int)task.names.size() : 0;
     o << neural_sweep_name(c.sweep.kind) << (two ? std::string(",") + neural_sweep_name(c.sweep2.kind) : std::string())
       << ",population," << (spikes ? "rate" : "R,spread,lyapunov") << ",stop_step";
-    for (int k = 0; k < T; ++k) o << ",nrmse_" << task.names[(size_t)k];
+    for (int k = 0; k < T; ++k) o << (task.classify ? std::string(",accuracy") : ",nrmse_" + task.names[(size_t)k]);
     o << "\n";
     for (int q = 0; q < nInst; ++q) {
         for (int p = 0; p < K; ++p) {
