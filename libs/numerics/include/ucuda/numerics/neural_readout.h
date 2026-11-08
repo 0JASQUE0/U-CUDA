@@ -79,6 +79,26 @@ inline double readout_nrmse(const double* y, const double* yhat, size_t stride, 
     return var > 0.0 ? std::sqrt(err / var) : std::numeric_limits<double>::quiet_NaN();
 }
 
+// Квадрат коэффициента корреляции цели и выхода: вклад одной задержки в memory capacity.
+inline double readout_r2(const double* y, const double* yhat, size_t stride, size_t n) {
+    double my = 0.0, mh = 0.0;
+    for (size_t t = 0; t < n; ++t) { my += y[t * stride]; mh += yhat[t * stride]; }
+    my /= (double)n; mh /= (double)n;
+    double cov = 0.0, vy = 0.0, vh = 0.0;
+    for (size_t t = 0; t < n; ++t) {
+        const double a = y[t * stride] - my, b = yhat[t * stride] - mh;
+        cov += a * b; vy += a * a; vh += b * b;
+    }
+    return vy > 0.0 && vh > 0.0 ? cov * cov / (vy * vh) : 0.0;
+}
+
+// Доля верных бит: цель 0 или 1, ответ по порогу 0.5.
+inline double readout_bit_accuracy(const double* y, const double* yhat, size_t stride, size_t n) {
+    size_t right = 0;
+    for (size_t t = 0; t < n; ++t) right += (y[t * stride] > 0.5) == (yhat[t * stride] > 0.5);
+    return n ? (double)right / (double)n : std::numeric_limits<double>::quiet_NaN();
+}
+
 inline std::vector<double> readout_predict(const ReadoutModel& r, const std::vector<double>& F, size_t t0, size_t t1) {
     const size_t M = (size_t)r.M, K = (size_t)r.K, n = t1 - t0;
     std::vector<double> out(n * K);

@@ -97,7 +97,8 @@ struct NeuralSweep {
 };
 
 // Канал входа. Система из библиотеки хранится снимком, эксперимент от правок библиотеки не зависит.
-enum class NeuralSourceKind { Constant = 0, Sine, Square, Noise, System };
+// Bits: +-amplitude с равной вероятностью на каждый отсчёт входа, для XOR задержанных битов.
+enum class NeuralSourceKind { Constant = 0, Sine, Square, Noise, System, Bits };
 
 struct NeuralSource {
     std::string name = "input";
@@ -131,7 +132,9 @@ enum class NeuralProtocol { Continuous = 0, Trials };
 // Классификация: попытка протокола Trials = образец, класс = источник входа. Во время стимула все источники-классы несут
 // сигнал класса попытки, у системы это очередной кусок её траектории (между кусками она идёт и в паузе, невидимо).
 // Метки сбалансированы в каждой части разбиения и перемешаны data_seed; части идут по времени: обучение, валидация, тест.
-enum class NeuralTaskKind { Regression = 0, Classification };
+// Memory: цель = сам вход source, задержанный на d = 1..max_delay отсчётов, r^2 на тесте, их сумма = memory capacity.
+// Xor: цель = XOR знаков входа на отсчётах p - d и p - d - 1, accuracy по порогу 0.5, угадывание 0.5. Обе по времени, как Regression.
+enum class NeuralTaskKind { Regression = 0, Classification, Memory, Xor };
 
 struct NeuralTask {
     bool enabled = false;
@@ -139,6 +142,8 @@ struct NeuralTask {
     std::vector<int> classes;              // классификация: источники-классы
     std::string bins_text = "1";           // классификация: точек признаков на стимул, последняя в его конце
     std::string data_seed_text = "1";      // классификация: метки и их порядок, не зависит от seed сети
+    std::string max_delay_text = "40";     // Memory и Xor: задержки 1..max_delay
+    bool control_k0 = false;               // второй прогон той же сети при K = 0: вклад рекуррентных связей
     int source = 0;
     std::vector<int> targets;              // переменные источника
     std::string horizon_text = "0";        // на сколько отсчётов вперёд, 0 = наблюдатель
@@ -188,6 +193,10 @@ struct NeuralTaskResult {
     // Классификация: names = {"accuracy"}, val/test это доли верных ответов [instance], points = попыток теста,
     // truth = их классы, predicted = ответ [instance][попытка], delay_test = ridge по сигналу стимула, delay_length его точек.
     bool classify = false;
+    bool by_delay = false;                 // Memory и Xor: цели это задержки, окно Neural Readout рисует кривую по d
+    bool higher_better = false;            // accuracy, r^2 и MC: лучшая сеть свипа с наибольшим значением
+    std::string metric = "NRMSE";          // приставка к имени цели в окнах, пусто = имя цели уже полное
+    std::vector<double> control_test, control_val;   // [target], та же сеть при K = 0; пусто = контроль выключен
     std::vector<std::string> class_names;  // [C]
     std::vector<double> confusion;         // [instance][истинный][ответ], тест, число попыток
     double chance = 0.0;                   // доля самого частого класса в тесте

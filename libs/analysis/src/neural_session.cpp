@@ -85,6 +85,10 @@ struct SourceSeries {
             return offset + a * std::sqrt(-2.0 * std::log(u)) * std::cos(two_pi * v);
         }
         case NeuralSourceKind::System:   return offset + a * series[three ? 2 * active + (size_t)sub : active];
+        case NeuralSourceKind::Bits: {
+            Stream g(seed ^ 0x42495453ULL, (uint64_t)index, (uint64_t)sample);
+            return offset + (g.uni() < 0.5 ? a : -a);
+        }
         }
         return 0.0;
     }
@@ -554,6 +558,7 @@ const char* neural_source_name(NeuralSourceKind k) {
     case NeuralSourceKind::Sine:     return "Sine";
     case NeuralSourceKind::Square:   return "Square";
     case NeuralSourceKind::Noise:    return "Gaussian noise";
+    case NeuralSourceKind::Bits:     return "Random bits";
     case NeuralSourceKind::System:   return "System from the library";
     }
     return "?";
@@ -1115,15 +1120,31 @@ NeuralConfig neural_task_config(const NeuralConfig& c) {
     NeuralConfig o = c;
     const NeuralTask& t = c.task;
     if (!t.enabled) return o;
+    if (t.control_k0 && c.sweep.enabled) throw std::runtime_error("the K = 0 control runs without a sweep: sweep over K instead");
+    if (t.control_k0 && t.use_saved && t.kind == NeuralTaskKind::Regression)
+        throw std::runtime_error("the K = 0 control trains its own readout: turn off the saved readout");
     if (t.kind == NeuralTaskKind::Classification) return class_config(c);
+    const bool delayed = t.kind == NeuralTaskKind::Memory || t.kind == NeuralTaskKind::Xor;
     if (c.protocol != NeuralProtocol::Continuous) throw std::runtime_error("a readout needs the continuous protocol");
     if (num_or(c.transient_text, 0.0) != 0.0) throw std::runtime_error("a readout has its own washout: set the transient to 0");
     if (c.lyap_on) throw std::runtime_error("a readout does not work with the Lyapunov exponent");
-    if (t.source < 0 || t.source >= (int)c.sources.size() || c.sources[(size_t)t.source].kind != NeuralSourceKind::System)
+    if (t.source < 0 || t.source >= (int)c.sources.size()) throw std::runtime_error("the readout points to a missing input source");
+    if (!delayed && c.sources[(size_t)t.source].kind != NeuralSourceKind::System)
         throw std::runtime_error("a readout needs an input source that is a system: targets come from it");
     if (c.links.empty()) throw std::runtime_error("a readout needs an input link");
-    if (t.targets.empty()) throw std::runtime_error("pick at least one target variable");
-    for (int v : t.targets) if (v < 0 || v >= (int)c.sources[(size_t)t.source].vars.size()) throw std::runtime_error("a target variable is missing");
+    if (delayed) {
+        bool linked = false;
+        for (const NeuralLink& l : c.links) linked = linked || l.source == t.source;
+        if (!linked) throw std::runtime_error("link the input source of the task to the network");
+        if (int_or(t.max_delay_text, 40) < 1) throw std::runtime_error("the largest delay must be at least 1");
+        o.task.use_saved = false;
+        o.task.horizon_text = "0";
+        o.task.washout_text = std::to_string((std::max)(int_or(t.washout_text, 0), int_or(t.max_delay_text, 40) + 1));
+    }
+    else {
+        if (t.targets.empty()) throw std::runtime_error("pick at least one target variable");
+        for (int v : t.targets) if (v < 0 || v >= (int)c.sources[(size_t)t.source].vars.size()) throw std::runtime_error("a target variable is missing");
+    }
     const long long hold = task_hold(c);
     const double h = parse_num(c.h_text, 0.01);
     const long long total = std::llround(neural_record_time(c) / h) / hold;
@@ -1132,7 +1153,7 @@ NeuralConfig neural_task_config(const NeuralConfig& c) {
     const int M = (std::max)(1, int_or(t.features_text, 1000));
     NeuralSource& src = o.sources[(size_t)t.source];
     src.normalize = true;
-    if (t.use_saved) {
+    if (o.task.use_saved) {
         // Всё, что задаёт признаки и цели, проверяется до расчёта: иначе ошибка выйдет только после него.
         const NeuralReadoutSaved& m = c.readout;
         if (m.empty()) throw std::runtime_error("there is no saved readout: train one and press Keep");
@@ -1147,7 +1168,7 @@ NeuralConfig neural_task_config(const NeuralConfig& c) {
         src.norm_fixed = true;
         src.norm_mean = m.input_mean; src.norm_sd = m.input_sd;
     }
-    else src.normalize_first = (long long)task_split(t, (size_t)(std::max)(0LL, total - (long long)int_or(t.horizon_text, 0))).train1;
+    else src.normalize_first = (long long)task_split(o.task, (size_t)(std::max)(0LL, total - (long long)int_or(o.task.horizon_text, 0))).train1;
     o.pre_scaller_text = std::to_string(hold);
     o.order_var = -1;
     o.observed_per_pop_text = spike ? "0" : std::to_string(M);
@@ -1173,6 +1194,8 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
     const NeuralTask& t = c.task;
     NeuralTaskResult out;
     out.classify = true;
+    out.higher_better = true;
+    out.metric.clear();
     out.names = { "accuracy" };
     const int C = (int)t.classes.size();
     for (int q : t.classes) out.class_names.push_back(c.sources[(size_t)q].name);
@@ -1282,22 +1305,48 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
 
 NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest& r, const NeuralResult& res) {
     if (c.task.kind == NeuralTaskKind::Classification) return class_evaluate(c, r, res);
-    const NeuralTask& t = c.task;
+    NeuralTask t = c.task;
     NeuralTaskResult out;
-    const int horizon = int_or(t.horizon_text, 0), K = (int)t.targets.size();
+    // Memory и Xor: цели из самого входа, задержка d считается от последней строки входа, которую видела точка.
+    const bool memory = t.kind == NeuralTaskKind::Memory, xr = t.kind == NeuralTaskKind::Xor, delayed = memory || xr;
+    const int D = delayed ? int_or(t.max_delay_text, 40) : 0;
+    if (delayed && D < 1) throw std::runtime_error("the largest delay must be at least 1");
+    if (delayed) {
+        t.use_saved = false;
+        t.washout_text = std::to_string((std::max)(int_or(t.washout_text, 0), D + 1));
+    }
+    const int horizon = delayed ? 0 : int_or(t.horizon_text, 0), K = delayed ? D : (int)t.targets.size();
     // Импульсная сеть точек не пишет, признаки идут из журнала, поэтому отсчёты считаются от длины записи.
     const size_t points = (size_t)(std::llround(r.t_max / r.h) / r.pre_scaller) - (size_t)horizon;
     const NeuralSource& src = c.sources[(size_t)t.source];
     // Шаг источника считается как в fill_input: хаотичному источнику другой последний бит даёт другую траекторию.
     const double dt = (double)r.input.hold_steps * r.h * num_or(src.time_scale_text, 1.0);
     const bool three = r.input.stage_rows == 3;
-    std::vector<double> Y(points * (size_t)K);
-    for (int k = 0; k < K; ++k) {
+    std::vector<double> Y(points * (size_t)K, 0.0);
+    if (delayed) {
+        // Точка p видела строки входа 0..p-1 (pre_scaller = hold), поэтому задержка 1 это строка p - 1.
+        const size_t row_stride = (size_t)r.input.stage_rows * (size_t)r.input.channels;
+        const auto u = [&](long long row) { return r.input.samples[(size_t)row * row_stride + (size_t)t.source]; };
+        for (size_t p = 0; p < points; ++p)
+            for (int d = 1; d <= D; ++d) {
+                const long long a = (long long)p - d;
+                if (a - 1 < 0) continue;
+                Y[p * K + (size_t)(d - 1)] = memory ? u(a) : (double)((u(a) > 0.0) != (u(a - 1) > 0.0));
+            }
+        if (memory) out.names.push_back("MC");
+        for (int d = 1; d <= D; ++d) out.names.push_back((memory ? "r2 d=" : "accuracy d=") + std::to_string(d));
+        out.by_delay = true;
+        out.higher_better = true;
+        out.metric.clear();
+    }
+    else for (int k = 0; k < K; ++k) {
         const size_t need = points + (size_t)horizon;
         const std::vector<double> v = neural_source_samples(src, t.targets[(size_t)k], three ? 2 * need + 1 : need, three ? 0.5 * dt : dt);
         for (size_t q = 0; q < points; ++q) Y[q * K + k] = v[(q + (size_t)horizon) * (three ? 2 : 1)];
         out.names.push_back(src.vars[(size_t)t.targets[(size_t)k]]);
     }
+    // Число значений на сеть: у Memory первое это сумма r^2.
+    const int KO = (int)out.names.size();
     const bool spike = c.schedule == NeuralSchedule::Spike;
     if (spike && res.spikes_dropped > 0) throw std::runtime_error("the spike log was cut, the features would be wrong");
     const std::vector<int> inst = r.instance_start.empty() ? std::vector<int>{ 0, r.n_nodes } : r.instance_start;
@@ -1339,9 +1388,10 @@ NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest
     out.dt = (double)r.pre_scaller * r.h;
     out.points = (int)(points - from);
     out.t0 = (double)from * out.dt;
-    out.truth.assign(Y.begin() + (std::ptrdiff_t)(from * K), Y.begin() + (std::ptrdiff_t)(points * K));
-    out.val.assign((size_t)nInst * K, nan); out.test.assign((size_t)nInst * K, nan); out.lambda.assign((size_t)nInst * K, nan);
-    out.predicted.assign((size_t)nInst * out.points * K, nan);
+    // Кривые по задержкам рядов не хранят: окно рисует значение от d, а ряд на 40 целей весил бы десятки МБ на сеть.
+    if (!delayed) out.truth.assign(Y.begin() + (std::ptrdiff_t)(from * K), Y.begin() + (std::ptrdiff_t)(points * K));
+    out.val.assign((size_t)nInst * KO, nan); out.test.assign((size_t)nInst * KO, nan); out.lambda.assign((size_t)nInst * KO, nan);
+    if (!delayed) out.predicted.assign((size_t)nInst * out.points * K, nan);
     const std::vector<double> lambdas = {1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0};
     ReadoutModel m0;
     std::vector<int> nodes0;
@@ -1362,19 +1412,47 @@ NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest
             }
             else {
                 m = readout_fit(F, Y, M, K, sp, lambdas);
-                for (int k = 0; k < K; ++k) { out.val[(size_t)q * K + k] = m.val_nrmse[(size_t)k]; out.lambda[(size_t)q * K + k] = m.lambda[(size_t)k]; }
+                const int o = memory ? 1 : 0;
+                for (int k = 0; k < K; ++k) {
+                    if (!delayed) out.val[(size_t)q * KO + k] = m.val_nrmse[(size_t)k];
+                    out.lambda[(size_t)q * KO + o + k] = m.lambda[(size_t)k];
+                }
             }
             const std::vector<double> p = readout_predict(m, F, from, points);
-            std::copy(p.begin(), p.end(), out.predicted.begin() + (std::ptrdiff_t)((size_t)q * out.points * K));
-            for (int k = 0; k < K; ++k)
-                out.test[(size_t)q * K + k] = readout_nrmse(out.truth.data() + k, p.data() + k, (size_t)K, (size_t)out.points);
+            if (delayed) {
+                const double* y = Y.data() + from * K;
+                double mc = 0.0;
+                for (int k = 0; k < K; ++k) {
+                    const double v = memory ? readout_r2(y + k, p.data() + k, (size_t)K, (size_t)out.points)
+                                            : readout_bit_accuracy(y + k, p.data() + k, (size_t)K, (size_t)out.points);
+                    out.test[(size_t)q * KO + (memory ? 1 : 0) + k] = v;
+                    if (std::isfinite(v)) mc += v;
+                }
+                if (memory) out.test[(size_t)q * KO] = mc;
+            }
+            else {
+                std::copy(p.begin(), p.end(), out.predicted.begin() + (std::ptrdiff_t)((size_t)q * out.points * K));
+                for (int k = 0; k < K; ++k)
+                    out.test[(size_t)q * K + k] = readout_nrmse(out.truth.data() + k, p.data() + k, (size_t)K, (size_t)out.points);
+            }
             if (q == 0) { m0 = std::move(m); nodes0 = std::move(nodes); }
         } catch (const std::exception& e) {
             if (nInst == 1) throw;
             if (out.note.empty()) out.note = "network " + std::to_string(q) + ": " + e.what();
         }
     }
-    if (t.use_saved) return out;
+    if (t.use_saved || memory) return out;
+    if (xr) {
+        // Линейная модель по задержанным входам XOR не решает: её accuracy около 0.5, это и есть контроль нелинейности.
+        const std::vector<double> G = task_delays(r, t.source, points, D + 2);
+        try {
+            const ReadoutModel q = readout_fit(G, Y, D + 2, K, sp, lambdas);
+            const std::vector<double> e = readout_predict(q, G, from, points);
+            for (int k = 0; k < K; ++k) out.delay_test.push_back(readout_bit_accuracy(Y.data() + from * K + k, e.data() + k, (size_t)K, (size_t)out.points));
+            out.delay_length = D + 2;
+        } catch (const std::exception&) {}
+        return out;
+    }
     if (nInst == 1) {
     // Нормировку входа считает fill_input внутри плана; повтор того же ряда по тем же отсчётам даёт те же биты.
     double stats[2] = { 0.0, 1.0 };
@@ -1471,7 +1549,11 @@ std::string neural_sweep_csv(const NeuralConfig& c) {
     const int T = task.instances == nInst ? (int)task.names.size() : 0;
     o << neural_sweep_name(c.sweep.kind) << (two ? std::string(",") + neural_sweep_name(c.sweep2.kind) : std::string())
       << ",population," << (spikes ? "rate" : "R,spread,lyapunov") << ",stop_step";
-    for (int k = 0; k < T; ++k) o << (task.classify ? std::string(",accuracy") : ",nrmse_" + task.names[(size_t)k]);
+    for (int k = 0; k < T; ++k) {
+        std::string col = task.metric.empty() ? task.names[(size_t)k] : "nrmse_" + task.names[(size_t)k];
+        std::replace(col.begin(), col.end(), ' ', '_');
+        o << "," << col;
+    }
     o << "\n";
     for (int q = 0; q < nInst; ++q) {
         for (int p = 0; p < K; ++p) {
@@ -1782,6 +1864,21 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
             if (out.result.ok && job.task.enabled) {
                 out.task_result = neural_task_evaluate(job, plan.request, out.result);
                 if (!out.task_result.applied) out.task_result.model.graph_hash = plan.hash;
+                if (job.task.control_k0) {
+                    // Та же сеть, тот же вход и те же узлы, только K = 0: разница с основным прогоном это вклад рекуррентных связей.
+                    NeuralConfig zero = job;
+                    zero.coupling_text = "0";
+                    NeuralPlan p0 = neural_plan(sys_copy, cs, v, q, zero);
+                    p0.request.cancel = cancel; p0.request.progress = progress;
+                    const NeuralResult r0 = engine.run_neural(p0.request);
+                    if (r0.cancelled) out.task_result.note = "the K = 0 control was stopped";
+                    else if (!r0.ok) out.task_result.note = "the K = 0 control failed: " + r0.error;
+                    else {
+                        const NeuralTaskResult t0 = neural_task_evaluate(zero, p0.request, r0);
+                        out.task_result.control_test = t0.test;
+                        out.task_result.control_val = t0.val;
+                    }
+                }
             }
             out.sweep_values = std::move(plan.sweep_values);
             out.sweep2_values = std::move(plan.sweep2_values);

@@ -353,6 +353,10 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
         o << ",\"filter\":"; jstr(o, c.task.filter_text);
         o << ",\"features\":"; jstr(o, c.task.features_text);
         if (c.task.use_saved) o << ",\"use_saved\":true";
+        if (c.task.kind == NeuralTaskKind::Memory) o << ",\"kind\":\"memory\"";
+        if (c.task.kind == NeuralTaskKind::Xor) o << ",\"kind\":\"xor\"";
+        if (c.task.kind == NeuralTaskKind::Memory || c.task.kind == NeuralTaskKind::Xor) { o << ",\"max_delay\":"; jstr(o, c.task.max_delay_text); }
+        if (c.task.control_k0) o << ",\"control_k0\":true";
         if (c.task.kind == NeuralTaskKind::Classification) {
             o << ",\"kind\":\"classification\",\"classes\":";
             jarr(o, c.task.classes, [&o](int v) { o << v; });
@@ -585,7 +589,13 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
                 else if (k == "filter") c.task.filter_text = p.str();
                 else if (k == "features") c.task.features_text = p.str();
                 else if (k == "use_saved") c.task.use_saved = p.boolean();
-                else if (k == "kind") c.task.kind = p.str() == "classification" ? NeuralTaskKind::Classification : NeuralTaskKind::Regression;
+                else if (k == "kind") {
+                    const std::string v = p.str();
+                    c.task.kind = v == "classification" ? NeuralTaskKind::Classification : v == "memory" ? NeuralTaskKind::Memory
+                                : v == "xor" ? NeuralTaskKind::Xor : NeuralTaskKind::Regression;
+                }
+                else if (k == "max_delay") c.task.max_delay_text = p.str();
+                else if (k == "control_k0") c.task.control_k0 = p.boolean();
                 else if (k == "classes") c.task.classes = jarr_read<int>(p, [&p]() { return std::stoi(p.str_or_num()); });
                 else if (k == "bins") c.task.bins_text = p.str();
                 else if (k == "data_seed") c.task.data_seed_text = p.str();

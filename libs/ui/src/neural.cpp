@@ -13,7 +13,7 @@ static const NeuralSweepKind kNeuralSweeps[] = { NeuralSweepKind::Coupling, Neur
                                                  NeuralSweepKind::ParameterSpread, NeuralSweepKind::Replica,
                                                  NeuralSweepKind::InputGain };
 static const NeuralSourceKind kNeuralSources[] = { NeuralSourceKind::Constant, NeuralSourceKind::Sine, NeuralSourceKind::Square,
-                                                   NeuralSourceKind::Noise, NeuralSourceKind::System };
+                                                   NeuralSourceKind::Noise, NeuralSourceKind::Bits, NeuralSourceKind::System };
 
 static void draw_neural_populations(NeuralSession& s, NeuralConfig& c) {
     if (!ImGui::CollapsingHeader("Populations", ImGuiTreeNodeFlags_DefaultOpen)) return;
@@ -460,6 +460,40 @@ static void draw_neural_classes(NeuralConfig& c) {
                         "Train, validation and test go in time order; ridge on one-hot, lambda by validation accuracy.");
 }
 
+// Memory capacity и XOR: цель берётся из самого входа.
+static void draw_neural_delayed(NeuralConfig& c) {
+    NeuralTask& t = c.task;
+    if (c.sources.empty()) { ImGui::TextDisabled("Add an input source in Input and link it to the network."); return; }
+    if (t.source < 0 || t.source >= (int)c.sources.size()) t.source = 0;
+    ImGui::SetNextItemWidth(kFieldW);
+    if (ImGui::BeginCombo("input", c.sources[(size_t)t.source].name.c_str())) {
+        for (int i = 0; i < (int)c.sources.size(); ++i)
+            if (ImGui::Selectable(c.sources[(size_t)i].name.c_str(), i == t.source)) t.source = i;
+        ImGui::EndCombo();
+    }
+    InputNumStr("largest delay, samples", t.max_delay_text, kFieldW);
+    InputNumStr("washout, samples", t.washout_text, kFieldW);
+    InputNumStr("train share", t.train_text, kFieldW);
+    InputNumStr("validation share", t.val_text, kFieldW);
+    InputNumStr("gap, samples", t.gap_text, kFieldW);
+    InputNumStr("feature nodes", t.features_text, kFieldW);
+    if (c.schedule == NeuralSchedule::Spike) InputNumStr("spike filter time", t.filter_text, kFieldW);
+    const NeuralSourceKind k = c.sources[(size_t)t.source].kind;
+    if (t.kind == NeuralTaskKind::Memory) {
+        ImGui::TextDisabled("Target d is the input d samples back, d = 1..largest delay; r^2 of each on the test, MC is their sum.\n"
+                            "The classic protocol drives the network with white noise: MC <= number of feature nodes.");
+        if (k != NeuralSourceKind::Noise && k != NeuralSourceKind::Bits)
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "A smooth input is predictable from its own past: MC then counts that too. Gaussian noise is the usual input.");
+    }
+    else {
+        ImGui::TextDisabled("Target d is the XOR of the signs of the input d and d + 1 samples back; accuracy by the threshold 0.5,\n"
+                            "chance 0.5. A linear model on the delayed input cannot do XOR: it is shown as the control of nonlinearity.");
+        if (k != NeuralSourceKind::Bits && k != NeuralSourceKind::Noise)
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Use Random bits as the input: the bit is the sign of the sample.");
+    }
+    ImGui::TextDisabled("One sample is the input sample time. The washout is raised to the largest delay + 1 when shorter.");
+}
+
 static void draw_neural_readout(NeuralConfig& c) {
     if (!ImGui::CollapsingHeader("Readout")) return;
     NeuralTask& t = c.task;
@@ -471,10 +505,17 @@ static void draw_neural_readout(NeuralConfig& c) {
                           "Classify: every trial is a sample of a class, accuracy is reported on the test trials.");
     if (!t.enabled) return;
     int kind = (int)t.kind;
-    static const char* const kinds[] = { "Recover or predict the input system", "Classify the stimulus" };
+    static const char* const kinds[] = { "Recover or predict the input system", "Classify the stimulus",
+                                         "Memory capacity: recall the delayed input", "XOR of two delayed bits of the input" };
     ImGui::SetNextItemWidth(kFieldW + 160.0f);
     if (ImGui::Combo("task", &kind, kinds, IM_ARRAYSIZE(kinds))) t.kind = (NeuralTaskKind)kind;
+    ImGui::Checkbox("control: the same network with K = 0", &t.control_k0);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("A second run with the same nodes, input, feature nodes and data, but every recurrent link is 0.\n"
+                          "The difference to the main run is what the links add; the readout of the control is trained anew.\n"
+                          "Not with a sweep: sweep over K instead.");
     if (t.kind == NeuralTaskKind::Classification) { draw_neural_classes(c); return; }
+    if (t.kind == NeuralTaskKind::Memory || t.kind == NeuralTaskKind::Xor) { draw_neural_delayed(c); return; }
     std::vector<int> systems;
     for (int i = 0; i < (int)c.sources.size(); ++i) if (c.sources[(size_t)i].kind == NeuralSourceKind::System) systems.push_back(i);
     if (systems.empty()) { ImGui::TextDisabled("Add an input source that is a system from the library."); return; }
@@ -771,7 +812,40 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
             for (size_t p = 0; p < c.pop_rate.size() && p < c.populations.size(); ++p)
                 ImGui::Text("%s: %.4g spikes per node per unit of time", c.populations[p].name.c_str(), c.pop_rate[p]);
         const NeuralTaskResult& q = c.task_result;
-        const size_t T = q.classify ? 0 : q.names.size();
+        const size_t T = q.classify || q.by_delay ? 0 : q.names.size();
+        if (q.by_delay && !q.test.empty()) {
+            const size_t KO = q.names.size();
+            const bool memory = !q.names.empty() && q.names[0] == "MC";
+            const int D = (int)KO - (memory ? 1 : 0);
+            // У свипа значения по сетям в окнах Neural Sweep и Neural Map; здесь сеть 0 и разброс MC.
+            if (memory) {
+                double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+                for (int i = 0; i < q.instances; ++i) if (std::isfinite(q.test[(size_t)i * KO])) { lo = (std::min)(lo, q.test[(size_t)i * KO]); hi = (std::max)(hi, q.test[(size_t)i * KO]); }
+                if (q.instances > 1) ImGui::Text("memory capacity MC %.2f .. %.2f over %d networks, delays 1..%d", lo, hi, q.instances, D);
+                else ImGui::Text("memory capacity MC = %.2f over delays 1..%d, %d feature nodes", q.test[0], D, q.features);
+                if (q.control_test.size() == KO) ImGui::TextDisabled("the same network with K = 0: MC = %.2f", q.control_test[0]);
+            }
+            else {
+                std::string line = "XOR accuracy by delay:";
+                char b[48];
+                for (int d = 0; d < (std::min)(D, 6); ++d) { std::snprintf(b, sizeof b, " %d: %.3f", d + 1, q.test[(size_t)d]); line += b; }
+                ImGui::TextUnformatted(line.c_str());
+                if (q.control_test.size() == KO) {
+                    line = "K = 0:";
+                    for (int d = 0; d < (std::min)(D, 6); ++d) { std::snprintf(b, sizeof b, " %d: %.3f", d + 1, q.control_test[(size_t)d]); line += b; }
+                    ImGui::TextDisabled("%s", line.c_str());
+                }
+                if (!q.delay_test.empty()) {
+                    line = "linear on " + std::to_string(q.delay_length) + " delayed inputs:";
+                    for (int d = 0; d < (std::min)(D, 6); ++d) { std::snprintf(b, sizeof b, " %d: %.3f", d + 1, q.delay_test[(size_t)d]); line += b; }
+                    ImGui::TextDisabled("%s", line.c_str());
+                }
+                ImGui::TextDisabled("Chance 0.5. The whole curve is in the Neural Readout window.");
+            }
+        }
+        if (q.classify && q.control_test.size() == 1) ImGui::TextDisabled("the same network with K = 0: accuracy %.3f", q.control_test[0]);
+        if (T > 0 && q.control_test.size() == T)
+            for (size_t k = 0; k < T; ++k) ImGui::TextDisabled("%s with K = 0: test NRMSE %.4f", q.names[k].c_str(), q.control_test[k]);
         if (q.classify && !q.test.empty()) {
             // Лучшая сеть у точности наибольшая.
             int best = -1, finite = 0;
@@ -974,7 +1048,18 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         }
         return;
     }
-    if (readout && !task.names.empty()) {
+    // Memory и XOR: кривая значения от задержки d, сеть, та же сеть при K = 0 и линейная модель по задержкам.
+    const bool delayMemory = readout && task.by_delay && !task.names.empty() && task.names[0] == "MC";
+    const int delayFirst = delayMemory ? 1 : 0, delayD = (int)task.names.size() - delayFirst;
+    const bool delayCtl = readout && task.by_delay && task.control_test.size() == task.names.size() && task.instances == 1;
+    const bool delayLin = readout && task.by_delay && (int)task.delay_test.size() == delayD;
+    if (readout && task.by_delay && !task.test.empty()) {
+        if (delayMemory) ImGui::Text("MC = %.2f over delays 1..%d", task.test[(size_t)taskInst * task.names.size()], delayD);
+        else ImGui::TextUnformatted("XOR of the input signs d and d + 1 samples back, chance 0.5");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%d feature nodes, test part", task.features);
+    }
+    if (readout && !task.names.empty() && !task.by_delay) {
         const std::vector<const char*> items = c_str_list(task.names);
         if (vs.readout_target >= (int)items.size()) vs.readout_target = 0;
         ImGui::SetNextItemWidth(90.0f);
@@ -1066,6 +1151,18 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     }
     else if (readout) {
         if (task.names.empty()) empty = "Turn on the readout in Neural Controls and press Run.";
+        else if (task.by_delay) {
+            const size_t at = (size_t)taskInst * task.names.size() + (size_t)delayFirst;
+            const int first = delayFirst;
+            curves = 1 + (delayCtl ? 1 : 0) + (delayLin ? 1 : 0); points = delayD;
+            xof = [](int p) { return (double)(p + 1); };
+            yof = [&task, at, first, delayCtl](int k, int p) {
+                if (k == 0) return task.test[at + (size_t)p];
+                if (k == 1 && delayCtl) return task.control_test[(size_t)(first + p)];
+                return task.delay_test[(size_t)p];
+            };
+            yname = delayMemory ? "r^2" : "accuracy";
+        }
         else {
             const int K2 = (int)task.names.size(), v = vs.readout_target;
             const size_t at = (size_t)taskInst * task.points * K2;
@@ -1102,7 +1199,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
             curves = n2; points = (int)c.sweep_values.size();
             xof = [&c](int p) { return c.sweep_values[(size_t)p]; };
             yof = [&task, n2, taskT, v](int k, int p) { return task.test[((size_t)p * n2 + k) * taskT + v]; };
-            yname = task.classify ? std::string("accuracy") : "NRMSE " + task.names[(size_t)v];
+            yname = task.metric.empty() ? task.names[(size_t)v] : task.metric + " " + task.names[(size_t)v];
         }
     }
     else if (!lyap && (r.n_points <= 0 || nPops <= 0)) empty = none;
@@ -1206,6 +1303,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         si.label = what == kNeuralNodes ? std::to_string(r.observed[(size_t)nodes[(size_t)k]])
                  : input ? c.sources[(size_t)k].name
                  : weights ? (k < (int)c.watch_labels.size() ? c.watch_labels[(size_t)k] : std::to_string(k))
+                 : readout && task.by_delay ? std::string(k == 0 ? "network" : k == 1 && delayCtl ? "K = 0" : "linear on delays")
                  : readout ? std::string(k == 0 ? "true" : "readout")
                  : readoutSweep ? std::string(task.classify ? "accuracy" : "NRMSE")
                  : lyap ? std::string("lambda") : c.populations[(size_t)(k % K)].name;
@@ -1217,7 +1315,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         }
         series.push_back(si);
     }
-    view.x_axis.name = byValue ? neural_sweep_name(c.sweep.kind) : "t";
+    view.x_axis.name = byValue ? neural_sweep_name(c.sweep.kind) : readout && task.by_delay ? "delay d, samples" : "t";
     view.y_axis.name = yname;
     if (longest == 0) {
         ImGui::TextDisabled(readoutSweep ? "No network gave a readout: see the note in Neural Controls."
@@ -1232,9 +1330,10 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     view.x_fit_use_explicit = !byValue && t_end > r.t0;
     view.x_fit_min = readout ? task.t0 : r.t0;
     view.x_fit_max = readout ? task.t0 + task.dt * (double)(task.points - 1) : t_end;
+    if (readout && task.by_delay) { view.x_fit_min = 1.0; view.x_fit_max = (double)(std::max)(2, delayD); }
     view.pad_y = true;
     view.show_zero_x = view.show_zero_y = false;
-    view.point_markers = byValue;
+    view.point_markers = byValue || (readout && task.by_delay);
     // Клик по точке свипа выбирает её экземпляр для окон от времени; вторая ось остаётся как была.
     const int sweepN2 = (std::max)(1, (int)c.sweep2_values.size());
     view.left_click_plain = byValue;
@@ -1353,7 +1452,7 @@ void draw_neural_map_window(AppModel& model, PlotRenderer& renderer, std::map<in
     hv.y_axis.log_scale = c.sweep2.log && c.sweep2_values.front() > 0.0;
     // Вид хранит указатель на имя между кадрами.
     static std::string value_name;
-    value_name = readout ? (task.classify ? std::string("accuracy") : "NRMSE " + task.names[(size_t)pop]) : spikes ? "rate" : lyap ? "lambda" : log10_spread ? "log10 spread" : spread ? "spread" : "R";
+    value_name = readout ? (task.metric.empty() ? task.names[(size_t)pop] : task.metric + " " + task.names[(size_t)pop]) : spikes ? "rate" : lyap ? "lambda" : log10_spread ? "log10 spread" : spread ? "spread" : "R";
     hv.value_name = value_name.c_str();
     hv.left_click_plain = true;
     hv.on_left_click = [&vs, n2](int ix, int iy, double, double) { vs.instance = ix * n2 + iy; };
