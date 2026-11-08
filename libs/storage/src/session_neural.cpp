@@ -1,8 +1,153 @@
 ﻿#include "session_json_internal.h"
+#include <charconv>
+#include <cmath>
 
 using namespace ucuda::storage_detail;
 
 // Neural-сессия. Перенесено из U-CUDA/session_io.cpp (main, d30f0ac) без изменений в телах.
+
+// Веса выхода пишутся кратчайшим текстом, который читается в тот же double: применение должно совпасть с обучением побитово.
+static void jnum(std::ostringstream& o, double v) {
+    if (!std::isfinite(v)) { jstr(o, std::isnan(v) ? "nan" : v > 0.0 ? "inf" : "-inf"); return; }
+    char b[32];
+    const std::to_chars_result r = std::to_chars(b, b + sizeof b, v);
+    o.write(b, r.ptr - b);
+}
+static double jnum_read(JP& p) {
+    const std::string t = p.str_or_num();
+    double v = 0.0;
+    const std::from_chars_result r = std::from_chars(t.data(), t.data() + t.size(), v);
+    if (r.ec != std::errc() || r.ptr != t.data() + t.size()) throw std::runtime_error("bad number in the saved readout: " + t);
+    return v;
+}
+template <class T, class Write> static void jarr(std::ostringstream& o, const std::vector<T>& v, Write w) {
+    o << "[";
+    for (size_t i = 0; i < v.size(); ++i) { if (i) o << ","; w(v[i]); }
+    o << "]";
+}
+template <class T, class Read> static std::vector<T> jarr_read(JP& p, Read rd) {
+    std::vector<T> v;
+    p.expect('[');
+    if (!p.opt(']')) while (true) { v.push_back(rd()); if (p.opt(',')) continue; p.expect(']'); break; }
+    return v;
+}
+
+static void write_neural_readout(std::ostringstream& o, const NeuralReadoutSaved& r) {
+    const auto num = [&o](double v) { jnum(o, v); };
+    const auto whole = [&o](int v) { o << v; };
+    o << "{\"graph_hash\":"; jstr(o, r.graph_hash);
+    o << ",\"spikes\":" << (r.spikes ? "true" : "false");
+    o << ",\"feature_var\":" << r.feature_var;
+    o << ",\"features_requested\":" << r.features_requested;
+    o << ",\"filter\":"; jnum(o, r.filter);
+    o << ",\"sample_dt\":"; jnum(o, r.sample_dt);
+    o << ",\"source\":" << r.source << ",\"horizon\":" << r.horizon;
+    o << ",\"targets\":"; jarr(o, r.targets, whole);
+    o << ",\"names\":"; jarr(o, r.names, [&o](const std::string& s) { jstr(o, s); });
+    o << ",\"input_mean\":"; jnum(o, r.input_mean);
+    o << ",\"input_sd\":"; jnum(o, r.input_sd);
+    o << ",\"nodes\":"; jarr(o, r.nodes, whole);
+    o << ",\"M\":" << r.M << ",\"K\":" << r.K;
+    o << ",\"mean\":"; jarr(o, r.mean, num);
+    o << ",\"scale\":"; jarr(o, r.scale, num);
+    o << ",\"w\":"; jarr(o, r.w, num);
+    o << ",\"lambda\":"; jarr(o, r.lambda, num);
+    o << ",\"val\":"; jarr(o, r.val, num);
+    o << ",\"test\":"; jarr(o, r.test, num);
+    o << "}";
+}
+
+static NeuralReadoutSaved read_neural_readout(JP& p) {
+    NeuralReadoutSaved r;
+    const auto num = [&p]() { return jnum_read(p); };
+    const auto whole = [&p]() { return std::stoi(p.str_or_num()); };
+    p.expect('{');
+    if (!p.opt('}')) while (true) {
+        const std::string k = p.str();
+        p.expect(':');
+        if      (k == "graph_hash") r.graph_hash = p.str();
+        else if (k == "spikes") r.spikes = p.boolean();
+        else if (k == "feature_var") r.feature_var = whole();
+        else if (k == "features_requested") r.features_requested = whole();
+        else if (k == "filter") r.filter = num();
+        else if (k == "sample_dt") r.sample_dt = num();
+        else if (k == "source") r.source = whole();
+        else if (k == "horizon") r.horizon = whole();
+        else if (k == "targets") r.targets = jarr_read<int>(p, whole);
+        else if (k == "names") r.names = jarr_read<std::string>(p, [&p]() { return p.str(); });
+        else if (k == "input_mean") r.input_mean = num();
+        else if (k == "input_sd") r.input_sd = num();
+        else if (k == "nodes") r.nodes = jarr_read<int>(p, whole);
+        else if (k == "M") r.M = whole();
+        else if (k == "K") r.K = whole();
+        else if (k == "mean") r.mean = jarr_read<double>(p, num);
+        else if (k == "scale") r.scale = jarr_read<double>(p, num);
+        else if (k == "w") r.w = jarr_read<double>(p, num);
+        else if (k == "lambda") r.lambda = jarr_read<double>(p, num);
+        else if (k == "val") r.val = jarr_read<double>(p, num);
+        else if (k == "test") r.test = jarr_read<double>(p, num);
+        else p.skip_value();
+        if (p.opt(',')) continue;
+        p.expect('}');
+        break;
+    }
+    // Битая запись не применяется, но и сессию целиком не роняет: выход просто пропадает.
+    const size_t M = (size_t)r.M, K = (size_t)r.K;
+    if (r.M < 1 || r.K < 1 || r.nodes.size() != M || r.mean.size() != M || r.scale.size() != M || r.w.size() != K * (M + 1)
+        || r.targets.size() != K || r.lambda.size() != K)
+        return NeuralReadoutSaved{};
+    return r;
+}
+
+void neural_readout_export(const std::string& path, const NeuralReadoutSaved& r) {
+    if (r.empty()) throw std::runtime_error("there is no saved readout to export");
+    if (path.empty()) throw std::runtime_error("set the file name of the readout first");
+    std::ostringstream o;
+    o << "{\"format\":\"ucuda-neural-readout\",\"version\":1,\"formula\":";
+    jstr(o, "y[k] = w[k*(M+1)+M] + sum over i of w[k*(M+1)+i] * (f[i] - mean[i]) / scale[i]; f[i] is the state of node nodes[i] "
+            "(spikes: the spike train of that node filtered by exp(-t/filter)), sampled every sample_dt; the input was normalised "
+            "as (u - input_mean) / input_sd; scale inf = the feature was dropped");
+    o << ",\"readout\":";
+    write_neural_readout(o, r);
+    o << "}\n";
+    std::ofstream f(path, std::ios::binary);
+    f << o.str();
+    if (!f) throw std::runtime_error("could not write " + path);
+}
+
+NeuralReadoutSaved neural_readout_import(const std::string& path) {
+    if (path.empty()) throw std::runtime_error("set the file name of the readout first");
+    std::ifstream f(path, std::ios::binary);
+    if (!f) throw std::runtime_error("could not read " + path);
+    std::stringstream ss;
+    ss << f.rdbuf();
+    const std::string json = ss.str();
+    std::string format;
+    int version = 0;
+    bool have = false;
+    NeuralReadoutSaved r;
+    try {
+        JP p(json);
+        p.expect('{');
+        if (!p.opt('}')) while (true) {
+            const std::string k = p.str();
+            p.expect(':');
+            if      (k == "format") format = p.str();
+            else if (k == "version") version = std::stoi(p.str_or_num());
+            else if (k == "readout") { r = read_neural_readout(p); have = true; }
+            else p.skip_value();
+            if (p.opt(',')) continue;
+            p.expect('}');
+            break;
+        }
+    } catch (const std::exception& e) {
+        throw std::runtime_error(path + " is not a valid readout file (" + e.what() + ")");
+    }
+    if (format != "ucuda-neural-readout") throw std::runtime_error(path + " is not a readout written by Export");
+    if (version != 1) throw std::runtime_error(path + ": readout format version " + std::to_string(version) + " is not supported");
+    if (!have || r.empty()) throw std::runtime_error(path + ": the readout sizes do not agree");
+    return r;
+}
 
 static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
     o << "{\"label\":"; jstr(o, c.label);
@@ -207,8 +352,11 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
         o << ",\"val\":"; jstr(o, c.task.val_text);
         o << ",\"filter\":"; jstr(o, c.task.filter_text);
         o << ",\"features\":"; jstr(o, c.task.features_text);
+        if (c.task.use_saved) o << ",\"use_saved\":true";
         o << "}";
     }
+    if (!c.readout.empty()) { o << ",\"readout\":"; write_neural_readout(o, c.readout); }
+    if (!c.readout_path.empty()) { o << ",\"readout_path\":"; jstr(o, c.readout_path); }
     if (c.keep_checkpoint) o << ",\"keep_checkpoint\":true";
     if (!c.checkpoint_path.empty()) { o << ",\"checkpoint_path\":"; jstr(o, c.checkpoint_path); }
     o << "}";
@@ -430,6 +578,7 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
                 else if (k == "val") c.task.val_text = p.str();
                 else if (k == "filter") c.task.filter_text = p.str();
                 else if (k == "features") c.task.features_text = p.str();
+                else if (k == "use_saved") c.task.use_saved = p.boolean();
                 else p.skip_value();
                 if (p.opt(',')) continue;
                 p.expect('}');
@@ -437,6 +586,8 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
             }
         }
     }
+    else if (key == "readout")          c.readout = read_neural_readout(p);
+    else if (key == "readout_path")     c.readout_path = p.str();
     else if (key == "device_state")     c.device.state_name = p.str();
     else if (key == "device_rhs")       c.device.rhs_text = p.str();
     else if (key == "device_current")   c.device.current_text = p.str();

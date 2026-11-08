@@ -91,7 +91,7 @@ struct SourceSeries {
 };
 
 // RK4 снимка системы: active отсчётов через dt времени источника, после skip.
-std::vector<double> source_system_series(const NeuralSource& s, size_t active, double dt, size_t per_sample = 1) {
+std::vector<double> source_system_series(const NeuralSource& s, size_t active, double dt, size_t per_sample = 1, double* stats = nullptr) {
     if (s.rhs.empty()) throw std::runtime_error("input source '" + s.name + "' has no system: pick one from the library");
     if (s.variable < 0 || s.variable >= (int)s.vars.size()) throw std::runtime_error("input source '" + s.name + "': bad variable");
     System sys;
@@ -132,13 +132,17 @@ std::vector<double> source_system_series(const NeuralSource& s, size_t active, d
         for (long long m = 0; m < (std::max)(1LL, sub); ++m) advance(h);
     }
     if (s.normalize && active > 1) {
-        const size_t used = s.normalize_first > 0 ? (std::min)(active, (size_t)s.normalize_first * per_sample) : active;
-        double m = 0.0, v = 0.0;
-        for (size_t q = 0; q < used; ++q) m += out[q];
-        m /= (double)used;
-        for (size_t q = 0; q < used; ++q) v += (out[q] - m) * (out[q] - m);
-        v = std::sqrt(v / (double)used);
+        double m = s.norm_mean, v = s.norm_sd;
+        if (!s.norm_fixed) {
+            const size_t used = s.normalize_first > 0 ? (std::min)(active, (size_t)s.normalize_first * per_sample) : active;
+            m = 0.0; v = 0.0;
+            for (size_t q = 0; q < used; ++q) m += out[q];
+            m /= (double)used;
+            for (size_t q = 0; q < used; ++q) v += (out[q] - m) * (out[q] - m);
+            v = std::sqrt(v / (double)used);
+        }
         if (!(v > 0.0)) throw std::runtime_error("input source '" + s.name + "' is constant, it cannot be normalised");
+        if (stats) { stats[0] = m; stats[1] = v; }
         for (double& e : out) e = (e - m) / v;
     }
     return out;
@@ -1002,13 +1006,28 @@ NeuralConfig neural_task_config(const NeuralConfig& c) {
     const double h = parse_num(c.h_text, 0.01);
     const long long total = std::llround(neural_record_time(c) / h) / hold;
     if (int_or(t.horizon_text, 0) < 0) throw std::runtime_error("the horizon must not be negative");
-    const ReadoutSplit sp = task_split(t, (size_t)(std::max)(0LL, total - (long long)int_or(t.horizon_text, 0)));
-    o.sources[(size_t)t.source].normalize = true;
-    o.sources[(size_t)t.source].normalize_first = (long long)sp.train1;
-    o.pre_scaller_text = std::to_string(hold);
-    o.order_var = -1;
     const bool spike = c.schedule == NeuralSchedule::Spike;
     const int M = (std::max)(1, int_or(t.features_text, 1000));
+    NeuralSource& src = o.sources[(size_t)t.source];
+    src.normalize = true;
+    if (t.use_saved) {
+        // Всё, что задаёт признаки и цели, проверяется до расчёта: иначе ошибка выйдет только после него.
+        const NeuralReadoutSaved& m = c.readout;
+        if (m.empty()) throw std::runtime_error("there is no saved readout: train one and press Keep");
+        if (m.spikes != spike) throw std::runtime_error("the saved readout was trained on a different schedule (spikes or states)");
+        if (m.source != t.source || m.targets != t.targets) throw std::runtime_error("the input system or the targets differ from the saved readout");
+        if (m.horizon != int_or(t.horizon_text, 0)) throw std::runtime_error("the horizon differs from the saved readout");
+        if (m.features_requested != M) throw std::runtime_error("the number of feature nodes differs from the saved readout");
+        if (!spike && m.feature_var != c.input_var) throw std::runtime_error("the node variable differs from the saved readout");
+        if (spike && num_or(t.filter_text, 20.0) != m.filter) throw std::runtime_error("the spike filter time differs from the saved readout");
+        if (std::fabs((double)hold * h - m.sample_dt) > 1e-12 * m.sample_dt) throw std::runtime_error("the input sample time differs from the saved readout");
+        if (total - (long long)m.horizon <= (long long)int_or(t.washout_text, 0)) throw std::runtime_error("the record is not longer than the washout");
+        src.norm_fixed = true;
+        src.norm_mean = m.input_mean; src.norm_sd = m.input_sd;
+    }
+    else src.normalize_first = (long long)task_split(t, (size_t)(std::max)(0LL, total - (long long)int_or(t.horizon_text, 0))).train1;
+    o.pre_scaller_text = std::to_string(hold);
+    o.order_var = -1;
     o.observed_per_pop_text = spike ? "0" : std::to_string(M);
     o.obs_vars_off.clear();
     for (int k = 0; k < 64; ++k) if (k != c.input_var || spike) o.obs_vars_off.push_back(k);
@@ -1032,7 +1051,6 @@ NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest
     const int horizon = int_or(t.horizon_text, 0), K = (int)t.targets.size();
     // Импульсная сеть точек не пишет, признаки идут из журнала, поэтому отсчёты считаются от длины записи.
     const size_t points = (size_t)(std::llround(r.t_max / r.h) / r.pre_scaller) - (size_t)horizon;
-    const ReadoutSplit sp = task_split(t, points);
     const NeuralSource& src = c.sources[(size_t)t.source];
     // Шаг источника считается как в fill_input: хаотичному источнику другой последний бит даёт другую траекторию.
     const double dt = (double)r.input.hold_steps * r.h * num_or(src.time_scale_text, 1.0);
@@ -1045,6 +1063,7 @@ NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest
         out.names.push_back(src.vars[(size_t)t.targets[(size_t)k]]);
     }
     std::vector<double> F;
+    std::vector<int> nodes;
     int M = 0;
     if (c.schedule == NeuralSchedule::Spike) {
         if (res.spikes_dropped > 0) throw std::runtime_error("the spike log was cut, the features would be wrong");
@@ -1054,23 +1073,57 @@ NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest
             if (!c.populations[p].spike_source) { node0 = r.observe.pop_start[p]; M = (std::min)(want, r.observe.pop_start[p + 1] - node0); break; }
         const double tau = num_or(t.filter_text, 20.0) / r.h;
         F = readout_spike_features(res.spike_step, res.spike_node, node0, M, 0, r.pre_scaller, (int)points, tau);
+        for (int i = 0; i < M; ++i) nodes.push_back(node0 + i);
     }
     else {
         M = (int)res.observed.size();
         if (M < 1 || res.traces.size() < points * (size_t)M) throw std::runtime_error("the record has no features");
         F.assign(res.traces.begin(), res.traces.begin() + (std::ptrdiff_t)(points * (size_t)M));
+        nodes = res.observed;
     }
+    out.features = M;
+    out.dt = (double)r.pre_scaller * r.h;
+    if (t.use_saved) {
+        const NeuralReadoutSaved& s = c.readout;
+        if (nodes != s.nodes) throw std::runtime_error("the feature nodes differ from the saved readout");
+        ReadoutModel m;
+        m.M = s.M; m.K = s.K; m.mean = s.mean; m.scale = s.scale; m.w = s.w;
+        const size_t wash = (size_t)int_or(t.washout_text, 0);
+        out.applied = true;
+        out.lambda = s.lambda;
+        out.points = (int)(points - wash);
+        out.t0 = (double)wash * out.dt;
+        out.predicted = readout_predict(m, F, wash, points);
+        out.truth.assign(Y.begin() + (std::ptrdiff_t)(wash * K), Y.begin() + (std::ptrdiff_t)(points * K));
+        for (int k = 0; k < K; ++k) out.test.push_back(readout_nrmse(out.truth.data() + k, out.predicted.data() + k, (size_t)K, (size_t)out.points));
+        return out;
+    }
+    const ReadoutSplit sp = task_split(t, points);
     const std::vector<double> lambdas = {1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0};
     const ReadoutModel m = readout_fit(F, Y, M, K, sp, lambdas);
     const std::vector<double> p = readout_predict(m, F, sp.test0, sp.test1);
-    out.features = M;
     out.val = m.val_nrmse; out.lambda = m.lambda;
     out.points = (int)(sp.test1 - sp.test0);
     out.t0 = (double)sp.test0 * (double)r.pre_scaller * r.h;
-    out.dt = (double)r.pre_scaller * r.h;
     out.predicted = p;
     out.truth.assign(Y.begin() + (std::ptrdiff_t)(sp.test0 * K), Y.begin() + (std::ptrdiff_t)(sp.test1 * K));
     for (int k = 0; k < K; ++k) out.test.push_back(readout_nrmse(out.truth.data() + k, p.data() + k, (size_t)K, (size_t)out.points));
+    // Нормировку входа считает fill_input внутри плана; повтор того же ряда по тем же отсчётам даёт те же биты.
+    double stats[2] = { 0.0, 1.0 };
+    const size_t used = (size_t)src.normalize_first * (three ? 2 : 1);
+    source_system_series(src, used, three ? 0.5 * dt : dt, three ? 2 : 1, stats);
+    NeuralReadoutSaved& s = out.model;
+    s.spikes = c.schedule == NeuralSchedule::Spike;
+    s.feature_var = c.input_var;
+    s.features_requested = (std::max)(1, int_or(t.features_text, 1000));
+    s.filter = num_or(t.filter_text, 20.0);
+    s.sample_dt = out.dt;
+    s.source = t.source; s.horizon = horizon;
+    s.targets = t.targets; s.names = out.names;
+    s.input_mean = stats[0]; s.input_sd = stats[1];
+    s.nodes = nodes;
+    s.M = m.M; s.K = m.K; s.mean = m.mean; s.scale = m.scale; s.w = m.w;
+    s.lambda = m.lambda; s.val = m.val_nrmse; s.test = out.test;
     // Простая модель той же задачи: без неё число ни о чём не говорит.
     double best = std::numeric_limits<double>::infinity();
     for (int D : {1, 5, 10, 20, 50}) {
@@ -1410,6 +1463,10 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
             }
             plan.request.cancel = cancel; plan.request.progress = progress;
             if (resume) { plan.request.resume = snap.checkpoint; plan.request.observe.order_var = -1; }
+            // Признаки и цели выхода берутся от начала записи, у продолжения его нет.
+            if (job.task.enabled && resume) throw std::runtime_error("a readout does not work with Continue yet");
+            if (job.task.enabled && job.task.use_saved && plan.hash != job.readout.graph_hash)
+                throw std::runtime_error("the saved readout was trained on another graph (hash " + job.readout.graph_hash + ", now " + plan.hash + ")");
             out.resumed = resume;
             out.watched_per_instance = plan.watched_per_instance;
             out.watch_labels = plan.watch_labels;
@@ -1442,7 +1499,10 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
                     out.weight_summary.push_back(lo); out.weight_summary.push_back(n ? sum / (double)n : 0.0); out.weight_summary.push_back(hi);
                 }
             }
-            if (out.result.ok && job.task.enabled) out.task_result = neural_task_evaluate(job, plan.request, out.result);
+            if (out.result.ok && job.task.enabled) {
+                out.task_result = neural_task_evaluate(job, plan.request, out.result);
+                if (!out.task_result.applied) out.task_result.model.graph_hash = plan.hash;
+            }
             out.sweep_values = std::move(plan.sweep_values);
             out.sweep2_values = std::move(plan.sweep2_values);
             out.sweep_lyap = out.result.lyapunov;

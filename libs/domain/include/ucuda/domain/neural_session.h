@@ -113,6 +113,9 @@ struct NeuralSource {
     std::string skip_text = "100";         // переходный процесс источника
     bool normalize = true;                 // среднее 0 и СКО 1 по поданным отсчётам
     long long normalize_first = 0;         // считать их только по первым отсчётам, 0 = по всем: задача не должна видеть тест
+    // Только в запуске: сохранённый выход видел вход с нормировкой обучения, её и берём. В JSON не пишется.
+    bool norm_fixed = false;
+    double norm_mean = 0.0, norm_sd = 1.0;
 };
 
 // Доля узлов популяции на канал: у одного узла один канал, доли одной популяции не пересекаются.
@@ -134,9 +137,34 @@ struct NeuralTask {
     std::string train_text = "0.6", val_text = "0.2";      // доли остатка
     std::string filter_text = "20";        // импульсный режим: постоянная фильтра спайков
     std::string features_text = "1000";    // узлов-признаков
+    bool use_saved = false;                // применить сохранённый выход ко всей записи после прогрева, без обучения
+};
+
+// Обученный выход для применения без обучения. Применение требует того же графа, признаков, целей и шага отсчётов;
+// параметры узлов и источник (его начальные условия, параметры) менять можно, на этом и проверяется обобщение.
+// y_k = w[k][M] + sum_i w[k][i] (f_i - mean_i) / scale_i, scale = inf у выпавшего признака.
+struct NeuralReadoutSaved {
+    std::string graph_hash;
+    bool spikes = false;                   // признаки: фильтр спайков, иначе состояние узла
+    int feature_var = 0;                   // непрерывная сеть: переменная узла
+    int features_requested = 0;            // поле feature nodes на обучении
+    double filter = 0.0;                   // импульсный режим: постоянная фильтра, время сети
+    double sample_dt = 0.0;                // отсчёт выхода, время сети
+    int source = 0, horizon = 0;
+    std::vector<int> targets;
+    std::vector<std::string> names;
+    double input_mean = 0.0, input_sd = 1.0;   // нормировка входа на обучении
+    std::vector<int> nodes;                // [M] узлы-признаки
+    int M = 0, K = 0;
+    std::vector<double> mean, scale;       // [M]
+    std::vector<double> w;                 // [K][M + 1]
+    std::vector<double> lambda, val, test; // [K], на обучении
+    bool empty() const { return w.empty(); }
 };
 
 struct NeuralTaskResult {
+    bool applied = false;                  // сохранённый выход без обучения: val, delay_test пусты, test по записи после прогрева
+    NeuralReadoutSaved model;              // обученный в этом расчёте, пусто при applied
     std::vector<std::string> names;        // [targets]
     std::vector<double> val, test, lambda; // [targets], NRMSE
     std::vector<double> delay_test;        // [targets], ridge по задержкам входа, длина выбрана на валидации
@@ -203,6 +231,8 @@ struct NeuralConfig {
     std::vector<NeuralPlasticRule> plastic_rules;
     NeuralDeviceModel device;
     NeuralTask task;
+    NeuralReadoutSaved readout;            // сохранённый кнопкой Keep, пишется в сессию
+    std::string readout_path;              // файл экспорта
 
     // Снимок конца расчёта живёт только в памяти, пока его не сохранили в файл.
     bool keep_checkpoint = false;

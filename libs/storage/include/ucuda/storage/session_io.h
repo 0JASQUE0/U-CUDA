@@ -82,6 +82,10 @@ bool session_from_json_network(const std::string& json, NetworkState& s);
 // Neural-сессия: рецепт сети (популяции, проекции, seed) с хешем графа; рёбер в файле нет.
 std::string session_to_json_neural(const NeuralState& s);
 bool session_from_json_neural(const std::string& json, NeuralState& s);
+// Обученный выход Neural отдельным JSON с формулой применения, для обработки вне U-CUDA.
+void neural_readout_export(const std::string& path, const NeuralReadoutSaved& r);
+// Обратное к экспорту; бросает на чужом формате или несогласованных размерах.
+NeuralReadoutSaved neural_readout_import(const std::string& path);
 
 // Parametric plot windows (AppModel::parametric_plot_windows) — the dynamic
 // window list, spans all 3 sessions so it's its own file (`_last_parametric_windows.json`)

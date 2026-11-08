@@ -454,6 +454,52 @@ static void draw_neural_readout(NeuralConfig& c) {
     InputNumStr("feature nodes", t.features_text, kFieldW);
     if (c.schedule == NeuralSchedule::Spike) InputNumStr("spike filter time", t.filter_text, kFieldW);
     ImGui::TextDisabled("The input sample time sets the samples. The transient must be 0, sweeps are off.");
+
+    ImGui::SeparatorText("Saved readout");
+    const bool have = !c.readout.empty(), fresh = !c.task_result.model.empty();
+    if (!have) ImGui::TextDisabled("None yet: train a readout and press Keep.");
+    else {
+        const NeuralReadoutSaved& m = c.readout;
+        for (size_t k = 0; k < m.names.size(); ++k)
+            ImGui::Text("%s from %d feature nodes, test NRMSE %.4f when trained", m.names[k].c_str(), m.M, k < m.test.size() ? m.test[k] : 0.0);
+        ImGui::TextDisabled("graph hash %s", m.graph_hash.c_str());
+    }
+    if (!have) ImGui::BeginDisabled();
+    ImGui::Checkbox("use the saved readout, no training", &t.use_saved);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Run applies the saved weights to the whole record after the washout and reports NRMSE there.\n"
+                          "The graph, the feature nodes, the targets, the horizon and the sample time must match the training;\n"
+                          "node parameters and the source transient (another piece of the same attractor) may change;\n"
+                          "other initial conditions or parameters of the input system come from the library: edit and pick it again.\n"
+                          "The input is normalised with the mean and deviation of the training.");
+    if (!have) ImGui::EndDisabled();
+    if (!fresh) ImGui::BeginDisabled();
+    if (ImGui::Button("Keep")) c.readout = c.task_result.model;
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Keeps the readout trained by the last run, in place of the saved one. It is written with the session.");
+    if (!fresh) ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (!have) ImGui::BeginDisabled();
+    if (ImGui::Button("Forget")) { c.readout = NeuralReadoutSaved{}; t.use_saved = false; }
+    if (!have) ImGui::EndDisabled();
+    InputTextStr("file##readout", c.readout_path, kFieldW + 240.0f);
+    if (!have) ImGui::BeginDisabled();
+    if (ImGui::Button("Export")) {
+        try { neural_readout_export(c.readout_path, c.readout); }
+        catch (const std::exception& e) { c.last_error = e.what(); }
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("JSON with the weights, the feature normalisation, the feature nodes,\nthe input normalisation and the formula that applies them.");
+    if (!have) ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Load##readout")) {
+        // Загружают, чтобы применить: Forget перед этим снял галочку, без неё Run молча обучил бы новый выход.
+        try { c.readout = neural_readout_import(c.readout_path); t.use_saved = true; c.last_error.clear(); }
+        catch (const std::exception& e) { c.last_error = e.what(); }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Reads a readout written by Export, in place of the saved one, and turns on its use.\n"
+                          "It applies only to the same graph (hash), feature nodes, targets, horizon and sample time.");
 }
 
 static void draw_neural_protocol(NeuralConfig& c) {
@@ -579,6 +625,12 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
     NeuralConfig& c = s.configs[(size_t)s.active_config_index];
 
     draw_label_rename("Label##neural", c.label);
+    // Ошибка сверху: внизу под свёрнутыми разделами её не видно, а старые числа выглядят как результат.
+    if (!c.last_error.empty()) draw_error_box("##neural_err", c.last_error);
+    if (c.hash_mismatch && ImGui::Button("Rebuild as a new experiment")) {
+        c.graph_hash.clear(); c.graph_recipe.clear();
+        c.hash_mismatch = false; c.last_error.clear();
+    }
 
     ImGui::SetNextItemWidth(kFieldW + 100.0f);
     if (ImGui::BeginCombo("coupling in time", neural_schedule_name(c.schedule))) {
@@ -651,6 +703,8 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
 
     if (c.arcs > 0 || c.last_run_ok) {
         ImGui::Separator();
+        if (!c.last_run_ok && c.result.ok)
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "The last run failed (see the error at the top): the numbers below are from the run before.");
         ImGui::Text("%d nodes, %lld arcs, in-degree %d..%d", c.result.n_nodes, c.arcs, c.degree_min, c.degree_max);
         ImGui::Text("graph %.2f s, run %.2f s, %.0f MB on the GPU", c.build_seconds, c.result.wall_ms / 1000.0,
                     (double)c.result.device_bytes / (1024.0 * 1024.0));
@@ -660,6 +714,7 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
                 ImGui::Text("%s: %.4g spikes per node per unit of time", c.populations[p].name.c_str(), c.pop_rate[p]);
         const NeuralTaskResult& q = c.task_result;
         for (size_t k = 0; k < q.names.size(); ++k) {
+            if (q.applied) { ImGui::Text("%s: NRMSE %.4f of the saved readout after the washout", q.names[k].c_str(), q.test[k]); continue; }
             ImGui::Text("%s: test NRMSE %.4f, validation %.4f, lambda %g", q.names[k].c_str(), q.test[k], q.val[k], q.lambda[k]);
             if (k < q.delay_test.size()) { ImGui::SameLine(); ImGui::TextDisabled("delays of the input (%d): %.4f", q.delay_length, q.delay_test[k]); }
         }
@@ -686,14 +741,6 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
     }
     if (!c.model_text.empty() && !s.sys.rhs.empty() && c.model_text != neural_model_text(s.sys))
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "The system changed since this experiment was last run.");
-    if (!c.last_error.empty()) {
-        ImGui::Separator();
-        draw_error_box("##neural_err", c.last_error);
-    }
-    if (c.hash_mismatch && ImGui::Button("Rebuild as a new experiment")) {
-        c.graph_hash.clear(); c.graph_recipe.clear();
-        c.hash_mismatch = false; c.last_error.clear();
-    }
 }
 
 // Номер показываемого экземпляра и что с ним стало.
@@ -775,7 +822,8 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         ImGui::SetNextItemWidth(90.0f);
         ImGui::Combo("target##readout", &vs.readout_target, items.data(), (int)items.size());
         ImGui::SameLine();
-        ImGui::TextDisabled("test part only, NRMSE %.4f, %d feature nodes", task.test[(size_t)vs.readout_target], task.features);
+        ImGui::TextDisabled(task.applied ? "saved readout, record after the washout, NRMSE %.4f, %d feature nodes"
+                                         : "test part only, NRMSE %.4f, %d feature nodes", task.test[(size_t)vs.readout_target], task.features);
     }
     if (!sweep && !input && !lyap && !rate && !raster && !weights && !readout && !s.vars.empty() && (!sync || spread)) {
         const std::vector<const char*> items = c_str_list(s.vars);
