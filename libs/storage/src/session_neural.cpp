@@ -357,6 +357,12 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
         if (c.task.kind == NeuralTaskKind::Xor) o << ",\"kind\":\"xor\"";
         if (c.task.kind == NeuralTaskKind::Memory || c.task.kind == NeuralTaskKind::Xor) { o << ",\"max_delay\":"; jstr(o, c.task.max_delay_text); }
         if (c.task.control_k0) o << ",\"control_k0\":true";
+        if (c.task.kind == NeuralTaskKind::Forecast) {
+            o << ",\"kind\":\"forecast\",\"forecast_length\":"; jstr(o, c.task.forecast_length_text);
+            o << ",\"forecast_threshold\":"; jstr(o, c.task.forecast_threshold_text);
+            o << ",\"lambda\":"; jstr(o, c.task.lambda_text);
+            o << ",\"lyapunov\":"; jstr(o, c.task.lyapunov_text);
+        }
         if (c.task.kind == NeuralTaskKind::Classification) {
             o << ",\"kind\":\"classification\",\"classes\":";
             jarr(o, c.task.classes, [&o](int v) { o << v; });
@@ -592,9 +598,13 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
                 else if (k == "kind") {
                     const std::string v = p.str();
                     c.task.kind = v == "classification" ? NeuralTaskKind::Classification : v == "memory" ? NeuralTaskKind::Memory
-                                : v == "xor" ? NeuralTaskKind::Xor : NeuralTaskKind::Regression;
+                                : v == "xor" ? NeuralTaskKind::Xor : v == "forecast" ? NeuralTaskKind::Forecast : NeuralTaskKind::Regression;
                 }
                 else if (k == "max_delay") c.task.max_delay_text = p.str();
+                else if (k == "forecast_length") c.task.forecast_length_text = p.str();
+                else if (k == "forecast_threshold") c.task.forecast_threshold_text = p.str();
+                else if (k == "lambda") c.task.lambda_text = p.str();
+                else if (k == "lyapunov") c.task.lyapunov_text = p.str();
                 else if (k == "control_k0") c.task.control_k0 = p.boolean();
                 else if (k == "classes") c.task.classes = jarr_read<int>(p, [&p]() { return std::stoi(p.str_or_num()); });
                 else if (k == "bins") c.task.bins_text = p.str();

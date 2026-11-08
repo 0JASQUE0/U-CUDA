@@ -134,7 +134,10 @@ enum class NeuralProtocol { Continuous = 0, Trials };
 // Метки сбалансированы в каждой части разбиения и перемешаны data_seed; части идут по времени: обучение, валидация, тест.
 // Memory: цель = сам вход source, задержанный на d = 1..max_delay отсчётов, r^2 на тесте, их сумма = memory capacity.
 // Xor: цель = XOR знаков входа на отсчётах p - d и p - d - 1, accuracy по порогу 0.5, угадывание 0.5. Обе по времени, как Regression.
-enum class NeuralTaskKind { Regression = 0, Classification, Memory, Xor };
+// Forecast: выход учится давать следующий отсчёт каждого подключённого входа (сеть ведёт настоящий сигнал, t max Protocol),
+// затем второй прогон с конца первого подаёт на вход выход сети: forecast_length отсчётов автономно. Метрика — время до
+// ошибки forecast_threshold (нормированная по обучению), сравнение — линейная авторегрессия в том же замкнутом режиме.
+enum class NeuralTaskKind { Regression = 0, Classification, Memory, Xor, Forecast };
 
 struct NeuralTask {
     bool enabled = false;
@@ -144,6 +147,10 @@ struct NeuralTask {
     std::string data_seed_text = "1";      // классификация: метки и их порядок, не зависит от seed сети
     std::string max_delay_text = "40";     // Memory и Xor: задержки 1..max_delay
     bool control_k0 = false;               // второй прогон той же сети при K = 0: вклад рекуррентных связей
+    std::string forecast_length_text = "500";    // Forecast: автономных отсчётов
+    std::string forecast_threshold_text = "0.5"; // Forecast: порог ошибки для времени верного прогноза
+    std::string lambda_text = "0";               // Forecast: lambda ridge, 0 = по валидации
+    std::string lyapunov_text = "0";             // Forecast: старший показатель источника, 0 = неизвестен
     int source = 0;
     std::vector<int> targets;              // переменные источника
     std::string horizon_text = "0";        // на сколько отсчётов вперёд, 0 = наблюдатель
@@ -200,6 +207,18 @@ struct NeuralTaskResult {
     std::vector<std::string> class_names;  // [C]
     std::vector<double> confusion;         // [instance][истинный][ответ], тест, число попыток
     double chance = 0.0;                   // доля самого частого класса в тесте
+    // Forecast: names = подключённые входы, test/val = NRMSE на один отсчёт под настоящим входом; truth/predicted =
+    // автономная часть, t0 = её начало. error = нормированная ошибка по отсчётам, ar_* = авторегрессия ar_order.
+    bool forecast = false;
+    std::vector<double> error, ar_error, ar_predicted;   // [point], [point], [point][target]
+    std::vector<double> target_sd;                       // [target], СКО цели на обучении: единица ошибки
+    // NVAR (Gauthier и др., 2021): задержки всех целей и их попарные произведения, ridge на приращение строки.
+    std::vector<double> nvar_error, nvar_predicted;      // [point], [point][target]
+    double nvar_valid_time = 0.0;
+    int nvar_order = 0;                                  // задержек на цель, 0 = не обучилась
+    double valid_time = 0.0, ar_valid_time = 0.0;        // время сети до первого превышения порога; NaN = нет прогноза
+    double threshold = 0.5, lyapunov = 0.0, time_scale = 1.0;
+    int ar_order = 0;
 };
 
 struct NeuralConfig {

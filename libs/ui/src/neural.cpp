@@ -494,6 +494,44 @@ static void draw_neural_delayed(NeuralConfig& c) {
     ImGui::TextDisabled("One sample is the input sample time. The washout is raised to the largest delay + 1 when shorter.");
 }
 
+// Автономный прогноз: выход учится на следующем отсчёте входа, затем сам становится входом.
+static void draw_neural_forecast(NeuralConfig& c) {
+    NeuralTask& t = c.task;
+    const std::vector<int> chans = neural_forecast_channels(c);
+    if (chans.empty()) { ImGui::TextDisabled("Link an input source to the network: the readout learns and then replaces every linked input."); return; }
+    std::string list;
+    bool smooth = true;
+    for (int q : chans) {
+        list += (list.empty() ? "" : ", ") + c.sources[(size_t)q].name;
+        smooth = smooth && c.sources[(size_t)q].kind != NeuralSourceKind::Noise && c.sources[(size_t)q].kind != NeuralSourceKind::Bits;
+    }
+    ImGui::Text("forecast of %s", list.c_str());
+    if (!smooth) ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "A random input cannot be forecast: link a system or a periodic source.");
+    InputNumStr("forecast length, samples", t.forecast_length_text, kFieldW);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("After t max of Protocol the network runs on with its own readout as the input.");
+    InputNumStr("error threshold", t.forecast_threshold_text, kFieldW);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Error = RMS over the inputs of (forecast - truth) / deviation of the input on the training part.\n"
+                          "Valid time = how long the error stays below this; 0.5 is common.");
+    InputNumStr("ridge lambda", t.lambda_text, kFieldW);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("0 = chosen on the validation part by the error one sample ahead.\n"
+                          "That choice is often too small for a stable closed loop: try 1e-4 .. 1e-1 by hand.");
+    InputNumStr("Lyapunov exponent of the source", t.lyapunov_text, kFieldW);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Optional, in the time of the source (Lorenz 28, 10, 8/3: 0.906). Shows the valid time in Lyapunov times.");
+    InputNumStr("washout, samples", t.washout_text, kFieldW);
+    InputNumStr("train share", t.train_text, kFieldW);
+    InputNumStr("validation share", t.val_text, kFieldW);
+    InputNumStr("gap, samples", t.gap_text, kFieldW);
+    InputNumStr("feature nodes", t.features_text, kFieldW);
+    ImGui::TextDisabled("t max of Protocol is the training run: the true input drives the network, the readout learns the next\n"
+                        "input sample (washout, train, gap, validation, gap, test one sample ahead). A second run goes on from\n"
+                        "its end with the readout as the input. Compared in the same closed loop with a linear autoregression\n"
+                        "(the floor: is nonlinearity needed) and NVAR, delays and their products (the strong baseline).\n"
+                        "One sample is the input sample time; the transient must be 0; no sweep, no spiking network yet.");
+}
+
 static void draw_neural_readout(NeuralConfig& c) {
     if (!ImGui::CollapsingHeader("Readout")) return;
     NeuralTask& t = c.task;
@@ -506,9 +544,11 @@ static void draw_neural_readout(NeuralConfig& c) {
     if (!t.enabled) return;
     int kind = (int)t.kind;
     static const char* const kinds[] = { "Recover or predict the input system", "Classify the stimulus",
-                                         "Memory capacity: recall the delayed input", "XOR of two delayed bits of the input" };
+                                         "Memory capacity: recall the delayed input", "XOR of two delayed bits of the input",
+                                         "Autonomous forecast: the readout drives the input" };
     ImGui::SetNextItemWidth(kFieldW + 160.0f);
     if (ImGui::Combo("task", &kind, kinds, IM_ARRAYSIZE(kinds))) t.kind = (NeuralTaskKind)kind;
+    if (t.kind == NeuralTaskKind::Forecast) { draw_neural_forecast(c); return; }
     ImGui::Checkbox("control: the same network with K = 0", &t.control_k0);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("A second run with the same nodes, input, feature nodes and data, but every recurrent link is 0.\n"
@@ -812,7 +852,27 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
             for (size_t p = 0; p < c.pop_rate.size() && p < c.populations.size(); ++p)
                 ImGui::Text("%s: %.4g spikes per node per unit of time", c.populations[p].name.c_str(), c.pop_rate[p]);
         const NeuralTaskResult& q = c.task_result;
-        const size_t T = q.classify || q.by_delay ? 0 : q.names.size();
+        const size_t T = q.classify || q.by_delay || q.forecast ? 0 : q.names.size();
+        if (q.forecast && q.points > 0 && q.dt > 0.0) {
+            const auto valid_text = [&q](double v) {
+                char b[160];
+                const long long n = std::llround(v / q.dt);
+                if (n >= q.points) std::snprintf(b, sizeof b, "at least %.4g (all %lld samples)", v, n);
+                else std::snprintf(b, sizeof b, "%.4g (%lld samples)", v, n);
+                std::string s = b;
+                if (q.lyapunov > 0.0) { std::snprintf(b, sizeof b, ", %.2f Lyapunov times", v * q.time_scale * q.lyapunov); s += b; }
+                return s;
+            };
+            ImGui::Text("autonomous forecast: valid time %s", valid_text(q.valid_time).c_str());
+            if (q.ar_order > 0)
+                ImGui::TextDisabled("linear autoregression of order %d in the same closed loop: %s", q.ar_order, valid_text(q.ar_valid_time).c_str());
+            if (q.nvar_order > 0)
+                ImGui::TextDisabled("NVAR, %d delays of every input and their products, same closed loop: %s", q.nvar_order, valid_text(q.nvar_valid_time).c_str());
+            for (size_t k = 0; k < q.names.size() && k < q.test.size(); ++k)
+                ImGui::TextDisabled("%s one sample ahead under the true input: test NRMSE %.3g, validation %.3g, lambda %g",
+                                    q.names[k].c_str(), q.test[k], q.val[k], q.lambda[k]);
+            ImGui::TextDisabled("Error threshold %.3g. The forecast against the truth is in the Neural Readout window.", q.threshold);
+        }
         if (q.by_delay && !q.test.empty()) {
             const size_t KO = q.names.size();
             const bool memory = !q.names.empty() && q.names[0] == "MC";
@@ -1059,16 +1119,31 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         ImGui::SameLine();
         ImGui::TextDisabled("%d feature nodes, test part", task.features);
     }
+    // Прогноз: настоящий вход, сеть, авторегрессия и NVAR по входам, последний пункт = их ошибки с порогом.
+    const bool forecastAr = readout && task.forecast && task.ar_order > 0 && task.ar_predicted.size() == task.truth.size()
+                            && task.ar_error.size() == (size_t)task.points;
+    const bool forecastNvar = readout && task.forecast && task.nvar_order > 0 && task.nvar_predicted.size() == task.truth.size()
+                              && task.nvar_error.size() == (size_t)task.points;
+    enum { kFcTrue, kFcNet, kFcAr, kFcNvar, kFcThreshold };
+    std::vector<int> forecastKinds;
     if (readout && !task.names.empty() && !task.by_delay) {
-        const std::vector<const char*> items = c_str_list(task.names);
+        std::vector<std::string> labels = task.names;
+        if (task.forecast) labels.push_back("error");
+        const std::vector<const char*> items = c_str_list(labels);
         if (vs.readout_target >= (int)items.size()) vs.readout_target = 0;
         ImGui::SetNextItemWidth(90.0f);
         ImGui::Combo("target##readout", &vs.readout_target, items.data(), (int)items.size());
         ImGui::SameLine();
-        ImGui::TextDisabled(task.applied ? "saved readout, record after the washout, NRMSE %.4f, %d feature nodes"
-                                         : "test part only, NRMSE %.4f, %d feature nodes",
-                            task.test[(size_t)taskInst * items.size() + (size_t)vs.readout_target], task.features);
+        if (task.forecast)
+            ImGui::TextDisabled("autonomous from t = %.6g, valid time %.4g, error threshold %.3g, %d feature nodes",
+                                task.t0, task.valid_time, task.threshold, task.features);
+        else
+            ImGui::TextDisabled(task.applied ? "saved readout, record after the washout, NRMSE %.4f, %d feature nodes"
+                                             : "test part only, NRMSE %.4f, %d feature nodes",
+                                task.test[(size_t)taskInst * items.size() + (size_t)vs.readout_target], task.features);
     }
+    // После списка: в кадре выбора он уже сменил цель, иначе окно взяло бы имя несуществующей цели.
+    const bool forecastError = readout && task.forecast && vs.readout_target >= (int)task.names.size();
     if (!sweep && !input && !lyap && !rate && !raster && !weights && !readout && !s.vars.empty() && (!sync || spread)) {
         const std::vector<const char*> items = c_str_list(s.vars);
         if (sync) ImGui::SameLine();
@@ -1162,6 +1237,41 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
                 return task.delay_test[(size_t)p];
             };
             yname = delayMemory ? "r^2" : "accuracy";
+        }
+        else if (task.forecast) {
+            const int K2 = (int)task.names.size(), v = (std::min)(vs.readout_target, K2 - 1);
+            points = task.points;
+            xof = [&task](int p) { return task.t0 + task.dt * (double)p; };
+            forecastKinds = { forecastError ? (int)kFcNet : (int)kFcTrue };
+            if (!forecastError) forecastKinds.push_back(kFcNet);
+            if (forecastAr) forecastKinds.push_back(kFcAr);
+            if (forecastNvar) forecastKinds.push_back(kFcNvar);
+            if (forecastError) forecastKinds.push_back(kFcThreshold);
+            curves = (int)forecastKinds.size();
+            if (task.error.size() != (size_t)task.points) empty = "The forecast run gave no forecast.";
+            else if (forecastError) {
+                yof = [&task, kinds = forecastKinds](int k, int p) {
+                    switch (kinds[(size_t)k]) {
+                    case kFcNet:  return task.error[(size_t)p];
+                    case kFcAr:   return task.ar_error[(size_t)p];
+                    case kFcNvar: return task.nvar_error[(size_t)p];
+                    default:      return task.threshold;
+                    }
+                };
+                yname = "error";
+            }
+            else {
+                yof = [&task, K2, v, kinds = forecastKinds](int k, int p) {
+                    const size_t at = (size_t)p * K2 + (size_t)v;
+                    switch (kinds[(size_t)k]) {
+                    case kFcTrue: return task.truth[at];
+                    case kFcNet:  return task.predicted[at];
+                    case kFcAr:   return task.ar_predicted[at];
+                    default:      return task.nvar_predicted[at];
+                    }
+                };
+                yname = task.names[(size_t)v];
+            }
         }
         else {
             const int K2 = (int)task.names.size(), v = vs.readout_target;
@@ -1304,6 +1414,9 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
                  : input ? c.sources[(size_t)k].name
                  : weights ? (k < (int)c.watch_labels.size() ? c.watch_labels[(size_t)k] : std::to_string(k))
                  : readout && task.by_delay ? std::string(k == 0 ? "network" : k == 1 && delayCtl ? "K = 0" : "linear on delays")
+                 : readout && task.forecast && k < (int)forecastKinds.size()
+                     ? std::string(forecastKinds[(size_t)k] == kFcTrue ? "true" : forecastKinds[(size_t)k] == kFcNet ? "network"
+                                 : forecastKinds[(size_t)k] == kFcAr ? "autoregression" : forecastKinds[(size_t)k] == kFcNvar ? "NVAR" : "threshold")
                  : readout ? std::string(k == 0 ? "true" : "readout")
                  : readoutSweep ? std::string(task.classify ? "accuracy" : "NRMSE")
                  : lyap ? std::string("lambda") : c.populations[(size_t)(k % K)].name;

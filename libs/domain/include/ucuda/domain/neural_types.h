@@ -126,6 +126,16 @@ struct NeuralCheckpoint {
     std::vector<char> data;
 };
 
+// Замкнутый выход: с строки from_row вход каналов channels считает сама сеть, y_k = w[k][M] + sum_i w[k][i] * row[cols_i],
+// где row это строка записи точки p (после шага p * hold_steps), а результат идёт в строку входа p, до её шагов.
+// Только непрерывные расписания, stage_rows = 1, pre_scaller = hold_steps, без transient и показателя Ляпунова.
+struct NeuralFeedback {
+    long long from_row = -1;          // -1 = вход задан целиком
+    std::vector<int> cols;            // [M], номера в строке записи
+    std::vector<int> channels;        // [K]
+    std::vector<double> w;            // [K * (M + 1)], последний столбец свободный член
+};
+
 struct NeuralRequest {
     NeuralSchedule schedule = NeuralSchedule::Stage;
     std::string krs_body;             // шаг узла; stage его не зовёт, но шаблону он нужен
@@ -162,6 +172,7 @@ struct NeuralRequest {
     NeuralLyapunov    lyapunov;
     NeuralSpiking     spike;
     NeuralDevices     devices;
+    NeuralFeedback    feedback;
     std::shared_ptr<const NeuralCheckpoint> resume;   // продолжить с этой точки; R и показатель Ляпунова несовместимы
     // Входит в форму точки: хеш графа, сеть того же размера с другим графом отказывает. Часть после '|' описывает запись:
     // сессия дополняет ею продолжение, и при другом прореживании склейка вышла бы неверной.
@@ -216,6 +227,7 @@ struct NeuralResult {
     std::vector<double>    final_devices;  // [devices * states]
     long long              device_clips = 0;   // сколько раз сработала граница состояния
     std::shared_ptr<NeuralCheckpoint> checkpoint;
+    std::vector<double>    feedback_rows;  // [строка - from_row][K], поданный вход; после остановки строки не считались
 
     long long launches = 0, syncs = 0, steps_done = 0;
     int block_size = 0;

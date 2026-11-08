@@ -175,7 +175,9 @@ void fill_input(const NeuralConfig& c, const NeuralGraph& g, uint64_t seed, Neur
     in.hold_steps = hold_t > 0.0 ? (std::max)(1LL, steps_of(hold_t, r.h, "the input sample time")) : 1;
     in.channels = (int)c.sources.size();
     // Отсчёт на шаг и связь в стадиях: гладкий источник видит время своей стадии, иначе порядок по нему первый.
-    const bool three = (c.schedule == NeuralSchedule::Stage || c.schedule == NeuralSchedule::Spike) && in.hold_steps == 1;
+    // Прогноз подаёт выход строкой на отсчёт: гладкий вход внутри шага сеть сама не посчитает.
+    const bool closed = c.task.enabled && c.task.kind == NeuralTaskKind::Forecast;
+    const bool three = (c.schedule == NeuralSchedule::Stage || c.schedule == NeuralSchedule::Spike) && in.hold_steps == 1 && !closed;
     in.stage_rows = three ? 3 : 1;
     const long long rows = total / in.hold_steps + 1;
     if ((double)rows * in.stage_rows * in.channels * sizeof(double) > 4.0e9) throw std::runtime_error("the input needs too many samples: raise the sample time");
@@ -1116,10 +1118,58 @@ static NeuralConfig class_config(const NeuralConfig& c) {
     return o;
 }
 
+std::vector<int> neural_forecast_channels(const NeuralConfig& c) {
+    std::vector<int> ch;
+    for (const NeuralLink& l : c.links) if (l.source >= 0 && l.source < (int)c.sources.size()) ch.push_back(l.source);
+    std::sort(ch.begin(), ch.end());
+    ch.erase(std::unique(ch.begin(), ch.end()), ch.end());
+    return ch;
+}
+
+// Прогноз: запись на отсчётах входа, цель = следующая строка каждого подключённого входа.
+static NeuralConfig forecast_config(const NeuralConfig& c) {
+    const NeuralTask& t = c.task;
+    if (c.protocol != NeuralProtocol::Continuous) throw std::runtime_error("a readout needs the continuous protocol");
+    if (num_or(c.transient_text, 0.0) != 0.0) throw std::runtime_error("a readout has its own washout: set the transient to 0");
+    if (c.lyap_on) throw std::runtime_error("a readout does not work with the Lyapunov exponent");
+    if (c.sweep.enabled) throw std::runtime_error("a forecast drives one network: turn off the sweep");
+    if (c.schedule == NeuralSchedule::Spike) throw std::runtime_error("a forecast needs a network of states: a spiking readout cannot drive the input yet");
+    const std::vector<int> ch = neural_forecast_channels(c);
+    if (ch.empty()) throw std::runtime_error("a forecast needs an input link: the readout replaces the linked inputs");
+    if (int_or(t.forecast_length_text, 0) < 1) throw std::runtime_error("the forecast length must be at least 1 sample");
+    if (!(num_or(t.forecast_threshold_text, 0.5) > 0.0)) throw std::runtime_error("the error threshold must be positive");
+    if (!(num_or(t.lambda_text, 0.0) >= 0.0)) throw std::runtime_error("lambda must not be negative");
+    NeuralConfig o = c;
+    // Галочки других задач в панели прогноза не видны: от них ничего не зависит.
+    o.task.use_saved = false;
+    o.task.control_k0 = false;
+    o.task.horizon_text = "0";
+    const long long hold = task_hold(c);
+    const double h = parse_num(c.h_text, 0.01);
+    const long long total = std::llround(neural_record_time(c) / h) / hold;
+    // Конец обучения на границе отсчёта: с неё второй прогон продолжает уже с выходом на входе.
+    o.t_max_text = fmt_num_shortest((double)(total * hold) * h);
+    const size_t train1 = task_split(o.task, (size_t)(std::max)(0LL, total)).train1;
+    for (int q : ch) {
+        NeuralSource& s = o.sources[(size_t)q];
+        if (s.kind == NeuralSourceKind::System) { s.normalize = true; s.normalize_first = (long long)train1; }
+    }
+    const int M = (std::max)(1, int_or(t.features_text, 1000));
+    o.pre_scaller_text = std::to_string(hold);
+    o.order_var = -1;
+    o.observed_per_pop_text = std::to_string(M);
+    o.obs_vars_off.clear();
+    for (int k = 0; k < 64; ++k) if (k != c.input_var) o.obs_vars_off.push_back(k);
+    const double mb = (double)(total + int_or(t.forecast_length_text, 0) + 1) * M * (double)c.populations.size() * sizeof(double) / (1024.0 * 1024.0) * 1.2 + 16.0;
+    o.output_limit_text = fmt_num_shortest((std::max)(num_or(c.output_limit_text, 1024.0), mb));
+    return o;
+}
+
 NeuralConfig neural_task_config(const NeuralConfig& c) {
     NeuralConfig o = c;
     const NeuralTask& t = c.task;
     if (!t.enabled) return o;
+    if (t.kind == NeuralTaskKind::Forecast) return forecast_config(c);
     if (t.control_k0 && c.sweep.enabled) throw std::runtime_error("the K = 0 control runs without a sweep: sweep over K instead");
     if (t.control_k0 && t.use_saved && t.kind == NeuralTaskKind::Regression)
         throw std::runtime_error("the K = 0 control trains its own readout: turn off the saved readout");
@@ -1305,6 +1355,7 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
 
 NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest& r, const NeuralResult& res) {
     if (c.task.kind == NeuralTaskKind::Classification) return class_evaluate(c, r, res);
+    if (c.task.kind == NeuralTaskKind::Forecast) throw std::runtime_error("a forecast is evaluated by its own two runs");
     NeuralTask t = c.task;
     NeuralTaskResult out;
     // Memory и Xor: цели из самого входа, задержка d считается от последней строки входа, которую видела точка.
@@ -1487,6 +1538,198 @@ NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest
         for (int k = 0; k < K; ++k) out.delay_test.push_back(readout_nrmse(out.truth.data() + k, e.data() + k, (size_t)K, (size_t)out.points));
     }
     return out;
+}
+
+// Ошибка прогноза по отсчётам в долях СКО цели на обучении; время верного прогноза = отсчётов до первого превышения порога.
+static void forecast_error(const NeuralTaskResult& o, const std::vector<double>& pred, std::vector<double>& e, double& valid) {
+    const size_t K = o.names.size(), n = (size_t)o.points;
+    e.assign(n, std::numeric_limits<double>::quiet_NaN());
+    size_t good = n;
+    for (size_t j = 0; j < n; ++j) {
+        double s = 0.0;
+        for (size_t k = 0; k < K; ++k) {
+            const double d = (pred[j * K + k] - o.truth[j * K + k]) / o.target_sd[k];
+            s += d * d;
+        }
+        e[j] = std::sqrt(s / (double)K);
+        if (good == n && !(e[j] <= o.threshold)) good = j;
+    }
+    // Весь прогноз в пороге: время = вся длина, окно пишет его как нижнюю границу.
+    valid = (double)good * o.dt;
+}
+
+void neural_forecast_prepare(const NeuralConfig& c, const NeuralRequest& r1, const NeuralResult& res1, NeuralRequest& r2, NeuralTaskResult& out) {
+    const NeuralTask& t = c.task;
+    const std::vector<int> chans = neural_forecast_channels(c);
+    const size_t K = chans.size(), ch = (size_t)r1.input.channels;
+    if (K < 1 || ch < 1 || r1.input.stage_rows != 1 || r2.input.stage_rows != 1 || (size_t)r2.input.channels != ch)
+        throw std::runtime_error("the forecast needs an input of one row per sample");
+    // Точка S видела строки до S - 1: точки 0..S-1 учат выход, точка S даёт первую строку прогноза.
+    const size_t S = (size_t)(std::llround(r1.t_max / r1.h) / r1.pre_scaller);
+    const size_t L = (size_t)int_or(t.forecast_length_text, 500);
+    if (r2.input.samples.size() / ch < S + L + 1) throw std::runtime_error("the forecast run is shorter than the forecast");
+    if (res1.observed_vars.size() != 1) throw std::runtime_error("the forecast reads one node variable");
+    const size_t nSel = res1.observed.size();
+    if (nSel < 1 || res1.traces.size() < (S + 1) * nSel) throw std::runtime_error("the record has no features");
+    const int M = (int)nSel;
+    const std::vector<double>& F = res1.traces;
+    for (size_t i = 0; i < nSel; ++i) if (!std::isfinite(F[S * nSel + i])) throw std::runtime_error("the network diverged before the forecast");
+    std::vector<double> Y(S * K);
+    for (size_t p = 0; p < S; ++p)
+        for (size_t k = 0; k < K; ++k) Y[p * K + k] = r1.input.samples[p * ch + (size_t)chans[k]];
+    const ReadoutSplit sp = task_split(t, S);
+    const double lam = num_or(t.lambda_text, 0.0);
+    const std::vector<double> lambdas = lam > 0.0 ? std::vector<double>{ lam } : std::vector<double>{ 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0 };
+    const ReadoutModel m = readout_fit(F, Y, M, (int)K, sp, lambdas);
+
+    out = NeuralTaskResult{};
+    out.forecast = true;
+    out.features = M;
+    out.threshold = num_or(t.forecast_threshold_text, 0.5);
+    out.lyapunov = num_or(t.lyapunov_text, 0.0);
+    for (size_t k = 0; k < K; ++k) {
+        const NeuralSource& s = c.sources[(size_t)chans[k]];
+        out.names.push_back(s.name);
+        if (k == 0 || s.kind == NeuralSourceKind::System) out.time_scale = num_or(s.time_scale_text, 1.0);
+    }
+    // Под настоящим входом, на один отсчёт вперёд: с этим числом сравнивается прогноз.
+    const size_t nt = sp.test1 - sp.test0;
+    const std::vector<double> one = readout_predict(m, F, sp.test0, sp.test1);
+    for (size_t k = 0; k < K; ++k) {
+        out.val.push_back(m.val_nrmse[k]);
+        out.test.push_back(readout_nrmse(Y.data() + sp.test0 * K + k, one.data() + k, K, nt));
+        out.lambda.push_back(m.lambda[k]);
+        double mu = 0.0, v = 0.0;
+        const size_t n = sp.train1 - sp.train0;
+        for (size_t p = sp.train0; p < sp.train1; ++p) mu += Y[p * K + k];
+        mu /= (double)n;
+        for (size_t p = sp.train0; p < sp.train1; ++p) v += (Y[p * K + k] - mu) * (Y[p * K + k] - mu);
+        out.target_sd.push_back(v > 0.0 ? std::sqrt(v / (double)n) : 1.0);
+    }
+
+    // Настоящее продолжение: строки S..S+L второго запроса, пока S не подменена прогнозом.
+    out.dt = (double)r1.pre_scaller * r1.h;
+    out.t0 = (double)S * out.dt;
+    out.points = (int)(L + 1);
+    out.truth.resize((L + 1) * K);
+    for (size_t j = 0; j <= L; ++j)
+        for (size_t k = 0; k < K; ++k) out.truth[j * K + k] = r2.input.samples[(S + j) * ch + (size_t)chans[k]];
+    const std::vector<double> first = readout_predict(m, F, S, S + 1);
+    out.predicted.assign((L + 1) * K, std::numeric_limits<double>::quiet_NaN());
+    for (size_t k = 0; k < K; ++k) {
+        out.predicted[k] = first[k];
+        r2.input.samples[S * ch + (size_t)chans[k]] = first[k];
+    }
+    // Остальные строки считает выход на GPU: нормировка признаков свёрнута в веса.
+    NeuralFeedback& fb = r2.feedback;
+    fb.from_row = (long long)S + 1;
+    fb.cols.resize((size_t)M);
+    std::iota(fb.cols.begin(), fb.cols.end(), 0);
+    fb.channels = chans;
+    fb.w.assign(K * (size_t)(M + 1), 0.0);
+    for (size_t k = 0; k < K; ++k) {
+        const double* w = m.w.data() + k * (size_t)(M + 1);
+        double b = w[M];
+        for (int i = 0; i < M; ++i) {
+            const double a = w[i] / m.scale[(size_t)i];
+            fb.w[k * (size_t)(M + 1) + (size_t)i] = a;
+            if (a != 0.0) b -= a * m.mean[(size_t)i];
+        }
+        fb.w[k * (size_t)(M + 1) + (size_t)M] = b;
+    }
+
+    // Сравнения выбирают lambda сами: поле lambda подбирают под сеть. Квадратичным признакам гладкого сигнала нужна и 1e-10.
+    const std::vector<double> base_lambdas = { 1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0 };
+    // Авторегрессия по прошлым строкам всех целей: порядок по валидации на один отсчёт, затем тот же замкнутый режим.
+    const auto ar_row = [&](const std::vector<double>& rows, size_t p, int D, double* g) {
+        for (size_t k = 0; k < K; ++k)
+            for (int d = 1; d <= D; ++d) g[k * (size_t)D + (size_t)(d - 1)] = p >= (size_t)d ? rows[(p - (size_t)d) * K + k] : 0.0;
+    };
+    double best = std::numeric_limits<double>::infinity();
+    ReadoutModel ar;
+    for (int D : {1, 2, 5, 10, 20, 50}) {
+        if ((size_t)D * K + 1 >= sp.train1 - sp.train0) break;
+        std::vector<double> G(S * K * (size_t)D);
+        for (size_t p = 0; p < S; ++p) ar_row(Y, p, D, G.data() + p * K * (size_t)D);
+        try {
+            ReadoutModel q = readout_fit(G, Y, D * (int)K, (int)K, sp, base_lambdas);
+            double v = 0.0;
+            for (double e : q.val_nrmse) v += e;
+            if (!(v < best)) continue;
+            best = v;
+            ar = std::move(q);
+            out.ar_order = D;
+        } catch (const std::exception&) {}
+    }
+    if (out.ar_order > 0) {
+        const int D = out.ar_order;
+        std::vector<double> rows(Y);
+        rows.resize((S + L + 1) * K);
+        std::vector<double> g(K * (size_t)D);
+        out.ar_predicted.resize((L + 1) * K);
+        for (size_t j = 0; j <= L; ++j) {
+            ar_row(rows, S + j, D, g.data());
+            const std::vector<double> y = readout_predict(ar, g, 0, 1);
+            for (size_t k = 0; k < K; ++k) rows[(S + j) * K + k] = out.ar_predicted[j * K + k] = y[k];
+        }
+        forecast_error(out, out.ar_predicted, out.ar_error, out.ar_valid_time);
+    }
+
+    // NVAR: линейная часть как у авторегрессии, к ней все попарные произведения. Цель = приращение строки:
+    // приращение мало и гладко, а вес 1 на прошлом отсчёте ridge не прижимает.
+    const auto nvar_size = [K](int D) { const size_t n = K * (size_t)D; return n + n * (n + 1) / 2; };
+    const auto nvar_row = [&](const std::vector<double>& rows, size_t p, int D, double* g) {
+        const size_t n = K * (size_t)D;
+        ar_row(rows, p, D, g);
+        size_t at = n;
+        for (size_t a = 0; a < n; ++a)
+            for (size_t b = a; b < n; ++b) g[at++] = g[a] * g[b];
+    };
+    std::vector<double> dY(S * K, 0.0);
+    for (size_t p = 1; p < S; ++p)
+        for (size_t k = 0; k < K; ++k) dY[p * K + k] = Y[p * K + k] - Y[(p - 1) * K + k];
+    best = std::numeric_limits<double>::infinity();
+    ReadoutModel nv;
+    for (int D : {1, 2, 3, 4}) {
+        const size_t Mn = nvar_size(D);
+        if (Mn + 1 >= sp.train1 - sp.train0) break;
+        std::vector<double> G(S * Mn);
+        for (size_t p = 0; p < S; ++p) nvar_row(Y, p, D, G.data() + p * Mn);
+        try {
+            ReadoutModel q = readout_fit(G, dY, (int)Mn, (int)K, sp, base_lambdas);
+            double v = 0.0;
+            for (double e : q.val_nrmse) v += e;
+            if (!(v < best)) continue;
+            best = v;
+            nv = std::move(q);
+            out.nvar_order = D;
+        } catch (const std::exception&) {}
+    }
+    if (out.nvar_order > 0 && S >= 1) {
+        const int D = out.nvar_order;
+        std::vector<double> rows(Y);
+        rows.resize((S + L + 1) * K);
+        std::vector<double> g(nvar_size(D));
+        out.nvar_predicted.resize((L + 1) * K);
+        for (size_t j = 0; j <= L; ++j) {
+            const size_t p = S + j;
+            nvar_row(rows, p, D, g.data());
+            const std::vector<double> d = readout_predict(nv, g, 0, 1);
+            for (size_t k = 0; k < K; ++k) {
+                // Разошедшийся прогноз дальше не считается: квадраты переполнили бы double, порог он уже перешёл.
+                const double y = rows[(p - 1) * K + k] + d[k];
+                rows[p * K + k] = out.nvar_predicted[j * K + k] = std::isfinite(y) && std::fabs(y) < 1e100 ? y : std::numeric_limits<double>::quiet_NaN();
+            }
+        }
+        forecast_error(out, out.nvar_predicted, out.nvar_error, out.nvar_valid_time);
+    }
+}
+
+void neural_forecast_finish(const NeuralResult& res2, NeuralTaskResult& out) {
+    const size_t K = out.names.size(), L = (size_t)out.points - 1;
+    for (size_t j = 1; j <= L && j * K <= res2.feedback_rows.size(); ++j)
+        for (size_t k = 0; k < K; ++k) out.predicted[j * K + k] = res2.feedback_rows[(j - 1) * K + k];
+    forecast_error(out, out.predicted, out.error, out.valid_time);
 }
 
 void neural_checkpoint_save(const std::string& path, const NeuralCheckpoint& c) {
@@ -1832,7 +2075,30 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
             out.resumed = resume;
             out.watched_per_instance = plan.watched_per_instance;
             out.watch_labels = plan.watch_labels;
+            const bool forecast = job.task.enabled && job.task.kind == NeuralTaskKind::Forecast;
+            // Прогноз продолжает первый прогон с его конца: снимок нужен всегда, а не только по флажку.
+            const bool keep = plan.request.keep_checkpoint;
+            if (forecast) plan.request.keep_checkpoint = true;
             out.result = engine.run_neural(plan.request);
+            if (forecast && out.result.ok) {
+                NeuralConfig longer = job;
+                const double h = plan.request.h;
+                const long long steps = std::llround(plan.request.t_max / h) + (long long)int_or(job.task.forecast_length_text, 500) * plan.request.pre_scaller;
+                longer.t_max_text = fmt_num_shortest((double)steps * h);
+                NeuralPlan p2 = neural_plan(sys_copy, cs, v, q, longer);
+                if (p2.hash != plan.hash) throw std::runtime_error("the forecast run built another graph");
+                p2.request.cancel = cancel; p2.request.progress = progress;
+                p2.request.resume = out.result.checkpoint;
+                p2.request.keep_checkpoint = keep;
+                neural_forecast_prepare(job, plan.request, out.result, p2.request, out.task_result);
+                NeuralResult r2 = engine.run_neural(p2.request);
+                if (r2.ok) {
+                    neural_forecast_finish(r2, out.task_result);
+                    neural_merge_resumed(out.result, r2);
+                }
+                else if (!r2.cancelled) r2.error = "the forecast run failed: " + r2.error;
+                out.result = std::move(r2);
+            }
             out.instance_start = plan.request.instance_start;
             if (out.instance_start.empty()) out.instance_start = { 0, plan.request.n_nodes };
             out.pops_per_instance = plan.pops_per_instance;
@@ -1861,7 +2127,7 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
                     out.weight_summary.push_back(lo); out.weight_summary.push_back(n ? sum / (double)n : 0.0); out.weight_summary.push_back(hi);
                 }
             }
-            if (out.result.ok && job.task.enabled) {
+            if (out.result.ok && job.task.enabled && !forecast) {
                 out.task_result = neural_task_evaluate(job, plan.request, out.result);
                 if (!out.task_result.applied) out.task_result.model.graph_hash = plan.hash;
                 if (job.task.control_k0) {
