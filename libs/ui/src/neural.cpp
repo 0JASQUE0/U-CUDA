@@ -453,7 +453,8 @@ static void draw_neural_readout(NeuralConfig& c) {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Dropped between the parts, so that one window of the record does not lie on both sides.");
     InputNumStr("feature nodes", t.features_text, kFieldW);
     if (c.schedule == NeuralSchedule::Spike) InputNumStr("spike filter time", t.filter_text, kFieldW);
-    ImGui::TextDisabled("The input sample time sets the samples. The transient must be 0, sweeps are off.");
+    ImGui::TextDisabled("The input sample time sets the samples. The transient must be 0.\n"
+                        "With a sweep every network trains its own readout: see the Neural Sweep and Neural Map windows.");
 
     ImGui::SeparatorText("Saved readout");
     const bool have = !c.readout.empty(), fresh = !c.task_result.model.empty();
@@ -476,7 +477,10 @@ static void draw_neural_readout(NeuralConfig& c) {
     if (!fresh) ImGui::BeginDisabled();
     if (ImGui::Button("Keep")) c.readout = c.task_result.model;
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("Keeps the readout trained by the last run, in place of the saved one. It is written with the session.");
+        ImGui::SetTooltip("Keeps the readout trained by the last run, in place of the saved one. It is written with the session.\n"
+                          "A sweep trains one readout per network, so there is nothing to keep after it: run without the sweep.\n"
+                          "A saved readout can be applied to a sweep over a node parameter or the input gain (one graph);\n"
+                          "a sweep over K or the seed changes the graph.");
     if (!fresh) ImGui::EndDisabled();
     ImGui::SameLine();
     if (!have) ImGui::BeginDisabled();
@@ -713,11 +717,28 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
             for (size_t p = 0; p < c.pop_rate.size() && p < c.populations.size(); ++p)
                 ImGui::Text("%s: %.4g spikes per node per unit of time", c.populations[p].name.c_str(), c.pop_rate[p]);
         const NeuralTaskResult& q = c.task_result;
-        for (size_t k = 0; k < q.names.size(); ++k) {
-            if (q.applied) { ImGui::Text("%s: NRMSE %.4f of the saved readout after the washout", q.names[k].c_str(), q.test[k]); continue; }
-            ImGui::Text("%s: test NRMSE %.4f, validation %.4f, lambda %g", q.names[k].c_str(), q.test[k], q.val[k], q.lambda[k]);
-            if (k < q.delay_test.size()) { ImGui::SameLine(); ImGui::TextDisabled("delays of the input (%d): %.4f", q.delay_length, q.delay_test[k]); }
+        const size_t T = q.names.size();
+        for (size_t k = 0; k < T; ++k) {
+            if (q.instances > 1) {
+                // Сводка свипа: лучшая сеть и где она, остальное в окнах Neural Sweep и Neural Map.
+                int best = -1, finite = 0;
+                double hi = -std::numeric_limits<double>::infinity();
+                for (int i = 0; i < q.instances; ++i) {
+                    const double v = q.test[(size_t)i * T + k];
+                    if (!std::isfinite(v)) continue;
+                    ++finite;
+                    hi = (std::max)(hi, v);
+                    if (best < 0 || v < q.test[(size_t)best * T + k]) best = i;
+                }
+                if (best < 0) ImGui::Text("%s: no network gave a readout", q.names[k].c_str());
+                else ImGui::Text("%s: %s NRMSE %.4f .. %.4f over %d of %d networks, best is network %d", q.names[k].c_str(),
+                                 q.applied ? "saved readout," : "test", q.test[(size_t)best * T + k], hi, finite, q.instances, best);
+            }
+            else if (q.applied) ImGui::Text("%s: NRMSE %.4f of the saved readout after the washout", q.names[k].c_str(), q.test[k]);
+            else ImGui::Text("%s: test NRMSE %.4f, validation %.4f, lambda %g", q.names[k].c_str(), q.test[k], q.val[k], q.lambda[k]);
+            if (!q.applied && k < q.delay_test.size()) { ImGui::SameLine(); ImGui::TextDisabled("delays of the input (%d): %.4f", q.delay_length, q.delay_test[k]); }
         }
+        if (!q.note.empty()) ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Readout: %s", q.note.c_str());
         if (c.result.device_clips > 0)
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "The device state bound acted %lld times.", c.result.device_clips);
         if (c.result.spikes_dropped > 0)
@@ -792,9 +813,29 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         InputNumStr("bin (0 = auto)", vs.rate_bin_text, kFieldW);
     }
     if (sync || sweep) {
-        static const char* const kinds[] = { "Order parameter R", "Spread across nodes", "Lyapunov exponent" };
+        static const char* const kinds[] = { "Order parameter R", "Spread across nodes", "Lyapunov exponent", "Readout NRMSE" };
+        static const char* const spike_kinds[] = { "Spike rate", "Readout NRMSE" };
         ImGui::SetNextItemWidth(170.0f);
-        if (sync || !spikes) ImGui::Combo(sweep ? "##neural_sweep_kind" : "##neural_sync_kind", sweep ? &vs.sweep_kind : &vs.sync_kind, kinds, sweep ? 3 : 2);
+        if (sweep && spikes) {
+            if (vs.sweep_kind > 1) vs.sweep_kind = 0;
+            ImGui::Combo("##neural_sweep_kind_spikes", &vs.sweep_kind, spike_kinds, 2);
+        }
+        else ImGui::Combo(sweep ? "##neural_sweep_kind" : "##neural_sync_kind", sweep ? &vs.sweep_kind : &vs.sync_kind, kinds, sweep ? 4 : 2);
+    }
+    const NeuralTaskResult& task = c.task_result;
+    // Номер NRMSE в окне свипа: у импульсной сети список короче.
+    const bool readoutSweep = sweep && vs.sweep_kind == (spikes ? 1 : 3);
+    const int taskT = (int)task.names.size();
+    if (readoutSweep && taskT > 0) {
+        const std::vector<const char*> items = c_str_list(task.names);
+        if (vs.readout_target >= taskT) vs.readout_target = 0;
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(90.0f);
+        ImGui::Combo("target##readout_sweep", &vs.readout_target, items.data(), taskT);
+        if ((size_t)vs.readout_target < task.delay_test.size()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("delays of the input: %.4f", task.delay_test[(size_t)vs.readout_target]);
+        }
     }
     const bool lyap = lyapWindow || (sweep && !spikes && vs.sweep_kind == 2);
     if (lyapWindow) {
@@ -815,7 +856,9 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     // Показатель от значения свипа рисуется как сводка свипа.
     const bool byValue = sweep || (lyapWindow && r.lyapunov.size() > 1 && vs.lyap_kind == 0);
     const bool spread = (sync && vs.sync_kind == 1) || (sweep && !spikes && vs.sweep_kind == 1);
-    const NeuralTaskResult& task = c.task_result;
+    const bool readoutSwept = readout && task.instances > 1;
+    if (readoutSwept) neural_instance_picker(c, vs, "instance##readout");
+    const int taskInst = (std::max)(0, (std::min)(vs.instance, task.instances - 1));
     if (readout && !task.names.empty()) {
         const std::vector<const char*> items = c_str_list(task.names);
         if (vs.readout_target >= (int)items.size()) vs.readout_target = 0;
@@ -823,7 +866,8 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         ImGui::Combo("target##readout", &vs.readout_target, items.data(), (int)items.size());
         ImGui::SameLine();
         ImGui::TextDisabled(task.applied ? "saved readout, record after the washout, NRMSE %.4f, %d feature nodes"
-                                         : "test part only, NRMSE %.4f, %d feature nodes", task.test[(size_t)vs.readout_target], task.features);
+                                         : "test part only, NRMSE %.4f, %d feature nodes",
+                            task.test[(size_t)taskInst * items.size() + (size_t)vs.readout_target], task.features);
     }
     if (!sweep && !input && !lyap && !rate && !raster && !weights && !readout && !s.vars.empty() && (!sync || spread)) {
         const std::vector<const char*> items = c_str_list(s.vars);
@@ -909,9 +953,10 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
         if (task.names.empty()) empty = "Turn on the readout in Neural Controls and press Run.";
         else {
             const int K2 = (int)task.names.size(), v = vs.readout_target;
+            const size_t at = (size_t)taskInst * task.points * K2;
             curves = 2; points = task.points;
             xof = [&task](int p) { return task.t0 + task.dt * (double)p; };
-            yof = [&task, K2, v](int k, int p) { return (k == 0 ? task.truth : task.predicted)[(size_t)p * K2 + v]; };
+            yof = [&task, K2, v, at](int k, int p) { return k == 0 ? task.truth[(size_t)p * K2 + v] : task.predicted[at + (size_t)p * K2 + v]; };
             yname = task.names[(size_t)v];
         }
     }
@@ -930,6 +975,19 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
                 const double* q = c.weight_summary.data() + (size_t)vs.instance * 3;
                 ImGui::TextDisabled("all plastic arcs at the end: min %.5g, mean %.5g, max %.5g", q[0], q[1], q[2]);
             }
+        }
+    }
+    else if (readoutSweep) {
+        // Кривая на значение второй оси, как у показателя: один выход на сеть.
+        const int n2 = (std::max)(1, (int)c.sweep2_values.size());
+        if (c.sweep_values.empty()) empty = "Turn on the sweep and press Run.";
+        else if (taskT == 0 || task.instances != (int)c.sweep_values.size() * n2) empty = "Turn on the readout in Neural Controls and press Run.";
+        else {
+            const int v = vs.readout_target;
+            curves = n2; points = (int)c.sweep_values.size();
+            xof = [&c](int p) { return c.sweep_values[(size_t)p]; };
+            yof = [&task, n2, taskT, v](int k, int p) { return task.test[((size_t)p * n2 + k) * taskT + v]; };
+            yname = "NRMSE " + task.names[(size_t)v];
         }
     }
     else if (!lyap && (r.n_points <= 0 || nPops <= 0)) empty = none;
@@ -1002,7 +1060,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     static int filled[kNeuralWindowCount] = {};
     static int filled_epoch[kNeuralWindowCount] = {};
     std::vector<std::vector<double>>& bufs = buffers[what];
-    const int gen = (((((c.data_generation * 131 + vs.series_var) * 131 + s.active_config_index) * 131 + vs.instance) * 131 + vs.sync_kind * 3 + vs.sweep_kind) * 131 + curves) * 131 + vs.lyap_kind + (rate ? points * 7 : 0) + (readout ? vs.readout_target * 11 : 0);
+    const int gen = (((((c.data_generation * 131 + vs.series_var) * 131 + s.active_config_index) * 131 + vs.instance) * 131 + vs.sync_kind * 3 + vs.sweep_kind) * 131 + curves) * 131 + vs.lyap_kind + (rate ? points * 7 : 0) + (readout || readoutSweep ? vs.readout_target * 11 : 0);
     const bool fresh = (int)bufs.size() != curves || filled[what] != gen + 1 || filled_epoch[what] != epoch;
     if (fresh) {
         filled_epoch[what] = epoch;
@@ -1034,9 +1092,10 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
                  : input ? c.sources[(size_t)k].name
                  : weights ? (k < (int)c.watch_labels.size() ? c.watch_labels[(size_t)k] : std::to_string(k))
                  : readout ? std::string(k == 0 ? "true" : "readout")
+                 : readoutSweep ? std::string("NRMSE")
                  : lyap ? std::string("lambda") : c.populations[(size_t)(k % K)].name;
         if (byValue && !c.sweep2_values.empty()) {
-            const int perNet = lyap ? 1 : K;
+            const int perNet = lyap || readoutSweep ? 1 : K;
             char v[32];
             std::snprintf(v, sizeof v, " %g", c.sweep2_values[(size_t)(k / perNet)]);
             si.label += v;
@@ -1046,8 +1105,9 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     view.x_axis.name = byValue ? neural_sweep_name(c.sweep.kind) : "t";
     view.y_axis.name = yname;
     if (longest == 0) {
-        ImGui::TextDisabled(sync || sweep ? "No finite values. R needs two threshold crossings of every node: run longer."
-                                          : "No finite values.");
+        ImGui::TextDisabled(readoutSweep ? "No network gave a readout: see the note in Neural Controls."
+                            : sync || sweep ? "No finite values. R needs two threshold crossings of every node: run longer."
+                                            : "No finite values.");
         return;
     }
     // Без запаса вырожденный диапазон (одна точка, все значения равны) даёт ось нулевой длины.
@@ -1085,7 +1145,7 @@ void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, Plot2DVi
     // Вид один на R и разброс: log10(R) на линейной оси дал бы отрицательные значения.
     bool* spread_log = sync ? &vs.spread_log[0] : sweep ? &vs.spread_log[1] : nullptr;
     if (spread_log) view.y_axis.display_log = spread && *spread_log;
-    if ((sync || sweep) && !spread && !lyap && !(sweep && spikes)) {
+    if ((sync || sweep) && !spread && !lyap && !(sweep && spikes) && !readoutSweep) {
         view.y_axis.view_min = -0.05; view.y_axis.view_max = 1.05;
         view.y_axis.lock = true;
     }
@@ -1112,12 +1172,26 @@ void draw_neural_map_window(AppModel& model, PlotRenderer& renderer, std::map<in
     }
     HeatmapView& hv = get_or_create_heatmap(maps, idx, -1, model.heatmap_colormap);
     const bool spikes = c.schedule == NeuralSchedule::Spike;
-    static const char* const kinds[] = { "Order parameter R", "Spread across nodes", "Lyapunov exponent" };
+    static const char* const kinds[] = { "Order parameter R", "Spread across nodes", "Lyapunov exponent", "Readout NRMSE" };
+    static const char* const spike_kinds[] = { "Spike rate", "Readout NRMSE" };
     ImGui::SetNextItemWidth(170.0f);
-    if (spikes) ImGui::TextUnformatted("Spike rate");
+    if (spikes) {
+        if (vs.map_kind > 1) vs.map_kind = 0;
+        ImGui::Combo("##neural_map_kind_spikes", &vs.map_kind, spike_kinds, IM_ARRAYSIZE(spike_kinds));
+    }
     else ImGui::Combo("##neural_map_kind", &vs.map_kind, kinds, IM_ARRAYSIZE(kinds));
+    const NeuralTaskResult& task = c.task_result;
+    const bool readout = vs.map_kind == (spikes ? 1 : 3);
+    const int T = (int)task.names.size();
+    if (readout && T > 0) {
+        const std::vector<const char*> items = c_str_list(task.names);
+        if (vs.readout_target >= T) vs.readout_target = 0;
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(90.0f);
+        ImGui::Combo("target##readout_map", &vs.readout_target, items.data(), T);
+    }
     if (vs.map_pop >= K) vs.map_pop = 0;
-    if (K > 1 && (spikes || vs.map_kind != 2)) {
+    if (K > 1 && !readout && (spikes || vs.map_kind != 2)) {
         ImGui::SameLine();
         ImGui::SetNextItemWidth(120.0f);
         if (ImGui::BeginCombo("##neural_map_pop", c.populations[(size_t)vs.map_pop].name.c_str())) {
@@ -1134,10 +1208,12 @@ void draw_neural_map_window(AppModel& model, PlotRenderer& renderer, std::map<in
     draw_heatmap_toolbar(hv);
 
     const bool lyap = !spikes && vs.map_kind == 2, spread = !spikes && vs.map_kind == 1, log10_spread = spread && vs.map_log;
-    const std::vector<double>& d = spikes ? c.pop_rate : lyap ? c.sweep_lyap : spread ? c.sweep_spread : c.sweep_order;
-    const int perNet = lyap ? 1 : K, pop = lyap ? 0 : vs.map_pop;
-    if (d.size() != (size_t)nInst * perNet) {
-        ImGui::TextDisabled(lyap ? "Turn on the Lyapunov exponent in Neural Controls and press Run." : "No data yet - press Run on the Neural tab.");
+    // У выхода «популяция» ячейки это цель: test лежит как [сеть][цель].
+    const std::vector<double>& d = readout ? task.test : spikes ? c.pop_rate : lyap ? c.sweep_lyap : spread ? c.sweep_spread : c.sweep_order;
+    const int perNet = readout ? T : lyap ? 1 : K, pop = readout ? vs.readout_target : lyap ? 0 : vs.map_pop;
+    if (perNet < 1 || d.size() != (size_t)nInst * perNet) {
+        ImGui::TextDisabled(readout ? "Turn on the readout in Neural Controls and press Run."
+                            : lyap ? "Turn on the Lyapunov exponent in Neural Controls and press Run." : "No data yet - press Run on the Neural tab.");
         return;
     }
     // Вид читает значения каждый кадр ради шкалы цвета, поэтому буфер живёт между кадрами.
@@ -1153,14 +1229,17 @@ void draw_neural_map_window(AppModel& model, PlotRenderer& renderer, std::map<in
             vmin = (std::min)(vmin, v);
             vmax = (std::max)(vmax, v);
         }
-    if (!std::isfinite(vmin)) { ImGui::TextDisabled("No finite values."); return; }
-    if (!lyap && !spread && !spikes) { vmin = 0.0; vmax = 1.0; }
+    if (!std::isfinite(vmin)) { ImGui::TextDisabled(readout ? "No network gave a readout: see the note in Neural Controls." : "No finite values."); return; }
+    if (!lyap && !spread && !spikes && !readout) { vmin = 0.0; vmax = 1.0; }
 
     hv.x_axis.name = neural_sweep_name(c.sweep.kind);
     hv.y_axis.name = neural_sweep_name(c.sweep2.kind);
     hv.x_axis.log_scale = c.sweep.log && c.sweep_values.front() > 0.0;
     hv.y_axis.log_scale = c.sweep2.log && c.sweep2_values.front() > 0.0;
-    hv.value_name = spikes ? "rate" : lyap ? "lambda" : log10_spread ? "log10 spread" : spread ? "spread" : "R";
+    // Вид хранит указатель на имя между кадрами.
+    static std::string value_name;
+    value_name = readout ? "NRMSE " + task.names[(size_t)pop] : spikes ? "rate" : lyap ? "lambda" : log10_spread ? "log10 spread" : spread ? "spread" : "R";
+    hv.value_name = value_name.c_str();
     hv.left_click_plain = true;
     hv.on_left_click = [&vs, n2](int ix, int iy, double, double) { vs.instance = ix * n2 + iy; };
 

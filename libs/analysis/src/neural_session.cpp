@@ -993,7 +993,6 @@ NeuralConfig neural_task_config(const NeuralConfig& c) {
     NeuralConfig o = c;
     const NeuralTask& t = c.task;
     if (!t.enabled) return o;
-    if (c.sweep.enabled) throw std::runtime_error("a readout does not work with a sweep yet");
     if (c.protocol != NeuralProtocol::Continuous) throw std::runtime_error("a readout needs the continuous protocol");
     if (num_or(c.transient_text, 0.0) != 0.0) throw std::runtime_error("a readout has its own washout: set the transient to 0");
     if (c.lyap_on) throw std::runtime_error("a readout does not work with the Lyapunov exponent");
@@ -1031,7 +1030,8 @@ NeuralConfig neural_task_config(const NeuralConfig& c) {
     o.observed_per_pop_text = spike ? "0" : std::to_string(M);
     o.obs_vars_off.clear();
     for (int k = 0; k < 64; ++k) if (k != c.input_var || spike) o.obs_vars_off.push_back(k);
-    const double mb = (double)(total + 1) * M * (double)c.populations.size() * sizeof(double) / (1024.0 * 1024.0) * 1.2 + 16.0;
+    const double nets = (double)(std::max<size_t>)(1, neural_sweep_values(c).size()) * (double)(std::max<size_t>)(1, neural_sweep2_values(c).size());
+    const double mb = (double)(total + 1) * M * (double)c.populations.size() * nets * sizeof(double) / (1024.0 * 1024.0) * 1.2 + 16.0;
     o.output_limit_text = fmt_num_shortest((std::max)(num_or(c.output_limit_text, 1024.0), mb));
     return o;
 }
@@ -1062,58 +1062,90 @@ NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest
         for (size_t q = 0; q < points; ++q) Y[q * K + k] = v[(q + (size_t)horizon) * (three ? 2 : 1)];
         out.names.push_back(src.vars[(size_t)t.targets[(size_t)k]]);
     }
-    std::vector<double> F;
-    std::vector<int> nodes;
-    int M = 0;
-    if (c.schedule == NeuralSchedule::Spike) {
-        if (res.spikes_dropped > 0) throw std::runtime_error("the spike log was cut, the features would be wrong");
-        const int want = (std::max)(1, int_or(t.features_text, 1000));
-        int node0 = 0;
-        for (size_t p = 0; p < c.populations.size(); ++p)
-            if (!c.populations[p].spike_source) { node0 = r.observe.pop_start[p]; M = (std::min)(want, r.observe.pop_start[p + 1] - node0); break; }
-        const double tau = num_or(t.filter_text, 20.0) / r.h;
-        F = readout_spike_features(res.spike_step, res.spike_node, node0, M, 0, r.pre_scaller, (int)points, tau);
-        for (int i = 0; i < M; ++i) nodes.push_back(node0 + i);
-    }
-    else {
-        M = (int)res.observed.size();
-        if (M < 1 || res.traces.size() < points * (size_t)M) throw std::runtime_error("the record has no features");
-        F.assign(res.traces.begin(), res.traces.begin() + (std::ptrdiff_t)(points * (size_t)M));
-        nodes = res.observed;
-    }
-    out.features = M;
+    const bool spike = c.schedule == NeuralSchedule::Spike;
+    if (spike && res.spikes_dropped > 0) throw std::runtime_error("the spike log was cut, the features would be wrong");
+    const std::vector<int> inst = r.instance_start.empty() ? std::vector<int>{ 0, r.n_nodes } : r.instance_start;
+    const int nInst = (int)inst.size() - 1, P = (int)c.populations.size();
+    // Признаки экземпляра q и номера их узлов внутри экземпляра: по ним сохранённый выход узнаёт свои узлы.
+    const auto features = [&](int q, std::vector<double>& F, std::vector<int>& nodes) {
+        nodes.clear();
+        if (spike) {
+            const int want = (std::max)(1, int_or(t.features_text, 1000));
+            int node0 = -1, M = 0;
+            for (int p = 0; p < P && node0 < 0; ++p)
+                if (!c.populations[(size_t)p].spike_source) {
+                    node0 = r.observe.pop_start[(size_t)(q * P + p)];
+                    M = (std::min)(want, r.observe.pop_start[(size_t)(q * P + p + 1)] - node0);
+                }
+            if (node0 < 0 || M < 1) throw std::runtime_error("the readout needs a population that is not a spike source");
+            F = readout_spike_features(res.spike_step, res.spike_node, node0, M, 0, r.pre_scaller, (int)points, num_or(t.filter_text, 20.0) / r.h);
+            for (int i = 0; i < M; ++i) nodes.push_back(node0 + i - inst[(size_t)q]);
+            return M;
+        }
+        const size_t nSel = res.observed.size();
+        if (nSel < 1 || res.traces.size() < points * nSel) throw std::runtime_error("the record has no features");
+        std::vector<size_t> cols;
+        for (size_t i = 0; i < nSel; ++i)
+            if (res.observed[i] >= inst[(size_t)q] && res.observed[i] < inst[(size_t)q + 1]) { cols.push_back(i); nodes.push_back(res.observed[i] - inst[(size_t)q]); }
+        const int M = (int)cols.size();
+        if (M < 1) throw std::runtime_error("the network has no observed nodes");
+        F.resize(points * (size_t)M);
+        for (size_t p = 0; p < points; ++p)
+            for (int i = 0; i < M; ++i) F[p * (size_t)M + (size_t)i] = res.traces[p * nSel + cols[(size_t)i]];
+        return M;
+    };
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const size_t wash = (size_t)int_or(t.washout_text, 0);
+    const ReadoutSplit sp = t.use_saved ? ReadoutSplit{} : task_split(t, points);
+    const size_t from = t.use_saved ? wash : sp.test0;
+    out.instances = nInst;
+    out.applied = t.use_saved;
     out.dt = (double)r.pre_scaller * r.h;
-    if (t.use_saved) {
-        const NeuralReadoutSaved& s = c.readout;
-        if (nodes != s.nodes) throw std::runtime_error("the feature nodes differ from the saved readout");
-        ReadoutModel m;
-        m.M = s.M; m.K = s.K; m.mean = s.mean; m.scale = s.scale; m.w = s.w;
-        const size_t wash = (size_t)int_or(t.washout_text, 0);
-        out.applied = true;
-        out.lambda = s.lambda;
-        out.points = (int)(points - wash);
-        out.t0 = (double)wash * out.dt;
-        out.predicted = readout_predict(m, F, wash, points);
-        out.truth.assign(Y.begin() + (std::ptrdiff_t)(wash * K), Y.begin() + (std::ptrdiff_t)(points * K));
-        for (int k = 0; k < K; ++k) out.test.push_back(readout_nrmse(out.truth.data() + k, out.predicted.data() + k, (size_t)K, (size_t)out.points));
-        return out;
-    }
-    const ReadoutSplit sp = task_split(t, points);
+    out.points = (int)(points - from);
+    out.t0 = (double)from * out.dt;
+    out.truth.assign(Y.begin() + (std::ptrdiff_t)(from * K), Y.begin() + (std::ptrdiff_t)(points * K));
+    out.val.assign((size_t)nInst * K, nan); out.test.assign((size_t)nInst * K, nan); out.lambda.assign((size_t)nInst * K, nan);
+    out.predicted.assign((size_t)nInst * out.points * K, nan);
     const std::vector<double> lambdas = {1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0};
-    const ReadoutModel m = readout_fit(F, Y, M, K, sp, lambdas);
-    const std::vector<double> p = readout_predict(m, F, sp.test0, sp.test1);
-    out.val = m.val_nrmse; out.lambda = m.lambda;
-    out.points = (int)(sp.test1 - sp.test0);
-    out.t0 = (double)sp.test0 * (double)r.pre_scaller * r.h;
-    out.predicted = p;
-    out.truth.assign(Y.begin() + (std::ptrdiff_t)(sp.test0 * K), Y.begin() + (std::ptrdiff_t)(sp.test1 * K));
-    for (int k = 0; k < K; ++k) out.test.push_back(readout_nrmse(out.truth.data() + k, p.data() + k, (size_t)K, (size_t)out.points));
+    ReadoutModel m0;
+    std::vector<int> nodes0;
+    for (int q = 0; q < nInst; ++q) {
+        // Отказ одной сети свипа (разошлась, молчит) не отменяет остальные: у неё NaN и первая причина в заметке.
+        try {
+            if (nInst > 1 && q < (int)res.instance_stop.size() && res.instance_stop[(size_t)q] >= 0) throw std::runtime_error("the network diverged");
+            std::vector<double> F;
+            std::vector<int> nodes;
+            const int M = features(q, F, nodes);
+            if (q == 0) out.features = M;
+            ReadoutModel m;
+            if (t.use_saved) {
+                const NeuralReadoutSaved& s = c.readout;
+                if (nodes != s.nodes) throw std::runtime_error("the feature nodes differ from the saved readout");
+                m.M = s.M; m.K = s.K; m.mean = s.mean; m.scale = s.scale; m.w = s.w;
+                for (int k = 0; k < K; ++k) out.lambda[(size_t)q * K + k] = s.lambda[(size_t)k];
+            }
+            else {
+                m = readout_fit(F, Y, M, K, sp, lambdas);
+                for (int k = 0; k < K; ++k) { out.val[(size_t)q * K + k] = m.val_nrmse[(size_t)k]; out.lambda[(size_t)q * K + k] = m.lambda[(size_t)k]; }
+            }
+            const std::vector<double> p = readout_predict(m, F, from, points);
+            std::copy(p.begin(), p.end(), out.predicted.begin() + (std::ptrdiff_t)((size_t)q * out.points * K));
+            for (int k = 0; k < K; ++k)
+                out.test[(size_t)q * K + k] = readout_nrmse(out.truth.data() + k, p.data() + k, (size_t)K, (size_t)out.points);
+            if (q == 0) { m0 = std::move(m); nodes0 = std::move(nodes); }
+        } catch (const std::exception& e) {
+            if (nInst == 1) throw;
+            if (out.note.empty()) out.note = "network " + std::to_string(q) + ": " + e.what();
+        }
+    }
+    if (t.use_saved) return out;
+    if (nInst == 1) {
     // Нормировку входа считает fill_input внутри плана; повтор того же ряда по тем же отсчётам даёт те же биты.
     double stats[2] = { 0.0, 1.0 };
     const size_t used = (size_t)src.normalize_first * (three ? 2 : 1);
     source_system_series(src, used, three ? 0.5 * dt : dt, three ? 2 : 1, stats);
     NeuralReadoutSaved& s = out.model;
-    s.spikes = c.schedule == NeuralSchedule::Spike;
+    s.spikes = spike;
     s.feature_var = c.input_var;
     s.features_requested = (std::max)(1, int_or(t.features_text, 1000));
     s.filter = num_or(t.filter_text, 20.0);
@@ -1121,10 +1153,11 @@ NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest
     s.source = t.source; s.horizon = horizon;
     s.targets = t.targets; s.names = out.names;
     s.input_mean = stats[0]; s.input_sd = stats[1];
-    s.nodes = nodes;
-    s.M = m.M; s.K = m.K; s.mean = m.mean; s.scale = m.scale; s.w = m.w;
-    s.lambda = m.lambda; s.val = m.val_nrmse; s.test = out.test;
-    // Простая модель той же задачи: без неё число ни о чём не говорит.
+    s.nodes = nodes0;
+    s.M = m0.M; s.K = m0.K; s.mean = m0.mean; s.scale = m0.scale; s.w = m0.w;
+    s.lambda = m0.lambda; s.val = m0.val_nrmse; s.test = out.test;
+    }
+    // Простая модель той же задачи: без неё число ни о чём не говорит. Вход у сетей свипа общий, поэтому она одна.
     double best = std::numeric_limits<double>::infinity();
     for (int D : {1, 5, 10, 20, 50}) {
         if ((size_t)D >= sp.train1 - sp.train0) break;
@@ -1198,8 +1231,12 @@ std::string neural_sweep_csv(const NeuralConfig& c) {
     o.precision(17);
     const int K = c.pops_per_instance, n2 = (std::max)(1, (int)c.sweep2_values.size()), nInst = (int)c.result.instance_stop.size();
     const bool two = !c.sweep2_values.empty(), spikes = c.schedule == NeuralSchedule::Spike;
+    const NeuralTaskResult& task = c.task_result;
+    const int T = task.instances == nInst ? (int)task.names.size() : 0;
     o << neural_sweep_name(c.sweep.kind) << (two ? std::string(",") + neural_sweep_name(c.sweep2.kind) : std::string())
-      << ",population," << (spikes ? "rate" : "R,spread,lyapunov") << ",stop_step\n";
+      << ",population," << (spikes ? "rate" : "R,spread,lyapunov") << ",stop_step";
+    for (int k = 0; k < T; ++k) o << ",nrmse_" << task.names[(size_t)k];
+    o << "\n";
     for (int q = 0; q < nInst; ++q) {
         for (int p = 0; p < K; ++p) {
             const size_t at = (size_t)q * K + p;
@@ -1216,7 +1253,9 @@ std::string neural_sweep_csv(const NeuralConfig& c) {
                 cell(c.sweep_spread, at);
                 cell(c.sweep_lyap, (size_t)q);
             }
-            o << "," << c.result.instance_stop[(size_t)q] << "\n";
+            o << "," << c.result.instance_stop[(size_t)q];
+            for (int k = 0; k < T; ++k) cell(task.test, (size_t)q * T + k);
+            o << "\n";
         }
     }
     return o.str();
@@ -1277,6 +1316,7 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
         plan.request = neural_build_request(sys, custom_schemes, vars, params, c, g);
         take_view(plan.request);
         plan.hash = g.hash;
+        plan.instance_hashes = { g.hash };
         plan.arcs = (long long)g.src.size();
         plan.degree_min = g.degree_min; plan.degree_max = g.degree_max;
         plan.watched_per_instance = (int)(plan.request.spike.watch_arcs.size() + plan.request.devices.watch.size() * (size_t)plan.request.devices.states);
@@ -1301,6 +1341,7 @@ NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custo
         if (plan.arcs > kMaxArcs) throw std::runtime_error("the sweep would hold more than " + std::to_string(kMaxArcs) + " arcs");
         const int off = (int)nodes, arc_off = (int)a.edge_src.size();
         for (const char ch : g.hash) f.add((uint64_t)(uint8_t)ch);
+        plan.instance_hashes.push_back(g.hash);
         plan.degree_min = (std::min)(plan.degree_min, g.degree_min);
         plan.degree_max = (std::max)(plan.degree_max, g.degree_max);
         const unsigned long long lyap_seed = r.lyapunov.seed;
@@ -1465,8 +1506,11 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
             if (resume) { plan.request.resume = snap.checkpoint; plan.request.observe.order_var = -1; }
             // Признаки и цели выхода берутся от начала записи, у продолжения его нет.
             if (job.task.enabled && resume) throw std::runtime_error("a readout does not work with Continue yet");
-            if (job.task.enabled && job.task.use_saved && plan.hash != job.readout.graph_hash)
-                throw std::runtime_error("the saved readout was trained on another graph (hash " + job.readout.graph_hash + ", now " + plan.hash + ")");
+            if (job.task.enabled && job.task.use_saved)
+                for (size_t q = 0; q < plan.instance_hashes.size(); ++q)
+                    if (plan.instance_hashes[q] != job.readout.graph_hash)
+                        throw std::runtime_error("the saved readout was trained on another graph (hash " + job.readout.graph_hash + ", now "
+                                                 + plan.instance_hashes[q] + (plan.instance_hashes.size() > 1 ? " in network " + std::to_string(q) : std::string()) + ")");
             out.resumed = resume;
             out.watched_per_instance = plan.watched_per_instance;
             out.watch_labels = plan.watch_labels;

@@ -162,16 +162,20 @@ struct NeuralReadoutSaved {
     bool empty() const { return w.empty(); }
 };
 
+// Свип: у каждого экземпляра свой выход на одном разбиении, вход и цели у экземпляров общие.
 struct NeuralTaskResult {
     bool applied = false;                  // сохранённый выход без обучения: val, delay_test пусты, test по записи после прогрева
-    NeuralReadoutSaved model;              // обученный в этом расчёте, пусто при applied
+    NeuralReadoutSaved model;              // обученный в этом расчёте, пусто при applied и в свипе
+    int instances = 1;
     std::vector<std::string> names;        // [targets]
-    std::vector<double> val, test, lambda; // [targets], NRMSE
+    std::vector<double> val, test, lambda; // [instance][target], NRMSE; NaN у остановленного или не обученного экземпляра
     std::vector<double> delay_test;        // [targets], ridge по задержкам входа, длина выбрана на валидации
     int delay_length = 0, features = 0;
     double t0 = 0.0, dt = 0.0;             // тест в единицах времени сети
     int points = 0;
-    std::vector<double> truth, predicted;  // [point][target], тест
+    std::vector<double> truth;             // [point][target], тест
+    std::vector<double> predicted;         // [instance][point][target]
+    std::string note;                      // первый отказ экземпляра свипа
 };
 
 struct NeuralConfig {
@@ -284,6 +288,7 @@ struct NeuralGraph {
 struct NeuralPlan {
     NeuralRequest request;
     std::string hash;
+    std::vector<std::string> instance_hashes;   // граф каждой сети свипа: сохранённый выход сверяется с каждой
     long long arcs = 0;
     int degree_min = 0, degree_max = 0;
     int pops_per_instance = 0;
