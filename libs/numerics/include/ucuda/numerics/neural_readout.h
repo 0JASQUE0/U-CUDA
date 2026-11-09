@@ -32,7 +32,18 @@ struct ReadoutModel {
     std::vector<double> w;             // [K * (M + 1)], последний столбец свободный член
     std::vector<double> lambda;        // [K]
     std::vector<double> val_nrmse;     // [K]
+    double val_accuracy = 0.0;         // классификатор: доля верных argmax на валидации
 };
+
+// Номер наибольшего выхода в каждой строке [n][K]: класс ridge-классификатора по one-hot.
+inline std::vector<int> readout_argmax(const std::vector<double>& p, int K) {
+    std::vector<int> out(p.size() / (size_t)K);
+    for (size_t t = 0; t < out.size(); ++t) {
+        const double* row = p.data() + t * (size_t)K;
+        out[t] = (int)(std::max_element(row, row + K) - row);
+    }
+    return out;
+}
 
 // Экспоненциальный фильтр журнала спайков на сетке записи: спайк шага n стоит на времени (n + 1) h, поэтому в точку
 // шага s входят только спайки с n + 1 <= s. Журнал упорядочен по шагу. Узлы вне [node0, node0 + M) пропускаются.
@@ -66,6 +77,26 @@ inline double readout_nrmse(const double* y, const double* yhat, size_t stride, 
         var += (a - m) * (a - m);
     }
     return var > 0.0 ? std::sqrt(err / var) : std::numeric_limits<double>::quiet_NaN();
+}
+
+// Квадрат коэффициента корреляции цели и выхода: вклад одной задержки в memory capacity.
+inline double readout_r2(const double* y, const double* yhat, size_t stride, size_t n) {
+    double my = 0.0, mh = 0.0;
+    for (size_t t = 0; t < n; ++t) { my += y[t * stride]; mh += yhat[t * stride]; }
+    my /= (double)n; mh /= (double)n;
+    double cov = 0.0, vy = 0.0, vh = 0.0;
+    for (size_t t = 0; t < n; ++t) {
+        const double a = y[t * stride] - my, b = yhat[t * stride] - mh;
+        cov += a * b; vy += a * a; vh += b * b;
+    }
+    return vy > 0.0 && vh > 0.0 ? cov * cov / (vy * vh) : 0.0;
+}
+
+// Доля верных бит: цель 0 или 1, ответ по порогу 0.5.
+inline double readout_bit_accuracy(const double* y, const double* yhat, size_t stride, size_t n) {
+    size_t right = 0;
+    for (size_t t = 0; t < n; ++t) right += (y[t * stride] > 0.5) == (yhat[t * stride] > 0.5);
+    return n ? (double)right / (double)n : std::numeric_limits<double>::quiet_NaN();
 }
 
 inline std::vector<double> readout_predict(const ReadoutModel& r, const std::vector<double>& F, size_t t0, size_t t1) {
@@ -127,8 +158,9 @@ inline void cholesky_solve(const std::vector<double>& L, size_t n, double* b) {
 
 // Вес на цель берётся при лучшем по валидации lambda. Обучение видит только train: и среднее, и масштаб, и матрицу.
 // Система (X^T X / n + lambda I) w = X^T y / n, X стандартизован, y центрирован: lambda не зависит от длины записи.
+// classify: Y это one-hot, lambda одна на все выходы и выбирается по accuracy на валидации, при равенстве большая.
 inline ReadoutModel readout_fit(const std::vector<double>& F, const std::vector<double>& Y, int M, int K, const ReadoutSplit& s,
-                                const std::vector<double>& lambdas) {
+                                const std::vector<double>& lambdas, bool classify = false) {
     if (M < 1 || K < 1 || lambdas.empty()) throw std::runtime_error("the readout needs features, targets and lambdas");
     const size_t Ms = (size_t)M, Ks = (size_t)K, n = s.train1 - s.train0;
     ReadoutModel r;
@@ -193,6 +225,21 @@ inline ReadoutModel readout_fit(const std::vector<double>& F, const std::vector<
             c.w[k * (Ms + 1) + Ms] = ymean[k];
         }
         const std::vector<double> p = readout_predict(c, F, s.val0, s.val1);
+        if (classify) {
+            const std::vector<int> cls = readout_argmax(p, K);
+            size_t right = 0;
+            for (size_t t = 0; t < cls.size(); ++t) right += Y[(s.val0 + t) * Ks + (size_t)cls[t]] > 0.5;
+            const double acc = (double)right / (double)cls.size();
+            if (acc >= r.val_accuracy) {
+                r.val_accuracy = acc;
+                r.w = c.w;
+                for (size_t k = 0; k < Ks; ++k) {
+                    r.lambda[k] = lam;
+                    r.val_nrmse[k] = readout_nrmse(Y.data() + s.val0 * Ks + k, p.data() + k, Ks, s.val1 - s.val0);
+                }
+            }
+            continue;
+        }
         for (size_t k = 0; k < Ks; ++k) {
             const double e = readout_nrmse(Y.data() + s.val0 * Ks + k, p.data() + k, Ks, s.val1 - s.val0);
             if (e < r.val_nrmse[k]) {

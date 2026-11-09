@@ -414,6 +414,7 @@ struct EngineModuleCache : EngineSources {
         CUfunction  mean = nullptr;          // neuralMeanKernel
         CUfunction  lyap = nullptr;          // neuralLyapKernel
         CUfunction  weight = nullptr;        // neuralWeightKernel
+        CUfunction  feedback = nullptr;      // neuralFeedbackKernel
     };
     CachedNeuralModule cached_neural;
 

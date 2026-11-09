@@ -551,6 +551,32 @@ extern "C" __global__ void neuralObserveKernel(const NeuralObserveArgs A) {
         A.out[(size_t)sel * A.nVars + v] = A.state[(size_t)A.vars[v] * A.nNodes + node];
 }
 
+// Замкнутый выход: блок k считает y_k по строке записи и кладёт его в строку входа. Сумма в double при любом numb.
+#define NEURAL_FEEDBACK_BLOCK 256
+struct NeuralFeedbackArgs {
+    const numb* row;
+    const int*  cols;
+    const int*  channels;
+    const double* w;          // [K][M + 1]
+    numb* out;                // строка входа
+    int M, K;
+};
+extern "C" __global__ void neuralFeedbackKernel(const NeuralFeedbackArgs A) {
+    __shared__ double part[NEURAL_FEEDBACK_BLOCK];
+    const int k = blockIdx.x;
+    if (k >= A.K) return;
+    const double* w = A.w + (size_t)k * (A.M + 1);
+    double s = 0.0;
+    for (int i = threadIdx.x; i < A.M; i += blockDim.x) s += w[i] * (double)A.row[A.cols[i]];
+    part[threadIdx.x] = s;
+    __syncthreads();
+    for (int half = blockDim.x / 2; half > 0; half >>= 1) {
+        if ((int)threadIdx.x < half) part[threadIdx.x] += part[threadIdx.x + half];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) A.out[A.channels[k]] = (numb)(part[0] + w[A.M]);
+}
+
 struct NeuralMeanArgs {
     const numb* state;
     const int*  groupStart;   // [nGroups + 1], группы подряд идущих узлов одной популяции

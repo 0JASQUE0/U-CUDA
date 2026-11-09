@@ -106,14 +106,14 @@ struct NeuralViewState {
     int series_var = 0;
     int instance = 0;    // экземпляр в окнах от времени
     int sync_kind = 0;   // 0 = R, 1 = разброс по узлам
-    int sweep_kind = 0;  // Neural Sweep: то же, 2 = показатель Ляпунова
+    int sweep_kind = 0;  // Neural Sweep: то же, 2 = показатель Ляпунова, 3 = NRMSE выхода; у спайков 0 = частота, 1 = NRMSE
     bool spread_log[2] = { true, true };   // окна Synchronisation и Neural Sweep; у R оси всегда линейная
     int lyap_kind = 0;   // 0 = показатель от значения свипа, 1 = накопленное среднее одной сети
-    int map_kind = 0;    // Neural Map: 0 = R, 1 = разброс, 2 = показатель Ляпунова
+    int map_kind = 0;    // Neural Map: как sweep_kind
     int map_pop = 0;
     bool map_log = true; // разброс в log10: он меняется на 7 порядков
     std::string rate_bin_text = "0";   // окно Population Rate, 0 = авто
-    int readout_target = 0;            // окно Neural Readout
+    int readout_target = 0;            // цель выхода в окнах Neural Readout, Neural Sweep и Neural Map
 };
 
 struct NetworkViewState {

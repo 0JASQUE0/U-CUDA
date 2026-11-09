@@ -185,7 +185,8 @@ bool ParametricEngine::Impl::compile_neural_module(bool activate, const NeuralRe
                 || !module_fn(mod, "neuralMeanKernel", fresh.mean, err)
                 || !module_fn(mod, "neuralOrderKernel", fresh.order, err)
                 || !module_fn(mod, "neuralLyapKernel", fresh.lyap, err)
-                || !module_fn(mod, "neuralWeightKernel", fresh.weight, err)) { cuModuleUnload(mod); return false; }
+                || !module_fn(mod, "neuralWeightKernel", fresh.weight, err)
+                || !module_fn(mod, "neuralFeedbackKernel", fresh.feedback, err)) { cuModuleUnload(mod); return false; }
             return true;
         }, err);
     }
@@ -257,6 +258,7 @@ NeuralResult ParametricEngine::Impl::run_neural_spike(const NeuralRequest& req) 
             for (int c : in.node_channel) if (c >= in.channels) return fail("input channel out of range");
         }
         if (req.lyapunov.enabled) return fail("the Lyapunov exponent does not work on a spiking network");
+        if (req.feedback.from_row >= 0) return fail("a closed-loop readout does not work on a spiking network yet");
         if (req.devices.states > 0) return fail("devices on links need the stage schedule");
         for (size_t q = 0; q < req.reset_at.size(); ++q)
             if (req.reset_at[q] < 0 || (q > 0 && req.reset_at[q] <= req.reset_at[q - 1])) return fail("reset steps must increase");
@@ -909,6 +911,20 @@ NeuralResult ParametricEngine::Impl::run_neural(const NeuralRequest& req) {
             return fail("the recorded output is above max_output_bytes: raise the decimation or select less");
         const int nPoints = (int)nPointsLL;
 
+        // Замкнутый выход: строка входа p считается по записи точки p, поэтому сетки входа и записи совпадают.
+        const NeuralFeedback& fb = req.feedback;
+        const bool closed = fb.from_row >= 0;
+        const int fbM = (int)fb.cols.size(), fbK = (int)fb.channels.size();
+        if (closed) {
+            if (in.channels < 1 || in.stage_rows != 1) return fail("a closed-loop readout needs an input of one row per sample");
+            if (skipSteps != 0 || (long long)req.pre_scaller != in.hold_steps) return fail("a closed-loop readout needs no transient and the record on the input samples");
+            if (lyap) return fail("a closed-loop readout does not work with the Lyapunov exponent");
+            if (nInst != 1) return fail("a closed-loop readout drives one network");
+            if (fbM < 1 || fbK < 1 || fb.w.size() != (size_t)fbK * (size_t)(fbM + 1)) return fail("bad closed-loop readout");
+            for (int col : fb.cols) if (col < 0 || (size_t)col >= (size_t)nSel * (size_t)nVars) return fail("a closed-loop feature is not in the record");
+            for (int ch : fb.channels) if (ch < 0 || ch >= in.channels) return fail("a closed-loop channel is out of range");
+        }
+
         std::string err;
         if (!ensure_init(err)) return fail(err);
         cuCtxSetCurrent(context);
@@ -1013,6 +1029,11 @@ NeuralResult ParametricEngine::Impl::run_neural(const NeuralRequest& req) {
             if (lyap && (!up_to(d_inCh.as<int>() + N, in.node_channel.data(), (size_t)N * sizeof(int), "inChannel")
                          || !up_to(d_inGain.as<numb>() + N, gain.data(), (size_t)N * sizeof(numb), "inGain"))) return fail(err);
         }
+        OrderDevBuf d_fbCols, d_fbCh, d_fbW;
+        if (closed && (!dev(d_fbCols, (size_t)fbM * sizeof(int), "feedbackCols") || !up(d_fbCols, fb.cols.data(), (size_t)fbM * sizeof(int), "feedbackCols")
+                       || !dev(d_fbCh, (size_t)fbK * sizeof(int), "feedbackChannels") || !up(d_fbCh, fb.channels.data(), (size_t)fbK * sizeof(int), "feedbackChannels")
+                       || !dev(d_fbW, fb.w.size() * sizeof(double), "feedbackW") || !up(d_fbW, fb.w.data(), fb.w.size() * sizeof(double), "feedbackW")))
+            return fail(err);
 
         std::vector<int> lyStart, lyInst;
         if (lyap) {
@@ -1254,6 +1275,21 @@ NeuralResult ParametricEngine::Impl::run_neural(const NeuralRequest& req) {
             ++rowsOnDevice;
             return true;
         };
+        // Сразу после записи точки p, до её сброса на хост: строка входа p нужна уже следующему шагу.
+        struct FeedbackArgs { const numb* row; const int* cols; const int* channels; const double* w; numb* out; int M, K; };
+        constexpr unsigned kFeedbackBlock = 256;   // NEURAL_FEEDBACK_BLOCK в шаблоне
+        long long fedLast = -1;
+        const auto feed = [&](long long point) -> bool {
+            if (!closed || point < fb.from_row || point >= nInRows) return true;
+            FeedbackArgs fa{ d_out.as<numb>() + (size_t)(rowsOnDevice - 1) * rowElems, d_fbCols.as<int>(), d_fbCh.as<int>(), d_fbW.as<double>(),
+                             d_inRows.as<numb>() + (size_t)point * (size_t)in.channels, fbM, fbK };
+            void* args[] = { &fa };
+            CUresult r = cuLaunchKernel(cached_neural.feedback, (unsigned)fbK, 1, 1, kFeedbackBlock, 1, 1, 0, nullptr, args, nullptr);
+            if (r != CUDA_SUCCESS) { err = "cuLaunchKernel(neural feedback): " + cu_err(r); return false; }
+            ++res.launches;
+            fedLast = point;
+            return true;
+        };
 
         long long done = 0;
         size_t nextReset = 0;
@@ -1275,7 +1311,7 @@ NeuralResult ParametricEngine::Impl::run_neural(const NeuralRequest& req) {
             if (done >= skipSteps) rowsFlushed = (int)(std::min<long long>)((done - skipSteps) / req.pre_scaller + 1, nPoints);
             for (long long v : instStop) res.diverged = res.diverged || v >= 0;
         } else {
-            if (skipSteps == 0 && nPoints > 0 && !record(d_buf[0].as<numb>())) return fail(err);
+            if (skipSteps == 0 && nPoints > 0 && (!record(d_buf[0].as<numb>()) || !feed(0))) return fail(err);
             // Интервал, на который попадает начало записи, начался раньше: пересечения считаются и в transient.
             if (skipSteps > 0 && nOrder > 0 && skipSteps % req.pre_scaller == 0 && !track(d_buf[0].as<numb>(), 0.0)) return fail(err);
         }
@@ -1317,7 +1353,7 @@ NeuralResult ParametricEngine::Impl::run_neural(const NeuralRequest& req) {
                 if (nPoints > 0 && done >= skipSteps && (done - skipSteps) % req.pre_scaller == 0
                     && (done - skipSteps) / req.pre_scaller < nPoints) {
                     const numb* state = d_buf[stage ? 0 : (int)(done & 1)].as<numb>();
-                    if (!record(state)) return fail(err);
+                    if (!record(state) || !feed((done - skipSteps) / req.pre_scaller)) return fail(err);
                     if (rowsOnDevice == flushRows) {
                         cudaDeviceSynchronize();
                         if (!flush()) return fail("memcpy D2H out");
@@ -1358,6 +1394,17 @@ NeuralResult ParametricEngine::Impl::run_neural(const NeuralRequest& req) {
             if (running == 0) stopped = true;
         }
         res.steps_done = done;
+        if (closed && fb.from_row < nInRows) {
+            cudaDeviceSynchronize();
+            const size_t first = (size_t)fb.from_row, n = (size_t)(nInRows - fb.from_row), ch = (size_t)in.channels;
+            std::vector<numb> rows(n * ch);
+            if (cudaMemcpy(rows.data(), d_inRows.as<numb>() + first * ch, rows.size() * sizeof(numb), cudaMemcpyDeviceToHost) != cudaSuccess)
+                return fail("memcpy D2H closed-loop input");
+            // Строки после остановки не считались: там лежит заданный вход, а не выход сети.
+            res.feedback_rows.assign(n * (size_t)fbK, std::numeric_limits<double>::quiet_NaN());
+            for (size_t p = 0; p < n && (long long)(first + p) <= fedLast; ++p)
+                for (int k = 0; k < fbK; ++k) res.feedback_rows[p * (size_t)fbK + (size_t)k] = (double)rows[p * ch + (size_t)fb.channels[(size_t)k]];
+        }
         res.device_trace = std::move(deviceTrace);
         if (dS > 0) {
             int clips = 0;

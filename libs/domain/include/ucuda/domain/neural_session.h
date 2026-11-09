@@ -95,7 +95,8 @@ struct NeuralSweep {
 };
 
 // Канал входа. Система из библиотеки хранится снимком, эксперимент от правок библиотеки не зависит.
-enum class NeuralSourceKind { Constant = 0, Sine, Square, Noise, System };
+// Bits: +-amplitude с равной вероятностью на каждый отсчёт входа, для XOR задержанных битов.
+enum class NeuralSourceKind { Constant = 0, Sine, Square, Noise, System, Bits };
 
 struct NeuralSource {
     std::string name = "input";
@@ -111,6 +112,9 @@ struct NeuralSource {
     std::string skip_text = "100";         // переходный процесс источника
     bool normalize = true;                 // среднее 0 и СКО 1 по поданным отсчётам
     long long normalize_first = 0;         // считать их только по первым отсчётам, 0 = по всем: задача не должна видеть тест
+    // Только в запуске: сохранённый выход видел вход с нормировкой обучения, её и берём. В JSON не пишется.
+    bool norm_fixed = false;
+    double norm_mean = 0.0, norm_sd = 1.0;
 };
 
 // Доля узлов популяции на канал: у одного узла один канал, доли одной популяции не пересекаются.
@@ -123,8 +127,28 @@ enum class NeuralProtocol { Continuous = 0, Trials };
 
 // Задача: по отклику сети на вход восстановить или предсказать переменные той же системы-источника. Отсчёт = отсчёт входа.
 // Разбиение по времени: прогрев, обучение, пропуск, валидация, пропуск, тест; нормировка входа только по обучению.
+// Классификация: попытка протокола Trials = образец, класс = источник входа. Во время стимула все источники-классы несут
+// сигнал класса попытки, у системы это очередной кусок её траектории (между кусками она идёт и в паузе, невидимо).
+// Метки сбалансированы в каждой части разбиения и перемешаны data_seed; части идут по времени: обучение, валидация, тест.
+// Memory: цель = сам вход source, задержанный на d = 1..max_delay отсчётов, r^2 на тесте, их сумма = memory capacity.
+// Xor: цель = XOR знаков входа на отсчётах p - d и p - d - 1, accuracy по порогу 0.5, угадывание 0.5. Обе по времени, как Regression.
+// Forecast: выход учится давать следующий отсчёт каждого подключённого входа (сеть ведёт настоящий сигнал, t max Protocol),
+// затем второй прогон с конца первого подаёт на вход выход сети: forecast_length отсчётов автономно. Метрика — время до
+// ошибки forecast_threshold (нормированная по обучению), сравнение — линейная авторегрессия в том же замкнутом режиме.
+enum class NeuralTaskKind { Regression = 0, Classification, Memory, Xor, Forecast };
+
 struct NeuralTask {
     bool enabled = false;
+    NeuralTaskKind kind = NeuralTaskKind::Regression;
+    std::vector<int> classes;              // классификация: источники-классы
+    std::string bins_text = "1";           // классификация: точек признаков на стимул, последняя в его конце
+    std::string data_seed_text = "1";      // классификация: метки и их порядок, не зависит от seed сети
+    std::string max_delay_text = "40";     // Memory и Xor: задержки 1..max_delay
+    bool control_k0 = false;               // второй прогон той же сети при K = 0: вклад рекуррентных связей
+    std::string forecast_length_text = "500";    // Forecast: автономных отсчётов
+    std::string forecast_threshold_text = "0.5"; // Forecast: порог ошибки для времени верного прогноза
+    std::string lambda_text = "0";               // Forecast: lambda ridge, 0 = по валидации
+    std::string lyapunov_text = "0";             // Forecast: старший показатель источника, 0 = неизвестен
     int source = 0;
     std::vector<int> targets;              // переменные источника
     std::string horizon_text = "0";        // на сколько отсчётов вперёд, 0 = наблюдатель
@@ -132,16 +156,67 @@ struct NeuralTask {
     std::string train_text = "0.6", val_text = "0.2";      // доли остатка
     std::string filter_text = "20";        // импульсный режим: постоянная фильтра спайков
     std::string features_text = "1000";    // узлов-признаков
+    bool use_saved = false;                // применить сохранённый выход ко всей записи после прогрева, без обучения
 };
 
+// Обученный выход для применения без обучения. Применение требует того же графа, признаков, целей и шага отсчётов;
+// параметры узлов и источник (его начальные условия, параметры) менять можно, на этом и проверяется обобщение.
+// y_k = w[k][M] + sum_i w[k][i] (f_i - mean_i) / scale_i, scale = inf у выпавшего признака.
+struct NeuralReadoutSaved {
+    std::string graph_hash;
+    bool spikes = false;                   // признаки: фильтр спайков, иначе состояние узла
+    int feature_var = 0;                   // непрерывная сеть: переменная узла
+    int features_requested = 0;            // поле feature nodes на обучении
+    double filter = 0.0;                   // импульсный режим: постоянная фильтра, время сети
+    double sample_dt = 0.0;                // отсчёт выхода, время сети
+    int source = 0, horizon = 0;
+    std::vector<int> targets;
+    std::vector<std::string> names;
+    double input_mean = 0.0, input_sd = 1.0;   // нормировка входа на обучении
+    std::vector<int> nodes;                // [M] узлы-признаки
+    int M = 0, K = 0;
+    std::vector<double> mean, scale;       // [M]
+    std::vector<double> w;                 // [K][M + 1]
+    std::vector<double> lambda, val, test; // [K], на обучении
+    bool empty() const { return w.empty(); }
+};
+
+// Свип: у каждого экземпляра свой выход на одном разбиении, вход и цели у экземпляров общие.
 struct NeuralTaskResult {
+    bool applied = false;                  // сохранённый выход без обучения: val, delay_test пусты, test по записи после прогрева
+    NeuralReadoutSaved model;              // обученный в этом расчёте, пусто при applied и в свипе
+    int instances = 1;
     std::vector<std::string> names;        // [targets]
-    std::vector<double> val, test, lambda; // [targets], NRMSE
+    std::vector<double> val, test, lambda; // [instance][target], NRMSE; NaN у остановленного или не обученного экземпляра
     std::vector<double> delay_test;        // [targets], ridge по задержкам входа, длина выбрана на валидации
     int delay_length = 0, features = 0;
     double t0 = 0.0, dt = 0.0;             // тест в единицах времени сети
     int points = 0;
-    std::vector<double> truth, predicted;  // [point][target], тест
+    std::vector<double> truth;             // [point][target], тест
+    std::vector<double> predicted;         // [instance][point][target]
+    std::string note;                      // первый отказ экземпляра свипа
+    // Классификация: names = {"accuracy"}, val/test это доли верных ответов [instance], points = попыток теста,
+    // truth = их классы, predicted = ответ [instance][попытка], delay_test = ridge по сигналу стимула, delay_length его точек.
+    bool classify = false;
+    bool by_delay = false;                 // Memory и Xor: цели это задержки, окно Neural Readout рисует кривую по d
+    bool higher_better = false;            // accuracy, r^2 и MC: лучшая сеть свипа с наибольшим значением
+    std::string metric = "NRMSE";          // приставка к имени цели в окнах, пусто = имя цели уже полное
+    std::vector<double> control_test, control_val;   // [target], та же сеть при K = 0; пусто = контроль выключен
+    std::vector<std::string> class_names;  // [C]
+    std::vector<double> confusion;         // [instance][истинный][ответ], тест, число попыток
+    double chance = 0.0;                   // доля самого частого класса в тесте
+    // Forecast: names = подключённые входы, test/val = NRMSE на один отсчёт под настоящим входом; truth/predicted =
+    // автономная часть, t0 = её начало. error = нормированная ошибка по отсчётам, ar_* = авторегрессия ar_order.
+    bool forecast = false;
+    std::vector<double> error, ar_error, ar_predicted;   // [point], [point], [point][target]
+    std::vector<double> target_sd;                       // [target], СКО цели на обучении: единица ошибки
+    // NVAR (Gauthier и др., 2021): задержки всех целей и их попарные произведения, ridge на приращение строки.
+    std::vector<double> nvar_error, nvar_predicted;      // [point], [point][target]
+    double nvar_valid_time = 0.0;
+    int nvar_order = 0;                                  // задержек на цель, 0 = не обучилась
+    double valid_time = 0.0, ar_valid_time = 0.0;        // время сети до первого превышения порога; NaN = нет прогноза
+    double threshold = 0.5, lyapunov = 0.0, time_scale = 1.0;
+    int ar_order = 0;
 };
 
 struct NeuralConfig {
@@ -201,6 +276,8 @@ struct NeuralConfig {
     std::vector<NeuralPlasticRule> plastic_rules;
     NeuralDeviceModel device;
     NeuralTask task;
+    NeuralReadoutSaved readout;            // сохранённый кнопкой Keep, пишется в сессию
+    std::string readout_path;              // файл экспорта
 
     // Снимок конца расчёта живёт только в памяти, пока его не сохранили в файл.
     bool keep_checkpoint = false;
@@ -252,6 +329,7 @@ struct NeuralGraph {
 struct NeuralPlan {
     NeuralRequest request;
     std::string hash;
+    std::vector<std::string> instance_hashes;   // граф каждой сети свипа: сохранённый выход сверяется с каждой
     long long arcs = 0;
     int degree_min = 0, degree_max = 0;
     int pops_per_instance = 0;

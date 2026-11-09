@@ -62,8 +62,17 @@ double neural_record_time(const NeuralConfig& c);
 std::vector<double> neural_source_samples(const NeuralSource& s, int variable, size_t n, double dt);
 // Настройки запуска под задачу: что писать, с каким шагом, по какому отрезку нормировать вход. Бросает на несовместимых настройках.
 NeuralConfig neural_task_config(const NeuralConfig& c);
+// Классификация: класс каждой попытки (номер в task.classes). Бросает, если попыток мало для разбиения.
+std::vector<int> neural_class_labels(const NeuralConfig& c);
 // Обучение выхода по готовому расчёту. c из neural_task_config, r его запрос.
 NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest& r, const NeuralResult& res);
+// Прогноз: подключённые входы по номеру источника, они же цели.
+std::vector<int> neural_forecast_channels(const NeuralConfig& c);
+// Обучение по первому прогону (r1, res1) и замыкание второго: r2 = тот же план до конца прогноза, с res1.checkpoint.
+// Первая строка прогноза считается здесь и пишется в r2, остальные считает выход на GPU (r2.feedback); авторегрессия тут же.
+void neural_forecast_prepare(const NeuralConfig& c, const NeuralRequest& r1, const NeuralResult& res1, NeuralRequest& r2, NeuralTaskResult& out);
+// Прогноз сети из второго прогона, ошибка и время верного прогноза.
+void neural_forecast_finish(const NeuralResult& res2, NeuralTaskResult& out);
 // Спайки строками: шаг, время, узел. Время спайка шага n = (n + 1) h.
 std::string neural_spike_csv(const NeuralConfig& c);
 // Контрольная точка в файле. Бросает на ошибке чтения и записи.
