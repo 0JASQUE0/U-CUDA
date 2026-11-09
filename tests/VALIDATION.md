@@ -85,3 +85,42 @@ an explicit scenario version increment; other workload versions are unchanged.
 Accepted manifests and case artifacts are stored in [baselines](baselines/README.md).
 The ordinary check targets never replace them. Performance comparisons require
 a compatible hardware/software environment and stable measurements.
+
+## Small CUBA regression, 9 November 2026
+
+The `neuromorphic` working branch was fast-forwarded to GitHub `main`
+`4163962`. Local `.codex/config.toml` changes were preserved. The CUBA change
+adds tests and documentation only; no production integrator or kernel changed.
+
+Validation used Windows, RTX 2060 SUPER, driver 591.86, CUDA/NVRTC 12.8.93,
+MSVC 19.43.34810 and the Release headless CMake configuration. The
+`neural_cuba_test`, `adaptive_test`, `architecture_test` and `gpu_smoke`
+targets built successfully. All eight selected CTest checks passed, without
+skips: `neural_cuba_oracle`, `neural_cuba_gpu`, `adaptive_cpu`, `adaptive_gpu`,
+`architecture`, `layer_rules`, `vcxproj_sync`, and `gpu_smoke` (125.36 seconds
+total). The full regression suite, performance suite and GUI build were not run.
+
+The three fixed CUBA fixtures produced 4, 2 and 37 spikes respectively.
+Every `(step, neuron)` event and per-neuron count agreed with the independent
+closed-form CPU reference; every recorded state and final state met the
+documented truncation bounds. Block/chunk changes preserved trajectories
+bit-for-bit. Disabling observations also tested actual multi-step spike
+launches and preserved final states and event logs. A zero-delay edge was
+rejected. This validates a small fixed configuration, not a full 4000-node
+CUBA benchmark or equivalence with another simulator.
+
+Two deliberate faults were tested in the **packaged build copy** of
+`kernels/neural.template.cu`, in separate fresh processes:
+
+- Adding `+ NEURAL_CH` to `int idx = base + __ldg(A.outPack + e);` shifted
+  delivery by one step. The pulse fixture failed on the first affected trace
+  (scalar 42: -60 instead of approximately -59.877321).
+- Replacing `if (refr > 0) --refr;` with `if (refr > 1) --refr;` released
+  the membrane early. The pinned boundary fixture failed on its spike events.
+
+Both mutations returned exit code 1. The packaged template was restored
+byte-for-byte and checked against the repository source; normal checks then
+passed. These mutations never changed a tracked kernel or the user library.
+Local logs are under `build/windows/` (`cuba-build.log`,
+`cuba-final-build.log`, `cuba-mutation-check.log`, and `cuba-validation.xml`).
+`git diff --check` passed. Accepted baseline artifacts were not changed.

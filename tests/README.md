@@ -44,6 +44,39 @@ the corresponding linux-release preset. Missing GPU, required results or
 baseline fails the overall check. Missing KiCad/ngspice is an explicitly
 reported optional external skip, separate from computation validation.
 
+## Small CUBA regression
+
+`neural_cuba_oracle` and `neural_cuba_gpu` are included in the regression/all
+modes. They use fixed initial states and directed edges, without a random graph
+or the user library. Build and run on Windows:
+
+```powershell
+cmake --build --preset windows-release --target neural_cuba_test
+ctest --preset windows-release -R '^neural_cuba_(oracle|gpu)$'
+```
+
+| Path | Capability | Independent check |
+|---|---|---|
+| CPU oracle | Closed-form LIF with exponential current synapses; not a CPU Neural backend | Pinned threshold/reset/refractory events, signed and simultaneous arrivals, delay and refractory sensitivity |
+| GPU Neural | CUBA RK4 membrane with two exact exponential synapses | Every `(step, neuron)` event, per-neuron counts, all recorded states and final states against the analytic oracle |
+| GPU execution variants | Different block sizes, host chunks and spike windows | Identical spike logs and bitwise equal trajectories; delay zero is rejected |
+
+Spike indices start at zero: index `n` means the threshold was checked at
+`(n + 1) * h`. An edge of delay `d >= 1` from that spike is applied at the
+beginning of step `n + d`. The oracle schedules deliveries in an absolute-time
+table and integrates LIF in closed form; it reuses neither the RK stages nor
+the device ring or fixed-point accumulation. Binary-exact weights avoid
+quantization ambiguity. The recurrent fixture includes both signed synapses,
+nonzero initial currents, and equal membrane/synaptic time constants.
+
+The fixed step is 0.125 ms; the longest fixture is 64 ms. Membrane comparisons
+allow 2e-6 mV for RK4 truncation; synaptic comparisons allow 2e-11. Every spike
+must match exactly and the log must be complete. The pinned boundary fixture
+tests equality at threshold, reset, two full refractory steps, and a node that
+starts at threshold but falls below it before the first threshold check.
+This is a small regression, not the 4-second, 4000-node benchmark or a
+cross-simulator reproduction. A skipped GPU test does not validate the engine.
+
 ## First baseline and subsequent comparisons
 
 ```powershell
