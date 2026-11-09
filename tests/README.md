@@ -77,6 +77,89 @@ starts at threshold but falls below it before the first threshold check.
 This is a small regression, not the 4-second, 4000-node benchmark or a
 cross-simulator reproduction. A skipped GPU test does not validate the engine.
 
+## Saved classifier and LIF trial protocol
+
+`neural_classifier_cpu` checks old Neural JSON, the v1 regression file format
+and training-only input normalisation. `neural_classifier_gpu` trains and
+replays both state and LIF classifiers through `NeuralSession`, including a
+session round trip and export/import. It checks predictions and confusion
+matrices, that changing the saved weights changes the replay, and rejection
+of mismatched graphs, class order, features, inputs and trial settings. The
+LIF case compares individual trials against the combined run by spike step
+and neuron, to check reset at the boundaries.
+
+```powershell
+cmake --build --preset windows-release --target neural_classifier_test
+ctest --preset windows-release -R '^neural_classifier_(cpu|gpu)$'
+```
+
+To check the same LIF fixture in the desktop app, create an isolated library
+in a directory that does not yet exist. From the repo root in PowerShell,
+after building the desktop solution in Release|x64:
+
+```powershell
+$lifLibrary = Join-Path $PWD 'build\windows\lif-lsm-ui-library'
+& .\build\windows\bin\Release\neural_classifier_test.exe --write-lif-library $lifLibrary
+if ($LASTEXITCODE -ne 0) { throw 'Could not create the LIF test library' }
+$previousLibrary = $env:U_CUDA_LIBRARY
+try {
+    $env:U_CUDA_LIBRARY = $lifLibrary
+    & .\x64\Release\U-CUDA.exe
+} finally { $env:U_CUDA_LIBRARY = $previousLibrary }
+```
+
+Load **LIF LSM validation** from Library. In Neural, run the saved experiment,
+then compare Neural Readout to the headless fixture: 3 test trials, accuracy
+1.000, confusion matrix `[[2, 0], [0, 1]]` (Low current, High current), and
+30 spikes across all 12 trials. Press **Keep**, tick **use the saved classifier,
+no training**, and run again. Check the same confusion matrix and the saved
+classifier label. Reopen the library session and repeat; the saved output and
+its input scaler should persist. This library is for validation only and is
+separate from the user's library and from the shipped presets.
+
+## Neural Results and spike statistics
+
+`neural_results_cpu` checks result-view eligibility, setting changes, analytic
+ISI/CV examples, reset boundaries, missing spikes, and rate normalisation for
+a short final bin. `neural_results_gpu` checks that completed and queued runs
+retain their own labels and settings, that failed runs preserve the previous
+result, and that spike statistics handle complete and incomplete continuation.
+The optional `--benchmark` measures the CPU aggregation on 2 million events
+without changing any accepted benchmark references.
+
+```powershell
+cmake --build --preset windows-release --target neural_results_test
+ctest --preset windows-release -R '^neural_results_(cpu|gpu)$'
+& .\build\windows\bin\Release\neural_results_test.exe --benchmark
+```
+
+Desktop smoke check with the LIF fixture above:
+
+1. Open Neural and run **LIF LSM validation**. Results appear in **Neural
+   Results**; the old individual plot windows do not open.
+2. In **Activity**, zoom or pan either plot and confirm the other follows the
+   time range while Y stays fixed. Double-click inside either plot and check
+   that both reset to the full time range. Check that each population uses
+   the same color in both plots. The gray bands indicate rest and the colored
+   bands show the stimulus class and trial number. Hover the strip to see
+   details. All 30 spikes in this fixture fall in **High current** bands;
+   there are none in **Low current** or the pauses. A continuous run has no
+   trial bands.
+3. Open **Spike statistics** and check the filled native histogram bars.
+   Hover a bin to see its interval and count. ISI counts same-neuron intervals within one
+   reset segment; CV is the population standard deviation of a neuron's
+   intervals divided by its mean, with at least two intervals required. The
+   CV histogram gives one observation per eligible neuron. A truncated log
+   has no ISI/CV result; binned rates and raster are explicitly partial.
+4. Check the **Classification** matrix, change the schedule or population
+   name without running, and check that the previous-result notice appears
+   while the original graphs, labels and matrix remain. Restore the original
+   settings and check the notice disappears. Switch away and back on the same
+   system; the result remains attached to that experiment.
+5. With other configurations, check the continuous means and R(t), forecast
+   above the error plot and its optional phase portrait, the memory/XOR
+   delay curves, and the sweep curve (one axis) or heatmap (two axes).
+
 ## First baseline and subsequent comparisons
 
 ```powershell

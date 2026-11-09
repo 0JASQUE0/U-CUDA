@@ -157,6 +157,7 @@ struct NeuralTask {
     std::string filter_text = "20";        // импульсный режим: постоянная фильтра спайков
     std::string features_text = "1000";    // узлов-признаков
     bool use_saved = false;                // применить сохранённый выход ко всей записи после прогрева, без обучения
+    bool use_saved_classifier = false;     // повторить тест сохранённого классификатора, без обучения
 };
 
 // Обученный выход для применения без обучения. Применение требует того же графа, признаков, целей и шага отсчётов;
@@ -178,6 +179,12 @@ struct NeuralReadoutSaved {
     std::vector<double> mean, scale;       // [M]
     std::vector<double> w;                 // [K][M + 1]
     std::vector<double> lambda, val, test; // [K], на обучении
+    // Классификатор: столбцы идут по узлам, внутри узла по окнам. M = nodes.size() * class_bins.
+    int class_bins = 0;                    // 0 у прежнего регрессионного выхода
+    std::vector<int> classes;              // [K], выход -> индекс источника, names -> метка
+    std::string class_protocol;            // разбиение, сетка попыток и отпечаток данных/настроек
+    std::vector<double> class_input_norm;  // [source][mean, sd], единичная для ненормируемых источников
+    bool is_classifier() const { return class_bins > 0; }
     bool empty() const { return w.empty(); }
 };
 
@@ -217,6 +224,43 @@ struct NeuralTaskResult {
     double valid_time = 0.0, ar_valid_time = 0.0;        // время сети до первого превышения порога; NaN = нет прогноза
     double threshold = 0.5, lyapunov = 0.0, time_scale = 1.0;
     int ar_order = 0;
+};
+
+// Trial grid and optional class labels from the run, in the same steps as the spike log.
+struct NeuralTrialTimeline {
+    long long first_step = 0, rest_steps = 0, stimulus_steps = 0;
+    int count = 0;
+    std::vector<int> classes;
+    std::vector<std::string> class_names;
+};
+
+// Non-persistent labels and settings of the last successful run, independent of the editable config.
+struct NeuralResultContext {
+    std::string settings_key, label, device_state;
+    std::vector<std::string> variables, populations, sources;
+    NeuralSweep sweep, sweep2;
+    NeuralTrialTimeline trials;
+    std::vector<long long> reset_at;
+    bool mixed_settings = false; // Continue may append a segment with different settings
+    bool partial_history = false; // resumed from a checkpoint without the earlier recording
+    long long first_record_step = 0;
+};
+
+struct NeuralSpikeHistogram {
+    double bin_width = 0.0;
+    std::vector<unsigned long long> counts;
+};
+
+struct NeuralPopulationSpikes {
+    unsigned long long intervals = 0;
+    int neurons_with_cv = 0;
+    double mean_isi = 0.0, mean_cv = 0.0;
+    NeuralSpikeHistogram isi, cv;
+};
+
+struct NeuralSpikeStatistics {
+    bool complete = false;
+    std::vector<NeuralPopulationSpikes> populations;
 };
 
 struct NeuralConfig {
@@ -277,17 +321,21 @@ struct NeuralConfig {
     NeuralDeviceModel device;
     NeuralTask task;
     NeuralReadoutSaved readout;            // сохранённый кнопкой Keep, пишется в сессию
+    NeuralReadoutSaved classifier;         // отдельный слот, не заменяет выход регрессии
     std::string readout_path;              // файл экспорта
 
     // Снимок конца расчёта живёт только в памяти, пока его не сохранили в файл.
     bool keep_checkpoint = false;
     std::string checkpoint_path;
     std::shared_ptr<NeuralCheckpoint> checkpoint;
+    bool checkpoint_from_result = false;
 
     // Рецепт, по которому получен graph_hash, и система на момент расчёта.
     std::string graph_recipe, graph_hash, model_text;
 
     NeuralResult result;
+    NeuralResultContext result_context;
+    NeuralSpikeStatistics spike_statistics;
     std::vector<int>    instance_start;   // последнего расчёта
     std::vector<double> sweep_values;     // значения первой оси, пусто без свипа
     std::vector<double> sweep2_values;    // значения второй оси, пусто = одна ось; экземпляр = i1 * n2 + i2
@@ -342,6 +390,8 @@ struct NeuralPlan {
 
 struct NeuralOutcome {
     NeuralResult result;
+    NeuralResultContext context;
+    NeuralSpikeStatistics spike_statistics;
     std::vector<int>    instance_start;
     std::vector<double> sweep_values, sweep2_values, sweep_order, sweep_spread, sweep_lyap, input_view;
     double input_view_t0 = 0.0, input_view_dt = 0.0;

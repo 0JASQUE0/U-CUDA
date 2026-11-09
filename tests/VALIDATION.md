@@ -124,3 +124,59 @@ passed. These mutations never changed a tracked kernel or the user library.
 Local logs are under `build/windows/` (`cuba-build.log`,
 `cuba-final-build.log`, `cuba-mutation-check.log`, and `cuba-validation.xml`).
 `git diff --check` passed. Accepted baseline artifacts were not changed.
+
+## Saved classifier and LIF-LSM validation, 9 November 2026
+
+Release headless targets and the desktop `U-CUDA.sln` (Release|x64) built on
+the RTX 2060 SUPER setup above. Eight selected CTest checks passed without
+skips: `adaptive_cpu`, `layer_rules`, `vcxproj_sync`, `architecture`, both CUBA
+checks and both classifier checks. The CTest report is
+`build/windows/classifier-validation.xml`. The full regression suite and the
+separate `adaptive_gpu` and `gpu_smoke` suites were not run for this change.
+
+Both state and LIF classifiers matched the original held-out predictions and
+confusion matrix after session load and readout export/import. A deliberately
+changed saved model gave different predictions without training. Old Neural
+sessions and regression files still load. The scaler check uses a ramp with a
+known training mean for both a class source and an auxiliary source.
+
+The LIF fixture uses four neurons, 12 separate trials (6 train, 3 validation,
+3 test), two feature windows per stimulus and a 0.125 step. It produced 30
+spikes and test accuracy 1.000 with confusion matrix `[[2, 0], [0, 1]]`.
+Trials 2, 6 and 12 matched isolated runs event for event after aligning the
+step numbers. The stimuli are deliberately simple to check execution and
+reset; this result does not establish an advantage over an input baseline.
+
+Plan 6.6.2 passed the automated checks and the user confirmed the manual LIF
+run with the isolated `build/windows/lif-lsm-ui-library`. See [the procedure
+and expected values](README.md#saved-classifier-and-lif-trial-protocol).
+No validation fixture was added to the shipped library.
+
+## Neural Results and spike statistics, 9 November 2026
+
+Release headless targets and the desktop solution built successfully on the
+RTX 2060 SUPER setup above. All 12 selected CTest checks passed without
+skips, including `adaptive_gpu`, `gpu_smoke`, and the CPU and GPU Neural
+Results, classifier and CUBA checks. The report is
+`build/windows/neural-results-validation.xml`; the full suite was not run.
+
+The statistics checks cover known ISIs and CVs, histogram totals, silence,
+insufficient spikes, trial resets and truncated logs. The rate check covers
+an event on a bin boundary and normalisation of the short final bin. A live
+GPU run with two regular sources also verified the published statistics and
+continuation: continuing with its earlier log gives 22 intervals, while a
+checkpoint without the log is marked partial and gives no ISI/CV. Failed
+runs and edits in flight preserve the old result; queued and reindexed
+experiments retain their result identity. The standalone benchmark took a
+median of about 30 ms for 2 million events from 100,000 neurons.
+
+Desktop visual inspection of the new layout and the linked time axis is
+pending. An isolated Release copy and LIF library can be opened via
+`build/windows/Run-Neural-Results.cmd`; see the [desktop smoke procedure](README.md#neural-results-and-spike-statistics).
+
+The Activity follow-up adds trial bands in the native `Plot2DView`, using
+the timing and class order captured in the completed run. Release built,
+and all eight selected checks passed (`activity-trials-validation.xml`).
+The LIF fixture produced 30 spikes in High current, zero in Low current,
+and zero during rest. Classifier replay retained the same annotations;
+continuous spiking published no trial bands. Visual inspection remains manual.

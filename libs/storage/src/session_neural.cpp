@@ -1,4 +1,5 @@
 ﻿#include "session_json_internal.h"
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 
@@ -54,6 +55,11 @@ static void write_neural_readout(std::ostringstream& o, const NeuralReadoutSaved
     o << ",\"lambda\":"; jarr(o, r.lambda, num);
     o << ",\"val\":"; jarr(o, r.val, num);
     o << ",\"test\":"; jarr(o, r.test, num);
+    if (r.is_classifier()) {
+        o << ",\"class_bins\":" << r.class_bins << ",\"classes\":"; jarr(o, r.classes, whole);
+        o << ",\"class_protocol\":"; jstr(o, r.class_protocol);
+        o << ",\"class_input_norm\":"; jarr(o, r.class_input_norm, num);
+    }
     o << "}";
 }
 
@@ -86,6 +92,10 @@ static NeuralReadoutSaved read_neural_readout(JP& p) {
         else if (k == "lambda") r.lambda = jarr_read<double>(p, num);
         else if (k == "val") r.val = jarr_read<double>(p, num);
         else if (k == "test") r.test = jarr_read<double>(p, num);
+        else if (k == "class_bins") r.class_bins = whole();
+        else if (k == "classes") r.classes = jarr_read<int>(p, whole);
+        else if (k == "class_protocol") r.class_protocol = p.str();
+        else if (k == "class_input_norm") r.class_input_norm = jarr_read<double>(p, num);
         else p.skip_value();
         if (p.opt(',')) continue;
         p.expect('}');
@@ -93,9 +103,18 @@ static NeuralReadoutSaved read_neural_readout(JP& p) {
     }
     // Битая запись не применяется, но и сессию целиком не роняет: выход просто пропадает.
     const size_t M = (size_t)r.M, K = (size_t)r.K;
-    if (r.M < 1 || r.K < 1 || r.nodes.size() != M || r.mean.size() != M || r.scale.size() != M || r.w.size() != K * (M + 1)
-        || r.targets.size() != K || r.lambda.size() != K)
+    if (r.M < 1 || r.K < 1 || r.mean.size() != M || r.scale.size() != M || r.w.size() != K * (M + 1) || r.lambda.size() != K)
         return NeuralReadoutSaved{};
+    if (r.is_classifier()) {
+        const size_t bins = (size_t)r.class_bins;
+        const auto finite = [](double v) { return std::isfinite(v); };
+        if (K < 2 || M % bins != 0 || r.nodes.size() != M / bins || r.classes.size() != K || r.names.size() != K
+            || r.class_protocol.empty() || r.graph_hash.empty() || r.class_input_norm.empty() || r.class_input_norm.size() % 2 != 0
+            || !std::all_of(r.class_input_norm.begin(), r.class_input_norm.end(), finite)
+            || !std::all_of(r.w.begin(), r.w.end(), finite) || !std::all_of(r.mean.begin(), r.mean.end(), finite)
+            || !std::all_of(r.scale.begin(), r.scale.end(), [](double v) { return v > 0; })) return {};
+        for (size_t i = 1; i < r.class_input_norm.size(); i += 2) if (r.class_input_norm[i] <= 0) return {};
+    } else if (r.nodes.size() != M || r.targets.size() != K) return {};
     return r;
 }
 
@@ -103,8 +122,11 @@ void neural_readout_export(const std::string& path, const NeuralReadoutSaved& r)
     if (r.empty()) throw std::runtime_error("there is no saved readout to export");
     if (path.empty()) throw std::runtime_error("set the file name of the readout first");
     std::ostringstream o;
-    o << "{\"format\":\"ucuda-neural-readout\",\"version\":1,\"formula\":";
-    jstr(o, "y[k] = w[k*(M+1)+M] + sum over i of w[k*(M+1)+i] * (f[i] - mean[i]) / scale[i]; f[i] is the state of node nodes[i] "
+    o << "{\"format\":\"ucuda-neural-readout\",\"version\":" << (r.is_classifier() ? 2 : 1) << ",\"formula\":";
+    if (r.is_classifier()) jstr(o, "y[k] = w[k*(M+1)+M] + sum over i of w[k*(M+1)+i] * (f[i] - mean[i]) / scale[i]; "
+        "class = names[argmax(y)]; f[node*class_bins+bin] is the state at the end of the bin or the spike count in the bin; "
+        "class_input_norm stores mean and sd for each source; scale inf = the feature was dropped");
+    else jstr(o, "y[k] = w[k*(M+1)+M] + sum over i of w[k*(M+1)+i] * (f[i] - mean[i]) / scale[i]; f[i] is the state of node nodes[i] "
             "(spikes: the spike train of that node filtered by exp(-t/filter)), sampled every sample_dt; the input was normalised "
             "as (u - input_mean) / input_sd; scale inf = the feature was dropped");
     o << ",\"readout\":";
@@ -144,12 +166,13 @@ NeuralReadoutSaved neural_readout_import(const std::string& path) {
         throw std::runtime_error(path + " is not a valid readout file (" + e.what() + ")");
     }
     if (format != "ucuda-neural-readout") throw std::runtime_error(path + " is not a readout written by Export");
-    if (version != 1) throw std::runtime_error(path + ": readout format version " + std::to_string(version) + " is not supported");
+    if (version != 1 && version != 2) throw std::runtime_error(path + ": readout format version " + std::to_string(version) + " is not supported");
     if (!have || r.empty()) throw std::runtime_error(path + ": the readout sizes do not agree");
+    if ((version == 2) != r.is_classifier()) throw std::runtime_error(path + ": the readout kind does not match its file format");
     return r;
 }
 
-static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
+static void write_neural_config(std::ostringstream& o, const NeuralConfig& c, bool settings_only = false) {
     o << "{\"label\":"; jstr(o, c.label);
     o << ",\"schedule\":" << (int)c.schedule;
     o << ",\"scheme\":"; jstr(o, c.scheme);
@@ -188,8 +211,10 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
     o << ",\"lyap_eps\":"; jstr(o, c.lyap_eps_text);
     o << ",\"lyap_interval\":"; jstr(o, c.lyap_interval_text);
     o << ",\"lyap_settle\":"; jstr(o, c.lyap_settle_text);
-    o << ",\"csv_save\":" << (c.csv_save_enabled ? "true" : "false");
-    o << ",\"csv_path\":"; jstr(o, c.csv_output_path);
+    if (!settings_only) {
+        o << ",\"csv_save\":" << (c.csv_save_enabled ? "true" : "false");
+        o << ",\"csv_path\":"; jstr(o, c.csv_output_path);
+    }
     o << ",\"obs_vars_off\":[";
     for (size_t i = 0; i < c.obs_vars_off.size(); ++i) o << (i ? "," : "") << c.obs_vars_off[i];
     o << "],\"output_limit\":"; jstr(o, c.output_limit_text);
@@ -240,9 +265,11 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
     }
     o << "]";
     o << ",\"graph_version\":" << kNeuralGraphVersion;
-    o << ",\"graph_recipe\":"; jstr(o, c.graph_recipe);
-    o << ",\"graph_hash\":"; jstr(o, c.graph_hash);
-    o << ",\"model_text\":"; jstr(o, c.model_text);
+    if (!settings_only) {
+        o << ",\"graph_recipe\":"; jstr(o, c.graph_recipe);
+        o << ",\"graph_hash\":"; jstr(o, c.graph_hash);
+        o << ",\"model_text\":"; jstr(o, c.model_text);
+    }
     o << ",\"laws\":[";
     for (size_t i = 0; i < c.laws.size(); ++i) {
         if (i) o << ",";
@@ -353,6 +380,7 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
         o << ",\"filter\":"; jstr(o, c.task.filter_text);
         o << ",\"features\":"; jstr(o, c.task.features_text);
         if (c.task.use_saved) o << ",\"use_saved\":true";
+        if (c.task.use_saved_classifier) o << ",\"use_saved_classifier\":true";
         if (c.task.kind == NeuralTaskKind::Memory) o << ",\"kind\":\"memory\"";
         if (c.task.kind == NeuralTaskKind::Xor) o << ",\"kind\":\"xor\"";
         if (c.task.kind == NeuralTaskKind::Memory || c.task.kind == NeuralTaskKind::Xor) { o << ",\"max_delay\":"; jstr(o, c.task.max_delay_text); }
@@ -371,10 +399,13 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c) {
         }
         o << "}";
     }
-    if (!c.readout.empty()) { o << ",\"readout\":"; write_neural_readout(o, c.readout); }
-    if (!c.readout_path.empty()) { o << ",\"readout_path\":"; jstr(o, c.readout_path); }
+    const bool apply_regression = c.task.enabled && c.task.kind == NeuralTaskKind::Regression && c.task.use_saved;
+    const bool apply_classifier = c.task.enabled && c.task.kind == NeuralTaskKind::Classification && c.task.use_saved_classifier;
+    if (!c.readout.empty() && (!settings_only || apply_regression)) { o << ",\"readout\":"; write_neural_readout(o, c.readout); }
+    if (!c.classifier.empty() && (!settings_only || apply_classifier)) { o << ",\"classifier\":"; write_neural_readout(o, c.classifier); }
+    if (!settings_only && !c.readout_path.empty()) { o << ",\"readout_path\":"; jstr(o, c.readout_path); }
     if (c.keep_checkpoint) o << ",\"keep_checkpoint\":true";
-    if (!c.checkpoint_path.empty()) { o << ",\"checkpoint_path\":"; jstr(o, c.checkpoint_path); }
+    if (!settings_only && !c.checkpoint_path.empty()) { o << ",\"checkpoint_path\":"; jstr(o, c.checkpoint_path); }
     o << "}";
 }
 
@@ -595,6 +626,7 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
                 else if (k == "filter") c.task.filter_text = p.str();
                 else if (k == "features") c.task.features_text = p.str();
                 else if (k == "use_saved") c.task.use_saved = p.boolean();
+                else if (k == "use_saved_classifier") c.task.use_saved_classifier = p.boolean();
                 else if (k == "kind") {
                     const std::string v = p.str();
                     c.task.kind = v == "classification" ? NeuralTaskKind::Classification : v == "memory" ? NeuralTaskKind::Memory
@@ -616,7 +648,14 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
             }
         }
     }
-    else if (key == "readout")          c.readout = read_neural_readout(p);
+    else if (key == "readout") {
+        auto saved = read_neural_readout(p);
+        if (!saved.is_classifier()) c.readout = std::move(saved);
+    }
+    else if (key == "classifier") {
+        auto saved = read_neural_readout(p);
+        if (saved.is_classifier()) c.classifier = std::move(saved);
+    }
     else if (key == "readout_path")     c.readout_path = p.str();
     else if (key == "device_state")     c.device.state_name = p.str();
     else if (key == "device_rhs")       c.device.rhs_text = p.str();
@@ -663,6 +702,12 @@ std::string session_to_json_neural(const NeuralState& s) {
     }
     if (!s.configs.empty()) o << "\n  ";
     o << "]\n}\n";
+    return o.str();
+}
+
+std::string neural_settings_key(const NeuralConfig& c) {
+    std::ostringstream o;
+    write_neural_config(o, c, true);
     return o.str();
 }
 

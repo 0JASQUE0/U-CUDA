@@ -81,6 +81,8 @@ std::string session_to_json_network(const NetworkState& s);
 bool session_from_json_network(const std::string& json, NetworkState& s);
 // Neural-сессия: рецепт сети (популяции, проекции, seed) с хешем графа; рёбер в файле нет.
 std::string session_to_json_neural(const NeuralState& s);
+// Runtime comparison only: excludes output paths, last-run fields and unused saved models.
+std::string neural_settings_key(const NeuralConfig& c);
 bool session_from_json_neural(const std::string& json, NeuralState& s);
 // Обученный выход Neural отдельным JSON с формулой применения, для обработки вне U-CUDA.
 void neural_readout_export(const std::string& path, const NeuralReadoutSaved& r);
