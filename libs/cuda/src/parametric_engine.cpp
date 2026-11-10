@@ -272,7 +272,7 @@ bool krs_step_cost(const std::string& krs_body, int amountOfX, KrsStepCost& out,
     int cc_major = 0, cc_minor = 0;
     if (!estimate_device(dev, cc_major, cc_minor, err)) return false;
     std::string rerr;
-    const std::string cfg = peak_config_defines() + read_text_file(exe_dir() + "\\kernels\\configCUDA.h", rerr);
+    const std::string cfg = peak_config_defines() + read_text_file(exe_dir() + UCUDA_PATH_SEP "kernels" UCUDA_PATH_SEP "configCUDA.h", rerr);
     if (!rerr.empty()) { err = rerr; return false; }
 
     // Шаг со стадией предрасчёта (CD fast) считается без неё: в горячих циклах она идёт раз на
@@ -298,7 +298,7 @@ bool krs_step_cost(const std::string& krs_body, int amountOfX, KrsStepCost& out,
     return true;
 }
 
-std::string gpu_calibration_path() { return exe_dir() + "\\gpu_calibration.txt"; }
+std::string gpu_calibration_path() { return exe_dir() + UCUDA_PATH_SEP "gpu_calibration.txt"; }
 
 bool gpu_device_info(std::string& name, int& sm_count, std::string& err) {
     CUdevice dev = 0;
@@ -326,7 +326,7 @@ bool gpu_calibrate(GpuCalibration& out, std::string& err) {
     out.calib_ops  = cost[1].ops;
 
     std::string rerr;
-    const std::string cfg = peak_config_defines() + read_text_file(exe_dir() + "\\kernels\\configCUDA.h", rerr);
+    const std::string cfg = peak_config_defines() + read_text_file(exe_dir() + UCUDA_PATH_SEP "kernels" UCUDA_PATH_SEP "configCUDA.h", rerr);
     if (!rerr.empty()) { err = rerr; return false; }
     std::string ptx;
     std::vector<std::string> ignored;

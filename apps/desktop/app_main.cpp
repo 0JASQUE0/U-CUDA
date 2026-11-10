@@ -291,6 +291,7 @@ static std::string pick_image_file_win() { return pick_file_linux(false, "Images
 static std::string pick_save_csv_file_win() { return pick_file_linux(true, "CSV | *.csv", "csv"); }
 static std::string pick_open_text_file_win() { return pick_file_linux(false, "Coefficient tables | *.txt *.dat *.csv", ""); }
 static std::string pick_save_netlist_file_win() { return pick_file_linux(true, "SPICE netlist | *.cir *.net", "cir"); }
+static std::string pick_open_circuit_file_win() { return pick_file_linux(false, "Circuits | *.cir *.net *.sp *.spice *.kicad_sch", ""); }
 #endif
 
 static void set_clipboard_win(const std::string& text) {
