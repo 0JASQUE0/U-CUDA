@@ -98,17 +98,49 @@ void Plot3DView::render(PlotRenderer& renderer,
 
     // 4. Рендер в FBO, с depth
     camera.aspect = (float)plot_w / (float)plot_h;
-    {
-        float br, bg, bb, ba;
-        plot_bg_color(br, bg, bb, ba);
-        // 3D-сцена чуть темнее dark / чуть тусклее light, чтобы axes-стрелки
-        // оставались читабельными в обоих случаях.
-        if (plot_light_theme()) { br = 0.965f; bg = 0.965f; bb = 0.965f; }
-        else                    { br = 0.050f; bg = 0.050f; bb = 0.080f; }
-        renderer.begin_frame(plot_w, plot_h, br, bg, bb, ba, /*with_depth=*/true);
-    }
     float mvp[16];
     camera.build_mvp(mvp);
+
+    float bgc[4];
+    plot_bg_color(bgc[0], bgc[1], bgc[2], bgc[3]);
+    // 3D-сцена чуть темнее dark / чуть тусклее light, чтобы axes-стрелки
+    // оставались читабельными в обоих случаях.
+    if (plot_light_theme()) { bgc[0] = 0.965f; bgc[1] = 0.965f; bgc[2] = 0.965f; }
+    else                    { bgc[0] = 0.050f; bgc[1] = 0.050f; bgc[2] = 0.080f; }
+
+    // Кадр перерисовывается, только если что-то из того, что в него входит, поменялось: у
+    // каждой проекции свой PlotRenderer, и неподвижная сцена (камера стоит, данные те же)
+    // иначе гоняла бы все сегменты через geometry shader каждый кадр ImGui.
+    unsigned long long key = 1469598103934665603ull;   // FNV-1a
+    auto mix = [&key](const void* p, size_t n) {
+        const unsigned char* b = (const unsigned char*)p;
+        for (size_t i = 0; i < n; ++i) { key ^= b[i]; key *= 1099511628211ull; }
+    };
+    auto mixv = [&mix](const auto& v) { mix(&v, sizeof(v)); };
+    {
+        const Plot3DView* self = this;
+        mixv(self); mixv(plot_w); mixv(plot_h); mix(bgc, sizeof(bgc)); mix(mvp, sizeof(mvp));
+        mixv(series_generation); mixv(show_axes); mixv(line_thickness_px);
+        mixv(custom_line_style); mixv(points_mode); mixv(points_with_lines);
+        mixv(point_size_px); mixv(point_alpha);
+        const int ns = (int)series_cache_.size();
+        mixv(ns);
+        for (int k = 0; k < ns; ++k) {
+            const bool vis = eff_visible(k);
+            mixv(vis);
+            if (!vis || k >= (int)series_in.size()) continue;
+            const PlotSeriesInput3D& s = series_in[k];
+            const ImVec4 c = series_color(s);
+            mixv(c.x); mixv(c.y); mixv(c.z); mixv(c.w);
+            mixv(s.colormap); mixv(s.cmin); mixv(s.cmax); mixv(s.cmap_reverse);
+        }
+        if (key == 0) key = 1;   // 0 — «содержимого нет» у рендерера
+    }
+    const bool frame_cached = renderer.content_key() == key &&
+                              renderer.width() == plot_w && renderer.height() == plot_h;
+
+    if (!frame_cached) {
+    renderer.begin_frame(plot_w, plot_h, bgc[0], bgc[1], bgc[2], bgc[3], /*with_depth=*/true);
     // Оси (X=красная, Y=зелёная, Z=синяя) — ДО данных: они непрозрачны и пишут глубину, поэтому
     // траектория за осью ею закрывается, а перед ней — рисуется поверх. Полупрозрачные данные
     // глубину не пишут (draw_line_3d), и оси, нарисованные после них, ложились бы поверх всего.
@@ -126,28 +158,73 @@ void Plot3DView::render(PlotRenderer& renderer,
             if (az.valid()) renderer.draw_line_3d(az.vbo, az.point_count, mvp, col_z, 2.0f);
         }
     }
-    for (int k = (int)series_cache_.size() - 1; k >= 0; --k) {
-        if (!eff_visible(k)) continue;
-        const GpuLineSeries3D& g = series_cache_.get(k);
-        if (!g.valid()) continue;
-        ImVec4 c = (k < (int)series_in.size()) ? series_color(series_in[k]) : ImVec4(1, 1, 1, 1);
-        float color[4] = { c.x, c.y, c.z, c.w };
-        if (g.vbo_val && k < (int)series_in.size()) {
-            const PlotSeriesInput3D& s = series_in[k];
-            renderer.draw_line_3d_cmap(g.vbo, g.vbo_val, g.point_count, mvp, s.colormap,
-                                       s.cmin, s.cmax, s.cmap_reverse, c.w, line_thickness_px);
+    // Два прохода: сначала непрозрачное (пишет глубину), затем полупрозрачное через OIT —
+    // оно закрывается непрозрачным и перекрывается между сериями по глубине. Без OIT
+    // полупрозрачные серии ложились бы друг на друга в порядке рисования: серия, нарисованная
+    // последней (IC 1), оказывалась поверх, даже находясь внутри другой.
+    // pass 0 — непрозрачные элементы, pass 1 — полупрозрачные.
+    // dry — только посчитать, есть ли что рисовать в проходе (без OIT-накопителей, если нечего).
+    auto draw_series = [&](int pass, bool dry) -> int {
+        int drawn = 0;
+        for (int k = (int)series_cache_.size() - 1; k >= 0; --k) {
+            if (!eff_visible(k)) continue;
+            const GpuLineSeries3D& g = series_cache_.get(k);
+            if (!g.valid()) continue;
+            ImVec4 c = (k < (int)series_in.size()) ? series_color(series_in[k]) : ImVec4(1, 1, 1, 1);
+            float color[4] = { c.x, c.y, c.z, c.w };
+            // Элемент с альфой a — в этом проходе? Учитывает его и говорит, рисовать ли.
+            auto take = [&](float a) {
+                if ((a < 1.0f) != (pass == 1)) return false;
+                ++drawn;
+                return !dry;
+            };
+            // Тонкий путь (без Custom line style) α не смешивает — для него линия непрозрачна.
+            const float line_a = custom_line_style ? color[3] : 1.0f;
+            if (g.vbo_val && k < (int)series_in.size()) {
+                const PlotSeriesInput3D& s = series_in[k];
+                if (take(c.w))
+                    renderer.draw_line_3d_cmap(g.vbo, g.vbo_val, g.point_count, mvp, s.colormap,
+                                               s.cmin, s.cmax, s.cmap_reverse, c.w, line_thickness_px);
+            }
+            else if (points_mode) {
+                // Линия под точками; в одном проходе порядок не важен — решает глубина.
+                if (points_with_lines && take(line_a))
+                    renderer.draw_line_3d(g.vbo, g.point_count, mvp, color, line_thickness_px, custom_line_style);
+                float pcolor[4] = { c.x, c.y, c.z, point_alpha >= 0.0f ? point_alpha : c.w };
+                if (take(pcolor[3]))
+                    renderer.draw_points_3d(g.vbo, g.point_count, mvp, pcolor, point_size_px);
+            }
+            else if (take(line_a))
+                renderer.draw_line_3d(g.vbo, g.point_count, mvp, color,
+                                      line_thickness_px, custom_line_style);
         }
-        else if (points_mode) {
-            if (points_with_lines)   // линия первой, точки поверх
-                renderer.draw_line_3d(g.vbo, g.point_count, mvp, color, line_thickness_px, custom_line_style);
-            float pcolor[4] = { c.x, c.y, c.z, point_alpha >= 0.0f ? point_alpha : c.w };
-            renderer.draw_points_3d(g.vbo, g.point_count, mvp, pcolor, point_size_px);
+        return drawn;
+    };
+    draw_series(0, false);
+    if (draw_series(1, true) > 0) {
+        // Диапазон оконной глубины сцены — по 8 углам bbox (вес OIT считается вдоль него).
+        float zn = 0.0f, zf = 1.0f;
+        float b[6];
+        if (series_cache_.bbox(b[0], b[1], b[2], b[3], b[4], b[5])) {
+            float lo = 1.0f, hi = 0.0f;
+            for (int m = 0; m < 8; ++m) {
+                const float x = b[0 + (m & 1)], y = b[2 + ((m >> 1) & 1)], z = b[4 + ((m >> 2) & 1)];
+                const float cz = mvp[2] * x + mvp[6] * y + mvp[10] * z + mvp[14];
+                const float cw = mvp[3] * x + mvp[7] * y + mvp[11] * z + mvp[15];
+                if (cw <= 1e-12f) { lo = 0.0f; continue; }   // угол за камерой — от ближней плоскости
+                const float wz = std::clamp(0.5f * cz / cw + 0.5f, 0.0f, 1.0f);
+                lo = (std::min)(lo, wz);
+                hi = (std::max)(hi, wz);
+            }
+            if (hi > lo) { zn = lo; zf = hi; }
         }
-        else
-            renderer.draw_line_3d(g.vbo, g.point_count, mvp, color,
-                                  line_thickness_px, custom_line_style);
+        const bool oit = renderer.begin_oit(zn, zf);
+        draw_series(1, false);
+        if (oit) renderer.end_oit();
     }
     renderer.end_frame();
+    renderer.set_content_key(key);
+    }
 
     // 5. Вывод FBO
     ImDrawList* dl = ImGui::GetWindowDrawList();

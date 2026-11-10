@@ -249,6 +249,22 @@ void main() {
 }
 )";
 
+// Общий хвост фрагментных шейдеров 3D-данных: обычный вывод или запись в накопители OIT.
+// Вес по глубине: u_zrange — оконная глубина ближней и дальней точки bbox сцены, d в [0,1]
+// вдоль неё; exp(-10 d) даёт ближним слоям перевес ~e^10 над дальними, так что внутренний
+// аттрактор, закрытый плотной оболочкой, остаётся под ней, а не ложится поверх.
+#define OIT_OUT_GLSL R"(
+void oit_out(vec4 c) {
+    if (u_oit == 0) { frag_color = c; return; }
+    float a = clamp(c.a, 0.0, 0.999);
+    float span = max(u_zrange.y - u_zrange.x, 1e-7);
+    float d = clamp((gl_FragCoord.z - u_zrange.x) / span, 0.0, 1.0);
+    float w = a * exp(-10.0 * d);
+    frag_color  = vec4(c.rgb * w, w);
+    frag_reveal = vec4(-log(1.0 - a), 0.0, 0.0, 0.0);
+}
+)"
+
 static const char* FS_CMAP = R"(
 #version 330 core
 in float g_val;
@@ -258,23 +274,60 @@ uniform float u_vmin;
 uniform float u_vmax;
 uniform int   u_reverse;
 uniform float u_alpha;
-out vec4 frag_color;
+uniform int   u_oit;
+uniform vec2  u_zrange;
+layout(location = 0) out vec4 frag_color;
+layout(location = 1) out vec4 frag_reveal;
+)" OIT_OUT_GLSL R"(
 void main() {
     float range = u_vmax - u_vmin;
     float t = (range > 1e-30) ? clamp((g_val - u_vmin) / range, 0.0, 1.0) : 0.5;
     if (isnan(g_val) || isinf(g_val)) t = 1.0;   // разошедшаяся ошибка — верхний край шкалы
     if (u_reverse != 0) t = 1.0 - t;
     float row = float(u_colormap - 1001) + 0.5;
-    frag_color = vec4(texture(u_cmap_lut, vec2(t, row / 200.0)).rgb, u_alpha);
+    oit_out(vec4(texture(u_cmap_lut, vec2(t, row / 200.0)).rgb, u_alpha));
 }
 )";
 
+// u_oit = 0 (значение по умолчанию у неустановленного uniform, так что 2D-программы его не
+// трогают) — обычный вывод. u_oit = 1 — проход weighted blended OIT (begin_oit): во вложение 0
+// копится цвет с весом по глубине, во вложение 1 — -log(1 - α) (смешивание ONE, ONE в обоих).
+// Выход location 1 при FBO с одним вложением просто отбрасывается.
 static const char* FS = R"(
 #version 330 core
 uniform vec4 u_color;
+uniform int  u_oit;
+uniform vec2 u_zrange;
+layout(location = 0) out vec4 frag_color;
+layout(location = 1) out vec4 frag_reveal;
+)" OIT_OUT_GLSL R"(
+void main() {
+    oit_out(u_color);
+}
+)";
+
+// Сведение OIT-накопителей поверх непрозрачного кадра: цвет — средневзвешенный по глубине,
+// покрытие — 1 - prod(1 - α_i) = 1 - exp(-sum). Для серии одного цвета это ровно то же, что
+// последовательное смешивание её слоёв, т. е. плотность витков копится как раньше.
+static const char* VS_OIT_COMPOSITE = R"(
+#version 330 core
+void main() {
+    vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
+    gl_Position = vec4(p, 0.0, 1.0);
+}
+)";
+
+static const char* FS_OIT_COMPOSITE = R"(
+#version 330 core
+uniform sampler2D u_accum;
+uniform sampler2D u_reveal;
 out vec4 frag_color;
 void main() {
-    frag_color = u_color;
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    vec4 acc = texelFetch(u_accum, p, 0);
+    if (acc.a <= 0.0) discard;
+    float cov = 1.0 - exp(-texelFetch(u_reveal, p, 0).r);
+    frag_color = vec4(acc.rgb / acc.a, cov);
 }
 )";
 
@@ -455,6 +508,7 @@ PlotRenderer::~PlotRenderer() {
     if (program_2d_thick_) glDeleteProgram(program_2d_thick_);
     if (program_3d_cmap_)  glDeleteProgram(program_3d_cmap_);
     if (program_heatmap_)  glDeleteProgram(program_heatmap_);
+    if (program_oit_composite_) glDeleteProgram(program_oit_composite_);
     if (heatmap_vbo_)     glDeleteBuffers(1, &heatmap_vbo_);
     if (lut_tex_)         glDeleteTextures(1, &lut_tex_);
     if (vao_)             glDeleteVertexArrays(1, &vao_);
@@ -512,6 +566,8 @@ void PlotRenderer::compile_shaders() {
             loc_mvp_3d_ = glGetUniformLocation(program_3d_, "u_mvp");
             loc_color_3d_ = glGetUniformLocation(program_3d_, "u_color");
             loc_point_size_3d_ = glGetUniformLocation(program_3d_, "u_point_size");
+            loc_oit_3d_    = glGetUniformLocation(program_3d_, "u_oit");
+            loc_zrange_3d_ = glGetUniformLocation(program_3d_, "u_zrange");
         }
     }
     if (fs && vs3 && gs3t) {
@@ -521,6 +577,8 @@ void PlotRenderer::compile_shaders() {
             loc_color_3d_thick_     = glGetUniformLocation(program_3d_thick_, "u_color");
             loc_viewport_3d_thick_  = glGetUniformLocation(program_3d_thick_, "u_viewport");
             loc_thickness_3d_thick_ = glGetUniformLocation(program_3d_thick_, "u_thickness_px");
+            loc_oit_3d_thick_       = glGetUniformLocation(program_3d_thick_, "u_oit");
+            loc_zrange_3d_thick_    = glGetUniformLocation(program_3d_thick_, "u_zrange");
         }
     }
     // 2D-вариант толстой линии: тот же GS (z = 0, w = 1 у 2D-вершин), вход — VS_2D.
@@ -549,11 +607,26 @@ void PlotRenderer::compile_shaders() {
                 loc_vmax_3d_cmap_      = glGetUniformLocation(program_3d_cmap_, "u_vmax");
                 loc_reverse_3d_cmap_   = glGetUniformLocation(program_3d_cmap_, "u_reverse");
                 loc_alpha_3d_cmap_     = glGetUniformLocation(program_3d_cmap_, "u_alpha");
+                loc_oit_3d_cmap_       = glGetUniformLocation(program_3d_cmap_, "u_oit");
+                loc_zrange_3d_cmap_    = glGetUniformLocation(program_3d_cmap_, "u_zrange");
             }
         }
         if (vs_v) glDeleteShader(vs_v);
         if (gs_v) glDeleteShader(gs_v);
         if (fs_c) glDeleteShader(fs_c);
+    }
+    {
+        GLuint vs_o = compile(GL_VERTEX_SHADER, VS_OIT_COMPOSITE);
+        GLuint fs_o = compile(GL_FRAGMENT_SHADER, FS_OIT_COMPOSITE);
+        if (vs_o && fs_o) {
+            program_oit_composite_ = link_program(vs_o, fs_o);
+            if (program_oit_composite_) {
+                loc_oit_accum_  = glGetUniformLocation(program_oit_composite_, "u_accum");
+                loc_oit_reveal_ = glGetUniformLocation(program_oit_composite_, "u_reveal");
+            }
+        }
+        if (vs_o) glDeleteShader(vs_o);
+        if (fs_o) glDeleteShader(fs_o);
     }
     GLuint fs_h = compile(GL_FRAGMENT_SHADER, FS_HEATMAP);
     GLuint vs_h = compile(GL_VERTEX_SHADER, VS_HEATMAP);
@@ -584,7 +657,91 @@ void PlotRenderer::compile_shaders() {
     if (fs)   glDeleteShader(fs);
 }
 
+void PlotRenderer::destroy_oit() {
+    if (oit_accum_tex_)  { glDeleteTextures(1, &oit_accum_tex_);  oit_accum_tex_ = 0; }
+    if (oit_reveal_tex_) { glDeleteTextures(1, &oit_reveal_tex_); oit_reveal_tex_ = 0; }
+    if (oit_fbo_)        { glDeleteFramebuffers(1, &oit_fbo_);    oit_fbo_ = 0; }
+}
+
+// Накопители OIT — того же размера, что основной FBO, и на ТОМ ЖЕ depth-буфере: непрозрачное
+// (оси, серии с α = 1) уже записало туда глубину и закрывает полупрозрачное за собой.
+bool PlotRenderer::ensure_oit() {
+    if (oit_fbo_) return true;
+    if (!fbo_ || !depth_rbo_ || !program_oit_composite_) return false;
+    auto make_tex = [&](GLuint& tex, GLint ifmt, GLenum fmt) {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, ifmt, fbo_w_, fbo_h_, 0, fmt, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    };
+    // 32F, а не 16F: сотни наложенных витков с весом до e^10 переполняли бы half.
+    make_tex(oit_accum_tex_, GL_RGBA32F, GL_RGBA);
+    make_tex(oit_reveal_tex_, GL_R32F, GL_RED);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &oit_fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, oit_fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, oit_accum_tex_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, oit_reveal_tex_, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_rbo_);
+    const GLenum bufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+    glDrawBuffers(2, bufs);
+    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "[PlotRenderer] OIT FBO incomplete: 0x%x\n", status);
+        destroy_oit();
+        return false;
+    }
+    return true;
+}
+
+bool PlotRenderer::begin_oit(float z_near, float z_far) {
+    if (oit_active_ || !fbo_has_depth_ || !ensure_oit()) return false;
+    glBindFramebuffer(GL_FRAMEBUFFER, oit_fbo_);
+    const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    glClearBufferfv(GL_COLOR, 0, zero);
+    glClearBufferfv(GL_COLOR, 1, zero);
+    oit_was_blend_ = glIsEnabled(GL_BLEND);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);
+    glDepthMask(GL_FALSE);
+    oit_zrange_[0] = z_near;
+    oit_zrange_[1] = z_far;
+    oit_active_ = true;
+    return true;
+}
+
+void PlotRenderer::end_oit() {
+    if (!oit_active_) return;
+    oit_active_ = false;
+    glDepthMask(GL_TRUE);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    // Альфа текстуры плота остаётся 1 (как у draw_line_3d): меняется только цвет.
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+    const GLboolean was_depth = glIsEnabled(GL_DEPTH_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(program_oit_composite_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, oit_accum_tex_);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, oit_reveal_tex_);
+    if (loc_oit_accum_ >= 0)  glUniform1i(loc_oit_accum_, 0);
+    if (loc_oit_reveal_ >= 0) glUniform1i(loc_oit_reveal_, 1);
+    glBindVertexArray(vao_);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+    if (was_depth) glEnable(GL_DEPTH_TEST);
+    if (!oit_was_blend_) glDisable(GL_BLEND);
+}
+
 void PlotRenderer::destroy_fbo() {
+    destroy_oit();
     if (color_tex_) { glDeleteTextures(1, &color_tex_); color_tex_ = 0; }
     if (depth_rbo_) { glDeleteRenderbuffers(1, &depth_rbo_); depth_rbo_ = 0; }
     if (fbo_) { glDeleteFramebuffers(1, &fbo_);   fbo_ = 0; }
@@ -634,6 +791,7 @@ void PlotRenderer::begin_frame(int w, int h, float r, float g, float b, float a,
     glGetIntegerv(GL_VIEWPORT, saved_viewport_);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_fbo_);
     saved_depth_test_ = glIsEnabled(GL_DEPTH_TEST);
+    content_key_ = 0;   // текстура перерисовывается — прежний ключ содержимого недействителен
 
     ensure_fbo(w, h, with_depth);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
@@ -819,14 +977,19 @@ void PlotRenderer::draw_points_3d(GLuint vbo, int point_count, const float mvp[1
 
     // Blending is on for the same reason as in draw_points: a dense map attractor
     // leans on alpha, and without it the markers would be opaque squares.
+    // В OIT-проходе (begin_oit) смешивание и маску глубины уже выставил он.
+    const bool oit = oit_active_;
     GLboolean was_blend = glIsEnabled(GL_BLEND);
-    glEnable(GL_BLEND);
-    // Альфа FBO — на 1, полупрозрачные точки не пишут глубину: см. draw_line_3d.
-    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    const bool translucent = color[3] < 1.0f;
-    if (translucent) glDepthMask(GL_FALSE);
+    const bool translucent = !oit && color[3] < 1.0f;
+    if (!oit) {
+        glEnable(GL_BLEND);
+        // Альфа FBO — на 1, полупрозрачные точки не пишут глубину: см. draw_line_3d.
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        if (translucent) glDepthMask(GL_FALSE);
+    }
 
     glUseProgram(program_3d_);
+    set_oit_uniforms(loc_oit_3d_, loc_zrange_3d_);
     glUniformMatrix4fv(loc_mvp_3d_, 1, GL_FALSE, mvp);
     glUniform4fv(loc_color_3d_, 1, color);
     if (loc_point_size_3d_ >= 0) glUniform1f(loc_point_size_3d_, point_size);
@@ -843,7 +1006,13 @@ void PlotRenderer::draw_points_3d(GLuint vbo, int point_count, const float mvp[1
     glBindVertexArray(0);
     glUseProgram(0);
     if (translucent) glDepthMask(GL_TRUE);
-    if (!was_blend) glDisable(GL_BLEND);
+    if (!oit && !was_blend) glDisable(GL_BLEND);
+}
+
+void PlotRenderer::set_oit_uniforms(GLint loc_oit, GLint loc_zrange) const {
+    // Uniform живёт в программе между вызовами, поэтому 0 ставим явно на каждом рисовании.
+    if (loc_oit >= 0) glUniform1i(loc_oit, oit_active_ ? 1 : 0);
+    if (oit_active_ && loc_zrange >= 0) glUniform2f(loc_zrange, oit_zrange_[0], oit_zrange_[1]);
 }
 
 void PlotRenderer::draw_line_3d(GLuint vbo, int point_count, const float mvp[16],
@@ -857,6 +1026,7 @@ void PlotRenderer::draw_line_3d(GLuint vbo, int point_count, const float mvp[16]
         // СТАРЫЙ путь: побайтово как до Custom line style patch
         if (!program_3d_) return;
         glUseProgram(program_3d_);
+        set_oit_uniforms(loc_oit_3d_, loc_zrange_3d_);
         glUniformMatrix4fv(loc_mvp_3d_, 1, GL_FALSE, mvp);
         glUniform4fv(loc_color_3d_, 1, color);
         glBindVertexArray(vao_);
@@ -877,14 +1047,20 @@ void PlotRenderer::draw_line_3d(GLuint vbo, int point_count, const float mvp[16]
     // Альфа FBO держим на 1 (как draw_points): с glBlendFunc(SRC_ALPHA, ...) на канал альфы
     // полупрозрачная линия «продырявливала» текстуру плота, и вся траектория выходила ровным
     // бледным тоном. Полупрозрачная линия не пишет глубину: иначе тест глубины отбрасывал
-    // витки за уже нарисованными, и наложения (градиент плотности) не копились.
+    // витки за уже нарисованными, и наложения (градиент плотности) не копились. Порядок между
+    // полупрозрачными сериями при этом теряется — его держит OIT-проход (begin_oit), в котором
+    // смешивание и маску глубины выставил он сам.
+    const bool oit = oit_active_;
     GLboolean was_blend = glIsEnabled(GL_BLEND);
-    glEnable(GL_BLEND);
-    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    const bool translucent = color[3] < 1.0f;
-    if (translucent) glDepthMask(GL_FALSE);
+    const bool translucent = !oit && color[3] < 1.0f;
+    if (!oit) {
+        glEnable(GL_BLEND);
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        if (translucent) glDepthMask(GL_FALSE);
+    }
 
     glUseProgram(program_3d_thick_);
+    set_oit_uniforms(loc_oit_3d_thick_, loc_zrange_3d_thick_);
     glUniformMatrix4fv(loc_mvp_3d_thick_, 1, GL_FALSE, mvp);
     glUniform4fv(loc_color_3d_thick_, 1, color);
     if (loc_viewport_3d_thick_ >= 0)
@@ -904,7 +1080,7 @@ void PlotRenderer::draw_line_3d(GLuint vbo, int point_count, const float mvp[16]
     // Точный blend func не восстанавливаем — ImGui сам ставит свой перед
     // отрисовкой ImDrawList, "утечка" не важна.
     if (translucent) glDepthMask(GL_TRUE);
-    if (!was_blend) glDisable(GL_BLEND);
+    if (!oit && !was_blend) glDisable(GL_BLEND);
 }
 
 void PlotRenderer::draw_line_3d_cmap(GLuint vbo, GLuint vbo_val, int point_count,
@@ -914,13 +1090,17 @@ void PlotRenderer::draw_line_3d_cmap(GLuint vbo, GLuint vbo_val, int point_count
 
     // Смешивание и глубина — как у толстого пути draw_line_3d: альфа FBO на 1, полупрозрачная
     // линия глубину не пишет (иначе наложения витков не копятся).
+    const bool oit = oit_active_;
     GLboolean was_blend = glIsEnabled(GL_BLEND);
-    glEnable(GL_BLEND);
-    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    const bool translucent = alpha < 1.0f;
-    if (translucent) glDepthMask(GL_FALSE);
+    const bool translucent = !oit && alpha < 1.0f;
+    if (!oit) {
+        glEnable(GL_BLEND);
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        if (translucent) glDepthMask(GL_FALSE);
+    }
 
     glUseProgram(program_3d_cmap_);
+    set_oit_uniforms(loc_oit_3d_cmap_, loc_zrange_3d_cmap_);
     glUniformMatrix4fv(loc_mvp_3d_cmap_, 1, GL_FALSE, mvp);
     if (loc_viewport_3d_cmap_ >= 0)  glUniform2f(loc_viewport_3d_cmap_, (float)fbo_w_, (float)fbo_h_);
     if (loc_thickness_3d_cmap_ >= 0) glUniform1f(loc_thickness_3d_cmap_, line_width);
@@ -949,10 +1129,11 @@ void PlotRenderer::draw_line_3d_cmap(GLuint vbo, GLuint vbo_val, int point_count
     glUseProgram(0);
 
     if (translucent) glDepthMask(GL_TRUE);
-    if (!was_blend) glDisable(GL_BLEND);
+    if (!oit && !was_blend) glDisable(GL_BLEND);
 }
 
 void PlotRenderer::end_frame() {
+    end_oit();   // забытый end_oit не оставит кадр без сведения и FBO накопителей привязанным
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)saved_fbo_);
     glViewport(saved_viewport_[0], saved_viewport_[1],
         saved_viewport_[2], saved_viewport_[3]);

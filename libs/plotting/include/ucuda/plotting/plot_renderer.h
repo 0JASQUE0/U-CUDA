@@ -183,7 +183,22 @@ public:
     void draw_line_3d_cmap(GLuint vbo, GLuint vbo_val, int point_count, const float mvp[16],
         int colormap_id, float vmin, float vmax, bool reverse, float alpha, float line_width);
 
+    // Порядко-независимая прозрачность (weighted blended OIT) для 3D-кадра с глубиной. Между
+    // begin_oit и end_oit draw_line_3d / draw_points_3d / draw_line_3d_cmap не пишут в кадр,
+    // а копят цвет с весом по глубине и покрытие в float-накопители; end_oit сводит их поверх
+    // уже нарисованного непрозрачного (его глубина закрывает накопители). Так полупрозрачные
+    // серии перекрывают друг друга по глубине, а не по порядку рисования. z_near/z_far —
+    // оконная глубина [0,1] ближней и дальней точки сцены (вес считается вдоль неё).
+    // false — OIT недоступен (нет глубины / FBO не собрался): рисовать как раньше.
+    bool begin_oit(float z_near, float z_far);
+    void end_oit();
+
     void end_frame();
+
+    // Ключ содержимого текстуры: вызывающий ставит его после end_frame, begin_frame сбрасывает
+    // в 0. Совпал ключ — текстура уже содержит нужный кадр, перерисовку можно пропустить.
+    unsigned long long content_key() const { return content_key_; }
+    void set_content_key(unsigned long long k) { content_key_ = k; }
 
     GLuint texture_id() const { return color_tex_; }
     int width()  const { return fbo_w_; }
@@ -197,6 +212,22 @@ private:
     // Заливается напрямую из kSlanCmLut (layout совпадает), создаётся один
     // раз в конструкторе, как и шейдеры. 150 КБ VRAM на всю библиотеку.
     void ensure_lut_texture();
+    bool ensure_oit();
+    void destroy_oit();
+    void set_oit_uniforms(GLint loc_oit, GLint loc_zrange) const;
+
+    GLuint oit_fbo_ = 0;
+    GLuint oit_accum_tex_ = 0;    // RGBA32F: sum(rgb * w), sum(w)
+    GLuint oit_reveal_tex_ = 0;   // R32F: sum(-log(1 - alpha))
+    bool   oit_active_ = false;
+    GLboolean oit_was_blend_ = GL_FALSE;
+    float  oit_zrange_[2] = { 0.0f, 1.0f };
+    GLuint program_oit_composite_ = 0;
+    GLint  loc_oit_accum_ = -1, loc_oit_reveal_ = -1;
+    GLint  loc_oit_3d_ = -1, loc_zrange_3d_ = -1;
+    GLint  loc_oit_3d_thick_ = -1, loc_zrange_3d_thick_ = -1;
+    GLint  loc_oit_3d_cmap_ = -1, loc_zrange_3d_cmap_ = -1;
+    unsigned long long content_key_ = 0;
 
     GLuint fbo_ = 0;
     GLuint color_tex_ = 0;
