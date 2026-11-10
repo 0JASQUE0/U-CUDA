@@ -688,6 +688,7 @@ void draw_proj_line_style(Projection& pr, const char* sfx, const char* points_ti
         }
     }
     projection_views(pr).view2d->imdraw_lines      = pr.custom_line_style;
+    projection_views(pr).view2d->gpu_thick_lines   = true;
     projection_views(pr).view2d->line_thickness_px = pr.line_width;
     projection_views(pr).view2d->points_mode       = pr.draw_points;
     projection_views(pr).view2d->points_with_lines = pr.draw_points && pr.custom_line_style;

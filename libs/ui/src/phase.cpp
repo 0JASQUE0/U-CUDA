@@ -746,7 +746,11 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     projection_views(pr).view3d->y_name = s.vars.empty() ? "y" : plot_var_name(phase_axis_name(s, ay));
                     projection_views(pr).view3d->z_name = s.vars.empty() ? "z" : plot_var_name(phase_axis_name(s, az));
 
-                    // Локальный буфер — см. ветку Phase2D выше.
+                    // Локальный буфер — см. ветку Phase2D выше. Plot3DView берёт точки только
+                    // при смене поколения (заливка VBO), поэтому в остальные кадры траектории
+                    // не копируются: на миллионах точек это была заметная часть кадра.
+                    const int data_gen = s.data_generation * 1000 + ax * 100 + ay * 10 + az;
+                    const bool need_points = projection_views(pr).view3d->series_generation != data_gen;
                     std::vector<std::vector<float>> series_data(res.trajectories.size());
 
                     std::vector<PlotSeriesInput3D> series_in;
@@ -758,11 +762,13 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     for (size_t k = 0; k < res.trajectories.size(); ++k) {
                         const auto& traj = res.trajectories[k];
                         auto& buf = series_data[k];
-                        buf.reserve(traj.size() * 3);
-                        for (const auto& pt : traj) {
-                            buf.push_back((double)pt[ax < (int)pt.size() ? ax : 0]);
-                            buf.push_back((double)pt[ay < (int)pt.size() ? ay : 0]);
-                            buf.push_back((double)pt[az < (int)pt.size() ? az : 0]);
+                        if (need_points) {
+                            buf.reserve(traj.size() * 3);
+                            for (const auto& pt : traj) {
+                                buf.push_back((float)pt[ax < (int)pt.size() ? ax : 0]);
+                                buf.push_back((float)pt[ay < (int)pt.size() ? ay : 0]);
+                                buf.push_back((float)pt[az < (int)pt.size() ? az : 0]);
+                            }
                         }
                         std::string lab = (k < res.labels.size()) ? res.labels[k] : ("IC " + std::to_string(k + 1));
                         if (s.legend_show_ic) lab = ic_legend_text(res, k);
@@ -781,8 +787,6 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         glob_vis[k] = vis;
                         init_vis[k] = true;
                     }
-
-                    int data_gen = s.data_generation * 1000 + ax * 100 + ay * 10 + az;
 
                     ImVec2 avail = ImGui::GetContentRegionAvail();
                     ImVec2 origin = ImGui::GetCursorScreenPos();

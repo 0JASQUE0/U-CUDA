@@ -469,6 +469,11 @@ void Plot2DView::render(PlotRenderer& renderer,
     // Мировой Y под экранной долей высоты my (0 — низ, 1 — верх).
     auto y_at = [&](double my) { return YW(sy0 + my * (sy1 - sy0)); };
 
+    // Одноцветная линия Custom line style, которая идёт GL-путём (см. gpu_thick_lines).
+    auto gpu_thick_line_series = [this](const PlotSeriesInput* si) {
+        return imdraw_lines && gpu_thick_lines && si && !si->values && !si->segment_order;
+    };
+
     // 4. FBO render
     {
         float br, bg, bb, ba;
@@ -519,6 +524,8 @@ void Plot2DView::render(PlotRenderer& renderer,
         }
         else if (!imdraw_lines)  // линии нарисуем через ImDrawList после осей
             renderer.draw_line(g.vbo, g.point_count, mvp, color, line_thickness_px);
+        else if (gpu_thick_line_series(si))
+            renderer.draw_line_thick_2d(g.vbo, g.point_count, mvp, color, line_thickness_px);
     }
     renderer.end_frame();
 
@@ -614,6 +621,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             // Точечные серии (и Points + линия) уже нарисованы в GL-проходе.
             const bool as_pts = s.points_override >= 0 ? (s.points_override == 1) : points_mode;
             if (as_pts) continue;
+            if (gpu_thick_line_series(&s)) continue;   // уже в FBO (GL-проход выше)
             const bool   colored = (s.values != nullptr);
             const float  crange  = (s.cmax > s.cmin) ? (s.cmax - s.cmin) : 1.0f;
             const ImU32  uniform_col = ImGui::ColorConvertFloat4ToU32(series_color(s));

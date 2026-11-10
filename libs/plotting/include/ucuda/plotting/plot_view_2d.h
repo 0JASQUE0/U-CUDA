@@ -166,6 +166,12 @@ public:
     // FBO, как раньше (Bif/Phase). points_mode игнорируется этим флагом — оно
     // для точечных режимов остаётся через GL.
     bool imdraw_lines = false;
+    // Вместе с imdraw_lines: одноцветные серии (без values и segment_order) рисуются толстой
+    // GL-линией в FBO (draw_line_thick_2d), а не посегментно через ImDrawList. ImDrawList на
+    // траекториях в сотни тысяч точек каждый кадр строит по 4 вершины на сегмент и тормозит
+    // интерфейс; цена — данные оказываются под сеткой, как и у обычного GL-пути.
+    // Ставится для Custom line style фазовых проекций (draw_proj_line_style).
+    bool gpu_thick_lines = false;
 
     // Snap X-координаты курсора к узлам параметрической сетки (для 1D-графиков
     // Bif/LLE/LS, где значение считалось в N узлах на [snap_x_min, snap_x_max]).
