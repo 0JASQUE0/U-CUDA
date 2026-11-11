@@ -1,5 +1,6 @@
 ﻿#include "gui_common.h"
 #include "gui_inputs.h"
+#include "ucuda/plotting/plot_legend.h"
 // Общие поля ввода: текст, числа, списки, LaTeX-превью, цвета НУ, меню отмены.
 using namespace ucuda::ui_detail;
 
@@ -18,8 +19,9 @@ std::string get_exe_dir_with_sep() {
 
 
 namespace ucuda::ui_detail {
+// Палитра серий по умолчанию — выбор в Settings (set_series_palette, plot_legend.h).
 ImVec4 ic_base_color(int ic_index) {
-    return ImPlot::GetColormapColor(ic_index);
+    return default_series_color(ic_index);
 }
 }
 

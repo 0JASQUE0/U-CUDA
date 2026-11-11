@@ -53,6 +53,8 @@ struct AppConfig {
     // (исключает пустые подписи), максимум 10 (предел double-precision в `%g`).
     // По умолчанию 4 (сохраняет старое поведение).
     int tick_precision = 4;
+    // Палитра серий по умолчанию: 0 MATLAB gem12, 1 glow12, 2 ImPlot Deep.
+    int series_palette = 0;
 
     // Цветовая тема ImGui. true (дефолт) = StyleColorsDark, false = StyleColorsLight.
     // Переключается в Settings. apply_ui_scale в app_main.cpp перечитывает

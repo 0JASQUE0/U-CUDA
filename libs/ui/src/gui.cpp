@@ -731,6 +731,14 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // Окна диаграмм, нарисованные дальше, запоминают вкладку: Ctrl+Shift+клик в меню «Show»
     // применяет галку ко всем окнам этой вкладки (plot_show_menu).
     plot_set_window_scope((int)model.app_mode);
+    // Custom: 1D-сечения (Bif / LLE) считаются из той же точки, что и фазовый «IC 1», —
+    // разнос цвета (Ctrl+Shift или «Apply to all plots») красит их вместе.
+    static const bool custom_links = [] {
+        plot_set_series_color_links((int)AppModel::AppMode::Custom,
+            {{"IC 1", "Custom 1D X", "Custom 1D Y", "Custom LLE 1D X", "Custom LLE 1D Y"}});
+        return true;
+    }();
+    (void)custom_links;
 
     if (model.app_mode == AppModel::AppMode::Library) {
         // Library mode: list view by default, editor view (System/Parameters sub-tabs +
@@ -900,6 +908,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.basins_states_colormap = m.basins_states_colormap;
             cfg.slancm_enabled         = m.slancm_enabled;
             cfg.tick_precision         = m.tick_precision;
+            cfg.series_palette         = m.series_palette;
             cfg.dark_theme             = m.dark_theme;
             cfg.peak                   = m.peak;
             cfg.nvrtc_fmad             = m.nvrtc_fmad;
@@ -1003,6 +1012,34 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 persist_settings(model);
             }
             ImGui::TextDisabled("Significant digits in axis tick and colorbar labels.");
+
+            ImGui::Separator();
+            ImGui::Text("Series colours");
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::BeginCombo("Default palette", series_palette_name(model.series_palette))) {
+                for (int i = 0; i < kSeriesPaletteCount; ++i) {
+                    ImGui::PushID(i);
+                    if (ImGui::Selectable(series_palette_name(i), model.series_palette == i)) {
+                        model.series_palette = i;
+                        set_series_palette(i);
+                        persist_settings(model);
+                    }
+                    // Образцы палитры прямо в строке списка.
+                    ImGui::SameLine(ImGui::GetFontSize() * 8.0f);
+                    for (int k = 0; k < series_palette_size(i); ++k) {
+                        if (k > 0) ImGui::SameLine(0, 2);
+                        ImGui::PushID(k);
+                        ImGui::ColorButton("##pal", series_palette_color(i, k),
+                                           ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoAlpha,
+                                           ImVec2(ImGui::GetFontSize(), ImGui::GetFontSize()));
+                        ImGui::PopID();
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::TextDisabled("Colours of IC 1, IC 2, ... and other series without a colour of their own.");
+            ImGui::TextDisabled("A colour picked in a legend (right-click its swatch) overrides the palette.");
 
             ImGui::Separator();
             ImGui::Text("Theme");

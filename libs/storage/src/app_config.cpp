@@ -230,6 +230,9 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
     parse_string_field(body, "slancm_enabled", out.slancm_enabled);
     if (parse_int_field(body, "tick_precision", tp))
         out.tick_precision = tp;
+    int sp = 0;
+    if (parse_int_field(body, "series_palette", sp))
+        out.series_palette = sp;
     bool dark = true;
     if (parse_bool_field(body, "dark_theme", dark))
         out.dark_theme = dark;
@@ -304,6 +307,7 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         // единообразным с last_system_name.
         f << "  \"slancm_enabled\": \""       << json_escape(cfg.slancm_enabled) << "\",\n";
         f << "  \"tick_precision\": "         << cfg.tick_precision << ",\n";
+        f << "  \"series_palette\": "         << cfg.series_palette << ",\n";
         f << "  \"dark_theme\": "             << (cfg.dark_theme ? "true" : "false") << ",\n";
         f << "  \"last_app_mode\": "          << cfg.last_app_mode << ",\n";
         f << "  \"last_system_name\": \""     << json_escape(cfg.last_system_name) << "\",\n";

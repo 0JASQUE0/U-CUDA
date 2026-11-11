@@ -387,6 +387,7 @@ void Plot3DView::render(PlotRenderer& renderer,
         if (s.label == legend_color_target_) { cur = series_color(s); break; }
     // Цвета — общие на окно и сохраняются в imgui.ini (PlotWindowPrefs::series_colors).
     const std::map<std::string, ImVec4> before = wp.series_colors;
-    legend_color_popup(col_pop, legend_color_target_, wp.series_colors, cur);
-    plot_series_colors_changed(before, wp.series_colors);
+    if (legend_color_popup(col_pop, legend_color_target_, wp.series_colors, cur))
+        plot_series_color_spread(wp, legend_color_target_);
+    plot_series_colors_changed(wp, before);
 }

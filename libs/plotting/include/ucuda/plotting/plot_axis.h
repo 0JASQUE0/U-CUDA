@@ -291,9 +291,14 @@ struct PlotWindowPrefs {
 };
 // Вкладка приложения на текущий кадр: окна, отрисованные после вызова, запоминают её.
 void plot_set_window_scope(int scope);
-// Если меню легенды поменяло цвета (before — копия до него), помечает imgui.ini к сохранению.
-void plot_series_colors_changed(const std::map<std::string, ImVec4>& before,
-                                const std::map<std::string, ImVec4>& after);
+// Если меню легенды поменяло цвета p.series_colors (before — копия до него), помечает imgui.ini
+// к сохранению; при зажатых Ctrl+Shift те же правки (по подписям) уходят во все окна вкладки.
+void plot_series_colors_changed(PlotWindowPrefs& p, const std::map<std::string, ImVec4>& before);
+// Цвет серии label из окна p — во все окна той же вкладки (свой цвет или палитровый, если сброшен).
+void plot_series_color_spread(PlotWindowPrefs& p, const std::string& label);
+// Группы подписей одной сущности на вкладке scope (например, «IC 1» фазы и «Custom 1D X»
+// бифуркации — одна траектория): разнос цвета любой из них красит всю группу.
+void plot_set_series_color_links(int scope, std::vector<std::vector<std::string>> groups);
 // Сразу после ImGui::CreateContext: imgui.ini читается на первом NewFrame.
 void plot_install_settings_handler();
 PlotWindowPrefs& plot_window_prefs_current();

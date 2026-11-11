@@ -20,6 +20,7 @@
 #include "ucuda/storage/app_config.h"
 #include "ucuda/application/session_persistence.h"
 #include "ucuda/plotting/plot_axis.h"
+#include "ucuda/plotting/plot_legend.h"
 #include "ucuda/ui/gui.h"
 #include "ucuda/ui/gui_tree_state.h"
 #include "ucuda/storage/system_library.h"
@@ -449,6 +450,7 @@ int main() {
         model.basins_states_colormap = colormap_id_or(app_cfg.basins_states_colormap, model.basins_states_colormap);
         if (app_cfg.tick_precision >= 2 && app_cfg.tick_precision <= 10)
             model.tick_precision = app_cfg.tick_precision;
+        model.series_palette = app_cfg.series_palette;
         model.dark_theme = app_cfg.dark_theme;
 
         // Маски видимости из Settings: какие вкладки показывать в верхнем ряду
@@ -492,6 +494,7 @@ int main() {
     apply_gpu_block_size(model.gpu_block_size);
     model.sync_peak_text();   // текстовые буферы полей Settings — из свежих значений
     set_tick_precision(model.tick_precision);
+    set_series_palette(model.series_palette);
     // Клампится внутри: конфиг мог быть правлен руками.
     set_plot_font_scale(model.plot_font_scale);
     model.plot_font_scale = plot_font_scale();

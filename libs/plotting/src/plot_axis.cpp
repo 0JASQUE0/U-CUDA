@@ -1,5 +1,6 @@
 ﻿#include "ucuda/plotting/plot_axis.h"
 #include "ucuda/plotting/digit_input.h"
+#include "ucuda/plotting/plot_legend.h"
 #include "imgui_internal.h"   // ImGuiWindow / ImGuiSettingsHandler (настройки окон в imgui.ini)
 #include <map>
 #include <cmath>
@@ -795,11 +796,25 @@ bool prefs_default(const PlotWindowPrefs& p) {
            p.colorbar && p.axes3d && !p.smooth && p.series_colors.empty();
 }
 
+// Секция [UcudaPlot][#RecentColours] — недавние цвета меню легенды (legend_recent_colors).
+// '#' в начале имени у окон ImGui не бывает (там «###» только внутри), так что не пересечётся.
+constexpr const char* kRecentSection = "#RecentColours";
+
 void* prefs_read_open(ImGuiContext*, ImGuiSettingsHandler*, const char* name) {
+    if (std::strcmp(name, kRecentSection) == 0) {
+        legend_recent_colors().clear();
+        return &legend_recent_colors();
+    }
     return &window_prefs()[name];
 }
 
 void prefs_read_line(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line) {
+    if (entry == &legend_recent_colors()) {
+        float r, g, b;
+        if (std::sscanf(line, "Recent=%f,%f,%f", &r, &g, &b) == 3)
+            legend_recent_colors().push_back(ImVec4(r, g, b, 1.0f));
+        return;
+    }
     PlotWindowPrefs& p = *(PlotWindowPrefs*)entry;
     int v = 0;
     if      (std::sscanf(line, "Toolbar=%d", &v) == 1)  p.toolbar  = v != 0;
@@ -834,6 +849,12 @@ void prefs_write_all(ImGuiContext*, ImGuiSettingsHandler*, ImGuiTextBuffer* out)
             if (label.find('\n') != std::string::npos) continue;   // строка ini — одна строка
             out->appendf("Color=%.4f,%.4f,%.4f,%.4f,%s\n", c.x, c.y, c.z, c.w, label.c_str());
         }
+        out->append("\n");
+    }
+    if (!legend_recent_colors().empty()) {
+        out->appendf("[UcudaPlot][%s]\n", kRecentSection);
+        for (const ImVec4& c : legend_recent_colors())
+            out->appendf("Recent=%.4f,%.4f,%.4f\n", c.x, c.y, c.z);
         out->append("\n");
     }
 }
@@ -882,13 +903,58 @@ static void prefs_item(PlotWindowPrefs& p, const char* label, bool PlotWindowPre
     ImGui::MarkIniSettingsDirty();
 }
 
-void plot_series_colors_changed(const std::map<std::string, ImVec4>& before,
-                                const std::map<std::string, ImVec4>& after) {
-    bool same = before.size() == after.size();
-    for (auto a = before.begin(), b = after.begin(); same && a != before.end(); ++a, ++b)
-        same = a->first == b->first && a->second.x == b->second.x && a->second.y == b->second.y &&
-               a->second.z == b->second.z && a->second.w == b->second.w;
-    if (!same) ImGui::MarkIniSettingsDirty();
+static bool same_color(const ImVec4& a, const ImVec4& b) {
+    return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+}
+
+static std::map<int, std::vector<std::vector<std::string>>>& series_color_links() {
+    static std::map<int, std::vector<std::vector<std::string>>> m;
+    return m;
+}
+
+void plot_set_series_color_links(int scope, std::vector<std::vector<std::string>> groups) {
+    series_color_links()[scope] = std::move(groups);
+}
+
+void plot_series_color_spread(PlotWindowPrefs& p, const std::string& label) {
+    if (p.scope < 0 || label.empty()) return;
+    // Подпись и её группа связанных подписей (plot_set_series_color_links) этой вкладки.
+    std::vector<std::string> labels{label};
+    const auto links = series_color_links().find(p.scope);
+    if (links != series_color_links().end())
+        for (const auto& group : links->second)
+            if (std::find(group.begin(), group.end(), label) != group.end())
+                for (const std::string& l : group)
+                    if (l != label) labels.push_back(l);
+    // Копия: цикл ниже правит и само окно p (связанные подписи в нём же).
+    const auto it = p.series_colors.find(label);
+    const bool set = it != p.series_colors.end();
+    const ImVec4 colour = set ? it->second : ImVec4();
+    for (auto& [name, other] : window_prefs()) {
+        if (other.scope != p.scope) continue;
+        for (const std::string& l : labels) {
+            if (&other == &p && l == label) continue;
+            if (set) other.series_colors[l] = colour;
+            else     other.series_colors.erase(l);
+        }
+    }
+    ImGui::MarkIniSettingsDirty();
+}
+
+void plot_series_colors_changed(PlotWindowPrefs& p, const std::map<std::string, ImVec4>& before) {
+    const auto& after = p.series_colors;
+    std::vector<std::string> changed;
+    for (const auto& [label, c] : before) {
+        const auto it = after.find(label);
+        if (it == after.end() || !same_color(it->second, c)) changed.push_back(label);
+    }
+    for (const auto& [label, c] : after)
+        if (!before.count(label)) changed.push_back(label);
+    if (changed.empty()) return;
+    ImGui::MarkIniSettingsDirty();
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.KeyCtrl && io.KeyShift)
+        for (const std::string& label : changed) plot_series_color_spread(p, label);
 }
 
 void plot_show_menu(PlotWindowPrefs& p, unsigned items) {
