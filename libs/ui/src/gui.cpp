@@ -15,6 +15,130 @@
 #include "tab_phase.h"
 using namespace ucuda::ui_detail;
 
+// Пресеты раскладки окон (кнопка Layout в шапке). У каждой вкладки приложения свой
+// dockspace (MainDockspace_<mode>): перестройка одной вкладки не трогает окна других,
+// а докинг вкладок перестаёт мешать друг другу в общем дереве узлов.
+namespace {
+enum class LayoutPreset { None = -1, Tabs, Columns, Rows, Grid };
+constexpr const char* kLayoutPresetNames[] = { "Tabs", "Columns", "Rows", "Grid" };
+
+struct LayoutRequest {
+    int          mode   = -1;
+    LayoutPreset preset = LayoutPreset::None;
+};
+LayoutRequest g_layout_request;
+int           g_prev_frame_mode = -1;
+
+const char* controls_window_for(AppModel::AppMode m) {
+    switch (m) {
+    case AppModel::AppMode::Analysis:   return "Controls";
+    case AppModel::AppMode::Parametric: return "Parametric Controls";
+    case AppModel::AppMode::Dft1D:      return "DFT1D Controls";
+    case AppModel::AppMode::Basins:     return "Basins Controls";
+    case AppModel::AppMode::FastSync:   return "FastSync Controls";
+    case AppModel::AppMode::Order:      return "Order Controls";
+    case AppModel::AppMode::Network:    return "Network Controls";
+    case AppModel::AppMode::Neural:     return "Neural Controls";
+    default:                            return nullptr;
+    }
+}
+
+// Окна вкладки — те, что рисовались в прошлом кадре (окна других вкладок не рисуются).
+// Порядок — порядок Begin в кадре, т.е. как их перечисляет код вкладки.
+void apply_layout_preset(ImGuiID dock_id, ImVec2 size, const char* controls, LayoutPreset preset) {
+    ImGuiContext& g = *GImGui;
+    const int last_frame = ImGui::GetFrameCount() - 1;
+    std::vector<ImGuiWindow*> wins;
+    const char* side = nullptr;
+    for (ImGuiWindow* w : g.Windows) {
+        if (w->RootWindow != w || w->LastFrameActive < last_frame) continue;
+        if (w->Flags & (ImGuiWindowFlags_Popup | ImGuiWindowFlags_Tooltip | ImGuiWindowFlags_ChildMenu |
+                        ImGuiWindowFlags_DockNodeHost | ImGuiWindowFlags_NoDocking)) continue;
+        if (std::strncmp(w->Name, "Debug##", 7) == 0) continue;
+        if (controls && std::strcmp(w->Name, controls) == 0) { side = controls; continue; }
+        wins.push_back(w);
+    }
+    std::sort(wins.begin(), wins.end(), [](const ImGuiWindow* a, const ImGuiWindow* b) {
+        return a->BeginOrderWithinContext < b->BeginOrderWithinContext;
+    });
+    apply_dock_layout(dock_id, size, side, wins, (int)preset);
+}
+}  // namespace
+
+namespace ucuda::ui_detail {
+const char* const kDockLayoutNames[kDockLayoutCount] = { "Tabs", "Columns", "Rows", "Grid" };
+
+namespace {
+// k равных частей узла node (размер size): первая — со стороны dir, остальные — за ней.
+// Размер каждой части задаётся явно: доля 1/(k-i) от остатка не годится — ImGui отдаёт
+// всё лишнее центральному узлу dockspace, и последняя ячейка выходила вдвое шире.
+std::vector<ImGuiID> split_even(ImGuiID node, ImVec2 size, ImGuiDir dir, int k) {
+    std::vector<ImGuiID> out;
+    const bool horiz = dir == ImGuiDir_Left || dir == ImGuiDir_Right;
+    const float cell = (horiz ? size.x : size.y) / (float)k;
+    for (int i = 0; i < k - 1; ++i) {
+        ImGuiID first = 0, rest = 0;
+        ImGui::DockBuilderSplitNode(node, dir, 1.0f / (float)(k - i), &first, &rest);
+        const float rest_len = cell * (float)(k - i - 1);
+        ImGui::DockBuilderSetNodeSize(first, horiz ? ImVec2(cell, size.y) : ImVec2(size.x, cell));
+        ImGui::DockBuilderSetNodeSize(rest,  horiz ? ImVec2(rest_len, size.y) : ImVec2(size.x, rest_len));
+        out.push_back(first);
+        node = rest;
+    }
+    out.push_back(node);
+    return out;
+}
+}  // namespace
+
+void apply_dock_layout(ImGuiID dock_id, ImVec2 size, const char* side_window,
+                       const std::vector<ImGuiWindow*>& wins, int preset) {
+    ImGui::DockBuilderRemoveNode(dock_id);
+    ImGui::DockBuilderAddNode(dock_id, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dock_id, size);
+    ImGuiID plots = dock_id;
+    ImVec2  plots_size = size;
+    if (side_window) {
+        ImGuiID right = 0;
+        ImGui::DockBuilderSplitNode(dock_id, ImGuiDir_Right, 0.30f, &right, &plots);
+        const float side_w = std::floor(size.x * 0.30f);
+        plots_size = ImVec2(size.x - side_w, size.y);
+        ImGui::DockBuilderSetNodeSize(right, ImVec2(side_w, size.y));
+        ImGui::DockBuilderSetNodeSize(plots, plots_size);
+        ImGui::DockBuilderDockWindow(side_window, right);
+    }
+    const int n = (int)wins.size();
+    if (n > 0) {
+        std::vector<ImGuiID> cells;
+        switch (preset) {
+        case 1: cells = split_even(plots, plots_size, ImGuiDir_Left, n); break;   // Columns
+        case 2: cells = split_even(plots, plots_size, ImGuiDir_Up, n);   break;   // Rows
+        case 3: {                                                                  // Grid
+            const int cols = (int)std::ceil(std::sqrt((double)n));
+            const int rows = (n + cols - 1) / cols;
+            const std::vector<ImGuiID> row_ids = split_even(plots, plots_size, ImGuiDir_Up, rows);
+            const ImVec2 row_size(plots_size.x, plots_size.y / (float)rows);
+            for (int r = 0; r < rows; ++r) {
+                const int in_row = (std::min)(cols, n - r * cols);
+                for (ImGuiID c : split_even(row_ids[r], row_size, ImGuiDir_Left, in_row)) cells.push_back(c);
+            }
+            break;
+        }
+        default: cells.assign((size_t)n, plots); break;   // Tabs: всё в один узел
+        }
+        for (int i = 0; i < n; ++i) ImGui::DockBuilderDockWindow(wins[i]->Name, cells[(size_t)i]);
+    }
+    ImGui::DockBuilderFinish(dock_id);
+}
+
+int dock_layout_request_take(int mode) {
+    if (g_layout_request.mode != mode) return -1;
+    const int p = (int)g_layout_request.preset;
+    g_layout_request = {};
+    return p;
+}
+}  // namespace ucuda::ui_detail
+
+
 namespace ucuda::ui_detail {
 // Индикатор компьюта в верхней строке. Раньше состояние снималось лестницей из двенадцати
 // почти одинаковых веток: каждая доставала из своей сессии одну и ту же четвёрку — подпись
@@ -530,6 +654,24 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         }
         if (any_in_flight) ImGui::EndDisabled();
 
+        // Пресеты раскладки окон текущей вкладки. В Custom — окна активной вкладки рабочей
+        // области (панель Controls там своя, вне dockspace).
+        {
+            ImGui::SameLine();
+            if (ImGui::Button("Layout")) ImGui::OpenPopup("##layout_presets");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(model.app_mode == AppModel::AppMode::Custom
+                    ? "Arrange the plots of the active workspace tab:\nas tabs, columns, rows or a grid."
+                    : "Arrange the windows of this tab: controls on the right,\n"
+                      "plots as tabs, columns, rows or a grid.");
+            if (ImGui::BeginPopup("##layout_presets")) {
+                for (int p = 0; p < IM_ARRAYSIZE(kLayoutPresetNames); ++p)
+                    if (ImGui::MenuItem(kLayoutPresetNames[p]))
+                        g_layout_request = { (int)model.app_mode, (LayoutPreset)p };
+                ImGui::EndPopup();
+            }
+        }
+
         // Что сделала последняя массовая команда / Ctrl+Z / Ctrl+Shift+Z.
         // Держим несколько секунд: "Apply to..." правит и невидимые сейчас
         // вкладки, и без строки в шапке это неотличимо от "ничего не произошло".
@@ -720,9 +862,25 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     if (model.app_mode == AppModel::AppMode::Custom) {
         custom_area_pos  = ImGui::GetCursorScreenPos();
         custom_area_size = ImGui::GetContentRegionAvail();
+        g_prev_frame_mode = (int)model.app_mode;
     } else {
-        // dockspace для содержимого — используется всеми режимами, кроме Custom.
-        ImGuiID dockspace_id = ImGui::GetID("MainDockspace");
+        // dockspace для содержимого — свой у каждого режима, кроме Custom (у того своя раскладка).
+        // Общий на все режимы ломал докинг: окна невидимых вкладок держали узлы общего дерева,
+        // и перестройка на одной вкладке перекладывала окна другой.
+        const int mode_i = (int)model.app_mode;
+        const std::string ds_name = "MainDockspace_" + std::to_string(mode_i);
+        const ImGuiID dockspace_id = ImGui::GetID(ds_name.c_str());
+        // Вкладка без сохранённой раскладки (первый запуск или переход со старого общего
+        // dockspace) — раскладывается вкладками сама.
+        if (!ImGui::DockBuilderGetNode(dockspace_id) && g_layout_request.mode != mode_i)
+            g_layout_request = { mode_i, LayoutPreset::Tabs };
+        // Применяем со второго кадра на вкладке: список окон берётся из прошлого кадра.
+        if (g_layout_request.mode == mode_i && g_prev_frame_mode == mode_i) {
+            apply_layout_preset(dockspace_id, ImGui::GetContentRegionAvail(),
+                                controls_window_for(model.app_mode), g_layout_request.preset);
+            g_layout_request = {};
+        }
+        g_prev_frame_mode = mode_i;
         ImGui::DockSpace(dockspace_id, ImVec2(0, 0), ImGuiDockNodeFlags_None);
     }
 
@@ -769,7 +927,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     }
     else if (model.app_mode == AppModel::AppMode::Analysis) {
         // режим анализа: панель настроек + окна проекций (докаются пользователем)
-        if (ImGui::Begin("Controls")) {
+        if (ImGui::Begin("Controls", nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
             draw_phase_controls(model.phase_session, [&model, &lib]() {
                 if (!model.loaded_name.empty()) {
                     model.from_record(lib.load(model.loaded_name));   // reference from disk
@@ -785,7 +943,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // windows" management, unchanged in shape) + a dynamic list of plot
         // windows the user opens/closes/docks freely, like Phase's
         // projection windows.
-        if (ImGui::Begin("Parametric Controls")) {
+        if (ImGui::Begin("Parametric Controls", nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
             draw_parametric_controls(model, lib);
         }
         ImGui::End();
@@ -795,14 +953,14 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // DFT1D mode: controls window (system picker + Run/Run all + config
         // tab bar + Plot windows manager) + a dynamic list of heatmap plot
         // windows, mirrors Parametric mode's shape.
-        if (ImGui::Begin("DFT1D Controls")) {
+        if (ImGui::Begin("DFT1D Controls", nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
             draw_dft1d_controls(model, lib);
         }
         ImGui::End();
         draw_dft1d_plot_windows(model, lib, cb);
     }
     else if (model.app_mode == AppModel::AppMode::Basins) {
-        if (ImGui::Begin("Basins Controls")) {
+        if (ImGui::Begin("Basins Controls", nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
             draw_basins_controls(model, lib);
         }
         ImGui::End();
@@ -814,7 +972,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         draw_basins_phase_windows(model, cb);
     }
     else if (model.app_mode == AppModel::AppMode::FastSync) {
-        if (ImGui::Begin("FastSync Controls")) {
+        if (ImGui::Begin("FastSync Controls", nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
             draw_fastsync_controls(model, lib);
         }
         ImGui::End();
@@ -826,7 +984,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     else if (model.app_mode == AppModel::AppMode::Order) {
         // Order mode: панель настроек + динамический список окон графика
         // (кривая p, кривая ошибки, 2D-карта, диаграмма производительности).
-        if (ImGui::Begin("Order Controls")) {
+        if (ImGui::Begin("Order Controls", nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
             draw_order_controls(model, lib);
         }
         ImGui::End();
@@ -850,7 +1008,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         auto& rnd_raster = net_renderers[1];
         if (!rnd_raster) rnd_raster = std::make_unique<PlotRenderer>();
 
-        if (ImGui::Begin("Network Controls")) {
+        if (ImGui::Begin("Network Controls", nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
             draw_network_controls(model, lib);
         }
         ImGui::End();
@@ -868,7 +1026,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Neural) {
-        if (ImGui::Begin("Neural Controls")) {
+        if (ImGui::Begin("Neural Controls", nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
             draw_neural_controls(model, lib);
         }
         ImGui::End();
@@ -921,7 +1079,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             save_app_config(get_exe_dir_with_sep(), cfg);
         };
 
-        if (ImGui::Begin("Settings")) {
+        if (ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
             ImGui::Text("Interface scale");
             ImGui::TextDisabled("Auto-detected at startup from glfwGetMonitorContentScale.");
             ImGui::TextDisabled("Override persists in _app_config.json next to exe.");

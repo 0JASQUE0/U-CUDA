@@ -31,7 +31,8 @@ void draw_custom_controls_panel(AppModel& model, SystemLibrary& lib,
                            | ImGuiWindowFlags_NoResize
                            | ImGuiWindowFlags_NoMove
                            | ImGuiWindowFlags_NoCollapse
-                           | ImGuiWindowFlags_NoDocking;
+                           | ImGuiWindowFlags_NoDocking
+                           | ImGuiWindowFlags_HorizontalScrollbar;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     if (ImGui::Begin("Custom Controls##panel", nullptr, flags)) {
         draw_custom_controls(model, lib);
@@ -204,8 +205,26 @@ void draw_custom_workspace_panel(CustomSession& cs,
     }
     if (std::any_of(ws.tabs.begin(), ws.tabs.end(),
                     [&](const WorkspaceTab& t){ return t.id == ws.active_tab_id; })) {
-        ImGui::DockSpace(ws_dock_id(ws.active_tab_id, sys), ImVec2(0, 0),
-                         ImGuiDockNodeFlags_None);
+        const ImGuiID active_id = ws_dock_id(ws.active_tab_id, sys);
+        // Кнопка Layout в шапке: окна, пристыкованные в дерево активной вкладки, — по пресету.
+        const int preset = dock_layout_request_take((int)AppModel::AppMode::Custom);
+        if (preset >= 0) {
+            std::vector<ImGuiWindow*> wins;
+            for (ImGuiWindow* w : GImGui->Windows) {
+                if (!w->DockNode || w->RootWindow != w) continue;
+                ImGuiDockNode* root = w->DockNode;
+                while (root->ParentNode) root = root->ParentNode;
+                if (root->ID == active_id) wins.push_back(w);
+            }
+            std::sort(wins.begin(), wins.end(), [](const ImGuiWindow* a, const ImGuiWindow* b) {
+                return a->BeginOrderWithinContext < b->BeginOrderWithinContext;
+            });
+            if (!wins.empty()) {
+                apply_dock_layout(active_id, ImGui::GetContentRegionAvail(), nullptr, wins, preset);
+                ws.dirty = true;
+            }
+        }
+        ImGui::DockSpace(active_id, ImVec2(0, 0), ImGuiDockNodeFlags_None);
     }
 
     // Deferred tab close — move every window still docked in the closing
