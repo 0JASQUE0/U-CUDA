@@ -19,6 +19,7 @@ inline NewtonSettings newton_from_record(const SystemRecord& r) {
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <string>
 #include <vector>
 #include <map>
@@ -184,6 +185,11 @@ struct Projection {
 struct FeaturePoints {
     std::vector<double> peaks;
     std::vector<double> intervals;
+    // Опорный (первый принятый) пик: в peaks/intervals он не входит — у него нет интервала.
+    // first_time — его время от начала ряда, с; NaN — пиков не было. Нужен continuation:
+    // без него пики куска ложились на ось времени со сдвигом на first_time.
+    double first_peak = std::numeric_limits<double>::quiet_NaN();
+    double first_time = std::numeric_limits<double>::quiet_NaN();
 };
 
 // Один запрошенный RQA-расчёт: конфиг + чья траектория. Собирается в snapshot_phase по всем
@@ -217,6 +223,12 @@ struct AnalysisResult {
     // Final integrator state per IC (pre-decimation), so continuation mode can
     // seed the next chunk from the true X[] rather than a decimated sample.
     std::vector<std::vector<double>> final_states;
+    // Где лежит final_states: время от первой записанной точки, с (длительность куска для
+    // оси continuation), и номер шага от старта траектории (явное t = n * h следующего куска).
+    double    final_t    = 0.0;
+    long long final_step = 0;
+    // Пояснение к прогону, не ошибка (например, ограничение continuation); пусто — нет.
+    std::string note;
     // Адаптивный шаг (при постоянном всё пусто). times[k] — моменты точек trajectories[k]
     // на узлах шага, уже прореженные decimator'ом; на равномерной сетке пусто: там, как и
     // при постоянном шаге, t = i * h * decimator.
@@ -327,6 +339,7 @@ struct PhaseAnalysisState {
     bool continuation_paused      = false;        // freezes the timer; state/elapsed preserved
     bool continuation_first_frame = true;         // apply skip_time on frame 0 only
     std::vector<std::vector<double>> continuation_state;  // [ic][coord] carried across frames
+    long long continuation_step = 0;   // номер шага continuation_state: явное t следующего куска
 
     // Accumulated recorded time (seconds) since continuation started; not persisted.
     double continuation_elapsed = 0.0;

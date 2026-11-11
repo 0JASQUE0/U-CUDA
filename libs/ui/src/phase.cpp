@@ -1667,6 +1667,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
             s.continuation_paused      = false;
             s.continuation_first_frame = true;
             s.continuation_state.clear();
+            s.continuation_step        = 0;
             s.continuation_last_frame  = std::chrono::steady_clock::now();
             s.continuation_elapsed = 0.0;
             s.continuation_peaks.clear();
@@ -1677,6 +1678,8 @@ void draw_phase_controls(PhaseAnalysisSession& s,
 
     if (!s.result.error.empty())
         ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "%s", s.result.error.c_str());
+    if (!s.result.note.empty())
+        ImGui::TextWrapped("%s", s.result.note.c_str());
 }
 }
 

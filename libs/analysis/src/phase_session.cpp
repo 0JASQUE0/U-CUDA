@@ -439,7 +439,7 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         }
         calc_ok = computePhasePortraitsNVRTC(in.krs_code, dim,
             ic_flat.data(), N, a.data(), (int)a.size(),
-            h, total, skip, raw, &calc_err);
+            h, total, skip, raw, &calc_err, in.step0);
         if (!calc_ok) {
             result.error = "GPU: " + calc_err;
             return result;
@@ -473,7 +473,8 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         }
         raw.resize(N);
         for (int k = 0; k < N; ++k) {
-            step.step_index(0);   // явное t: каждая траектория с t = 0
+            // Явное t: траектория с t = step0 * h (0, кроме continuation-куска).
+            step.step_index(in.step0);
             bool ok = computePhasePortraitCPU_custom(step.fn(),
                 &ic_flat[(size_t)k * dim], dim, a.data(), (int)a.size(),
                 h, total, skip, raw[k]);
@@ -558,6 +559,25 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
     // Preallocated so a divergent trajectory (empty traj[]) still leaves a
     // zero-length slot at the same index as ic_sets[k].
     result.final_states.assign(N, std::vector<double>{});
+    // Последняя ЗАПИСАННАЯ точка: запись идёт до шага (run_trajectory, phase_kernel), так что
+    // это состояние после skip + total - 1 шагов, и следующий кусок начинается с него же.
+    // Длительность куска — (точек - 1) шагов; на узлах адаптивного шага — по их времени.
+    {
+        size_t pts = 0;
+        for (const auto& traj : raw) pts = std::max(pts, traj.size());
+        result.final_step = in.step0 + (long long)skip + (pts > 0 ? (long long)pts - 1 : 0);
+        result.final_t    = pts > 1 ? (double)(pts - 1) * h : 0.0;
+        if (result.raw_nodes) {
+            result.final_t = 0.0;
+            for (const auto& tk : ad_times)
+                if (tk.size() > 1) result.final_t = std::max(result.final_t, tk.back() - tk.front());
+        }
+    }
+    // Адаптивный шаг и BDF начинают время с нуля и стартового t не принимают: у системы
+    // с явным t каждый continuation-кусок начинался бы с t = 0.
+    if (in.step0 > 0 && timed && (in.adaptive.enabled || scheme_is_multistep(in.scheme)) && !in.sys.is_map)
+        result.note = "Continuation: explicit time t restarts at 0 in every chunk with the adaptive step / BDF; "
+                      "use a fixed step for a time-dependent system.";
     for (int k = 0; k < N; ++k) {
         const auto& ic = in.ic_sets[k];
         std::vector<std::vector<double>>& traj = raw[k];
@@ -786,6 +806,7 @@ PhaseRunInputs snapshot_phase(PhaseAnalysisSession& s) {
         s.continuation_state.size() == s.ic_sets.size()) {
         in.ic_override    = s.continuation_state;
         in.skip_transient = false;
+        in.step0          = s.continuation_step;
     }
 
     // RQA-задачи из открытых окон типа RecurrencePlot. Дедуп по (ic, cfg): два окна с одинаковыми
@@ -856,10 +877,18 @@ void PhaseAnalysisSession::append_result_peaks(double base) {
         for (size_t v = 0; v < per_var_in.size(); ++v) {
             const FeaturePoints& fp = per_var_in[v];
             std::vector<double>& buf = per_var_out[v];
-            double cumt = base;
+            // Отсчёт — от опорного (первого) пика куска: интервалы идут от него. Раньше отсчёт
+            // шёл от начала куска, и все пики куска съезжали влево на first_time, а сам
+            // опорный пик терялся — на стыках continuation-кусков были провалы.
+            if (!std::isfinite(fp.first_time)) continue;   // в куске нет пиков
+            double cumt = base + fp.first_time;
             const size_t n = fp.peaks.size() < fp.intervals.size()
                            ? fp.peaks.size() : fp.intervals.size();
-            buf.reserve(buf.size() + n * 2);
+            buf.reserve(buf.size() + n * 2 + 2);
+            if (std::isfinite(fp.first_peak)) {
+                buf.push_back(cumt);
+                buf.push_back(fp.first_peak);
+            }
             for (size_t p = 0; p < n; ++p) {
                 if (!std::isfinite(fp.peaks[p]) || !std::isfinite(fp.intervals[p])) continue;
                 cumt += fp.intervals[p];
@@ -909,12 +938,15 @@ bool PhaseAnalysisSession::poll() {
     // adopt on success so a divergent frame doesn't corrupt the seed.
     if (continuation_active && result.ok &&
         result.final_states.size() == ic_sets.size()) {
-        const double chunk_t = result.snapshot.t_max;
+        // Длительность куска — до его последней точки, с которой начнётся следующий
+        // (snapshot.t_max = Time(s) была длиннее на шаг: стыки уезжали на h за кусок).
+        const double chunk_t = result.final_t;
         const double base    = continuation_elapsed;
         continuation_elapsed += chunk_t;
         append_result_peaks(base);
         ++continuation_peaks_gen;
 
+        continuation_step        = result.final_step;
         continuation_state       = std::move(result.final_states);
         continuation_first_frame = false;
     }

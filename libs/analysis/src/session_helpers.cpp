@@ -116,6 +116,11 @@ FeaturePoints find_peaks_host(const std::vector<double>& data, double dt) {
 
     // Второй проход: пара (пик; интервал до него) + фильтр слишком близких.
     // Опора не сдвигается на отброшенный пик — как в оригинале.
+    if (!peaks.empty()) {
+        // times — индекс (j - 1) + delta, как в ядре; сама вершина на (j + delta).
+        out.first_peak = peaks[0];
+        out.first_time = (times[0] + 1.0) * dt;
+    }
     if (peaks.size() > 1) {
         double anchor = times[0];
         for (size_t i = 1; i < peaks.size(); ++i) {
@@ -214,7 +219,11 @@ FeaturePoints find_peaks_host_nodes(const std::vector<double>& x, const std::vec
                 }
             }
             if (pv - run_min >= pc.eps_peak_delta && pv > pc.peak_threshold) {
-                if (!have_anchor) { anchor = pt; have_anchor = true; }
+                if (!have_anchor) {
+                    anchor = pt; have_anchor = true;
+                    out.first_peak = pv;
+                    out.first_time = pt - t[0];   // от начала ряда, как у find_peaks_host
+                }
                 else if (pt - anchor >= pc.eps_interPeak_delta) {
                     out.peaks.push_back(pv);
                     out.intervals.push_back(pt - anchor);

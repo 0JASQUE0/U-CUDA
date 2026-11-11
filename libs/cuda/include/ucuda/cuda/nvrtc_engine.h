@@ -129,7 +129,7 @@ public:
     bool run_phase_portraits(const std::vector<double>& ic_flat, int N,
         const std::vector<double>& values,
         double h, int total, int skip,
-        std::vector<std::vector<std::vector<double>>>& out);
+        std::vector<std::vector<std::vector<double>>>& out, long long step0 = 0);
 
     // Адаптивный шаг: компиляция (с кэшем по телам + размерности) и счёт.
     // Не трогает состояние compile()/run_phase_portraits. false + error() при сбое.

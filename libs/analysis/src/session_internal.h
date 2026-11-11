@@ -55,6 +55,9 @@ struct PhaseRunInputs {
     // in-kernel transient loop so the resumed chunk starts recording immediately.
     bool                              skip_transient = true;
     std::vector<std::vector<double>>  ic_override;   // [ic][coord]; empty → use ic_sets text
+    // Номер шага, с которого стартует траектория (явное t = n * h): у continuation-куска —
+    // final_step прошлого куска, иначе 0. Автономным системам безразличен.
+    long long                         step0 = 0;
     // RQA-расчёты, запрошенные окнами проекций. Уже дедуплицированы по (ic, cfg).
     std::vector<RqaJob>               rqa_jobs;
     // Схемная траектория (фаза 4a).
