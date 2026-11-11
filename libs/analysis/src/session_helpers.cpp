@@ -77,7 +77,7 @@ namespace ucuda::analysis_detail {
 // dt — шаг ПО ВРЕМЕНИ между соседними отсчётами `data`. Вызывающий передаёт h*decimator и сам ряд,
 // прореженный тем же шагом: признаки должны считаться по тому же сигналу, что уходит в
 // peakFinderCUDA. Возвращает пары (значение пика; интервал от предыдущего удержанного пика).
-FeaturePoints find_peaks_host(const std::vector<double>& data, double dt) {
+FeaturePoints find_peaks_host(const std::vector<double>& data, double dt, bool apply_cap) {
     FeaturePoints out;
     const PeakConfig pc = get_peak_config();
     if (!pc.do_calculate_peaks) return out;
@@ -134,7 +134,7 @@ FeaturePoints find_peaks_host(const std::vector<double>& data, double dt) {
         }
     }
 
-    const size_t cap = (size_t)std::max(0, pc.max_amount_of_peaks);
+    const size_t cap = apply_cap ? (size_t)std::max(0, pc.max_amount_of_peaks) : ~(size_t)0;
     if (out.peaks.size() > cap) {
         out.peaks.resize(cap);
         out.intervals.resize(cap);
@@ -158,13 +158,13 @@ namespace ucuda::analysis_detail {
 // x, d, t — значение сигнала, его производная и время узлов; прореживание (каждый dec-й
 // узел и последний) уже сделано вызывающим — тем же правилом, что в ucudaAdRecordNodes.
 FeaturePoints find_peaks_host_nodes(const std::vector<double>& x, const std::vector<double>& d,
-                                           const std::vector<double>& t, int interp) {
+                                           const std::vector<double>& t, int interp, bool apply_cap) {
     FeaturePoints out;
     const PeakConfig pc = get_peak_config();
     if (!pc.do_calculate_peaks) return out;
     const size_t n = std::min(x.size(), std::min(d.size(), t.size()));
     if (n < 2) return out;
-    const size_t cap = (size_t)std::max(0, pc.max_amount_of_peaks);
+    const size_t cap = apply_cap ? (size_t)std::max(0, pc.max_amount_of_peaks) : ~(size_t)0;
 
     bool   have_anchor = false;
     double anchor = 0.0;

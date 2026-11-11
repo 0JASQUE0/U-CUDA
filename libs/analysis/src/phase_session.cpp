@@ -548,7 +548,11 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         }
     }
 
+    // Пики — БЕЗ лимита max_amount_of_peaks: из них же строится диаграмма Continuation, и лимит
+    // обрезал каждый её кусок (пики после первых N пропадали). Диаграмма Feature, сверяемая
+    // с ядром бифуркации, режет до лимита сама (features_cap).
     result.features.resize(N);
+    result.features_cap = get_peak_config().max_amount_of_peaks;
     // Признакам на узлах шага нужна точная производная в узле — та же f(x), что ядро
     // берёт из S.F0. Траектория могла прийти и с GPU, поэтому вычислитель свой.
     std::unique_ptr<SystemEvaluator> node_ev;
@@ -609,7 +613,7 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
                     const auto& pt = traj[t];
                     series.push_back(v < (int)pt.size() ? pt[v] : 0.0);
                 }
-                result.features[k][v] = find_peaks_host(series, h * (double)stride);
+                result.features[k][v] = find_peaks_host(series, h * (double)stride, /*apply_cap*/ false);
             }
 
             series.clear();
@@ -620,7 +624,7 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
                 if (dim >= 3 && pt.size() > 2) c += ::euler * pt[2];
                 series.push_back(c);
             }
-            result.features[k][(size_t)dim] = find_peaks_host(series, h * (double)stride);
+            result.features[k][(size_t)dim] = find_peaks_host(series, h * (double)stride, /*apply_cap*/ false);
         }
         else if (node_ev && k < (int)ad_times.size()) {
             // Узлы — как в ucudaAdRecordNodes: каждый dec-й (считая начальный) и последний.
@@ -648,7 +652,7 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
                     if (dim >= 3) { c += ::euler * X[2]; dcomb += ::euler * f[2]; }
                     xs[j] = c; ds[j] = dcomb;
                 }
-                result.features[k][(size_t)v] = find_peaks_host_nodes(xs, ds, ts, interp);
+                result.features[k][(size_t)v] = find_peaks_host_nodes(xs, ds, ts, interp, /*apply_cap*/ false);
             }
         }
 

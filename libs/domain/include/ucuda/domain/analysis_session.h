@@ -220,6 +220,9 @@ struct AnalysisResult {
     // пики, и интервалы между ними. Сразу по всем переменным: объём мал (<= max_amount_of_peaks на
     // переменную), зато переключение переменной в комбо не требует пересчёта.
     std::vector<std::vector<FeaturePoints>> features;
+    // Лимит пиков на траекторию (PeakConfig::max_amount_of_peaks) на момент расчёта: features
+    // хранятся полными (их берёт Continuation), диаграмма Feature показывает первые features_cap.
+    int features_cap = 0;
     // Final integrator state per IC (pre-decimation), so continuation mode can
     // seed the next chunk from the true X[] rather than a decimated sample.
     std::vector<std::vector<double>> final_states;

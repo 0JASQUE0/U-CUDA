@@ -255,8 +255,10 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         const auto& per_var = res.features[k];
                         if (av >= 0 && av < (int)per_var.size()) {
                             const FeaturePoints& fp = per_var[(size_t)av];
-                            const size_t n = fp.peaks.size() < fp.intervals.size()
-                                           ? fp.peaks.size() : fp.intervals.size();
+                            size_t n = fp.peaks.size() < fp.intervals.size()
+                                     ? fp.peaks.size() : fp.intervals.size();
+                            // Как у ядра бифуркации: не больше max peaks (features хранятся полными).
+                            if (res.features_cap > 0) n = (std::min)(n, (size_t)res.features_cap);
                             buf.reserve(n * 2);
                             for (size_t p = 0; p < n; ++p) {
                                 if (!std::isfinite(fp.peaks[p]) || !std::isfinite(fp.intervals[p]))
