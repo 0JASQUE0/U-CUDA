@@ -85,6 +85,16 @@ struct PlotSeriesInput {
     // log10(t), а не само время. nullptr — подсказка покажет сырые координаты.
     const double* point_tags      = nullptr;
     int           point_tag_count = 0;
+
+    // Positive width draws filled bars from zero. Each point is (bin center, height).
+    double bar_width = 0.0;
+};
+
+// Optional labelled interval on the X axis, in world coordinates.
+struct PlotXBand {
+    double begin = 0.0, end = 0.0;
+    ImVec4 color;
+    std::string label, short_label, tooltip;
 };
 
 class Plot2DView {
@@ -100,6 +110,7 @@ public:
     float last_margin_top    = 20.0f;
     float last_margin_right  = 20.0f;
     float last_margin_bottom = 46.0f;
+    float shared_margin_left = 0.0f; // optional aligned layout for stacked plots
 
     bool show_legend = true;
     // Прозрачность серии в легенду не уходит НИКОГДА — см. render(). Раньше
@@ -137,6 +148,9 @@ public:
     bool   x_fit_use_explicit = false;
     double x_fit_min = 0.0;
     double x_fit_max = 1.0;
+    // The caller supplies the current X range for stacked plots. A local data
+    // refresh must preserve it; explicit fit commands still reset it.
+    bool shared_x_range = false;
 
     // true: рисуем через GL_POINTS (для 1D-диаграмм).
     // false (по умолчанию): GL_LINE_STRIP, как для всех остальных графиков.
@@ -289,7 +303,8 @@ public:
         const std::vector<PlotSeriesInput>& series_in,
         const std::vector<bool>& init_visible,
         const std::vector<bool>& global_visible,
-        bool fit_request = false);
+        bool fit_request = false,
+        const std::vector<PlotXBand>* x_bands = nullptr);
 
 private:
     GpuLineSeriesSet series_cache_;

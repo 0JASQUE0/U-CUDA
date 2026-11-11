@@ -159,7 +159,7 @@ void Plot2DView::do_autofit() {
         // locked axes, but fit_request used to stomp them on every data change
         // (esp. visible in phase continuation, where each tick refit the view).
         // Ручной диапазон (user_range) переживает автоподгонку так же, как заблокированная ось.
-        if (!x_axis.lock && !x_axis.user_range) {
+        if (!shared_x_range && !x_axis.lock && !x_axis.user_range) {
             if (x_fit_use_explicit) {
                 x_axis.view_min = x_fit_min;
                 x_axis.view_max = x_fit_max;
@@ -173,12 +173,13 @@ void Plot2DView::do_autofit() {
         }
         view_valid = true;
     }
-    else if (x_fit_use_explicit && !x_axis.lock && !x_axis.user_range) {
+    else if (x_fit_use_explicit && !shared_x_range && !x_axis.lock && !x_axis.user_range) {
         // Нет данных, но есть явный X-диапазон → ось всё равно показываем.
         x_axis.view_min = x_fit_min;
         x_axis.view_max = x_fit_max;
         view_valid = true;
     }
+    else if (shared_x_range) view_valid = true;
 }
 
 void Plot2DView::fit_x() {
@@ -207,7 +208,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     const std::vector<PlotSeriesInput>& series_in,
     const std::vector<bool>& init_visible,
     const std::vector<bool>& global_visible,
-    bool fit_request)
+    bool fit_request, const std::vector<PlotXBand>* x_bands)
 {
     // Вид окна (Axes display, Toolbar) — общий на окно и сохраняется в imgui.ini (plot_axis.h).
     // Ссылка берётся здесь: в попапе меню текущим окном будет уже сам попап.
@@ -224,6 +225,8 @@ void Plot2DView::render(PlotRenderer& renderer,
     // (display_log), Y — только по выбору пользователя.
     const bool upload_xlog = x_axis.log_scale || x_axis.display_log;
     const bool upload_ylog = y_axis.display_log;
+    const auto is_bar = [](const PlotSeriesInput& s) { return s.bar_width > 0 && std::isfinite(s.bar_width); };
+    const bool has_bars = std::any_of(series_in.begin(), series_in.end(), is_bar);
     if (data_generation != series_generation || series_xlog_cached != upload_xlog
         || series_ylog_cached != upload_ylog) {
         bool count_changed = ((int)visible.size() != (int)series_in.size());
@@ -236,7 +239,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         auto real = [kLogOff](double v, bool lg) { return !lg || v != kLogOff; };
         // Свой bbox — при лог-Y и пользовательском лог-X; лог-сетка свипа без display_log
         // остаётся на прежнем (см. own_bbox_ в plot_view_2d.h).
-        own_bbox_ = upload_ylog || (upload_xlog && !x_axis.log_scale);
+        own_bbox_ = has_bars || upload_ylog || (upload_xlog && !x_axis.log_scale);
         std::vector<double> log_buf;
         // Начало координат для VBO: центр данных ПОСЛЕ лог-переноса, общий на весь
         // набор (матрица проекции одна на все серии). Проход по данным здесь дешевле
@@ -249,8 +252,10 @@ void Plot2DView::render(PlotRenderer& renderer,
                 const auto& s = series_in[k];
                 if (!s.points || s.n_points <= 0) continue;
                 auto& b = series_bbox_[k];
+                const bool bars = is_bar(s);
                 for (int i = 0; i < s.n_points; ++i) {
-                    const double x = tf(s.points[(size_t)i * 2 + 0], upload_xlog);
+                    const double center = s.points[(size_t)i * 2 + 0];
+                    const double x = tf(center, upload_xlog);
                     const double y = tf(s.points[(size_t)i * 2 + 1], upload_ylog);
                     if (real(x, upload_xlog)) {
                         if (x < xlo) xlo = x;  if (x > xhi) xhi = x;
@@ -260,7 +265,15 @@ void Plot2DView::render(PlotRenderer& renderer,
                         if (y < ylo) ylo = y;  if (y > yhi) yhi = y;
                         if (y < b[2]) b[2] = y; if (y > b[3]) b[3] = y;
                     }
+                    if (bars) {
+                        for (const double edge : {center - 0.5 * s.bar_width, center + 0.5 * s.bar_width}) {
+                            const double bound = tf(edge, upload_xlog);
+                            if (!std::isfinite(bound) || !real(bound, upload_xlog)) continue;
+                            b[0] = std::min(b[0], bound); b[1] = std::max(b[1], bound);
+                        }
+                    }
                 }
+                if (bars && !upload_ylog && b[2] <= b[3]) { b[2] = std::min(b[2], 0.0); b[3] = std::max(b[3], 0.0); }
             }
             for (auto& b : series_bbox_) {   // нет ни одной точки по оси — NaN (см. data_bbox)
                 if (!(b[0] <= b[1])) b[0] = b[1] = std::numeric_limits<double>::quiet_NaN();
@@ -421,6 +434,11 @@ void Plot2DView::render(PlotRenderer& renderer,
     margin_bottom = plot_bottom_margin_for(show_x_ticks, show_x_label);
     if (!show_y_ticks) margin_top   = 8.0f;
     if (!show_x_ticks) margin_right = 8.0f;
+    // Полоса подписей x_bands — поверх итогового верхнего поля; общий левый отступ
+    // (выравнивание соседних окон) главнее локального.
+    const float band_height = x_bands ? ImGui::GetFontSize() + 5.0f : 0.0f;
+    margin_top += band_height;
+    if (shared_margin_left > 0) margin_left = shared_margin_left;
     last_margin_left   = margin_left;
     last_margin_top    = margin_top;
     last_margin_right  = margin_right;
@@ -509,6 +527,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         const GpuLineSeries& g = series_cache_.get(k);
         if (!g.valid()) continue;
         const PlotSeriesInput* si = (k < (int)series_in.size()) ? &series_in[k] : nullptr;
+        if (si && is_bar(*si)) continue;
         ImVec4 c = si ? series_color(*si) : ImVec4(1, 1, 1, 1);
         float color[4] = { c.x, c.y, c.z, c.w };
         // Per-series override (см. PlotSeriesInput::points_override) имеет
@@ -551,6 +570,31 @@ void Plot2DView::render(PlotRenderer& renderer,
     dl->AddImage((ImTextureID)(intptr_t)renderer.texture_id(),
         img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
         ImVec2(0, 1), ImVec2(1, 0));
+    if (x_bands && sx1 != sx0) {
+        const float strip_top = img_pos.y - band_height;
+        dl->PushClipRect(ImVec2(img_pos.x, strip_top), ImVec2(img_pos.x + plot_w, img_pos.y + plot_h), true);
+        const double left = std::min(ex0, ex1), right = std::max(ex0, ex1);
+        const auto pixel_x = [&](double x) { return img_pos.x + (float)((XS(x) - sx0) / (sx1 - sx0)) * plot_w; };
+        for (const auto& band : *x_bands) {
+            const double begin = std::max(left, band.begin), end = std::min(right, band.end);
+            if (begin >= end) continue;
+            const float a = pixel_x(begin), b = pixel_x(end);
+            const float x0 = std::min(a, b), x1 = std::max(a, b);
+            const auto tint = [&](float alpha) {
+                return ImGui::ColorConvertFloat4ToU32(ImVec4(band.color.x, band.color.y, band.color.z, alpha * band.color.w));
+            };
+            dl->AddRectFilled(ImVec2(x0, img_pos.y), ImVec2(x1, img_pos.y + plot_h), tint(0.13f));
+            dl->AddRectFilled(ImVec2(x0, strip_top), ImVec2(x1, img_pos.y - 1.0f), tint(0.42f));
+            const float width = x1 - x0 - 6.0f;
+            const char* label = band.label.c_str();
+            if (ImGui::CalcTextSize(label).x > width) label = band.short_label.c_str();
+            if (*label && ImGui::CalcTextSize(label).x <= width)
+                dl->AddText(ImVec2(x0 + 3.0f, strip_top + 2.0f), plot_col_text(), label);
+            if (ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(ImVec2(x0, strip_top), ImVec2(x1, img_pos.y)))
+                ImGui::SetTooltip("%s", band.tooltip.c_str());
+        }
+        dl->PopClipRect();
+    }
 
     // 6. Legend — INTERACT-проход. Клики по entry-элементам обрабатываем ЗДЕСЬ,
     // ДО плота-InvisibleButton (line ~178), чтобы легенда получала клики как
@@ -624,6 +668,40 @@ void Plot2DView::render(PlotRenderer& renderer,
     if (show_zero_y && !ylog && std::min(ey0, ey1) <= 0 && std::max(ey0, ey1) >= 0)
         dl->AddLine(ImVec2(img_pos.x, Y(0)), ImVec2(img_pos.x + plot_w, Y(0)), col_axis, 1.5f);
 
+    if (has_bars && vrx != 0 && vry != 0) {
+        const double left = std::min(ex0, ex1), right = std::max(ex0, ex1);
+        const double bottom = std::min(ey0, ey1), top = std::max(ey0, ey1);
+        const double baseline = ylog ? bottom : 0.0;
+        const double mouse_x = XW(sx0 + vrx * (ImGui::GetIO().MousePos.x - img_pos.x) / plot_w);
+        dl->PushClipRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h), true);
+        for (size_t k = 0; k < series_in.size(); ++k) {
+            const auto& s = series_in[k];
+            if (!is_bar(s) || !s.points || !eff_visible((int)k)) continue;
+            const ImVec4 c = series_color(s);
+            const ImU32 fill = ImGui::ColorConvertFloat4ToU32(ImVec4(c.x, c.y, c.z, c.w * 0.78f));
+            const ImU32 border = ImGui::ColorConvertFloat4ToU32(c);
+            for (int i = 0; i < s.n_points; ++i) {
+                const double center = s.points[(size_t)i * 2], height = s.points[(size_t)i * 2 + 1];
+                if (!std::isfinite(center) || !std::isfinite(height)) continue;
+                const double a = center - 0.5 * s.bar_width, b = center + 0.5 * s.bar_width;
+                const double lo = std::max(left, a), hi = std::min(right, b);
+                if (lo >= hi) continue;
+                if (plot_h_ov && !ImGui::GetIO().KeyShift && mouse_x >= a && (mouse_x < b || (i + 1 == s.n_points && mouse_x == b)))
+                    ImGui::SetTooltip("Bin: %.6g to %.6g\n%s: %.6g", a, b, s.label.c_str(), height);
+                if (ylog && height <= 0) continue;
+                const double ylo = std::max(bottom, std::min(baseline, height));
+                const double yhi = std::min(top, std::max(baseline, height));
+                if (ylo >= yhi) continue;
+                const float x0 = std::min(X(lo), X(hi)), x1 = std::max(X(lo), X(hi));
+                const float gap = x1 - x0 > 6.0f ? 0.75f : 0.0f;
+                const ImVec2 p0(x0 + gap, std::min(Y(ylo), Y(yhi))), p1(x1 - gap, std::max(Y(ylo), Y(yhi)));
+                dl->AddRectFilled(p0, p1, fill);
+                if (x1 - x0 > 3.0f) dl->AddRect(p0, p1, border);
+            }
+        }
+        dl->PopClipRect();
+    }
+
     // Линии данных поверх осей через ImDrawList (только если imdraw_lines).
     // Рисуем посегментно (AddLine), а не AddPolyline — последняя на резких
     // скачках LLE/LS визуально «рвётся» из-за miter-joins при острых углах.
@@ -635,7 +713,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         for (int k = (int)series_in.size() - 1; k >= 0; --k) {
             if (!eff_visible(k)) continue;
             const PlotSeriesInput& s = series_in[k];
-            if (!s.points || s.n_points < 2) continue;
+            if (!s.points || s.n_points < 2 || is_bar(s)) continue;
             // Точечные серии (и Points + линия) уже нарисованы в GL-проходе.
             const bool as_pts = s.points_override >= 0 ? (s.points_override == 1) : points_mode;
             if (as_pts) continue;
@@ -1033,7 +1111,10 @@ void Plot2DView::render(PlotRenderer& renderer,
     // 9. Двойные клики
     if (xax_dbl)   fit_x();
     if (yax_dbl)   fit_y();
-    if (plot_dbl)  view_valid = false;
+    if (plot_dbl) {
+        if (shared_x_range) fit_x(); // publish the new bounds to the other plot this frame
+        view_valid = false;
+    }
 
     // 10. Зум/пан внутри поля графика
     if (plot_h_ov || plot_a) {
@@ -1126,10 +1207,11 @@ void Plot2DView::render(PlotRenderer& renderer,
                 return ImVec2(sx, sy);
                 };
             ImVec2 p0, p1;
-            if (rect_zoom_mode_ == 0) {
+            const bool shared_x_only = rect_zoom_mode_ == 0 && shared_x_range && y_axis.lock;
+            if (rect_zoom_mode_ == 0 && !shared_x_only) {
                 p0 = d2s(rect_zoom_x0_, rect_zoom_y0_); p1 = d2s(cx, cy);
             }
-            else if (rect_zoom_mode_ == 1) {
+            else if (rect_zoom_mode_ == 1 || shared_x_only) {
                 p0 = ImVec2(d2s(rect_zoom_x0_, 0).x, img_pos.y);
                 p1 = ImVec2(d2s(cx, 0).x, img_pos.y + plot_h);
             }
@@ -1154,11 +1236,11 @@ void Plot2DView::render(PlotRenderer& renderer,
                 // Особенно на протяжке по самой оси Y: жест означает ровно «приблизь Y»,
                 // а блокировка отменяла его целиком.
                 // Сам флаг не снимаем: колесо и пан по этой оси по-прежнему не работают.
-                if (rect_zoom_mode_ == 0) {
+                if (rect_zoom_mode_ == 0 && !shared_x_only) {
                     x_axis.view_min = x0; x_axis.view_max = x1;
                     y_axis.view_min = y0; y_axis.view_max = y1;
                 }
-                else if (rect_zoom_mode_ == 1) {
+                else if (rect_zoom_mode_ == 1 || shared_x_only) {
                     x_axis.view_min = x0; x_axis.view_max = x1;
                 }
                 else {
@@ -1180,6 +1262,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     if (ImGui::BeginPopup(pop_id)) {
         if (ImGui::MenuItem("Auto fit (both)")) {
             x_axis.user_range = y_axis.user_range = false;   // явный Auto fit — и по ручным осям
+            if (shared_x_range) fit_x();
             view_valid = false;
         }
         if (ImGui::MenuItem("Auto fit X"))      fit_x();

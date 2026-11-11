@@ -385,19 +385,26 @@ void cleanup_plot_windows_after_removal(std::vector<ParametricPlotWindow>& wins,
 
 // Общий ход очередей вкладок с одной сессией: снять следующий элемент и запустить его.
 // Элемент с устаревшим индексом или отказом run_async (last_error уже выставлен) пропускается.
-template <class Session, class Item>
-static bool run_next_queued(Session& s, std::deque<Item>& q, std::unique_ptr<ParametricEngine>& engine) {
+template <class Session, class Item, class Run>
+static bool run_next_queued_with(Session& s, std::deque<Item>& q, Run run) {
     if (s.in_flight) return false;
     if (q.empty()) return false;
-    if (!engine) engine = std::make_unique<ParametricEngine>();
     while (!q.empty()) {
         Item it = q.front();
         q.pop_front();
         if (it.index >= 0 && it.index < (int)s.configs.size()) {
-            if (s.run_async(*engine, it.index)) return true;
+            if (run(it.index)) return true;
         }
     }
     return false;
+}
+
+template <class Session, class Item>
+static bool run_next_queued(Session& s, std::deque<Item>& q, std::unique_ptr<ParametricEngine>& engine) {
+    return run_next_queued_with(s, q, [&](int idx) {
+        if (!engine) engine = std::make_unique<ParametricEngine>();
+        return s.run_async(*engine, idx);
+    });
 }
 
 bool AppModel::start_next_in_dft1d_queue() {
@@ -417,7 +424,7 @@ bool AppModel::start_next_in_network_queue() {
 }
 
 bool AppModel::start_next_in_neural_queue() {
-    return run_next_queued(neural_session, neural_queue_, parametric_engine);
+    return run_next_queued_with(neural_session, neural_queue_, [&](int idx) { return run_neural(idx); });
 }
 
 bool AppModel::start_next_in_fastsync_queue() {
@@ -585,7 +592,16 @@ bool AppModel::recluster_basins(int idx) { return basins_session.run_recluster_a
 bool AppModel::run_fastsync(int idx)     { return fastsync_session.run_async(ensure_engine(), idx); }
 bool AppModel::run_order(int idx)        { return order_session.run_async(ensure_engine(), idx); }
 bool AppModel::run_network(int idx)      { return network_session.run_async(ensure_engine(), idx); }
-bool AppModel::run_neural(int idx, bool resume) { return neural_session.run_async(ensure_engine(), idx, resume); }
+std::string AppModel::neural_result_settings_key(int idx) const {
+    if (idx < 0 || idx >= (int)neural_session.configs.size()) return {};
+    const auto& s = neural_session;
+    return neural_settings_key(s.configs[(size_t)idx]) + prewarm_session_id(s.sys, s.vars, s.custom_schemes)
+         + (get_nvrtc_fmad() ? ":fm1" : ":fm0") + (get_nvrtc_rdc() ? ":rdc1" : ":rdc0");
+}
+bool AppModel::run_neural(int idx, bool resume) {
+    if (idx < 0 || idx >= (int)neural_session.configs.size() || neural_session.in_flight) return false;
+    return neural_session.run_async(ensure_engine(), idx, resume, neural_result_settings_key(idx));
+}
 
 void AppModel::reset_engine() {
     if (parametric_prewarm_future.valid()) parametric_prewarm_future.wait();

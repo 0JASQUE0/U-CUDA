@@ -860,29 +860,16 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Neural) {
-        static std::unique_ptr<PlotRenderer> neural_rnd[kNeuralWindowCount];
-        static Plot2DView neural_views[kNeuralWindowCount];
-        static std::unique_ptr<PlotRenderer> neural_map_rnd;
-        static std::map<int, std::unique_ptr<HeatmapView>> neural_maps;
-        static int seen_epoch = 0;
-        if (session_reloaded(model, AppModel::AppMode::Neural, seen_epoch)) {
-            for (Plot2DView& v : neural_views) invalidate_view(v);
-            invalidate_views(neural_maps);
-        }
-        for (auto& r : neural_rnd) if (!r) r = std::make_unique<PlotRenderer>();
-        if (!neural_map_rnd) neural_map_rnd = std::make_unique<PlotRenderer>();
         if (ImGui::Begin("Neural Controls")) {
             draw_neural_controls(model, lib);
         }
         ImGui::End();
-        static const char* const neural_titles[kNeuralWindowCount] = { "Population Means", "Observed Nodes", "Synchronisation", "Neural Sweep", "Neural Input", "Lyapunov Exponent", "Population Rate", "Neural Raster", "Neural Weights", "Neural Readout" };
-        for (int w = 0; w < kNeuralWindowCount; ++w) {
-            if (ImGui::Begin(neural_titles[w]))
-                draw_neural_series_window(model, *neural_rnd[w], neural_views[w], w);
-            ImGui::End();
-        }
-        if (ImGui::Begin("Neural Map"))
-            draw_neural_map_window(model, *neural_map_rnd, neural_maps);
+        const auto* vp = ImGui::GetMainViewport();
+        const float left = (std::min)(470.0f, vp->WorkSize.x * 0.42f);
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + left, vp->WorkPos.y + 85), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2((std::max)(300.0f, vp->WorkSize.x - left - 20),
+                                       (std::max)(380.0f, vp->WorkSize.y - 110)), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Neural Results")) draw_neural_results(model);
         ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Custom) {

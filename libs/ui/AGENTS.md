@@ -8,5 +8,6 @@ Use [README.md](README.md) for module entry points; consult [ARCHITECTURE.md](..
 - Use stable runtime IDs when associating views with projections.
 - Release all UI resources before the OpenGL context is destroyed.
 - Keep numerical algorithms out of draw code.
+- Use the project's plotting views and renderers for plots, including histograms.
 
 Validation: Build and smoke-test GUI session switching, window creation/closing, queues, save/load/export, OCR, screenshots, and shutdown.
