@@ -104,7 +104,7 @@ void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
     ImGui::TextDisabled("Decimator only thins the drawn points (applied after integration).");
     changed |= InputNumStr("max attractors##pp", c.pp_max_attractors_text, kFieldW);
     ImGui::SetNextItemWidth(200);
-    if (ImGui::SliderFloat("FP marker size##pp", &c.pp_marker_size, 2.0f, 12.0f, "%.0f px"))
+    if (slider_float_typed("FP marker size##pp", &c.pp_marker_size, 2.0f, 12.0f, "%.0f px"))
         changed = true;
 
     // Сводка: сколько бассейнов нашлось / сколько рисуем / сколько памяти
@@ -615,7 +615,7 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
             };
             topts.extras = [&]() { draw_renumber(/*same_line*/ true); };
             draw_heatmap_toolbar(*active_hm, topts);
-        } else {
+        } else if (!plot_toolbar_hidden()) {
             // Scatter-таб: Renumber и стиль точек (форма, размер, α — per-config,
             // уходят в _last_basins.json через phase_settings_dirty).
             draw_renumber(/*same_line*/ false);
@@ -630,10 +630,10 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
                             ch |= ImGui::Combo("Marker##bas_scatter", &c.scatter_marker,
                                                kPointMarkerNames, kPointMarkerCount);
                             ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Point size##bas_scatter", &c.scatter_point_size,
-                                                     0.5f, 12.0f, "%.1f");
+                            ch |= slider_float_typed("Point size##bas_scatter", &c.scatter_point_size,
+                                                     0.5f, 25.0f, "%.1f");
                             ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Alpha##bas_scatter", &c.scatter_alpha,
+                            ch |= slider_float_typed("Alpha##bas_scatter", &c.scatter_alpha,
                                                      0.0f, 1.0f, "%.2f");
                             return ch;
                         }))

@@ -250,6 +250,13 @@ void HeatmapView::render(PlotRenderer& renderer,
                          double engine_vmin, double engine_vmax,
                          bool fit_request)
 {
+    // Вид окна (Axes display, Colorbar, Toolbar) — общий на окно, сохраняется в imgui.ini
+    // (plot_axis.h). Оси экранные: при Swap axes «X» — горизонтальная ось картинки.
+    PlotWindowPrefs& wp = plot_window_prefs_current();
+    const bool show_x_label = wp.x_label, show_x_ticks = wp.x_ticks;
+    const bool show_y_label = wp.y_label, show_y_ticks = wp.y_ticks;
+    const bool show_colorbar = wp.colorbar;
+
     // Одноразовый (см. heatmap_view.h): забираем сразу, чтобы он не пережил вызов ни на одном пути.
     const std::function<const char*(int, int)> regime_of = std::move(cell_regime);
     const std::function<bool(int, int)> not_computed_data = std::move(cell_not_computed);
@@ -358,9 +365,12 @@ void HeatmapView::render(PlotRenderer& renderer,
     // Левый — под фактические подписи оси Y, измеренные прошлым кадром
     // (см. left_margin_px_). Нижний держит тики + имя оси X, поэтому растёт
     // вместе с кеглем подписей.
+    // Скрытые в меню («Axes display») подписи, числа и colorbar место не держат — см. Plot2DView.
+    // Крайние подписи Y и colorbar'а выходят на полстроки за верх и низ плота.
     const float margin_left   = left_margin_px_;
-    const float margin_top    = 20.0f;
-    const float margin_bottom = plot_bottom_margin();
+    const float margin_top    = (show_y_ticks || show_colorbar) ? 20.0f : 8.0f;
+    const float margin_bottom = std::max(plot_bottom_margin_for(show_x_ticks, show_x_label),
+                                         show_colorbar ? plot_text_line_height() * 0.5f + 4.0f : 0.0f);
     // Геометрия colorbar'а — kColorbar* в heatmap_view.h (шарится с FastSync).
 
     // Resolve the active number of discrete bands. discrete_levels overrides
@@ -380,7 +390,8 @@ void HeatmapView::render(PlotRenderer& renderer,
     // полос, а с раздвинутым диапазоном единственная полоса не проходила эту проверку, уходила в
     // непрерывную ветку и подписывалась серединой — 1.5 вместо 1.
     const std::vector<ColorbarTick> tick_vals = colorbar_ticks(vmin_raw, vmax_raw, n_disc);
-    const float margin_right = colorbar_total_width(tick_vals);
+    const float margin_right = show_colorbar ? colorbar_total_width(tick_vals)
+                                             : (show_x_ticks ? 20.0f : 8.0f);
 
     int plot_w = std::max(64, (int)(avail_size.x - margin_left - margin_right));
     int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));
@@ -535,7 +546,8 @@ void HeatmapView::render(PlotRenderer& renderer,
                           uv_off_x, uv_off_y, uv_scale_x, uv_scale_y,
                           n_disc, reverse_colormap, nodata_color,
                           oor_custom ? oor_below : nullptr,
-                          oor_custom ? oor_above : nullptr);
+                          oor_custom ? oor_above : nullptr,
+                          wp.smooth);
     renderer.end_frame();
 
     // 6. Вставка FBO-картинки. AddImage(uv_min, uv_max) — uv_min маппится в
@@ -627,6 +639,8 @@ void HeatmapView::render(PlotRenderer& renderer,
         ImGui::Separator();
         ImGui::MenuItem("Invert X", nullptr, &x_axis.invert);
         ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert);
+        ImGui::Separator();
+        plot_show_menu(wp, PlotShowColorbar | PlotShowAxes2D | PlotShowSmooth);
         ImGui::Separator();
         ImGui::Checkbox("Discrete colorbar", &discrete);
         if (discrete) {
@@ -1130,8 +1144,9 @@ void HeatmapView::render(PlotRenderer& renderer,
                       col_text, lbl.c_str());
         }
     };
-    draw_x_ticks();
-    draw_y_ticks();
+    // Скрытые числа — без засечек и подписей (y_tick_w_max тогда 0, и левый отступ сожмётся).
+    if (show_x_ticks) draw_x_ticks();
+    if (show_y_ticks) draw_y_ticks();
     dl->AddRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
                 plot_col_border(), 0.0f, 0, 1.0f);
 
@@ -1215,16 +1230,18 @@ void HeatmapView::render(PlotRenderer& renderer,
     const char* xl = vis_x_name.empty() ? "x" : vis_x_name.c_str();
     const char* yl = vis_y_name.empty() ? "y" : vis_y_name.c_str();
     float font_h = plot_text_line_height();
-    ImVec2 xs = plot_text_size(xl);
-    float x_label_y = img_pos.y + plot_h + 2.0f + font_h + 6.0f;
-    plot_text(dl, ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y), col_text, xl);
+    if (show_x_label) {
+        ImVec2 xs = plot_text_size(xl);
+        float x_label_y = img_pos.y + plot_h + (show_x_ticks ? 2.0f + font_h + 6.0f : 4.0f);
+        plot_text(dl, ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y), col_text, xl);
+    }
 
     // Y-метка повёрнута на -90° (читается снизу вверх, mathematical convention): рендерим
     // горизонтально через AddText, затем поворачиваем все добавленные вершины вокруг pivot. На
     // ТОЧНО -90° матрица имеет целочисленные компоненты (cos=0, sin=-1), пиксельная сетка глифов
     // сохраняется и шрифт остаётся чётким (AA-шум бывает только на произвольных углах). X-позиция
     // считается ДИНАМИЧЕСКИ за самыми широкими тиками, иначе подпись наезжает на длинные числа.
-    ImVec2 ts_yl = plot_text_size(yl);
+    const ImVec2 ts_yl = show_y_label ? plot_text_size(yl) : ImVec2(0.0f, 0.0f);
     if (ts_yl.x > 0.0f && ts_yl.y > 0.0f) {
         float max_tick_w = 0.0f;
         // Считаем через тот же compute_axis_ticks, что и draw_y_ticks — иначе
@@ -1232,7 +1249,7 @@ void HeatmapView::render(PlotRenderer& renderer,
         // длиннее оценки по nice_step ("-20", "10") и Y-название наезжает
         // на цифры. Работает в vis-домене (как и сам рендер тиков).
         double vry_v = vis_view_max_y - vis_view_min_y;
-        if (std::abs(vry_v) >= 1e-30) {
+        if (show_y_ticks && std::abs(vry_v) >= 1e-30) {
             double lo = std::min(vis_view_min_y, vis_view_max_y);
             double hi = std::max(vis_view_min_y, vis_view_max_y);
             auto ticks = y_full_view
@@ -1254,7 +1271,8 @@ void HeatmapView::render(PlotRenderer& renderer,
         // фактическое из draw_y_ticks. Берём большее — имя оси не должно
         // наехать на цифры, даже если генераторы разошлись на краю диапазона.
         max_tick_w = std::max(max_tick_w, y_tick_w_max);
-        float pivot_x = std::floor(img_pos.x - max_tick_w - 8.0f - label_gap - ts_yl.y);
+        float pivot_x = std::floor(img_pos.x - (show_y_ticks ? max_tick_w + 8.0f + label_gap : 6.0f)
+                                   - ts_yl.y);
         float pivot_y = std::floor(img_pos.y + (plot_h + ts_yl.x) * 0.5f);
         ImVec2 pivot(pivot_x, pivot_y);
 
@@ -1277,9 +1295,10 @@ void HeatmapView::render(PlotRenderer& renderer,
 
     // 9. Colorbar справа — общая реализация (см. draw_colorbar). tick_vals те
     //    же, по которым выше зарезервирован margin_right.
-    draw_colorbar(dl, ImVec2(img_pos.x + plot_w + kColorbarGap, img_pos.y),
-                  (float)plot_h, vmin, vmax, cmap_eff,
-                  reverse_colormap, n_disc, tick_vals);
+    if (show_colorbar)
+        draw_colorbar(dl, ImVec2(img_pos.x + plot_w + kColorbarGap, img_pos.y),
+                      (float)plot_h, vmin, vmax, cmap_eff,
+                      reverse_colormap, n_disc, tick_vals);
 
     // 10. Hover-tooltip: (p1, p2, λ) по позиции курсора.
     if (plot_hov && step_x > 0.0 && step_y > 0.0) {

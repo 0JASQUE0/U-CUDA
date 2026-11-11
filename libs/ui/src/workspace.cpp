@@ -611,6 +611,8 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                     else if (i == 2 && !cs.ls_session.curves.empty())
                         cs.ls_session.curves[0].colormap_idx = cm;
                     hm_init_cmap_seen[i] = cm;
+                    // Без этого _last_custom.json не перезаписывался, и выбор терялся при перезапуске.
+                    cs.workspace.dirty = true;
                 };
                 topts.extras = [&]() {
                     if (i != 2 || cs.ls_session.curves.empty()) return;
@@ -1178,8 +1180,10 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                             bsn_hv.colormap = (HeatmapColormap)cm;
 
                             HeatmapToolbarOpts topts;
-                            topts.persist_colormap =
-                                [&bcfg](int picked) { bcfg.colormap_idx[0] = picked; };
+                            topts.persist_colormap = [&bcfg, &cs](int picked) {
+                                bcfg.colormap_idx[0] = picked;
+                                cs.workspace.dirty = true;   // → пересохранение _last_custom.json
+                            };
                             draw_heatmap_toolbar(bsn_hv, topts);
                         }
                         bsn_hv.x_axis.name = (bc.axis_x_var >= 0 && bc.axis_x_var < (int)cs.vars.size())

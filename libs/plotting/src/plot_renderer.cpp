@@ -156,9 +156,10 @@ static const char* VS_2D = R"(
 layout(location = 0) in vec2 a_pos;
 uniform mat4 u_mvp;
 uniform float u_point_size;
+uniform float u_aa_pad;   // запас спрайта под сглаженный край маркера (0, если не задан)
 void main() {
     gl_Position = u_mvp * vec4(a_pos, 0.0, 1.0);
-    gl_PointSize = u_point_size;
+    gl_PointSize = max(u_point_size, 1.0) + u_aa_pad;
 }
 )";
 
@@ -167,10 +168,11 @@ static const char* VS_3D = R"(
 layout(location = 0) in vec3 a_pos;
 uniform mat4 u_mvp;
 uniform float u_point_size;
+uniform float u_aa_pad;   // см. VS_2D
 void main() {
     gl_Position = u_mvp * vec4(a_pos, 1.0);
     // Ignored for line/triangle draws; read only by draw_points_3d.
-    gl_PointSize = max(u_point_size, 1.0);
+    gl_PointSize = max(u_point_size, 1.0) + u_aa_pad;
 }
 )";
 
@@ -180,12 +182,28 @@ void main() {
 // сохраняем — depth test работает как для обычных линий, occlusion
 // корректный. Сегменты с точками за камерой (w<=0) пропускаем — иначе
 // perspective divide даёт бред и линия «взрывается» через весь экран.
+// Сглаживание толстых линий (FBO без MSAA): полоса раскрывается на 1 px шире с каждой стороны,
+// а фрагментный шейдер гасит альфу по расстоянию от оси (aa_coverage). Линия тоньше 1 px
+// рисуется шириной 1 px с альфой, пропорциональной толщине, — как у ImDrawList; иначе
+// субпиксельная полоса растеризовалась бы пунктиром.
+#define GS_AA_HALF_GLSL R"(
+float aa_half_extent() { return 0.5 * max(u_thickness_px, 1.0) + 1.0; }
+)"
+#define FS_AA_COVERAGE_GLSL R"(
+float aa_coverage() {
+    float w = max(u_thickness_px, 1.0);
+    return clamp(0.5 * w + 0.5 - abs(g_dist), 0.0, 1.0) * min(u_thickness_px, 1.0);
+}
+)"
+
 static const char* GS_3D_THICK = R"(
 #version 330 core
 layout(lines) in;
 layout(triangle_strip, max_vertices = 4) out;
+noperspective out float g_dist;   // расстояние от оси линии, px (для сглаживания краёв)
 uniform vec2  u_viewport;
 uniform float u_thickness_px;
+)" GS_AA_HALF_GLSL R"(
 void main() {
     vec4 p0 = gl_in[0].gl_Position;
     vec4 p1 = gl_in[1].gl_Position;
@@ -197,11 +215,12 @@ void main() {
     if (len_px < 1e-6) return;
     vec2 dir_n = dir_px / len_px;
     vec2 nrm_px = vec2(-dir_n.y, dir_n.x);
-    vec2 off_ndc = (nrm_px * (u_thickness_px * 0.5)) / (u_viewport * 0.5);
-    gl_Position = vec4((p0_ndc + off_ndc) * p0.w, p0.z, p0.w); EmitVertex();
-    gl_Position = vec4((p0_ndc - off_ndc) * p0.w, p0.z, p0.w); EmitVertex();
-    gl_Position = vec4((p1_ndc + off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
-    gl_Position = vec4((p1_ndc - off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
+    float h = aa_half_extent();
+    vec2 off_ndc = (nrm_px * h) / (u_viewport * 0.5);
+    g_dist =  h; gl_Position = vec4((p0_ndc + off_ndc) * p0.w, p0.z, p0.w); EmitVertex();
+    g_dist = -h; gl_Position = vec4((p0_ndc - off_ndc) * p0.w, p0.z, p0.w); EmitVertex();
+    g_dist =  h; gl_Position = vec4((p1_ndc + off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
+    g_dist = -h; gl_Position = vec4((p1_ndc - off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
     EndPrimitive();
 }
 )";
@@ -227,8 +246,10 @@ layout(lines) in;
 layout(triangle_strip, max_vertices = 4) out;
 in float v_val[];
 out float g_val;
+noperspective out float g_dist;
 uniform vec2  u_viewport;
 uniform float u_thickness_px;
+)" GS_AA_HALF_GLSL R"(
 void main() {
     vec4 p0 = gl_in[0].gl_Position;
     vec4 p1 = gl_in[1].gl_Position;
@@ -240,11 +261,12 @@ void main() {
     if (len_px < 1e-6) return;
     vec2 dir_n = dir_px / len_px;
     vec2 nrm_px = vec2(-dir_n.y, dir_n.x);
-    vec2 off_ndc = (nrm_px * (u_thickness_px * 0.5)) / (u_viewport * 0.5);
-    g_val = v_val[0]; gl_Position = vec4((p0_ndc + off_ndc) * p0.w, p0.z, p0.w); EmitVertex();
-    g_val = v_val[0]; gl_Position = vec4((p0_ndc - off_ndc) * p0.w, p0.z, p0.w); EmitVertex();
-    g_val = v_val[1]; gl_Position = vec4((p1_ndc + off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
-    g_val = v_val[1]; gl_Position = vec4((p1_ndc - off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
+    float h = aa_half_extent();
+    vec2 off_ndc = (nrm_px * h) / (u_viewport * 0.5);
+    g_val = v_val[0]; g_dist =  h; gl_Position = vec4((p0_ndc + off_ndc) * p0.w, p0.z, p0.w); EmitVertex();
+    g_val = v_val[0]; g_dist = -h; gl_Position = vec4((p0_ndc - off_ndc) * p0.w, p0.z, p0.w); EmitVertex();
+    g_val = v_val[1]; g_dist =  h; gl_Position = vec4((p1_ndc + off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
+    g_val = v_val[1]; g_dist = -h; gl_Position = vec4((p1_ndc - off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
     EndPrimitive();
 }
 )";
@@ -276,16 +298,34 @@ uniform int   u_reverse;
 uniform float u_alpha;
 uniform int   u_oit;
 uniform vec2  u_zrange;
+uniform float u_thickness_px;
+noperspective in float g_dist;
 layout(location = 0) out vec4 frag_color;
 layout(location = 1) out vec4 frag_reveal;
-)" OIT_OUT_GLSL R"(
+)" OIT_OUT_GLSL FS_AA_COVERAGE_GLSL R"(
 void main() {
     float range = u_vmax - u_vmin;
     float t = (range > 1e-30) ? clamp((g_val - u_vmin) / range, 0.0, 1.0) : 0.5;
     if (isnan(g_val) || isinf(g_val)) t = 1.0;   // разошедшаяся ошибка — верхний край шкалы
     if (u_reverse != 0) t = 1.0 - t;
     float row = float(u_colormap - 1001) + 0.5;
-    oit_out(vec4(texture(u_cmap_lut, vec2(t, row / 200.0)).rgb, u_alpha));
+    oit_out(vec4(texture(u_cmap_lut, vec2(t, row / 200.0)).rgb, u_alpha * aa_coverage()));
+}
+)";
+
+// Толстые одноцветные линии (GS_3D_THICK): FS со сглаженными краями.
+static const char* FS_THICK = R"(
+#version 330 core
+uniform vec4  u_color;
+uniform int   u_oit;
+uniform vec2  u_zrange;
+uniform float u_thickness_px;
+noperspective in float g_dist;
+layout(location = 0) out vec4 frag_color;
+layout(location = 1) out vec4 frag_reveal;
+)" OIT_OUT_GLSL FS_AA_COVERAGE_GLSL R"(
+void main() {
+    oit_out(vec4(u_color.rgb, u_color.a * aa_coverage()));
 }
 )";
 
@@ -334,29 +374,67 @@ void main() {
 // Фрагментный шейдер точек: вырезает форму маркера из квадратного спрайта
 // GL_POINTS. Дешевле любого CPU-пути — бифуркационная диаграмма легко даёт
 // сотни тысяч точек, ImDrawList на таком объёме встаёт колом.
+// Покрытие пикселя маркером со сглаженным краем (FBO без MSAA). Спрайт на u_aa_pad px шире
+// маркера (VS: gl_PointSize = max(size, 1) + pad), край гасится по расстоянию до границы формы в
+// пикселях. Точка меньше 1 px рисуется в 1 px с покрытием, пропорциональным размеру, — как
+// тонкие линии (aa_coverage), а не округляется до целого пикселя.
+static constexpr float kMarkerAaPad = 2.0f;   // px запаса спрайта: по 1 с каждой стороны
+
+#define MARKER_COVERAGE_GLSL R"(
+float marker_sdf(int m, vec2 p) {   // < 0 внутри, единица — полуразмер маркера
+    const float t = 0.32;            // полутолщина штриха для Cross/Plus
+    if      (m == 0) return length(p) - 1.0;                                    // Circle
+    else if (m == 2) return (abs(p.x) + abs(p.y) - 1.0) * 0.70710678;           // Diamond
+    else if (m == 3) return max((p.y + 2.0 * abs(p.x) - 1.0) * 0.4472136, -1.0 - p.y); // Triangle up
+    else if (m == 4) return max((2.0 * abs(p.x) - 1.0 - p.y) * 0.4472136, p.y - 1.0);  // Triangle down
+    else if (m == 5) {                                                          // Cross (x)
+        vec2 q = vec2(p.x + p.y, p.x - p.y) * 0.70710678;
+        return min(abs(q.x), abs(q.y)) - t;
+    }
+    else if (m == 6) return min(abs(p.x), abs(p.y)) - t;                         // Plus
+    return max(abs(p.x), abs(p.y)) - 1.0;                                       // Square
+}
+float marker_coverage(int m) {
+    float s = max(u_point_size, 1.0);
+    // gl_PointCoord: (0,0) — левый ВЕРХНИЙ угол спрайта. Переводим в [-1,1] с осью Y вверх
+    // (иначе «треугольник вверх» смотрел бы вниз) и снимаем запас u_aa_pad.
+    vec2 p = vec2(gl_PointCoord.x * 2.0 - 1.0, 1.0 - gl_PointCoord.y * 2.0) * ((s + u_aa_pad) / s);
+    float d_px = marker_sdf(m, p) * (0.5 * s);
+    return clamp(0.5 - d_px, 0.0, 1.0) * min(u_point_size, 1.0);
+}
+)"
+
 static const char* FS_POINT = R"(
 #version 330 core
-uniform vec4 u_color;
-uniform int  u_marker;
+uniform vec4  u_color;
+uniform int   u_marker;
+uniform float u_point_size;
+uniform float u_aa_pad;
 out vec4 frag_color;
+)" MARKER_COVERAGE_GLSL R"(
 void main() {
-    // gl_PointCoord: (0,0) — левый ВЕРХНИЙ угол спрайта. Переводим в [-1,1]
-    // с осью Y вверх, иначе «треугольник вверх» смотрел бы вниз.
-    vec2 p = vec2(gl_PointCoord.x * 2.0 - 1.0, 1.0 - gl_PointCoord.y * 2.0);
-    const float t = 0.32;            // полутолщина штриха для Cross/Plus
-    bool inside;
-    if      (u_marker == 0) inside = dot(p, p) <= 1.0;              // Circle
-    else if (u_marker == 2) inside = abs(p.x) + abs(p.y) <= 1.0;    // Diamond
-    else if (u_marker == 3) inside = p.y <= 1.0 - 2.0 * abs(p.x);   // Triangle up
-    else if (u_marker == 4) inside = p.y >= 2.0 * abs(p.x) - 1.0;   // Triangle down
-    else if (u_marker == 5) {                                       // Cross (x)
-        vec2 q = vec2(p.x + p.y, p.x - p.y) * 0.70710678;
-        inside = abs(q.x) <= t || abs(q.y) <= t;
-    }
-    else if (u_marker == 6) inside = abs(p.x) <= t || abs(p.y) <= t; // Plus
-    else                    inside = true;                           // Square
-    if (!inside) discard;
-    frag_color = u_color;
+    float cov = marker_coverage(u_marker);
+    if (cov <= 0.0) discard;
+    frag_color = vec4(u_color.rgb, u_color.a * cov);
+}
+)";
+
+// 3D-точки с формой маркера (draw_points_3d, marker >= 0): та же маска, вывод — с OIT.
+static const char* FS_POINT_3D = R"(
+#version 330 core
+uniform vec4  u_color;
+uniform int   u_marker;
+uniform float u_point_size;
+uniform float u_aa_pad;
+uniform int   u_oit;
+uniform vec2  u_zrange;
+layout(location = 0) out vec4 frag_color;
+layout(location = 1) out vec4 frag_reveal;
+)" OIT_OUT_GLSL MARKER_COVERAGE_GLSL R"(
+void main() {
+    float cov = marker_coverage(u_marker);
+    if (cov <= 0.0) discard;
+    oit_out(vec4(u_color.rgb, u_color.a * cov));
 }
 )";
 
@@ -393,31 +471,24 @@ uniform vec3  u_below;
 uniform vec3  u_above;
 uniform vec2  u_uv_off;
 uniform vec2  u_uv_scale;
+uniform int   u_smooth;      // 1 = сглаживание: среднее ЦВЕТОВ по сетке точек внутри пикселя
 out vec4 frag_color;
 
-void main() {
-    vec2 uv = v_uv * u_uv_scale + u_uv_off;
+// Цвет данных в точке uv (координаты текстуры данных).
+vec3 shade(vec2 uv) {
     // Если view вышел за пределы данных — рисуем фон, чтобы пользователю
     // были видны границы реального датасета.
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        frag_color = vec4(0.08, 0.08, 0.10, 1.0);
-        return;
-    }
-    float v = texture(u_tex, uv).r;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+        return vec3(0.08, 0.08, 0.10);
+    float v = textureLod(u_tex, uv, 0.0).r;
     // <= -1e30 — ячейку не досчитал Stop (HeatmapView::cell_not_computed): сплошной средне-серый,
     // заметно светлее тёмного «нет данных» (u_nodata) и фона, чтобы не путать с расходимостью.
-    if (v <= -1.0e30 && !isinf(v)) {
-        frag_color = vec4(0.40, 0.40, 0.42, 1.0);
-        return;
-    }
-    if (v >= 1.0e30 || isnan(v) || isinf(v)) {
-        frag_color = vec4(u_nodata, 1.0);
-        return;
-    }
+    if (v <= -1.0e30 && !isinf(v)) return vec3(0.40, 0.40, 0.42);
+    if (v >= 1.0e30 || isnan(v) || isinf(v)) return u_nodata;
     float range = u_vmax - u_vmin;
     if (u_oor != 0 && range > 1e-30) {
-        if (v < u_vmin) { frag_color = vec4(u_below, 1.0); return; }
-        if (v > u_vmax) { frag_color = vec4(u_above, 1.0); return; }
+        if (v < u_vmin) return u_below;
+        if (v > u_vmax) return u_above;
     }
     float t = (range > 1e-30) ? clamp((v - u_vmin) / range, 0.0, 1.0) : 0.5;
     // Discrete mode: quantize t into u_discrete_n bands. Sample the colormap
@@ -437,8 +508,31 @@ void main() {
     // собой. Невалидный id сюда не доходит — draw_heatmap прогоняет его через
     // colormap_id_or().
     float row = float(u_colormap - 1001) + 0.5;
-    vec3 col = texture(u_cmap_lut, vec2(t, row / 200.0)).rgb;
-    frag_color = vec4(clamp(col, 0.0, 1.0), 1.0);
+    vec3 col = textureLod(u_cmap_lut, vec2(t, row / 200.0), 0.0).rgb;
+    return clamp(col, 0.0, 1.0);
+}
+
+void main() {
+    vec2 uv = v_uv * u_uv_scale + u_uv_off;
+    // Производные — до любых ветвлений (в неоднородном потоке управления они не определены).
+    vec2 du = dFdx(uv), dv = dFdy(uv);
+    if (u_smooth == 0) {
+        frag_color = vec4(shade(uv), 1.0);
+        return;
+    }
+    // Сглаживание: n x n точек по площади пикселя, каждая -> цвет, усредняются ЦВЕТА. Значения не
+    // усредняются: между периодом 2 и 4 (или двумя бассейнами) нет никакого «3», а смесь цветов —
+    // честное «пиксель накрывает обе ячейки». Внутри крупной ячейки все точки одного цвета, и она
+    // остаётся резкой; сглаживаются края. Сетка гуще, когда в пиксель попадает много ячеек.
+    vec2 cells = abs(du) * vec2(textureSize(u_tex, 0)) + abs(dv) * vec2(textureSize(u_tex, 0));
+    int n = int(clamp(ceil(max(cells.x, cells.y) * 2.0), 2.0, 8.0));
+    vec3 acc = vec3(0.0);
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i) {
+            vec2 f = (vec2(float(i), float(j)) + 0.5) / float(n) - 0.5;
+            acc += shade(uv + f.x * du + f.y * dv);
+        }
+    frag_color = vec4(acc / float(n * n), 1.0);
 }
 )";
 
@@ -509,6 +603,7 @@ PlotRenderer::~PlotRenderer() {
     if (program_3d_cmap_)  glDeleteProgram(program_3d_cmap_);
     if (program_heatmap_)  glDeleteProgram(program_heatmap_);
     if (program_oit_composite_) glDeleteProgram(program_oit_composite_);
+    if (program_points_3d_) glDeleteProgram(program_points_3d_);
     if (heatmap_vbo_)     glDeleteBuffers(1, &heatmap_vbo_);
     if (lut_tex_)         glDeleteTextures(1, &lut_tex_);
     if (vao_)             glDeleteVertexArrays(1, &vao_);
@@ -558,6 +653,7 @@ void PlotRenderer::compile_shaders() {
             loc_color_points_      = glGetUniformLocation(program_points_, "u_color");
             loc_point_size_points_ = glGetUniformLocation(program_points_, "u_point_size");
             loc_marker_points_     = glGetUniformLocation(program_points_, "u_marker");
+            loc_aa_pad_points_     = glGetUniformLocation(program_points_, "u_aa_pad");
         }
     }
     if (fs && vs3) {
@@ -570,8 +666,23 @@ void PlotRenderer::compile_shaders() {
             loc_zrange_3d_ = glGetUniformLocation(program_3d_, "u_zrange");
         }
     }
-    if (fs && vs3 && gs3t) {
-        program_3d_thick_ = link_program_3(vs3, gs3t, fs);
+    GLuint fs_pt3 = compile(GL_FRAGMENT_SHADER, FS_POINT_3D);
+    if (fs_pt3 && vs3) {
+        program_points_3d_ = link_program(vs3, fs_pt3);
+        if (program_points_3d_) {
+            loc_mvp_points_3d_    = glGetUniformLocation(program_points_3d_, "u_mvp");
+            loc_color_points_3d_  = glGetUniformLocation(program_points_3d_, "u_color");
+            loc_size_points_3d_   = glGetUniformLocation(program_points_3d_, "u_point_size");
+            loc_marker_points_3d_ = glGetUniformLocation(program_points_3d_, "u_marker");
+            loc_oit_points_3d_    = glGetUniformLocation(program_points_3d_, "u_oit");
+            loc_zrange_points_3d_ = glGetUniformLocation(program_points_3d_, "u_zrange");
+            loc_aa_pad_points_3d_ = glGetUniformLocation(program_points_3d_, "u_aa_pad");
+        }
+    }
+    if (fs_pt3) glDeleteShader(fs_pt3);
+    GLuint fs_thick = compile(GL_FRAGMENT_SHADER, FS_THICK);
+    if (fs_thick && vs3 && gs3t) {
+        program_3d_thick_ = link_program_3(vs3, gs3t, fs_thick);
         if (program_3d_thick_) {
             loc_mvp_3d_thick_       = glGetUniformLocation(program_3d_thick_, "u_mvp");
             loc_color_3d_thick_     = glGetUniformLocation(program_3d_thick_, "u_color");
@@ -582,8 +693,8 @@ void PlotRenderer::compile_shaders() {
         }
     }
     // 2D-вариант толстой линии: тот же GS (z = 0, w = 1 у 2D-вершин), вход — VS_2D.
-    if (fs && vs2 && gs3t) {
-        program_2d_thick_ = link_program_3(vs2, gs3t, fs);
+    if (fs_thick && vs2 && gs3t) {
+        program_2d_thick_ = link_program_3(vs2, gs3t, fs_thick);
         if (program_2d_thick_) {
             loc_mvp_2d_thick_       = glGetUniformLocation(program_2d_thick_, "u_mvp");
             loc_color_2d_thick_     = glGetUniformLocation(program_2d_thick_, "u_color");
@@ -646,6 +757,7 @@ void PlotRenderer::compile_shaders() {
             loc_heatmap_oor_       = glGetUniformLocation(program_heatmap_, "u_oor");
             loc_heatmap_below_     = glGetUniformLocation(program_heatmap_, "u_below");
             loc_heatmap_above_     = glGetUniformLocation(program_heatmap_, "u_above");
+            loc_heatmap_smooth_    = glGetUniformLocation(program_heatmap_, "u_smooth");
         }
     }
     if (vs2)  glDeleteShader(vs2);
@@ -654,6 +766,7 @@ void PlotRenderer::compile_shaders() {
     if (vs_h) glDeleteShader(vs_h);
     if (fs_h) glDeleteShader(fs_h);
     if (fs_pt) glDeleteShader(fs_pt);
+    if (fs_thick) glDeleteShader(fs_thick);
     if (fs)   glDeleteShader(fs);
 }
 
@@ -875,6 +988,7 @@ void PlotRenderer::draw_points(GLuint vbo, int point_count, const float mvp[16],
         glUniform4fv(loc_color_points_, 1, color);
         if (loc_point_size_points_ >= 0) glUniform1f(loc_point_size_points_, point_size);
         if (loc_marker_points_ >= 0)     glUniform1i(loc_marker_points_, marker);
+        if (loc_aa_pad_points_ >= 0)     glUniform1f(loc_aa_pad_points_, kMarkerAaPad);
     } else {
         glUniformMatrix4fv(loc_mvp_2d_, 1, GL_FALSE, mvp);
         glUniform4fv(loc_color_2d_, 1, color);
@@ -904,7 +1018,8 @@ void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap
                                 int n_discrete, bool reverse,
                                 const float* nodata_rgb,
                                 const float* below_rgb,
-                                const float* above_rgb) {
+                                const float* above_rgb,
+                                bool smooth) {
     if (!program_heatmap_ || !tex) return;
     if (!heatmap_vbo_) {
         // Fullscreen triangle-strip: 4 точки × (pos.xy, uv.xy). Текстурные
@@ -951,6 +1066,7 @@ void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap
         if (loc_heatmap_below_ >= 0) glUniform3f(loc_heatmap_below_, below_rgb[0], below_rgb[1], below_rgb[2]);
         if (loc_heatmap_above_ >= 0) glUniform3f(loc_heatmap_above_, above_rgb[0], above_rgb[1], above_rgb[2]);
     }
+    if (loc_heatmap_smooth_ >= 0) glUniform1i(loc_heatmap_smooth_, smooth ? 1 : 0);
 
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, heatmap_vbo_);
@@ -972,7 +1088,7 @@ void PlotRenderer::draw_heatmap(GLuint tex, float vmin, float vmax, int colormap
 }
 
 void PlotRenderer::draw_points_3d(GLuint vbo, int point_count, const float mvp[16],
-    const float color[4], float point_size) {
+    const float color[4], float point_size, int marker) {
     if (point_count < 1 || !vbo || !program_3d_) return;
 
     // Blending is on for the same reason as in draw_points: a dense map attractor
@@ -988,11 +1104,22 @@ void PlotRenderer::draw_points_3d(GLuint vbo, int point_count, const float mvp[1
         if (translucent) glDepthMask(GL_FALSE);
     }
 
-    glUseProgram(program_3d_);
-    set_oit_uniforms(loc_oit_3d_, loc_zrange_3d_);
-    glUniformMatrix4fv(loc_mvp_3d_, 1, GL_FALSE, mvp);
-    glUniform4fv(loc_color_3d_, 1, color);
-    if (loc_point_size_3d_ >= 0) glUniform1f(loc_point_size_3d_, point_size);
+    // marker >= 0 — шейдерная маска формы (как draw_points в 2D); < 0 — прежний квадрат.
+    if (marker >= 0 && program_points_3d_) {
+        glUseProgram(program_points_3d_);
+        set_oit_uniforms(loc_oit_points_3d_, loc_zrange_points_3d_);
+        glUniformMatrix4fv(loc_mvp_points_3d_, 1, GL_FALSE, mvp);
+        glUniform4fv(loc_color_points_3d_, 1, color);
+        if (loc_size_points_3d_ >= 0)   glUniform1f(loc_size_points_3d_, point_size);
+        if (loc_marker_points_3d_ >= 0) glUniform1i(loc_marker_points_3d_, marker);
+        if (loc_aa_pad_points_3d_ >= 0) glUniform1f(loc_aa_pad_points_3d_, kMarkerAaPad);
+    } else {
+        glUseProgram(program_3d_);
+        set_oit_uniforms(loc_oit_3d_, loc_zrange_3d_);
+        glUniformMatrix4fv(loc_mvp_3d_, 1, GL_FALSE, mvp);
+        glUniform4fv(loc_color_3d_, 1, color);
+        if (loc_point_size_3d_ >= 0) glUniform1f(loc_point_size_3d_, point_size);
+    }
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glEnableVertexAttribArray(0);

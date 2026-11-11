@@ -1645,7 +1645,6 @@ namespace {
 struct LinkedNeuralPlots {
     std::pair<int, int> record = {-1, -1};
     AxisInfo x;
-    std::map<std::string, ImVec4> colors;
 };
 
 struct NeuralHistogramPlot {
@@ -1803,7 +1802,7 @@ void draw_neural_results(AppModel& model) {
         if (!renderer) renderer = std::make_unique<PlotRenderer>();
         draw_neural_series_window(model, *renderer, ui.plots[(size_t)which], which, bands);
     };
-    const auto stack = [&](int top, int bottom, LinkedNeuralPlots& linked, double first, double last, bool same_colors) {
+    const auto stack = [&](int top, int bottom, LinkedNeuralPlots& linked, double first, double last) {
         const auto record = std::make_pair(epoch, c.data_generation);
         if (linked.record != record) {
             linked.record = record;
@@ -1844,12 +1843,12 @@ void draw_neural_results(AppModel& model) {
                 view.shared_margin_left = (std::max)(left_top, left_bottom);
                 view.shared_x_range = true;
                 view.x_axis = linked.x;
-                if (same_colors) view.series_color_override = linked.colors;
+                // Цвета серий общие сами: стопка лежит в одном корневом окне, а карта
+                // цветов (PlotWindowPrefs::series_colors) ведётся по корневому окну.
                 const auto bands = show_trials ? trial_bands_in_view(c, model.neural_view.instance, view.x_axis, model.heatmap_colormap)
                                                : std::vector<PlotXBand>{};
                 draw(which, show_trials ? &bands : nullptr);
                 linked.x = view.x_axis;
-                if (same_colors) linked.colors = view.series_color_override;
             }
             ImGui::EndChild();
             ImGui::PopID();
@@ -1865,14 +1864,14 @@ void draw_neural_results(AppModel& model) {
         for (View view : available) switch (view) {
         case View::Activity:
             tab("Activity", [&] { stack(kNeuralRaster, kNeuralRate, ui.activity,
-                                       (std::max)(r.t0, (double)ctx.first_record_step * r.h), (double)r.steps_done * r.h, true); });
+                                       (std::max)(r.t0, (double)ctx.first_record_step * r.h), (double)r.steps_done * r.h); });
             break;
         case View::SpikeStatistics:
             tab("Spike statistics", [&] { draw_spike_statistics(c, model.neural_view.instance, ui, model.heatmap_colormap); });
             break;
         case View::Readout:
             if (task.forecast) tab("Forecast", [&] { stack(kNeuralReadout, kNeuralForecastError, ui.forecast,
-                                                           task.t0, task.t0 + task.dt * (task.points - 1), false); });
+                                                           task.t0, task.t0 + task.dt * (task.points - 1)); });
             else tab(task.classify ? "Classification" : task.by_delay ? (task.names[0] == "MC" ? "Memory" : "XOR") : "Readout",
                      [&] { draw(kNeuralReadout); });
             break;

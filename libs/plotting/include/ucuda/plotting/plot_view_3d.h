@@ -57,14 +57,17 @@ public:
     float point_size_px = 2.0f;
     // Своя прозрачность точек (Points при Custom line style), < 0 — альфа серии. См. Plot2DView.
     float point_alpha = -1.0f;
+    // Форма маркера в points_mode (PointMarker); -1 — прежний сплошной квадрат.
+    int   point_marker = -1;
+    // Колорбар рядом рисует вызывающий — см. Plot2DView::external_colorbar.
+    bool  external_colorbar = false;
 
     // Автоподгонка камеры при новых данных (пункт меню «Auto fit on new data»). Выключена —
     // перерасчёт и смена данных вид не трогают; «Auto fit» из меню и двойной клик работают всегда.
     bool auto_fit = true;
 
-    // Пользовательские цвета серий (ПКМ по квадрату легенды -> legend_color_popup), ключ — подпись;
-    // альфа — от вызывающего. См. Plot2DView::series_color_override.
-    std::map<std::string, ImVec4> series_color_override;
+    // Пользовательские цвета серий — PlotWindowPrefs::series_colors окна (plot_axis.h), см.
+    // Plot2DView.
 
     // Локальная видимость серий (переключается кликом по легенде).
     std::vector<bool> visible;

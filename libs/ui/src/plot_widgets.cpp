@@ -641,6 +641,7 @@ namespace ucuda::ui_detail {
 bool draw_style_toolbar(const char* label, const char* id_suffix,
                                bool& enabled,
                                const std::function<bool()>& body) {
+    if (plot_toolbar_hidden()) return false;   // скрыт в меню диаграммы (Toolbar)
     const std::string sfx = id_suffix;
     bool changed = false;
     if (ImGui::Checkbox((std::string(label) + "##" + sfx).c_str(), &enabled))
@@ -662,38 +663,108 @@ bool draw_style_toolbar(const char* label, const char* id_suffix,
 
 
 namespace ucuda::ui_detail {
-void draw_proj_line_style(Projection& pr, const char* sfx, const char* points_tip) {
-    const std::string s = sfx;
-    draw_style_toolbar("Custom line style", sfx, pr.custom_line_style,
-        [&pr, &s]() {
-            bool ch = false;
-            ImGui::SetNextItemWidth(150);
-            ch |= ImGui::SliderFloat(("Line width##" + s).c_str(), &pr.line_width, 0.1f, 5.0f, "%.2f");
-            ImGui::SetNextItemWidth(150);
-            ch |= ImGui::SliderFloat(("Alpha##" + s).c_str(), &pr.alpha, 0.0f, 1.0f, "%.2f");
-            return ch;
-        });
-    ImGui::SameLine();
-    ImGui::Checkbox(("Points##" + s).c_str(), &pr.draw_points);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s\nWith Custom line style on too: points on top of the line.", points_tip);
-    if (pr.draw_points) {
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(110);
-        ImGui::SliderFloat(("size##" + s + "pt").c_str(), &pr.point_size, 0.5f, 8.0f, "%.1f");
-        if (pr.custom_line_style) {   // своя альфа точек — при Custom line style (у линии своя)
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(110);
-            ImGui::SliderFloat(("alpha##" + s + "pt").c_str(), &pr.point_alpha, 0.0f, 1.0f, "%.2f");
-        }
+// Ползунок, в который по ПКМ (как и по Ctrl+клику) можно вписать число: мелкие значения вроде
+// толщины 0.19 ползунком не поймать. Введённое прижимается к [lo, hi].
+bool slider_float_typed(const char* label, float* v, float lo, float hi, const char* fmt) {
+    const bool ch = ImGui::SliderFloat(label, v, lo, hi, fmt, ImGuiSliderFlags_AlwaysClamp);
+    if (ImGui::IsItemHovered()) {
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) ImGui::SetKeyboardFocusHere(-1);
+        else if (!ImGui::IsItemActive()) ImGui::SetTooltip("Right-click or Ctrl+click to type a value");
     }
+    return ch;
+}
+
+float proj_point_alpha(const Projection& pr) {
+    return (pr.draw_points && (pr.custom_line_style || pr.point_alpha != 1.0f)) ? pr.point_alpha : -1.0f;
+}
+
+namespace {
+std::vector<Projection>* g_proj_style_group = nullptr;
+
+// Проекции с этим меню стиля (draw_proj_style_controls): у прочих тех же полей другой смысл
+// (Custom point style диаграмм признаков и продолжения).
+bool proj_has_style_controls(ProjType t) {
+    return t == ProjType::Phase2D || t == ProjType::TimeDomain || t == ProjType::Phase3D ||
+           t == ProjType::StepSize || t == ProjType::Rejections;
+}
+
+// Галка стиля проекции. Ctrl+Shift+клик — то же значение во всех проекциях вкладки с этим же
+// меню (как Ctrl+Shift в меню «Show» у окон диаграмм).
+void proj_style_checkbox(Projection& pr, const std::string& label, bool Projection::* field) {
+    if (!ImGui::Checkbox(label.c_str(), &(pr.*field))) return;
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.KeyCtrl && io.KeyShift && g_proj_style_group)
+        for (Projection& other : *g_proj_style_group)
+            if (proj_has_style_controls(other.type)) other.*field = pr.*field;
+}
+}
+
+ProjStyleGroupScope::ProjStyleGroupScope(std::vector<Projection>* group) : prev_(g_proj_style_group) {
+    g_proj_style_group = group;
+}
+ProjStyleGroupScope::~ProjStyleGroupScope() { g_proj_style_group = prev_; }
+
+void draw_proj_style_controls(Projection& pr, const char* sfx, const char* points_tip) {
+    if (plot_toolbar_hidden()) return;   // скрыт в меню диаграммы (Toolbar); стиль действует
+    const std::string s = sfx;
+    proj_style_checkbox(pr, "Custom line style##" + s, &Projection::custom_line_style);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Ctrl+Shift+click: all projections of this tab");
+    ImGui::SameLine();
+    proj_style_checkbox(pr, "Points##" + s, &Projection::draw_points);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s\nWith Custom line style on too: points on top of the line.\n"
+                          "Ctrl+Shift+click: all projections of this tab", points_tip);
+
+    const std::string pop_id = "##stylepop_" + s;
+    if (pr.custom_line_style || pr.draw_points) {
+        ImGui::SameLine(0.0f, 4.0f);
+        if (ImGui::ArrowButton(("##styleopen_" + s).c_str(), ImGuiDir_Down))
+            ImGui::OpenPopup(pop_id.c_str());
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Line and point style");
+    }
+    constrain_popup_height_below_item();
+    if (ImGui::BeginPopup(pop_id.c_str())) {
+        if (pr.custom_line_style) {
+            ImGui::SeparatorText("Line");
+            ImGui::SetNextItemWidth(150);
+            slider_float_typed(("Width##ln" + s).c_str(), &pr.line_width, 0.1f, 5.0f, "%.2f");
+            ImGui::SetNextItemWidth(150);
+            slider_float_typed(("Alpha##ln" + s).c_str(), &pr.alpha, 0.0f, 1.0f, "%.2f");
+        }
+        if (pr.draw_points) {
+            ImGui::SeparatorText("Points");
+            ImGui::SetNextItemWidth(150);
+            slider_float_typed(("Size##pt" + s).c_str(), &pr.point_size, 0.5f, 25.0f, "%.1f");
+            ImGui::SetNextItemWidth(150);
+            slider_float_typed(("Alpha##pt" + s).c_str(), &pr.point_alpha, 0.0f, 1.0f, "%.2f");
+            // -1 — прежний сплошной пиксель (самый быстрый), дальше формы PointMarker.
+            int idx = (pr.point_marker >= 0 && pr.point_marker < kPointMarkerCount) ? pr.point_marker + 1 : 0;
+            const char* cur = idx == 0 ? "Pixel" : kPointMarkerNames[idx - 1];
+            ImGui::SetNextItemWidth(150);
+            if (ImGui::BeginCombo(("Marker##pt" + s).c_str(), cur)) {
+                for (int m = 0; m <= kPointMarkerCount; ++m) {
+                    const char* name = m == 0 ? "Pixel" : kPointMarkerNames[m - 1];
+                    if (ImGui::Selectable(name, m == idx)) pr.point_marker = m - 1;
+                    if (m == idx) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void draw_proj_line_style(Projection& pr, const char* sfx, const char* points_tip) {
+    draw_proj_style_controls(pr, sfx, points_tip);
+    projection_views(pr).view2d->point_marker      = pr.point_marker;
     projection_views(pr).view2d->imdraw_lines      = pr.custom_line_style;
     projection_views(pr).view2d->gpu_thick_lines   = true;
     projection_views(pr).view2d->line_thickness_px = pr.line_width;
     projection_views(pr).view2d->points_mode       = pr.draw_points;
     projection_views(pr).view2d->points_with_lines = pr.draw_points && pr.custom_line_style;
     projection_views(pr).view2d->point_size_px     = pr.point_size;
-    projection_views(pr).view2d->point_alpha       = (pr.draw_points && pr.custom_line_style) ? pr.point_alpha : -1.0f;
+    projection_views(pr).view2d->point_alpha       = proj_point_alpha(pr);
 }
 }
 
@@ -709,10 +780,10 @@ bool draw_point_style_toolbar(BifurcationDiagramConfig& bd, const char* id_suffi
             ch |= ImGui::Combo(("Marker##" + sfx).c_str(), &bd.point_marker,
                                kPointMarkerNames, kPointMarkerCount);
             ImGui::SetNextItemWidth(150);
-            ch |= ImGui::SliderFloat(("Point size##" + sfx).c_str(), &bd.point_size,
-                                     0.5f, 12.0f, "%.1f");
+            ch |= slider_float_typed(("Point size##" + sfx).c_str(), &bd.point_size,
+                                     0.5f, 25.0f, "%.1f");
             ImGui::SetNextItemWidth(150);
-            ch |= ImGui::SliderFloat(("Alpha##" + sfx).c_str(), &bd.point_alpha,
+            ch |= slider_float_typed(("Alpha##" + sfx).c_str(), &bd.point_alpha,
                                      0.0f, 1.0f, "%.2f");
             return ch;
         });
@@ -992,37 +1063,93 @@ bool colormap_combo(const char* label, int* id, float width) {
 
 
 namespace ucuda::ui_detail {
+namespace {
+std::function<void()> g_toolbar_head;
+bool g_toolbar_head_used = false;
+}
+
+void constrain_popup_height_below_item() {
+    const ImGuiViewport* vp = ImGui::GetWindowViewport();
+    const float bottom = vp->WorkPos.y + vp->WorkSize.y;
+    const float margin = ImGui::GetStyle().WindowPadding.y * 2.0f;
+    float max_h = bottom - ImGui::GetItemRectMax().y - margin;
+    // Кнопка у самого низа экрана: всё равно даём разумную высоту — ImGui сдвинет попап вверх.
+    max_h = (std::max)(max_h, (std::min)(vp->WorkSize.y * 0.5f, ImGui::GetFontSize() * 15.0f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f), ImVec2(FLT_MAX, max_h));
+}
+
+void set_heatmap_toolbar_head(std::function<void()> head) {
+    g_toolbar_head = std::move(head);
+    g_toolbar_head_used = false;
+}
+
+bool take_heatmap_toolbar_head_used() {
+    const bool used = g_toolbar_head_used;
+    g_toolbar_head = nullptr;
+    g_toolbar_head_used = false;
+    return used;
+}
+
 bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o) {
+    // Тулбар скрыт в меню карты (Toolbar): ни строки, ни extras — карте вся высота. Шапку окна
+    // не забираем: без тулбара её некуда показать (окно тоже не рисует свою стрелку).
+    if (plot_toolbar_hidden()) return false;
     bool changed = false;
+    // Шапка окна-владельца — только первому тулбару кадра (см. set_heatmap_toolbar_head).
+    std::function<void()> head;
+    if (g_toolbar_head) {
+        head.swap(g_toolbar_head);
+        g_toolbar_head_used = true;
+    }
 
+    // В строке — только компактная кнопка: полоска текущей карты и стрелка. Всё остальное
+    // (карта, шкала цвета, Swap axes) — в вертикальном меню под ней: строка с раскрытым
+    // vmin/vmax раньше выходила шире окна. Доп. элементы вызывающего (extras) остаются в строке.
+    ImGui::PushID(&hv);
+    const char* pop_id = "##heatmap_style";
     int cmap_idx = (int)hv.colormap;
-    if (colormap_combo("Colormap", &cmap_idx, ImGui::GetFontSize() * 12.0f)) {
-        hv.colormap = (HeatmapColormap)cmap_idx;
-        if (o.persist_colormap) o.persist_colormap(cmap_idx);
-        changed = true;
+    const float h = ImGui::GetFrameHeight();
+    colormap_strip_item(cmap_idx, h * 4.0f, h);
+    const bool strip_clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+    const bool strip_hovered = ImGui::IsItemHovered();
+    ImGui::SameLine(0.0f, 4.0f);
+    if (ImGui::ArrowButton("##heatmap_style_open", ImGuiDir_Down) || strip_clicked)
+        ImGui::OpenPopup(pop_id);
+    if (strip_hovered || ImGui::IsItemHovered()) {
+        if (hv.autoscale)
+            ImGui::SetTooltip("%s\nColor scale: auto%s", colormap_label(cmap_idx),
+                              hv.swap_axes ? "\nAxes swapped" : "");
+        else
+            ImGui::SetTooltip("%s\nColor scale: %s .. %s%s", colormap_label(cmap_idx),
+                              hv.manual_vmin_text.c_str(), hv.manual_vmax_text.c_str(),
+                              hv.swap_axes ? "\nAxes swapped" : "");
     }
-
-    if (o.extras) o.extras();
-
-    ImGui::SameLine();
-    if (ImGui::Checkbox("Autoscale color", &hv.autoscale)) changed = true;
-    if (!hv.autoscale) {
-        ImGui::SameLine();
-        if (InputNumStr("vmin", hv.manual_vmin_text, 80)) changed = true;
-        hv.manual_vmin = (float)parse_ratio_or(hv.manual_vmin_text, hv.manual_vmin);
-        ImGui::SameLine();
-        if (InputNumStr("vmax", hv.manual_vmax_text, 80)) changed = true;
-        hv.manual_vmax = (float)parse_ratio_or(hv.manual_vmax_text, hv.manual_vmax);
-    }
-
-    if (o.show_swap) {
-        ImGui::SameLine();
-        if (ImGui::Button(hv.swap_axes ? "Swap axes (on)" : "Swap axes")) {
-            hv.swap_axes = !hv.swap_axes;
+    constrain_popup_height_below_item();
+    if (ImGui::BeginPopup(pop_id)) {
+        if (head) head();
+        ImGui::SeparatorText("Colormap");
+        if (colormap_combo("##cmap", &cmap_idx, ImGui::GetFontSize() * 12.0f)) {
+            hv.colormap = (HeatmapColormap)cmap_idx;
+            if (o.persist_colormap) o.persist_colormap(cmap_idx);
             changed = true;
         }
+        ImGui::SeparatorText("Color scale");
+        if (ImGui::Checkbox("Autoscale color", &hv.autoscale)) changed = true;
+        if (!hv.autoscale) {
+            if (InputNumStr("vmin", hv.manual_vmin_text, 120)) changed = true;
+            hv.manual_vmin = (float)parse_ratio_or(hv.manual_vmin_text, hv.manual_vmin);
+            if (InputNumStr("vmax", hv.manual_vmax_text, 120)) changed = true;
+            hv.manual_vmax = (float)parse_ratio_or(hv.manual_vmax_text, hv.manual_vmax);
+        }
+        if (o.show_swap) {
+            ImGui::SeparatorText("Axes");
+            if (ImGui::Checkbox("Swap axes", &hv.swap_axes)) changed = true;
+        }
+        ImGui::EndPopup();
     }
+    ImGui::PopID();
 
+    if (o.extras) o.extras();
     if (o.extras_tail) o.extras_tail();
     return changed;
 }

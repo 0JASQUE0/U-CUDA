@@ -48,6 +48,7 @@ std::string session_to_json(const PhaseAnalysisState& s) {
         o << ",\"pts\":" << (p.draw_points ? "true" : "false") << ",\"ps\":" << p.point_size;
         if (p.y_log) o << ",\"ylog\":true";
         if (p.point_alpha != 1.0f) o << ",\"pa\":" << p.point_alpha;
+        if (p.point_marker >= 0) o << ",\"pm\":" << p.point_marker;
         write_rqa_fields(o, p);
         o << ",\"show_var\":[";
         for (size_t v = 0; v < p.show_var.size(); ++v) { if (v)o << ","; o << (p.show_var[v] ? "true" : "false"); }
@@ -133,6 +134,7 @@ bool session_from_json(const std::string& json, PhaseAnalysisState& s) {
                             else if (k == "ps")    pr.point_size = (float)std::stod(p.str_or_num());
                             else if (k == "ylog")  pr.y_log = p.boolean();
                             else if (k == "pa")    pr.point_alpha = (float)std::stod(p.str_or_num());
+                            else if (k == "pm")    pr.point_marker = std::stoi(p.str_or_num());
                             else if (k == "show_var") {
                                 pr.show_var.clear();
                                 p.expect('[');

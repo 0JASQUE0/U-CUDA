@@ -1,4 +1,4 @@
-﻿#include "ucuda/plotting/plot_view_3d.h"
+#include "ucuda/plotting/plot_view_3d.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -51,6 +51,11 @@ void Plot3DView::render(PlotRenderer& renderer,
     const std::vector<bool>& global_visible,
     bool fit_request)
 {
+    // Toolbar окна (plot_axis.h) — ссылка здесь: в попапе текущим окном будет сам попап.
+    PlotWindowPrefs& wp = plot_window_prefs_current();
+    const bool axes_on   = show_axes && wp.axes3d;
+    const bool legend_on = show_legend && wp.legend;
+
     // 1. Пересобираем кэш
     if (data_generation != series_generation) {
         bool count_changed = ((int)visible.size() != (int)series_in.size());
@@ -80,8 +85,8 @@ void Plot3DView::render(PlotRenderer& renderer,
 
     // Цвет серии: пользовательский (меню легенды) поверх цвета вызывающего, альфа — его.
     auto series_color = [&](const PlotSeriesInput3D& s) -> ImVec4 {
-        auto it = series_color_override.find(s.label);
-        if (it == series_color_override.end()) return s.color;
+        auto it = wp.series_colors.find(s.label);
+        if (it == wp.series_colors.end()) return s.color;
         return ImVec4(it->second.x, it->second.y, it->second.z, s.color.w);
         };
 
@@ -120,9 +125,9 @@ void Plot3DView::render(PlotRenderer& renderer,
     {
         const Plot3DView* self = this;
         mixv(self); mixv(plot_w); mixv(plot_h); mix(bgc, sizeof(bgc)); mix(mvp, sizeof(mvp));
-        mixv(series_generation); mixv(show_axes); mixv(line_thickness_px);
+        mixv(series_generation); mixv(axes_on); mixv(line_thickness_px);
         mixv(custom_line_style); mixv(points_mode); mixv(points_with_lines);
-        mixv(point_size_px); mixv(point_alpha);
+        mixv(point_size_px); mixv(point_alpha); mixv(point_marker);
         const int ns = (int)series_cache_.size();
         mixv(ns);
         for (int k = 0; k < ns; ++k) {
@@ -144,7 +149,7 @@ void Plot3DView::render(PlotRenderer& renderer,
     // Оси (X=красная, Y=зелёная, Z=синяя) — ДО данных: они непрозрачны и пишут глубину, поэтому
     // траектория за осью ею закрывается, а перед ней — рисуется поверх. Полупрозрачные данные
     // глубину не пишут (draw_line_3d), и оси, нарисованные после них, ложились бы поверх всего.
-    if (show_axes) {
+    if (axes_on) {
         rebuild_axis_cache();
         if (axis_cache_.size() == 3) {
             float col_x[4] = { 1.0f, 0.4f, 0.4f, 1.0f };
@@ -192,7 +197,7 @@ void Plot3DView::render(PlotRenderer& renderer,
                     renderer.draw_line_3d(g.vbo, g.point_count, mvp, color, line_thickness_px, custom_line_style);
                 float pcolor[4] = { c.x, c.y, c.z, point_alpha >= 0.0f ? point_alpha : c.w };
                 if (take(pcolor[3]))
-                    renderer.draw_points_3d(g.vbo, g.point_count, mvp, pcolor, point_size_px);
+                    renderer.draw_points_3d(g.vbo, g.point_count, mvp, pcolor, point_size_px, point_marker);
             }
             else if (take(line_a))
                 renderer.draw_line_3d(g.vbo, g.point_count, mvp, color,
@@ -234,7 +239,7 @@ void Plot3DView::render(PlotRenderer& renderer,
 
     // Подписи осей (текстом поверх картинки, через ImDrawList)
     {
-        if (show_axes) {
+        if (axes_on) {
             float xmn, xmx, ymn, ymx, zmn, zmx;
             if (series_cache_.bbox(xmn, xmx, ymn, ymx, zmn, zmx)) {
                 ImU32 col_x = IM_COL32(255, 120, 120, 180);
@@ -264,7 +269,7 @@ void Plot3DView::render(PlotRenderer& renderer,
 
     // 6. Легенда. ПКМ по квадрату — меню цвета, по строке мимо — меню плота (как в 2D).
     LegendRightClick legend_rclick;
-    if (show_legend) {
+    if (legend_on) {
         std::vector<LegendEntry> entries;
         entries.reserve(series_in.size());
         for (const auto& s : series_in) {
@@ -350,8 +355,10 @@ void Plot3DView::render(PlotRenderer& renderer,
                               "Off: the view stays where you left it; Auto fit above and\n"
                               "a double click still fit it.");
         ImGui::Separator();
-        ImGui::MenuItem("Show legend", nullptr, &show_legend);
-        ImGui::MenuItem("Show axes", nullptr, &show_axes);
+        // Легенда и оси — галки окна (сохраняются в imgui.ini); show_legend / show_axes вида —
+        // разрешение вызывающего.
+        plot_show_menu(wp, (show_legend ? PlotShowLegend : 0u) | (show_axes ? PlotShowAxes3D : 0u) |
+                           (external_colorbar ? PlotShowColorbar : 0u));
         ImGui::Separator();
         if (ImGui::MenuItem("Copy image to clipboard")) {
             request_plot_screenshot(block_origin,
@@ -378,5 +385,8 @@ void Plot3DView::render(PlotRenderer& renderer,
     ImVec4 cur(1, 1, 1, 1);
     for (const auto& s : series_in)
         if (s.label == legend_color_target_) { cur = series_color(s); break; }
-    legend_color_popup(col_pop, legend_color_target_, series_color_override, cur);
+    // Цвета — общие на окно и сохраняются в imgui.ini (PlotWindowPrefs::series_colors).
+    const std::map<std::string, ImVec4> before = wp.series_colors;
+    legend_color_popup(col_pop, legend_color_target_, wp.series_colors, cur);
+    plot_series_colors_changed(before, wp.series_colors);
 }
