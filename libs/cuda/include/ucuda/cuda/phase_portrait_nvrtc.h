@@ -13,6 +13,7 @@
 //   N         — число траекторий (наборов НУ)
 //   values    — параметры a[] (со сдвигом, a[0] зарезервирован), ОБЩИЕ для всех
 //   out       — [N][total][amountOfX]
+//   step0     — номер шага начального состояния: явное t = (step0 + n) * h (continuation)
 // Возвращает false при ошибке; err (если не nullptr) получает текст.
 bool computePhasePortraitsNVRTC(
     const std::string& krs_body,
@@ -21,7 +22,7 @@ bool computePhasePortraitsNVRTC(
     const double* values, int amountOfValues,
     double h, int totalPoints, int skipPoints,
     std::vector<std::vector<std::vector<double>>>& outTrajectories,
-    std::string* err = nullptr);
+    std::string* err = nullptr, long long step0 = 0);
 
 // Фоновый (best-effort) прогрев кэша: компилирует krs_body/amountOfX прямо
 // сейчас, синхронно в вызывающем потоке — асинхронность (не блокировать GUI)

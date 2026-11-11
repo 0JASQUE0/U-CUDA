@@ -222,13 +222,14 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
             << prep_defs
             // t_n = n*h от целого счётчика: накопление t += h за 1e7 шагов
             // уводит фазу воздействия.
+            // n0 — номер шага начального состояния (continuation продолжает время прошлого куска).
             << "extern \"C\" __global__ void phase_kernel("
-            "const numb* ic, const numb* values, numb h, int total, int skip, int N, numb* data) {\n"
+            "const numb* ic, const numb* values, numb h, int total, int skip, int N, numb* data, long long n0) {\n"
             << "    int tid = blockIdx.x*blockDim.x + threadIdx.x;\n"
             << "    if (tid >= N) return;\n"
             << "    numb X[AMOUNTOFX];\n"
             << "    for (int i=0;i<AMOUNTOFX;++i) X[i]=ic[tid*AMOUNTOFX + i];\n"
-            << "    long long n = 0;\n"
+            << "    long long n = n0;\n"
             << "    for (int s=0;s<skip;++s, ++n) calculateDiscreteModel(X, (numb)n * h, values, h);\n"
             << "    numb* out = data + (size_t)tid*total*AMOUNTOFX;\n"
             << "    for (int t=0;t<total;++t, ++n) {\n"
@@ -245,8 +246,9 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
         // Все траектории параллельны. Параметры values общие для всех потоков.
         // Layout НУ:    ic[tid*AMOUNTOFX + k]
         // Layout выхода: data[(tid*total + step)*AMOUNTOFX + k]
+        // n0 — та же сигнатура, что у неавтономного ядра; автономному шагу время не нужно.
         << "extern \"C\" __global__ void phase_kernel("
-        "const numb* ic, const numb* values, numb h, int total, int skip, int N, numb* data) {\n"
+        "const numb* ic, const numb* values, numb h, int total, int skip, int N, numb* data, long long n0) {\n"
         << "    int tid = blockIdx.x*blockDim.x + threadIdx.x;\n"
         << "    if (tid >= N) return;\n"
         << "    numb X[AMOUNTOFX];\n"
@@ -311,7 +313,7 @@ bool NvrtcEngine::compile(const std::string& krs_body, int amountOfX) {
 bool NvrtcEngine::run_phase_portraits(const std::vector<double>& ic_flat, int N,
     const std::vector<double>& values,
     double h, int total, int skip,
-    std::vector<std::vector<std::vector<double>>>& out) {
+    std::vector<std::vector<std::vector<double>>>& out, long long step0) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     out.clear();
     // см. комментарий в compile() — нужно выставить НАШ контекст текущим.
@@ -333,7 +335,8 @@ bool NvrtcEngine::run_phase_portraits(const std::vector<double>& ic_flat, int N,
 
     numb hh = (numb)h;
     int tot = total, sk = skip, n = N;
-    void* args[] = { &d_ic, &d_val, &hh, &tot, &sk, &n, &d_data };
+    long long n0 = step0;
+    void* args[] = { &d_ic, &d_val, &hh, &tot, &sk, &n, &d_data, &n0 };
     // N потоков: поток tid -> траектория tid. Раскладка под N.
     int threads = 256, blocks = (N + threads - 1) / threads;
     CUOK(cuLaunchKernel((CUfunction)kernel_, blocks, 1, 1, threads, 1, 1, 0, nullptr, args, nullptr), "launch");

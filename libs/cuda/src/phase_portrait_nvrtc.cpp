@@ -14,7 +14,7 @@ bool computePhasePortraitsNVRTC(
     const double* values, int amountOfValues,
     double h, int totalPoints, int skipPoints,
     std::vector<std::vector<std::vector<double>>>& outTrajectories,
-    std::string* err)
+    std::string* err, long long step0)
 {
     outTrajectories.clear();
     if (!g_engine.init()) { if (err)*err = g_engine.error(); return false; }
@@ -23,7 +23,7 @@ bool computePhasePortraitsNVRTC(
     if (!g_engine.compile(krs_body, amountOfX)) { if (err)*err = g_engine.error(); return false; }
     std::vector<double> ic(ic_flat, ic_flat + (size_t)N * amountOfX);
     std::vector<double> a(values, values + amountOfValues);
-    if (!g_engine.run_phase_portraits(ic, N, a, h, totalPoints, skipPoints, outTrajectories)) {
+    if (!g_engine.run_phase_portraits(ic, N, a, h, totalPoints, skipPoints, outTrajectories, step0)) {
         if (err)*err = g_engine.error(); return false;
     }
     return true;

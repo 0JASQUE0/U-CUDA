@@ -77,7 +77,7 @@ namespace ucuda::analysis_detail {
 // dt — шаг ПО ВРЕМЕНИ между соседними отсчётами `data`. Вызывающий передаёт h*decimator и сам ряд,
 // прореженный тем же шагом: признаки должны считаться по тому же сигналу, что уходит в
 // peakFinderCUDA. Возвращает пары (значение пика; интервал от предыдущего удержанного пика).
-FeaturePoints find_peaks_host(const std::vector<double>& data, double dt) {
+FeaturePoints find_peaks_host(const std::vector<double>& data, double dt, bool apply_cap) {
     FeaturePoints out;
     const PeakConfig pc = get_peak_config();
     if (!pc.do_calculate_peaks) return out;
@@ -116,6 +116,11 @@ FeaturePoints find_peaks_host(const std::vector<double>& data, double dt) {
 
     // Второй проход: пара (пик; интервал до него) + фильтр слишком близких.
     // Опора не сдвигается на отброшенный пик — как в оригинале.
+    if (!peaks.empty()) {
+        // times — индекс (j - 1) + delta, как в ядре; сама вершина на (j + delta).
+        out.first_peak = peaks[0];
+        out.first_time = (times[0] + 1.0) * dt;
+    }
     if (peaks.size() > 1) {
         double anchor = times[0];
         for (size_t i = 1; i < peaks.size(); ++i) {
@@ -129,7 +134,7 @@ FeaturePoints find_peaks_host(const std::vector<double>& data, double dt) {
         }
     }
 
-    const size_t cap = (size_t)std::max(0, pc.max_amount_of_peaks);
+    const size_t cap = apply_cap ? (size_t)std::max(0, pc.max_amount_of_peaks) : ~(size_t)0;
     if (out.peaks.size() > cap) {
         out.peaks.resize(cap);
         out.intervals.resize(cap);
@@ -153,13 +158,13 @@ namespace ucuda::analysis_detail {
 // x, d, t — значение сигнала, его производная и время узлов; прореживание (каждый dec-й
 // узел и последний) уже сделано вызывающим — тем же правилом, что в ucudaAdRecordNodes.
 FeaturePoints find_peaks_host_nodes(const std::vector<double>& x, const std::vector<double>& d,
-                                           const std::vector<double>& t, int interp) {
+                                           const std::vector<double>& t, int interp, bool apply_cap) {
     FeaturePoints out;
     const PeakConfig pc = get_peak_config();
     if (!pc.do_calculate_peaks) return out;
     const size_t n = std::min(x.size(), std::min(d.size(), t.size()));
     if (n < 2) return out;
-    const size_t cap = (size_t)std::max(0, pc.max_amount_of_peaks);
+    const size_t cap = apply_cap ? (size_t)std::max(0, pc.max_amount_of_peaks) : ~(size_t)0;
 
     bool   have_anchor = false;
     double anchor = 0.0;
@@ -214,7 +219,11 @@ FeaturePoints find_peaks_host_nodes(const std::vector<double>& x, const std::vec
                 }
             }
             if (pv - run_min >= pc.eps_peak_delta && pv > pc.peak_threshold) {
-                if (!have_anchor) { anchor = pt; have_anchor = true; }
+                if (!have_anchor) {
+                    anchor = pt; have_anchor = true;
+                    out.first_peak = pv;
+                    out.first_time = pt - t[0];   // от начала ряда, как у find_peaks_host
+                }
                 else if (pt - anchor >= pc.eps_interPeak_delta) {
                     out.peaks.push_back(pv);
                     out.intervals.push_back(pt - anchor);

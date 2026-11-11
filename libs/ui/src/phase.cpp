@@ -255,8 +255,10 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         const auto& per_var = res.features[k];
                         if (av >= 0 && av < (int)per_var.size()) {
                             const FeaturePoints& fp = per_var[(size_t)av];
-                            const size_t n = fp.peaks.size() < fp.intervals.size()
-                                           ? fp.peaks.size() : fp.intervals.size();
+                            size_t n = fp.peaks.size() < fp.intervals.size()
+                                     ? fp.peaks.size() : fp.intervals.size();
+                            // Как у ядра бифуркации: не больше max peaks (features хранятся полными).
+                            if (res.features_cap > 0) n = (std::min)(n, (size_t)res.features_cap);
                             buf.reserve(n * 2);
                             for (size_t p = 0; p < n; ++p) {
                                 if (!std::isfinite(fp.peaks[p]) || !std::isfinite(fp.intervals[p]))
@@ -1667,6 +1669,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
             s.continuation_paused      = false;
             s.continuation_first_frame = true;
             s.continuation_state.clear();
+            s.continuation_step        = 0;
             s.continuation_last_frame  = std::chrono::steady_clock::now();
             s.continuation_elapsed = 0.0;
             s.continuation_peaks.clear();
@@ -1677,6 +1680,8 @@ void draw_phase_controls(PhaseAnalysisSession& s,
 
     if (!s.result.error.empty())
         ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "%s", s.result.error.c_str());
+    if (!s.result.note.empty())
+        ImGui::TextWrapped("%s", s.result.note.c_str());
 }
 }
 

@@ -120,3 +120,15 @@ static bool apply_session_json(AppModel& model,
     return true;
 }
 }
+
+namespace ucuda::ui_detail {
+// Пресеты раскладки окон (кнопка Layout в шапке, gui.cpp): 0 Tabs, 1 Columns, 2 Rows, 3 Grid.
+constexpr int kDockLayoutCount = 4;
+extern const char* const kDockLayoutNames[kDockLayoutCount];
+// Перестраивает dockspace dock_id размера size: side_window (если есть) справа на 30 %,
+// окна wins — равными ячейками по пресету preset.
+void apply_dock_layout(ImGuiID dock_id, ImVec2 size, const char* side_window,
+                       const std::vector<ImGuiWindow*>& wins, int preset);
+// Запрошенный кнопкой Layout пресет для вкладки mode (AppModel::AppMode); -1 — нет. Забирает запрос.
+int dock_layout_request_take(int mode);
+}
