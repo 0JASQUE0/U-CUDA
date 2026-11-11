@@ -56,5 +56,20 @@ void draw_legend(ImDrawList* dl,
 // прозрачностью рулят слайдеры Alpha у графика. Вызывать каждый кадр; открывает его вызывающий
 // (ImGui::OpenPopup(pop_id), target — подпись серии). current — нынешний цвет серии. Правка пишет
 // overrides[target] (ключ — подпись, а не индекс: серии сдвигаются).
-void legend_color_popup(const char* pop_id, const std::string& target,
+// Палитра серий по умолчанию (IC 1, IC 2, ... без своего цвета). Выбирается в Settings,
+// хранится в _app_config.json (series_palette); те же ряды — в меню цвета легенды.
+enum SeriesPaletteId { kSeriesPaletteGem12 = 0, kSeriesPaletteGlow12, kSeriesPaletteDeep, kSeriesPaletteCount };
+const char* series_palette_name(int palette);
+void        set_series_palette(int palette);   // вне диапазона -> gem12
+int         series_palette();
+int         series_palette_size(int palette);
+ImVec4      series_palette_color(int palette, int index);   // index по кругу палитры
+ImVec4      default_series_color(int index);                // из палитры series_palette()
+
+// Недавние цвета меню легенды (новые первыми, до 8). Общие на всё приложение, хранятся
+// в imgui.ini (секция [UcudaPlot][#RecentColours], см. plot_axis.cpp).
+std::vector<ImVec4>& legend_recent_colors();
+// Меню цвета серии: пипетка, пресеты (MATLAB gem / glow, основные), недавние.
+// true — выбран «Apply to all plots of this tab» (разнести цвет target: plot_series_color_spread).
+bool legend_color_popup(const char* pop_id, const std::string& target,
                         std::map<std::string, ImVec4>& overrides, const ImVec4& current);

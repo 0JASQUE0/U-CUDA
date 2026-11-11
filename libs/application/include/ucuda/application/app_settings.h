@@ -102,6 +102,9 @@ struct AppSettings {
     // Зеркалит AppConfig::tick_precision; при изменении в Settings вызывается
     // set_tick_precision() из plot_axis.h, чтобы fmt_tick() сразу подхватил.
     int tick_precision = 4;
+    // Палитра серий по умолчанию (SeriesPaletteId: 0 gem12, 1 glow12, 2 ImPlot Deep).
+    // Зеркалит AppConfig::series_palette; при изменении — set_series_palette() (plot_legend.h).
+    int series_palette = 0;
 
     // ImGui color theme. true = Dark (default), false = Light. Применяется
     // через apply_ui_scale в app_main.cpp: на каждый scale-apply сначала

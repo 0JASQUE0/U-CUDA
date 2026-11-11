@@ -45,7 +45,7 @@ struct Dft1DPlotWindow {
 // номера обязаны быть максимально далеки друг от друга. Градиентные карты
 // хитмап (HeatmapColormap) для этого не годятся — они по построению непрерывны,
 // и соседние кривые получают соседние оттенки.
-//   kOrderPaletteApp      — ImPlot::GetColormapColor, как у фазовых портретов;
+//   kOrderPaletteApp      — ic_base_color (MATLAB gem12), как у фазовых портретов;
 //   kOrderPaletteContrast — 12 насыщенных тонов средней светлоты, читаются и на
 //                           светлой, и на тёмной теме плота;
 //   kOrderPaletteOkabe    — Okabe-Ito: 8 цветов, различимых при всех трёх
