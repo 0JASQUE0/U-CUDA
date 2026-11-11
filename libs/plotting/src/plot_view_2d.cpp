@@ -1,4 +1,4 @@
-﻿#include "ucuda/plotting/plot_view_2d.h"
+#include "ucuda/plotting/plot_view_2d.h"
 #include "ucuda/domain/grid_snap.h"
 #include "ucuda/domain/num_parse.h"   // parse_num_checked — поля min/max осей
 #include <algorithm>
@@ -209,6 +209,13 @@ void Plot2DView::render(PlotRenderer& renderer,
     const std::vector<bool>& global_visible,
     bool fit_request)
 {
+    // Вид окна (Axes display, Toolbar) — общий на окно и сохраняется в imgui.ini (plot_axis.h).
+    // Ссылка берётся здесь: в попапе меню текущим окном будет уже сам попап.
+    PlotWindowPrefs& wp = plot_window_prefs_current();
+    const bool show_x_label = wp.x_label, show_x_ticks = wp.x_ticks;
+    const bool show_y_label = wp.y_label, show_y_ticks = wp.y_ticks;
+    const bool legend_on = show_legend && wp.legend;
+
     // 1. Пересобираем кэш, если сменилось поколение данных ИЛИ режим осей. Лог-ось переносит саму
     // координату: в VBO уходит log10, потому что GL рисует вершины аффинной make_ortho_mvp, а
     // логарифм не аффинен (см. XS/XW и YS/YW ниже). Флаги обязаны входить в условие перезаливки —
@@ -303,8 +310,8 @@ void Plot2DView::render(PlotRenderer& renderer,
     // если он задан для этой подписи, поверх цвета от caller'а. Alpha всегда
     // caller'ская — за неё отвечают слайдеры Alpha в Phase/TimeDomain/Bif.
     auto series_color = [&](const PlotSeriesInput& s) -> ImVec4 {
-        auto it = series_color_override.find(s.label);
-        if (it == series_color_override.end()) return s.color;
+        auto it = wp.series_colors.find(s.label);
+        if (it == wp.series_colors.end()) return s.color;
         return ImVec4(it->second.x, it->second.y, it->second.z, s.color.w);
         };
 
@@ -404,6 +411,16 @@ void Plot2DView::render(PlotRenderer& renderer,
     float margin_left, margin_top, margin_right, margin_bottom;
     plot_2d_margins_for(y_axis, y_axis.name.empty() ? "y" : y_axis.name.c_str(),
                         margin_left, margin_top, margin_right, margin_bottom);
+    // Скрытые в меню подписи и числа осей не держат места: график растёт на освободившееся.
+    // Верх и право держали половину крайней подписи Y / X — без чисел хватает воздуха.
+    if (!show_y_ticks || !show_y_label) {
+        margin_left = show_y_ticks
+            ? plot_y_axis_margin(y_axis, "")
+            : plot_left_margin_for_width(0.0f, show_y_label);
+    }
+    margin_bottom = plot_bottom_margin_for(show_x_ticks, show_x_label);
+    if (!show_y_ticks) margin_top   = 8.0f;
+    if (!show_x_ticks) margin_right = 8.0f;
     last_margin_left   = margin_left;
     last_margin_top    = margin_top;
     last_margin_right  = margin_right;
@@ -541,7 +558,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     // (imdraw_lines-путь ниже) не перекроют её.
     std::vector<LegendEntry> legend_entries;
     LegendRightClick legend_rclick;   // ПКМ по легенде: квадрат -> цвет, мимо -> меню плота
-    if (show_legend) {
+    if (legend_on) {
         legend_entries.reserve(series_in.size());
         for (const auto& s : series_in) {
             LegendEntry e{ s.label, series_color(s) };
@@ -593,8 +610,9 @@ void Plot2DView::render(PlotRenderer& renderer,
     double snap_axis_hi = std::max(snap_x_min, snap_x_max);
     int    snap_axis_n  = (snap_x_to_grid && snap_x_n > 1) ? snap_x_n : 0;
     draw_axis_x_grid(dl, x_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text,
-                     snap_axis_lo, snap_axis_hi, snap_axis_n);
-    draw_axis_y_grid(dl, y_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text);
+                     snap_axis_lo, snap_axis_hi, snap_axis_n, show_x_ticks);
+    draw_axis_y_grid(dl, y_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text,
+                     show_y_ticks);
 
     double vrx = sx1 - sx0;
     double vry = sy1 - sy0;
@@ -796,7 +814,7 @@ void Plot2DView::render(PlotRenderer& renderer,
     // путь custom line style). InvisibleButton'ы уже поданы в Interact-проходе
     // выше — здесь только dl-> отрисовка. hover highlight через
     // IsMouseHoveringRect (в отличие от IsItemHovered из Interact-прохода).
-    if (show_legend) {
+    if (legend_on) {
         // &legend_rclick и здесь: в Draw-проходе клики не ловятся, указатель
         // служит признаком «меню цвета есть» — по нему рисуется рамка-подсказка
         // на наведении цветного квадрата (см. plot_legend.h).
@@ -811,11 +829,14 @@ void Plot2DView::render(PlotRenderer& renderer,
         const char* yl = y_axis.name.empty() ? "y" : y_axis.name.c_str();
         float font_h = plot_text_line_height();
 
-        // X label: pos.y = низ плота + 2 (тики) + font_h (числа тиков) + 6 (зазор)
-        ImVec2 xs = plot_text_size(xl);
-        float x_label_y = img_pos.y + plot_h + 2.0f + font_h + 6.0f;
-        plot_text(dl, ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y),
-                  col_text, xl);
+        // X label: pos.y = низ плота + 2 (тики) + font_h (числа тиков) + 6 (зазор);
+        // без чисел — сразу под плотом (см. plot_bottom_margin_for).
+        if (show_x_label) {
+            ImVec2 xs = plot_text_size(xl);
+            float x_label_y = img_pos.y + plot_h + (show_x_ticks ? 2.0f + font_h + 6.0f : 4.0f);
+            plot_text(dl, ImVec2(img_pos.x + (plot_w - xs.x) * 0.5f, x_label_y),
+                      col_text, xl);
+        }
 
         // Y label повёрнут на -90° (читается снизу вверх, mathematical convention): рендерим текст
         // горизонтально через AddText, затем поворачиваем все добавленные вершины вокруг pivot. На
@@ -824,10 +845,12 @@ void Plot2DView::render(PlotRenderer& renderer,
         // произвольных углах. X-позиция считается ДИНАМИЧЕСКИ, за самыми широкими Y-тиками, иначе
         // подпись наезжает на длинные числа (например "0.09177").
         ImVec2 ts = plot_text_size(yl);
-        if (ts.x > 0.0f && ts.y > 0.0f) {
+        if (show_y_label && ts.x > 0.0f && ts.y > 0.0f) {
             float max_tick_w = 0.0f;
             double vry = ey1 - ey0;
-            if (ylog && std::abs(vry) >= 1e-30) {
+            if (!show_y_ticks) {
+                // Чисел нет — имя оси встаёт к плоту (max_tick_w = 0).
+            } else if (ylog && std::abs(vry) >= 1e-30) {
                 // Лог-ось подписана главными тиками log_axis_ticks (draw_axis_y_grid).
                 for (const LogAxisTick& t : log_axis_ticks(std::min(ey0, ey1), std::max(ey0, ey1),
                                                            (float)plot_h, false))
@@ -847,7 +870,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             // Pivot — позиция левого-верхнего угла текста ДО поворота, одновременно центр вращения.
             // После -90° (dx, dy) ↦ (dy, -dx): по X текст занимает [pivot.x, pivot.x + ts.y], по Y —
             // [pivot.y - ts.x, pivot.y]. Снапим к целым пикселям — критично для чёткости глифов.
-            float pivot_x = std::floor(img_pos.x - max_tick_w - 8.0f - ts.y);
+            float pivot_x = std::floor(img_pos.x - max_tick_w - (show_y_ticks ? 8.0f : 6.0f) - ts.y);
             float pivot_y = std::floor(img_pos.y + (plot_h + ts.x) * 0.5f);
             ImVec2 pivot(pivot_x, pivot_y);
 
@@ -1162,7 +1185,9 @@ void Plot2DView::render(PlotRenderer& renderer,
         if (ImGui::MenuItem("Auto fit X"))      fit_x();
         if (ImGui::MenuItem("Auto fit Y"))      fit_y();
         ImGui::Separator();
-        ImGui::MenuItem("Show legend", nullptr, &show_legend);
+        // Легенда — галка окна (wp.legend), если вызывающий её вообще не выключил (show_legend).
+        plot_show_menu(wp, (show_legend ? PlotShowLegend : 0u) | PlotShowAxes2D |
+                           (external_colorbar ? PlotShowColorbar : 0u));
         ImGui::MenuItem("Lock X axis", nullptr, &x_axis.lock);
         ImGui::MenuItem("Lock Y axis", nullptr, &y_axis.lock);
         ImGui::Separator();
@@ -1253,7 +1278,10 @@ void Plot2DView::render(PlotRenderer& renderer,
         ImVec4 cur(1, 1, 1, 1);
         for (const PlotSeriesInput& s : series_in)
             if (s.label == legend_color_target_) { cur = series_color(s); break; }
-        legend_color_popup(pop_id, legend_color_target_, series_color_override, cur);
+        // Цвета — общие на окно и сохраняются в imgui.ini (PlotWindowPrefs::series_colors).
+        const std::map<std::string, ImVec4> before = wp.series_colors;
+        legend_color_popup(pop_id, legend_color_target_, wp.series_colors, cur);
+        plot_series_colors_changed(before, wp.series_colors);
     }
     // Clamp view to data bounds — after ALL interactions this frame (wheel/pan
     // on plot & axes, rect-zoom, and popup min/max InputText). Mirrors the

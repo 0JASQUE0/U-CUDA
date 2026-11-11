@@ -79,36 +79,71 @@ bool draw_parametric_window_setup_row(AppModel& model, ParametricPlotWindow& win
 
     if (ImGui::Button("Members...")) ImGui::OpenPopup("edit_plot_window_members");
     if (ImGui::BeginPopup("edit_plot_window_members")) {
-        auto items = parametric_matching_items(model, win.kind, win.mode_2d);
-        if (items.empty()) {
-            ImGui::TextDisabled("(none available)");
-        } else if (win.mode_2d || win.colored_1d) {
-            // 2D / Colored 1D show heatmaps — single-select (radio).
-            for (const auto& item : items) {
-                bool sel = !win.members.empty() && win.members[0] == item.index;
-                std::string lbl = item.label + "##mem" + std::to_string(item.index);
-                if (ImGui::RadioButton(lbl.c_str(), sel)) {
-                    win.members.assign(1, item.index);
-                    model.parametric_plot_windows_dirty = true;
-                }
-            }
-        } else {
-            for (const auto& item : items) {
-                bool has = std::find(win.members.begin(), win.members.end(), item.index) != win.members.end();
-                std::string lbl = item.label + "##mem" + std::to_string(item.index);
-                if (ImGui::Checkbox(lbl.c_str(), &has)) {
-                    if (has) win.members.push_back(item.index);
-                    else win.members.erase(std::remove(win.members.begin(), win.members.end(), item.index), win.members.end());
-                    model.parametric_plot_windows_dirty = true;
-                }
-            }
-        }
+        draw_parametric_members_list(model, win);
         ImGui::EndPopup();
     }
     ImGui::SameLine();
     if (ImGui::SmallButton("X")) close_clicked = true;
 
     return close_clicked;
+}
+}
+
+namespace ucuda::ui_detail {
+void draw_parametric_members_list(AppModel& model, ParametricPlotWindow& win) {
+    auto items = parametric_matching_items(model, win.kind, win.mode_2d);
+    if (items.empty()) {
+        ImGui::TextDisabled("(none available)");
+    } else if (win.mode_2d || win.colored_1d) {
+        // 2D / Colored 1D show heatmaps — single-select (radio).
+        for (const auto& item : items) {
+            bool sel = !win.members.empty() && win.members[0] == item.index;
+            std::string lbl = item.label + "##mem" + std::to_string(item.index);
+            if (ImGui::RadioButton(lbl.c_str(), sel)) {
+                win.members.assign(1, item.index);
+                model.parametric_plot_windows_dirty = true;
+            }
+        }
+    } else {
+        for (const auto& item : items) {
+            bool has = std::find(win.members.begin(), win.members.end(), item.index) != win.members.end();
+            std::string lbl = item.label + "##mem" + std::to_string(item.index);
+            if (ImGui::Checkbox(lbl.c_str(), &has)) {
+                if (has) win.members.push_back(item.index);
+                else win.members.erase(std::remove(win.members.begin(), win.members.end(), item.index), win.members.end());
+                model.parametric_plot_windows_dirty = true;
+            }
+        }
+    }
+}
+}
+
+namespace ucuda::ui_detail {
+// Те же подпись / тип / члены, что в строке draw_parametric_window_setup_row, но столбиком —
+// для меню окна графика (вверху меню тулбара карты или под своей стрелкой). Закрывается окно
+// крестиком в заголовке, поэтому X здесь нет.
+static void draw_parametric_window_menu(AppModel& model, ParametricPlotWindow& win) {
+    ImGui::SeparatorText("Window");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+    if (InputTextStr("Label##wlabel_m", win.label)) {
+        win.label_is_manual = !win.label.empty();   // empty → back to auto
+        model.parametric_plot_windows_dirty = true;
+    }
+    int t = parametric_type_index_of(win.kind, win.mode_2d);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+    if (ImGui::Combo("Type##wtype_m", &t, kParametricTypeNames, IM_ARRAYSIZE(kParametricTypeNames))) {
+        ParametricPlotWindow::Kind new_kind; bool new_2d;
+        parametric_type_from_index(t, new_kind, new_2d);
+        if (new_kind != win.kind || new_2d != win.mode_2d) {   // как в строке настроек
+            win.kind = new_kind;
+            win.mode_2d = new_2d;
+            win.colored_1d = false;
+            win.members.clear();
+            model.parametric_plot_windows_dirty = true;
+        }
+    }
+    ImGui::SeparatorText("Members");
+    draw_parametric_members_list(model, win);
 }
 }
 
@@ -152,14 +187,29 @@ void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, const Gui
         float ox = 60.0f + (float)(i % 5) * 35.0f, oy = 80.0f + (float)(i % 5) * 35.0f;
         ImGui::SetNextWindowPos(ImVec2(ox, oy), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(700, 550), ImGuiCond_FirstUseEver);
-        bool row_close = false;
         if (ImGui::Begin(title.c_str(), &open)) {
             ImGui::PushID(win.id);
-            // Duplicate of the settings-panel row (draw_parametric_controls) so
-            // the chart type / members / label can be changed without leaving
-            // the window. Same helper, same PushID(win.id) scope.
-            row_close = draw_parametric_window_setup_row(model, win);
-            ImGui::Separator();
+            // Подпись / тип / члены окна — меню, а не строка над графиком: у карты (2D,
+            // Colored 1D) это верх меню её тулбара (draw_heatmap_toolbar забирает шапку), у
+            // графиков без тулбара — своя стрелка. Есть ли тулбар, узнаём по прошлому кадру:
+            // шапка отдаётся всегда, и если тулбар её не взял, со следующего кадра рисуется
+            // своя стрелка.
+            auto& head_in_toolbar = ui_resource<std::map<int, bool>, 3023>();
+            auto hit = head_in_toolbar.find(win.id);
+            const bool expect_toolbar = hit != head_in_toolbar.end() ? hit->second
+                                                                     : (win.mode_2d || win.colored_1d);
+            auto head = [&model, &win]() { draw_parametric_window_menu(model, win); };
+            if (!expect_toolbar && !plot_toolbar_hidden()) {
+                if (ImGui::ArrowButton("##pwin_menu_open", ImGuiDir_Down))
+                    ImGui::OpenPopup("##pwin_menu");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Label, type and members of this window");
+                constrain_popup_height_below_item();
+                if (ImGui::BeginPopup("##pwin_menu")) {
+                    head();
+                    ImGui::EndPopup();
+                }
+            }
+            set_heatmap_toolbar_head(head);
             switch (win.kind) {
             case ParametricPlotWindow::Kind::Bifurcation:
                 draw_bifurcation_plot(model, lib, cb, win, *renderer, *view, hm_map);
@@ -174,10 +224,13 @@ void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, const Gui
                 draw_metrics_plot(model, lib, cb, win, *renderer, *view, hm_map);
                 break;
             }
+            // Скрытый тулбар шапку не берёт — это не повод переводить окно на свою стрелку.
+            const bool head_used = take_heatmap_toolbar_head_used();
+            if (!plot_toolbar_hidden()) head_in_toolbar[win.id] = head_used;
             ImGui::PopID();
         }
         ImGui::End();
-        if (!open || row_close) to_remove = i;
+        if (!open) to_remove = i;
     }
     if (to_remove >= 0) {
         int id = model.parametric_plot_windows[to_remove].id;

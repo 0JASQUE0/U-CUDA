@@ -52,9 +52,9 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
             // Controls-панели рядом с прочими compute-параметрами.
             topts.extras_tail = [&]() {
                 ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-                ImGui::SliderFloat("Line width", &c.line_width, 0.1f, 5.0f, "%.2f");
+                slider_float_typed("Line width", &c.line_width, 0.1f, 5.0f, "%.2f");
                 ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-                ImGui::SliderFloat("Alpha", &c.alpha, 0.0f, 1.0f, "%.2f");
+                slider_float_typed("Alpha", &c.alpha, 0.0f, 1.0f, "%.2f");
             };
         }
         draw_heatmap_toolbar(hv, topts);
@@ -121,7 +121,9 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         // копия с 5 равноотстоящими тиками и продублированными константами.
         const std::vector<ColorbarTick> cb_ticks =
             colorbar_ticks((float)cmin, (float)cmax, /*n_discrete*/ 0);
-        const float cb_total = colorbar_total_width(cb_ticks);
+        // Колорбар скрыт в меню графика (Show → Colorbar): место под него не держим.
+        const bool show_cb = plot_window_prefs_current().colorbar;
+        const float cb_total = show_cb ? colorbar_total_width(cb_ticks) : 0.0f;
 
         ImVec2 plot_avail(std::max(64.0f, avail.x - cb_total), avail.y);
         // Колорбар справа от плота — в «Copy image» он должен попасть вместе с ним.
@@ -149,6 +151,7 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
             v3.z_name = var_name(vz);
             v3.line_thickness_px = c.line_width;
             v3.screenshot_extra_right = shot_extra;
+            v3.external_colorbar = true;
 
             // Смена осей — новый bbox: перезаливка (токен) и автоподгонка.
             auto& last_axes3 = ui_resource<std::map<unsigned, int>, 3009>();
@@ -192,6 +195,7 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
                       c.data_generation * 1000000 + axes_key, s3, vis, vis, fit);
             v3.popup_extras = nullptr;
 
+            if (show_cb)
             draw_colorbar(ImGui::GetWindowDrawList(),
                           ImVec2(v3.last_img_pos.x + v3.last_img_size.x + kColorbarGap,
                                  v3.last_img_pos.y),
@@ -219,6 +223,7 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         v.y_axis.name = var_name(vy);
         v.line_thickness_px = c.line_width;
         v.screenshot_extra_right = shot_extra;
+        v.external_colorbar = true;
 
         // Если поменялись axes — форсим (a) fit, чтобы view нашёл новый bbox;
         // (b) re-upload GPU-кэша точек, иначе series_cache_.bbox() даст старый
@@ -325,6 +330,7 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
         const float margin_bottom = v.last_margin_bottom;
         const float plot_w = std::max(64.0f, plot_avail.x - margin_left - margin_right);
         const float plot_h = std::max(64.0f, plot_avail.y - margin_top  - margin_bottom);
+        if (show_cb)
         draw_colorbar(ImGui::GetWindowDrawList(),
                       ImVec2(origin.x + margin_left + plot_w + kColorbarGap,
                              origin.y + margin_top),

@@ -105,6 +105,8 @@ struct Projection {
     float point_size      = 2.0f;
     // Альфа точек при Custom line style (своя, у линии — alpha выше).
     float point_alpha     = 1.0f;
+    // Форма маркера (PointMarker из plotting): -1 — прежний сплошной GL-пиксель.
+    int   point_marker    = -1;
     // Step size: ось Y в log10 (Plot2DView лог-оси Y не умеет — в буфер идёт log10 h).
     bool  y_log           = false;
 

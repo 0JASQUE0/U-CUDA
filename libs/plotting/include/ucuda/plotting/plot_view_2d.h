@@ -107,13 +107,11 @@ public:
     // виду (Phase, TimeDomain, Phase 3D, пики), и про остальные забывали:
     // Alpha у точек бифуркационной диаграммы гасила ярлыки в легенде.
 
-    // Пользовательские цвета серий: ПКМ по квадрату легенды -> legend_color_popup.
-    // Ключ — PlotSeriesInput::label, а НЕ индекс: серии сдвигаются, когда в
-    // time domain прячут переменную или в окно параметрики добавляют диаграмму,
-    // и цвет обязан остаться на СВОЕЙ кривой. Пустая карта = стандартный
-    // порядок палитры (ic_base_color), т.е. по умолчанию не меняется ничего.
-    // Alpha сюда не входит — ею рулят слайдеры Alpha у caller'а.
-    std::map<std::string, ImVec4> series_color_override;
+    // Пользовательские цвета серий (ПКМ по квадрату легенды -> legend_color_popup) живут в
+    // PlotWindowPrefs::series_colors окна (plot_axis.h): общие на окно и сохраняются в imgui.ini.
+    // Ключ — PlotSeriesInput::label, а НЕ индекс: серии сдвигаются, когда в time domain прячут
+    // переменную или в окно параметрики добавляют диаграмму, и цвет обязан остаться на СВОЕЙ
+    // кривой. Alpha сюда не входит — ею рулят слайдеры Alpha у caller'а.
 
     bool view_valid = false;
     int  series_generation = -1;
@@ -172,6 +170,9 @@ public:
     // интерфейс; цена — данные оказываются под сеткой, как и у обычного GL-пути.
     // Ставится для Custom line style фазовых проекций (draw_proj_line_style).
     bool gpu_thick_lines = false;
+    // Рядом с плотом колорбар рисует вызывающий (FastSync): в меню «Show» есть пункт Colorbar,
+    // а вызывающий сам читает plot_window_prefs_current().colorbar и не держит под него место.
+    bool external_colorbar = false;
 
     // Snap X-координаты курсора к узлам параметрической сетки (для 1D-графиков
     // Bif/LLE/LS, где значение считалось в N узлах на [snap_x_min, snap_x_max]).

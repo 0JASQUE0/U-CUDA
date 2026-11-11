@@ -155,6 +155,29 @@ bool draw_style_toolbar(const char* label, const char* id_suffix,
 
 void draw_proj_line_style(Projection& pr, const char* sfx, const char* points_tip);
 
+// SliderFloat для меню стиля (толщина, альфа, размер точек): по ПКМ, как и по Ctrl+клику,
+// превращается в поле ввода числа; введённое прижимается к [lo, hi].
+bool slider_float_typed(const char* label, float* v, float lo, float hi, const char* fmt);
+
+// Панель стиля проекции (2D и 3D): флажки «Custom line style» и «Points» и одна стрелка с
+// общим меню — толщина и альфа линии, размер, альфа и форма маркеров точек. Только UI.
+void draw_proj_style_controls(Projection& pr, const char* sfx, const char* points_tip);
+
+// Пока жив — Ctrl+Shift+клик по «Custom line style» / «Points» в draw_proj_style_controls
+// применяется ко всем проекциям group (окна проекций одной вкладки).
+struct ProjStyleGroupScope {
+    explicit ProjStyleGroupScope(std::vector<Projection>* group);
+    ~ProjStyleGroupScope();
+    ProjStyleGroupScope(const ProjStyleGroupScope&) = delete;
+    ProjStyleGroupScope& operator=(const ProjStyleGroupScope&) = delete;
+private:
+    std::vector<Projection>* prev_;
+};
+
+// Альфа точек для вида: своя — при Custom line style или если её увели от 1, иначе -1
+// (альфа серии, прежний путь).
+float proj_point_alpha(const Projection& pr);
+
 
 bool draw_point_style_toolbar(BifurcationDiagramConfig& bd, const char* id_suffix);
 
@@ -348,6 +371,18 @@ struct HeatmapToolbarOpts {
 
 
 bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o = {});
+
+// «Шапка» меню тулбара карты от окна-владельца (подпись, тип, члены окна графика): окно
+// ставит её перед отрисовкой графика, первый draw_heatmap_toolbar рисует её вверху своего
+// меню и забирает. take_heatmap_toolbar_head_used() после графика: была ли она взята
+// (сбрасывает шапку, чтобы она не утекла в чужое окно).
+void set_heatmap_toolbar_head(std::function<void()> head);
+
+// Звать прямо перед BeginPopup меню, открываемого кнопкой (последний item): высота попапа
+// ограничивается местом от кнопки до низа рабочей области окна-вьюпорта, и длинное меню
+// получает полосу прокрутки, а не уходит за край экрана.
+void constrain_popup_height_below_item();
+bool take_heatmap_toolbar_head_used();
 
 
 void draw_ls_exponent_picker(HeatmapView& hv, int n_exponents,

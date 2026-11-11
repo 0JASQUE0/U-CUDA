@@ -262,8 +262,9 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
     // heatmap напрямую, минуя Plot windows → Type → Members, держа diagram-флаг синхронно с
     // window-флагом. Если членов больше одного (overlay), оставляем первого как фокусного —
     // heatmap-режимы single-member, как и при переключении через Type combo.
-    // Только для Bifurcation 1D: поверх настоящего 2D Colored 1D смысла не имеет.
-    if (!win.mode_2d) {
+    // Только для Bifurcation 1D: поверх настоящего 2D Colored 1D смысла не имеет. Часть тулбара:
+    // скрытый в меню диаграммы (Show → Toolbar) прячет и его.
+    if (!win.mode_2d && !plot_toolbar_hidden()) {
         bool c1d = win.colored_1d;
         if (ImGui::Checkbox("Colored 1D diagram##bdtoolbar", &c1d)) {
             win.colored_1d = c1d;

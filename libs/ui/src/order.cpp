@@ -226,7 +226,11 @@ void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
                                      OrderConfig& c, int mi) {
     OrderAnalysisSession& s = model.order_session;
     const StabilityResult& r = c.stab_result;
+    // Строки над картой — тулбар: скрытый в её меню (Show → Toolbar) прячет их все, карта
+    // занимает освободившуюся высоту. Настройки вью ниже применяются независимо от этого.
+    const bool bar = !plot_toolbar_hidden();
 
+    if (bar) {
     ImGui::TextDisabled("show:"); ImGui::SameLine();
     ImGui::RadioButton("1 - rho##stabview", &win.stab_view, 1); ImGui::SameLine();
     ImGui::RadioButton("rho##stabview", &win.stab_view, 0); ImGui::SameLine();
@@ -262,11 +266,13 @@ void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
             "preference region says it also still resembles the exact one.\n"
             "For A-stable schemes the difference is dramatic: the whole left\n"
             "half-plane is stable, only a small part of it is preferred.");
+    }   // bar
     // Цвета слоя живут на окне (сохраняются вместе с ним) и отдаются вью каждый
     // кадр; перезаливку текстуры при смене цвета вью делает сама.
     hv.overlay_fill_color = win.stab_pref_fill;
     hv.overlay_edge_color = win.stab_pref_edge;
     hv.overlay_edge_width = win.stab_pref_edge_w;
+    if (bar) {
     ImGui::SameLine();
     // Образец — контур поверх заливки, как область и выглядит на карте.
     if (ImGui::ColorButton("##stabpref_swatch", ImGui::ColorConvertU32ToFloat4(win.stab_pref_edge),
@@ -326,6 +332,7 @@ void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
             "\n"
             "While this is on, the colormap chosen in the toolbar is not used\n"
             "(it is kept and comes back when you turn this off).");
+    }   // bar
     // Раскраска отдаётся вью каждый кадр: HeatmapView общий для всех видов
     // окна, и снятая галочка обязана вернуть пользовательскую палитру сразу.
     // Серая шкала — slanCM #28 "gray", чистое чёрное -> белое.
@@ -347,6 +354,7 @@ void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
     for (size_t i = 0; i < r.rho.size(); ++i)
         if (stability_cell_preferred(r, i, pref_tol)) { pref_mask[i] = 1; ++n_pref; }
 
+    if (bar) {
     ImGui::SameLine();
     ImGui::TextDisabled("|"); ImGui::SameLine();
     const int n_cells = r.n_ok + r.n_bad;
@@ -360,6 +368,7 @@ void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
                               "returned nan/inf.");
     }
     ImGui::TextDisabled("k = %g, r = %g, h = %g; the boundary is rho = 1", r.k, r.r, r.h);
+    }   // bar
 
     {
         HeatmapToolbarOpts topts;
@@ -477,11 +486,13 @@ void draw_order_map_window(AppModel& model, OrderPlotWindow& win,
     }
     const OrderResult& r = c.result;
 
-    ImGui::Checkbox("show error", &win.map_error);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Off - the map of the order p. On - log10 E1.");
-    ImGui::SameLine();
-    draw_order_status_line(c.label.c_str(), r.n_ok, r.n_diverged, r.n_floor, r.n_nocontract);
+    if (!plot_toolbar_hidden()) {   // тулбар карты (Show → Toolbar)
+        ImGui::Checkbox("show error", &win.map_error);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Off - the map of the order p. On - log10 E1.");
+        ImGui::SameLine();
+        draw_order_status_line(c.label.c_str(), r.n_ok, r.n_diverged, r.n_floor, r.n_nocontract);
+    }
 
     if (!c.last_run_ok || r.p.empty() || r.n_pts_y <= 1) {
         ImGui::TextDisabled("No data yet. Press Run.");
@@ -575,7 +586,9 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         if (mi >= 0 && mi < (int)s.configs.size())
             any_ad |= s.configs[(size_t)mi].adaptive.enabled || s.configs[(size_t)mi].perf_result.adaptive;
 
-    // ---- Тулбар ----
+    // ---- Тулбар ---- (скрывается в меню графика: Show → Toolbar)
+    const bool bar = !plot_toolbar_hidden();
+    if (bar) {
     ImGui::Checkbox("log X", &win.x_log);
     if (!is_p) {
         ImGui::SameLine();
@@ -641,34 +654,39 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
             ImGui::SetTooltip("Accepted steps per run (the rejected ones are in the node tooltip).");
         }
     }
+    }   // bar
 
     // Стиль кривых — тот же тулбар-с-попапом, что у точек бифуркационных
     // диаграмм и у Node Series: выключенный режим даёт прежний вид.
-    ImGui::SameLine();
-    ImGui::TextDisabled("|");
-    ImGui::SameLine();
+    if (bar) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+    }
     {
         const std::string sfx = "ordplot" + std::to_string(win.id);
         // Палитра стоит В СТРОКЕ, а не в попапе: попап открывается только при
         // включённом custom_line_style, а цвет кривых нужен и без него.
         if (win.palette < 0 || win.palette > kOrderPaletteOkabe)
             win.palette = kOrderPaletteContrast;
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
-        ImGui::Combo(("##pal" + sfx).c_str(), &win.palette,
-                     kOrderPaletteNames, 3);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("The colour codes the TAB, the marker shape codes the curve inside it\n"
-                              "(min / avg / max). Both extra palettes are qualitative: adjacent\n"
-                              "numbers are deliberately far apart in hue, unlike the heatmap maps.");
-        ImGui::SameLine();
+        if (bar) {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+            ImGui::Combo(("##pal" + sfx).c_str(), &win.palette,
+                         kOrderPaletteNames, 3);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The colour codes the TAB, the marker shape codes the curve inside it\n"
+                                  "(min / avg / max). Both extra palettes are qualitative: adjacent\n"
+                                  "numbers are deliberately far apart in hue, unlike the heatmap maps.");
+            ImGui::SameLine();
+        }
         draw_style_toolbar("Custom line style", sfx.c_str(), win.custom_line_style,
             [&win, &sfx]() {
                 bool ch = false;
                 ImGui::SetNextItemWidth(150);
-                ch |= ImGui::SliderFloat(("Line width##" + sfx).c_str(), &win.line_width,
+                ch |= slider_float_typed(("Line width##" + sfx).c_str(), &win.line_width,
                                          0.5f, 8.0f, "%.1f");
                 ImGui::SetNextItemWidth(150);
-                ch |= ImGui::SliderFloat(("Alpha##" + sfx).c_str(), &win.line_alpha,
+                ch |= slider_float_typed(("Alpha##" + sfx).c_str(), &win.line_alpha,
                                          0.05f, 1.0f, "%.2f");
                 ch |= ImGui::Checkbox(("Points instead of lines##" + sfx).c_str(), &win.points_mode);
                 if (ImGui::IsItemHovered())
@@ -682,8 +700,8 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                     ch |= ImGui::Combo(("Marker##" + sfx).c_str(), &win.point_marker,
                                        kPointMarkerNames, kPointMarkerCount);
                     ImGui::SetNextItemWidth(150);
-                    ch |= ImGui::SliderFloat(("Point size##" + sfx).c_str(), &win.point_size,
-                                             0.5f, 12.0f, "%.1f");
+                    ch |= slider_float_typed(("Point size##" + sfx).c_str(), &win.point_size,
+                                             0.5f, 25.0f, "%.1f");
                 } else {
                     ch |= ImGui::Checkbox(("Mark data points##" + sfx).c_str(), &win.node_markers);
                     if (ImGui::IsItemHovered())
@@ -691,8 +709,8 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                                           "neither the step nor the time itself lies on the axes,\n"
                                           "and the tooltip is attached to the marker.");
                     ImGui::SetNextItemWidth(150);
-                    ch |= ImGui::SliderFloat(("Marker size##" + sfx).c_str(), &win.point_size,
-                                             1.0f, 12.0f, "%.1f");
+                    ch |= slider_float_typed(("Marker size##" + sfx).c_str(), &win.point_size,
+                                             1.0f, 25.0f, "%.1f");
                 }
                 ch |= ImGui::Checkbox(("Marker shape per curve##" + sfx).c_str(), &win.vary_markers);
                 if (ImGui::IsItemHovered())
@@ -874,8 +892,8 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         }
     }
 
-    // Сводка по статусам — по строке на член окна.
-    for (size_t j = 0; j < win.members.size(); ++j) {
+    // Сводка по статусам — по строке на член окна. Часть тулбара: скрытый прячет и её.
+    for (size_t j = 0; bar && j < win.members.size(); ++j) {
         const int mi = win.members[j];
         if (mi < 0 || mi >= (int)s.configs.size()) continue;
         const OrderConfig& c = s.configs[(size_t)mi];

@@ -1,5 +1,7 @@
 ﻿#include "ucuda/plotting/plot_axis.h"
 #include "ucuda/plotting/digit_input.h"
+#include "imgui_internal.h"   // ImGuiWindow / ImGuiSettingsHandler (настройки окон в imgui.ini)
+#include <map>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -699,6 +701,7 @@ ImVec2 plot_text_size(const char* s) {
 
 void plot_text(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* s) {
     if (!dl || !s || !*s) return;
+    if ((col & IM_COL32_A_MASK) == 0) return;   // скрытые подписи (draw_axis_*_grid)
     if (!g_math_on) {
         if (g_plot_font_scale == 1.0f) { dl->AddText(pos, col, s); return; }
         dl->AddText(ImGui::GetFont(), plot_font_px(),
@@ -761,6 +764,8 @@ void math_formula_draw(ImDrawList* dl, ImVec2 pos, ImU32 col, const char* s, flo
 }
 
 float plot_left_margin_for_width(float max_tick_w, bool has_axis_name) {
+    // Ни цифр, ни имени (скрыты в меню плота): только воздух у края, график шире.
+    if (max_tick_w <= 0.0f && !has_axis_name) return 8.0f;
     // 4 — зазор тик/плот (draw_axis_y_grid), 6 — тик/имя оси, высота строки —
     // само повёрнутое имя, ещё 8 — воздух у левого края блока.
     float m = max_tick_w + (has_axis_name ? 4.0f + 6.0f + plot_text_line_height() + 8.0f
@@ -773,6 +778,158 @@ float plot_bottom_margin() {
     // 2 — штрих под плотом, 6 — зазор между подписями тиков и именем оси,
     // 6 — воздух снизу; остальное — две строки текста.
     return 2.0f + plot_text_line_height() + 6.0f + plot_text_line_height() + 6.0f;
+}
+
+namespace {
+// Ключ — имя корневого окна ImGui (как у [UcudaTree] в gui_tree_state.h): от запуска к запуску то же.
+// std::map: указатели на значения стабильны, виды держат их весь кадр.
+std::map<std::string, PlotWindowPrefs>& window_prefs() {
+    static std::map<std::string, PlotWindowPrefs> m;
+    return m;
+}
+
+int g_window_scope = -1;   // вкладка приложения текущего кадра (plot_set_window_scope)
+
+bool prefs_default(const PlotWindowPrefs& p) {
+    return p.toolbar && p.legend && p.x_label && p.x_ticks && p.y_label && p.y_ticks &&
+           p.colorbar && p.axes3d && !p.smooth && p.series_colors.empty();
+}
+
+void* prefs_read_open(ImGuiContext*, ImGuiSettingsHandler*, const char* name) {
+    return &window_prefs()[name];
+}
+
+void prefs_read_line(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line) {
+    PlotWindowPrefs& p = *(PlotWindowPrefs*)entry;
+    int v = 0;
+    if      (std::sscanf(line, "Toolbar=%d", &v) == 1)  p.toolbar  = v != 0;
+    else if (std::sscanf(line, "XLabel=%d", &v) == 1)   p.x_label  = v != 0;
+    else if (std::sscanf(line, "XTicks=%d", &v) == 1)   p.x_ticks  = v != 0;
+    else if (std::sscanf(line, "YLabel=%d", &v) == 1)   p.y_label  = v != 0;
+    else if (std::sscanf(line, "YTicks=%d", &v) == 1)   p.y_ticks  = v != 0;
+    else if (std::sscanf(line, "Colorbar=%d", &v) == 1) p.colorbar = v != 0;
+    else if (std::sscanf(line, "Legend=%d", &v) == 1)   p.legend   = v != 0;
+    else if (std::sscanf(line, "Axes3D=%d", &v) == 1)   p.axes3d   = v != 0;
+    else if (std::sscanf(line, "Smooth=%d", &v) == 1)   p.smooth   = v != 0;
+    else {
+        // Color=r,g,b,a,<подпись серии> — подпись последней: в ней могут быть запятые.
+        float r, g, b, a;
+        int n = 0;
+        if (std::sscanf(line, "Color=%f,%f,%f,%f,%n", &r, &g, &b, &a, &n) == 4 && n > 0)
+            p.series_colors[line + n] = ImVec4(r, g, b, a);
+    }
+}
+
+void prefs_write_all(ImGuiContext*, ImGuiSettingsHandler*, ImGuiTextBuffer* out) {
+    // Пишутся только окна, где что-то выключено: остальные и так по умолчанию.
+    for (const auto& [name, p] : window_prefs()) {
+        if (prefs_default(p)) continue;
+        out->appendf("[UcudaPlot][%s]\n", name.c_str());
+        out->appendf("Toolbar=%d\nLegend=%d\nXLabel=%d\nXTicks=%d\nYLabel=%d\nYTicks=%d\n"
+                     "Colorbar=%d\nAxes3D=%d\nSmooth=%d\n",
+                     (int)p.toolbar, (int)p.legend, (int)p.x_label, (int)p.x_ticks,
+                     (int)p.y_label, (int)p.y_ticks, (int)p.colorbar, (int)p.axes3d,
+                     (int)p.smooth);
+        for (const auto& [label, c] : p.series_colors) {
+            if (label.find('\n') != std::string::npos) continue;   // строка ini — одна строка
+            out->appendf("Color=%.4f,%.4f,%.4f,%.4f,%s\n", c.x, c.y, c.z, c.w, label.c_str());
+        }
+        out->append("\n");
+    }
+}
+}
+
+void plot_install_settings_handler() {
+    if (ImGui::FindSettingsHandler("UcudaPlot")) return;
+    ImGuiSettingsHandler h;
+    h.TypeName   = "UcudaPlot";
+    h.TypeHash   = ImHashStr("UcudaPlot");
+    h.ReadOpenFn = prefs_read_open;
+    h.ReadLineFn = prefs_read_line;
+    h.WriteAllFn = prefs_write_all;
+    ImGui::AddSettingsHandler(&h);
+}
+
+PlotWindowPrefs& plot_window_prefs_current() {
+    const ImGuiWindow* w = ImGui::GetCurrentWindowRead();
+    if (w && w->RootWindow) w = w->RootWindow;
+    if (!w) {
+        static PlotWindowPrefs fallback;   // вне окна ImGui (не бывает у живого UI)
+        fallback = PlotWindowPrefs{};
+        return fallback;
+    }
+    PlotWindowPrefs& p = window_prefs()[w->Name];
+    p.scope = g_window_scope;
+    return p;
+}
+
+void plot_set_window_scope(int scope) {
+    g_window_scope = scope;
+}
+
+bool plot_toolbar_hidden() {
+    return !plot_window_prefs_current().toolbar;
+}
+
+// Галка меню «Show». Ctrl+Shift+клик — то же значение во всех окнах той же вкладки приложения
+// (scope), в том числе в окнах, свёрнутых сейчас во вкладку дока, если они там уже рисовались.
+static void prefs_item(PlotWindowPrefs& p, const char* label, bool PlotWindowPrefs::* field) {
+    if (!ImGui::MenuItem(label, nullptr, &(p.*field))) return;
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.KeyCtrl && io.KeyShift && p.scope >= 0)
+        for (auto& [name, other] : window_prefs())
+            if (other.scope == p.scope) other.*field = p.*field;
+    ImGui::MarkIniSettingsDirty();
+}
+
+void plot_series_colors_changed(const std::map<std::string, ImVec4>& before,
+                                const std::map<std::string, ImVec4>& after) {
+    bool same = before.size() == after.size();
+    for (auto a = before.begin(), b = after.begin(); same && a != before.end(); ++a, ++b)
+        same = a->first == b->first && a->second.x == b->second.x && a->second.y == b->second.y &&
+               a->second.z == b->second.z && a->second.w == b->second.w;
+    if (!same) ImGui::MarkIniSettingsDirty();
+}
+
+void plot_show_menu(PlotWindowPrefs& p, unsigned items) {
+    if (!ImGui::BeginMenu("Show")) return;
+    // Галки не закрывают меню: обычно снимают несколько подряд.
+    ImGui::PushItemFlag(ImGuiItemFlags_AutoClosePopups, false);
+    prefs_item(p, "Toolbar", &PlotWindowPrefs::toolbar);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Controls above the plot. Hidden: the plot takes the freed height;\n"
+                          "this menu brings them back.");
+    if (items & PlotShowLegend)   prefs_item(p, "Legend", &PlotWindowPrefs::legend);
+    if (items & PlotShowColorbar) prefs_item(p, "Colorbar", &PlotWindowPrefs::colorbar);
+    if (items & PlotShowAxes3D)   prefs_item(p, "Axes", &PlotWindowPrefs::axes3d);
+    if (items & PlotShowSmooth) {
+        prefs_item(p, "Smooth image", &PlotWindowPrefs::smooth);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Anti-aliasing: each pixel averages the COLOURS of the cells it covers,\n"
+                              "not their values, so no regime that was not computed appears\n"
+                              "between two others. Removes moire when zoomed out; inside a large\n"
+                              "cell the colour stays flat. The data and its export are unchanged.");
+    }
+    if (items & PlotShowAxes2D) {
+        ImGui::Separator();
+        prefs_item(p, "X label", &PlotWindowPrefs::x_label);
+        prefs_item(p, "X tick labels", &PlotWindowPrefs::x_ticks);
+        prefs_item(p, "Y label", &PlotWindowPrefs::y_label);
+        prefs_item(p, "Y tick labels", &PlotWindowPrefs::y_ticks);
+    }
+    ImGui::Separator();
+    ImGui::TextDisabled("Ctrl+Shift+click: all plots of this tab");
+    ImGui::PopItemFlag();
+    ImGui::EndMenu();
+}
+
+float plot_bottom_margin_for(bool tick_labels, bool axis_name) {
+    if (tick_labels && axis_name) return plot_bottom_margin();
+    // Без подписей тиков имя оси встаёт сразу под плотом (4 px), без обоих — тонкий запас.
+    float m = 6.0f;
+    if (tick_labels) m += 2.0f + plot_text_line_height();
+    if (axis_name)   m += 4.0f + plot_text_line_height();
+    return m;
 }
 
 float plot_y_axis_margin(const AxisInfo& y, const char* y_name) {
@@ -1019,8 +1176,9 @@ void make_ortho_mvp(double xmin, double xmax, double ymin, double ymax, float ou
 void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     ImVec2 pos, float plot_w, float plot_h,
     ImU32 col_grid, ImU32 col_text,
-    double snap_lo, double snap_hi, int snap_n)
+    double snap_lo, double snap_hi, int snap_n, bool tick_labels)
 {
+    if (!tick_labels) col_text = 0;   // прозрачный текст ImDrawList не рисует (см. plot_text)
     double emin, emax;
     axis_effective(x, emin, emax);
     double vrx = emax - emin;
@@ -1113,8 +1271,9 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
 
 void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     ImVec2 pos, float plot_w, float plot_h,
-    ImU32 col_grid, ImU32 col_text)
+    ImU32 col_grid, ImU32 col_text, bool tick_labels)
 {
+    if (!tick_labels) col_text = 0;   // см. draw_axis_x_grid
     double emin, emax;
     axis_effective(y, emin, emax);
     double vry = emax - emin;

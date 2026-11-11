@@ -84,6 +84,7 @@ void parametric_type_from_index(int t, ParametricPlotWindow::Kind& kind, bool& m
 
 
 bool draw_parametric_window_setup_row(AppModel& model, ParametricPlotWindow& win) ;
+void draw_parametric_members_list(AppModel& model, ParametricPlotWindow& win);
 
 
 inline const char* kParametricTypeNames[] = {

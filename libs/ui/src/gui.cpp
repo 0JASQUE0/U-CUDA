@@ -728,6 +728,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
 
     ImGui::End(); // MainHost
 
+    // Окна диаграмм, нарисованные дальше, запоминают вкладку: Ctrl+Shift+клик в меню «Show»
+    // применяет галку ко всем окнам этой вкладки (plot_show_menu).
+    plot_set_window_scope((int)model.app_mode);
+
     if (model.app_mode == AppModel::AppMode::Library) {
         // Library mode: list view by default, editor view (System/Parameters sub-tabs +
         // Save/Cancel) after Edit or Add new. Switching top-level tabs during edit is safe — the

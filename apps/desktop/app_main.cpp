@@ -394,6 +394,7 @@ int main() {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     tree_state::install();
+    plot_install_settings_handler();   // вид диаграмм по окнам ([UcudaPlot] в imgui.ini)
     ImPlot::CreateContext();
     ImPlot3D::CreateContext();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;

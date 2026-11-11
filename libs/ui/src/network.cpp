@@ -835,9 +835,9 @@ void draw_network_series_window(AppModel& model, PlotRenderer& renderer, Plot2DV
         [&vs]() {
             bool ch = false;
             ImGui::SetNextItemWidth(150);
-            ch |= ImGui::SliderFloat("Line width##netseries", &vs.line_width, 0.5f, 8.0f, "%.1f");
+            ch |= slider_float_typed("Line width##netseries", &vs.line_width, 0.5f, 8.0f, "%.1f");
             ImGui::SetNextItemWidth(150);
-            ch |= ImGui::SliderFloat("Alpha##netseries", &vs.line_alpha, 0.05f, 1.0f, "%.2f");
+            ch |= slider_float_typed("Alpha##netseries", &vs.line_alpha, 0.05f, 1.0f, "%.2f");
             ch |= ImGui::Checkbox("Points instead of lines##netseries", &vs.points_mode);
             if (vs.points_mode) {
                 if (vs.point_marker < 0 || vs.point_marker >= kPointMarkerCount) vs.point_marker = 0;
@@ -845,7 +845,7 @@ void draw_network_series_window(AppModel& model, PlotRenderer& renderer, Plot2DV
                 ch |= ImGui::Combo("Marker##netseries", &vs.point_marker,
                                    kPointMarkerNames, kPointMarkerCount);
                 ImGui::SetNextItemWidth(150);
-                ch |= ImGui::SliderFloat("Point size##netseries", &vs.point_size, 0.5f, 12.0f, "%.1f");
+                ch |= slider_float_typed("Point size##netseries", &vs.point_size, 0.5f, 25.0f, "%.1f");
             } else {
                 ch |= ImGui::Checkbox("Mark data points##netseries", &vs.node_markers);
             }

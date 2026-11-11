@@ -62,6 +62,8 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
         s.fit_request = false;
     }
     int pr_to_remove = -1;
+    // Ctrl+Shift+клик по галкам стиля — на все проекции этой вкладки (draw_proj_style_controls).
+    const ProjStyleGroupScope style_group(&s.projections);
     for (int i = 0; i < (int)s.projections.size(); ++i) {
         Projection& pr = s.projections[i];
         PlotRenderer& renderer = *renderers[i]; // рендерер этой проекции
@@ -231,9 +233,9 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         [&pr]() {
                             bool ch = false;
                             ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Point size##featdiag", &pr.line_width, 0.5f, 8.0f, "%.1f");
+                            ch |= slider_float_typed("Point size##featdiag", &pr.line_width, 0.5f, 25.0f, "%.1f");
                             ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Alpha##featdiag",      &pr.alpha,      0.0f, 1.0f, "%.2f");
+                            ch |= slider_float_typed("Alpha##featdiag",      &pr.alpha,      0.0f, 1.0f, "%.2f");
                             return ch;
                         });
                     // Всегда точки, линий между пиками нет: соседние пики
@@ -459,6 +461,9 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                 const rqa::Result* rq = have_job ? find_rqa(res, job) : nullptr;
 
                 // ---------------- toolbar ----------------
+                // Скрыт в меню карты (Show → Toolbar) вместе с таблицей метрик: карте вся высота.
+                const bool rqa_bar = !plot_toolbar_hidden();
+                if (rqa_bar) {
                 ImGui::SetNextItemWidth(150);
                 const char* vmnames[] = { "Distance matrix", "Recurrence plot" };
                 ImGui::Combo("##rqvm", &pr.rqa_view_mode, vmnames, IM_ARRAYSIZE(vmnames));
@@ -482,6 +487,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     ImGui::Text("n=%d   dt=%.4g s   eps=%.5g   RR=%.3f%%",
                                 rq->n, rq->dt, rq->eps_used, 100.0 * rq->metrics.RR);
                 }
+                }   // rqa_bar
 
                 // ---------------- параметры ----------------
                 if (ImGui::BeginPopup("rqa_cfg")) {
@@ -590,7 +596,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     // ---------------- метрики ----------------
                     // NaN печатается прочерком, а не нулём: "линий такой длины не нашлось" и
                     // "линии есть, но метрика равна нулю" — разные утверждения.
-                    if (ImGui::CollapsingHeader("Metrics", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    if (rqa_bar && ImGui::CollapsingHeader("Metrics", ImGuiTreeNodeFlags_DefaultOpen)) {
                         const rqa::Metrics& M = rq->metrics;
                         struct Row { const char* name; double val; const char* tip; };
                         const Row rows[] = {
@@ -707,35 +713,14 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                 else {
                     if (!projection_views(pr).view3d) projection_views(pr).view3d = std::make_unique<Plot3DView>();
 
-                    // Toolbar над плотом: opt-in custom line styling (толщина + α). В 3D нет
-                    // ImDrawList-fallback (потерялся бы depth-sorting), толщина идёт через
-                    // glLineWidth и может клампиться драйвером, α точно уходит в шейдер.
-                    // При выключенной фиче восстанавливаем прежний хардкод 1.5f.
-                    draw_style_toolbar("Custom line style", "phase3d", pr.custom_line_style,
-                        [&pr]() {
-                            bool ch = false;
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Line width##phase3d", &pr.line_width, 0.1f, 5.0f, "%.2f");
-                            ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Alpha##phase3d",      &pr.alpha,      0.0f, 1.0f, "%.2f");
-                            return ch;
-                        });
-                    ImGui::SameLine();
-                    ImGui::Checkbox("Points##phase3d", &pr.draw_points);
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Draw iterates as markers instead of a polyline.\n"
-                                          "Default for discrete maps.");
-                    if (pr.draw_points) {
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(110);
-                        ImGui::SliderFloat("size##phase3dpt", &pr.point_size, 0.5f, 8.0f, "%.1f");
-                        if (pr.custom_line_style) {   // своя альфа точек (см. draw_proj_line_style)
-                            ImGui::SameLine();
-                            ImGui::SetNextItemWidth(110);
-                            ImGui::SliderFloat("alpha##phase3dpt", &pr.point_alpha, 0.0f, 1.0f, "%.2f");
-                        }
-                    }
-                    projection_views(pr).view3d->point_alpha = (pr.draw_points && pr.custom_line_style) ? pr.point_alpha : -1.0f;
+                    // Toolbar над плотом: Custom line style (толщина + α через geometry shader) и
+                    // Points в одном меню, как у 2D-проекций. При выключенном Custom line style —
+                    // прежний хардкод 1.5f.
+                    draw_proj_style_controls(pr, "phase3d",
+                        "Draw iterates as markers instead of a polyline.\n"
+                        "Default for discrete maps.");
+                    projection_views(pr).view3d->point_alpha  = proj_point_alpha(pr);
+                    projection_views(pr).view3d->point_marker = pr.point_marker;
                     projection_views(pr).view3d->line_thickness_px = pr.custom_line_style ? pr.line_width : 1.5f;
                     projection_views(pr).view3d->custom_line_style = pr.custom_line_style;
                     projection_views(pr).view3d->points_mode       = pr.draw_points;
@@ -819,9 +804,9 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         [&pr]() {
                             bool ch = false;
                             ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Point size##contdiag", &pr.line_width, 0.5f, 8.0f, "%.1f");
+                            ch |= slider_float_typed("Point size##contdiag", &pr.line_width, 0.5f, 25.0f, "%.1f");
                             ImGui::SetNextItemWidth(150);
-                            ch |= ImGui::SliderFloat("Alpha##contdiag",      &pr.alpha,      0.0f, 1.0f, "%.2f");
+                            ch |= slider_float_typed("Alpha##contdiag",      &pr.alpha,      0.0f, 1.0f, "%.2f");
                             return ch;
                         });
                     projection_views(pr).view2d->imdraw_lines = false;
@@ -886,12 +871,14 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     if (!projection_views(pr).view2d) projection_views(pr).view2d = std::make_unique<Plot2DView>();
                     // log Y — пересчётом в log10 h (лог-оси Y у Plot2DView нет), как у окон Order.
                     const bool prev_ylog = pr.y_log;
-                    ImGui::Checkbox("log Y##stepsize", &pr.y_log);
-                    if (pr.y_log != prev_ylog) pr.fit_pending = true;
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Y axis in log10 h: steps spread over orders of magnitude\n"
-                                          "(stiff parts, rejections near h_min) become readable.");
-                    ImGui::SameLine();
+                    if (!plot_toolbar_hidden()) {   // часть тулбара (Show → Toolbar)
+                        ImGui::Checkbox("log Y##stepsize", &pr.y_log);
+                        if (pr.y_log != prev_ylog) pr.fit_pending = true;
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Y axis in log10 h: steps spread over orders of magnitude\n"
+                                              "(stiff parts, rejections near h_min) become readable.");
+                        ImGui::SameLine();
+                    }
                     draw_proj_line_style(pr, "stepsize",
                         "Draw the accepted steps as markers instead of a line.");
                     projection_views(pr).view2d->x_axis.name = "t";

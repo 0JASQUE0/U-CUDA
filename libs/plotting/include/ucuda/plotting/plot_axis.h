@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "imgui.h"
 #include <cmath>
+#include <map>
 #include <string>
 #include <vector>
 #include <functional>
@@ -172,15 +173,17 @@ void make_ortho_mvp(double xmin, double xmax, double ymin, double ymax, float ou
 // стартовая позиция — тоже кратна этому шагу. Значит тики попадают ровно на
 // узлы параметрической сетки. Для 1D-графиков Bif/LLE/LS. Дефолты выключают
 // snap (старое поведение).
+// tick_labels = false — только сетка, без чисел (скрыты в меню плота).
 void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     ImVec2 plot_pos, float plot_w, float plot_h,
     ImU32 col_grid, ImU32 col_text,
-    double snap_lo = 0.0, double snap_hi = 0.0, int snap_n = 0);
+    double snap_lo = 0.0, double snap_hi = 0.0, int snap_n = 0,
+    bool tick_labels = true);
 
 // Рисует сетку и подписи по Y (горизонтальные линии + текст слева).
 void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     ImVec2 plot_pos, float plot_w, float plot_h,
-    ImU32 col_grid, ImU32 col_text);
+    ImU32 col_grid, ImU32 col_text, bool tick_labels = true);
 
 // Plot color palette — переключается между Dark и Light темами. AppModel
 // дёргает set_plot_light_theme(bool) на смену темы в Settings, а каждый
@@ -266,7 +269,51 @@ float plot_left_margin_for_width(float max_tick_w, bool has_axis_name);
 // Раньше — константа 46 px, которую я умножал на кегль подписей целиком, из-за
 // чего на множителе 1.6 под именем оси оставалось ~20 px пустоты: масштабу
 // подчиняются строки текста, а не фиксированные зазоры.
+// Вид диаграммы в окне — галки меню по ПКМ: тулбар над диаграммой, подписи (имя) и числа осей,
+// colorbar. Хранится на корневое окно ImGui (по имени) и пишется в imgui.ini разделом
+// [UcudaPlot], так что переживает перезапуск. Тулбары (draw_heatmap_toolbar, draw_style_toolbar,
+// ...) спрашивают plot_toolbar_hidden() и не рисуются — диаграмме достаётся вся высота.
+// Вид берёт ссылку в начале render(): внутри своего попапа текущее окно — уже попап.
+struct PlotWindowPrefs {
+    bool toolbar  = true;
+    bool legend   = true;
+    bool x_label  = true, x_ticks = true;
+    bool y_label  = true, y_ticks = true;
+    bool colorbar = true;
+    bool axes3d   = true;   // оси координат 3D-сцены
+    bool smooth   = false;  // сглаживание карт (PlotRenderer::draw_heatmap, smooth)
+    // Цвета серий из меню легенды (ПКМ по квадрату -> legend_color_popup). Ключ — подпись серии,
+    // а не индекс (серии сдвигаются, цвет должен остаться на своей кривой); альфа — от вызывающего.
+    std::map<std::string, ImVec4> series_colors;
+    // Вкладка приложения, на которой окно рисовалось последним (plot_set_window_scope); -1 — ещё
+    // не рисовалось в этом запуске. Не сохраняется: нужна только для Ctrl+Shift+клика в «Show».
+    int scope = -1;
+};
+// Вкладка приложения на текущий кадр: окна, отрисованные после вызова, запоминают её.
+void plot_set_window_scope(int scope);
+// Если меню легенды поменяло цвета (before — копия до него), помечает imgui.ini к сохранению.
+void plot_series_colors_changed(const std::map<std::string, ImVec4>& before,
+                                const std::map<std::string, ImVec4>& after);
+// Сразу после ImGui::CreateContext: imgui.ini читается на первом NewFrame.
+void plot_install_settings_handler();
+PlotWindowPrefs& plot_window_prefs_current();
+bool plot_toolbar_hidden();
+// Подменю «Show» меню диаграммы: что из её элементов видно (галки не закрывают меню);
+// Ctrl+Shift+клик ставит то же значение во всех окнах диаграмм текущей вкладки. Пункты —
+// только те, что у вида есть: legend — есть легенда, axes2d — подписи и числа осей X/Y,
+// colorbar — у карт, axes3d — оси 3D-сцены.
+enum PlotShowItems : unsigned {
+    PlotShowLegend   = 1u << 0,
+    PlotShowAxes2D   = 1u << 1,
+    PlotShowColorbar = 1u << 2,
+    PlotShowAxes3D   = 1u << 3,
+    PlotShowSmooth   = 1u << 4,   // сглаживание картинки карты
+};
+void plot_show_menu(PlotWindowPrefs& p, unsigned items);
+
 float plot_bottom_margin();
+// То же, когда подписи тиков и/или имя оси X скрыты (меню плота): отступ сжимается.
+float plot_bottom_margin_for(bool tick_labels, bool axis_name);
 
 // Screenshot-to-clipboard. Право-клик "Copy image to clipboard" на любой
 // диаграмме (Heatmap/Plot2D/Plot3D) заводится через request_plot_screenshot()
