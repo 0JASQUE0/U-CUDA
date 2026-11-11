@@ -1047,7 +1047,9 @@ static long long task_hold(const NeuralConfig& c) {
 static ReadoutSplit class_split(const NeuralConfig& c) {
     const long long n = int_or(c.trials_text, 0);
     if (n < 3) throw std::runtime_error("classification needs more trials");
-    return readout_split((size_t)n, 0, num_or(c.task.train_text, 0.6), num_or(c.task.val_text, 0.2), 0);
+    const double train = num_or(c.task.train_text, 0.6), val = num_or(c.task.val_text, 0.2);
+    if (!(train > 0 && val > 0 && train + val < 1)) throw std::runtime_error("classification needs positive train, validation and test shares");
+    return readout_split((size_t)n, 0, train, val, 0);
 }
 
 std::vector<int> neural_class_labels(const NeuralConfig& c) {
@@ -1085,8 +1087,7 @@ static NeuralConfig class_config(const NeuralConfig& c) {
     if (c.protocol != NeuralProtocol::Trials) throw std::runtime_error("classification needs the protocol of separate trials");
     if (num_or(c.transient_text, 0.0) != 0.0) throw std::runtime_error("set the transient to 0: the rest before each stimulus is the washout");
     if (c.lyap_on) throw std::runtime_error("a readout does not work with the Lyapunov exponent");
-    // Галочка сохранённого выхода остаётся от режима восстановления и здесь не видна: классификация её не читает.
-    o.task.use_saved = false;
+    o.task.use_saved = false; // separate regression option; older sessions may still have it set
     for (size_t k = 0; k < t.classes.size(); ++k) {
         if (t.classes[k] < 0 || t.classes[k] >= (int)c.sources.size()) throw std::runtime_error("a class points to a missing input source");
         if (std::count(t.classes.begin(), t.classes.end(), t.classes[k]) > 1) throw std::runtime_error("a source is a class twice");
@@ -1098,14 +1099,48 @@ static NeuralConfig class_config(const NeuralConfig& c) {
     const std::vector<int> labels = neural_class_labels(c);
     const ReadoutSplit sp = class_split(c);
     const long long hold = task_hold(c);
-    // Нормировка системы-класса только по её кускам в попытках обучения: они у класса первые.
-    for (size_t k = 0; k < t.classes.size(); ++k) {
-        long long n_train = 0;
-        for (size_t i = 0; i < sp.train1; ++i) n_train += labels[i] == (int)k;
-        o.sources[(size_t)t.classes[k]].normalize_first = n_train * (s.cycle / hold);
-    }
+    if (s.rest % hold != 0 || s.stim % hold != 0) throw std::runtime_error("the rest and the stimulus must be multiples of the input sample time");
     const bool spike = c.schedule == NeuralSchedule::Spike;
     const int M = (std::max)(1, int_or(t.features_text, 1000));
+    const auto& saved = c.classifier;
+    if (t.use_saved_classifier) {
+        if (saved.empty() || !saved.is_classifier()) throw std::runtime_error("there is no saved classifier: train one and press Keep");
+        if (c.sweep.enabled || t.control_k0) throw std::runtime_error("the saved classifier repeats one test: turn off the sweep and the K = 0 control");
+        if (saved.classes != t.classes || saved.names.size() != t.classes.size())
+            throw std::runtime_error("the class order differs from the saved classifier");
+        for (size_t k = 0; k < t.classes.size(); ++k)
+            if (saved.names[k] != c.sources[(size_t)t.classes[k]].name) throw std::runtime_error("the class names differ from the saved classifier");
+        if (saved.class_bins != s.bins || saved.features_requested != M || saved.spikes != spike || saved.feature_var != c.input_var)
+            throw std::runtime_error("the features differ from the saved classifier");
+        if (saved.class_input_norm.size() != 2 * c.sources.size()) throw std::runtime_error("the sources differ from the saved classifier");
+    }
+    const bool three = (c.schedule == NeuralSchedule::Stage || spike) && hold == 1;
+    const int per_sample = three ? 2 : 1;
+    std::vector<long long> train_rows(c.sources.size(), (long long)sp.train1 * (s.stim / hold));
+    for (int q : t.classes) train_rows[(size_t)q] = 0;
+    for (size_t i = 0; i < sp.train1; ++i) train_rows[(size_t)t.classes[(size_t)labels[i]]] += s.cycle / hold;
+    // Compute the scaler on training rows only, then use exactly those numbers for the entire run.
+    // For class sources the trajectory advances through the rest too; auxiliary sources advance only on stimulus rows.
+    for (size_t q = 0; q < o.sources.size(); ++q) {
+        NeuralSource& src = o.sources[q];
+        src.norm_fixed = src.kind == NeuralSourceKind::System && src.normalize;
+        src.norm_mean = 0; src.norm_sd = 1;
+        if (!src.norm_fixed) continue;
+        if (t.use_saved_classifier) {
+            src.norm_mean = saved.class_input_norm[2 * q]; src.norm_sd = saved.class_input_norm[2 * q + 1];
+            if (!std::isfinite(src.norm_mean) || !std::isfinite(src.norm_sd) || src.norm_sd <= 0)
+                throw std::runtime_error("invalid input normalisation in the saved classifier");
+        } else {
+            const double dt = (double)hold * parse_num(c.h_text, 0.01) * num_or(src.time_scale_text, 1.0);
+            const size_t used = (size_t)train_rows[q] * per_sample;
+            if (used < 2 || used > 500000000) throw std::runtime_error("input normalisation needs at least two training samples within the input size limit");
+            NeuralSource training = src;
+            training.norm_fixed = false; training.normalize_first = 0;
+            double stats[2];
+            source_system_series(training, used, three ? 0.5 * dt : dt, per_sample, stats);
+            src.norm_mean = stats[0]; src.norm_sd = stats[1];
+        }
+    }
     // Точки признаков: s.rest + (b + 1) * s.bin внутри каждой попытки, сетка записи кратна обоим.
     const long long pre = std::gcd(s.rest, s.bin);
     o.pre_scaller_text = std::to_string(pre);
@@ -1118,6 +1153,37 @@ static NeuralConfig class_config(const NeuralConfig& c) {
     const double mb = spike ? 16.0 : points * M * (double)c.populations.size() * nets * sizeof(double) / (1024.0 * 1024.0) * 1.2 + 16.0;
     o.output_limit_text = fmt_num_shortest((std::max)(num_or(c.output_limit_text, 1024.0), mb));
     return o;
+}
+
+// The saved classifier replays the same held-out trials, including the original input routing and reset policy.
+// Keep the readable split/grid in the key and fingerprint generated inputs and network dynamics separately from the graph hash.
+static std::string class_protocol(const NeuralConfig& c, const NeuralRequest& r) {
+    const ClassSteps s = class_steps(c);
+    const ReadoutSplit split = class_split(c);
+    Fnv f;
+    const auto real = [&](double v) { uint64_t bits; std::memcpy(&bits, &v, sizeof bits); f.add(bits); };
+    const auto reals = [&](const auto& v) { f.add(v.size()); for (double x : v) real(x); };
+    const auto ints = [&](const auto& v) { f.add(v.size()); for (auto x : v) f.add((uint64_t)x); };
+    const auto str = [&](const std::string& v) { f.add(v.size()); for (unsigned char x : v) f.add(x); };
+    f.add((uint64_t)r.schedule); f.add(r.amountOfX); f.add(r.amountOfValues);
+    real(r.h); real(r.max_value); f.add(r.input.channels); f.add(r.input.stage_rows);
+    ints(r.reset_at); ints(r.input.node_channel); reals(r.input.node_gain); reals(r.input.samples);
+    ints(r.observe.nodes); ints(r.observe.vars);
+    str(r.krs_body); str(r.rhs_body); str(r.coupling_body);
+    reals(r.values); reals(r.initial_conditions);
+    str(r.spike.spike_body); reals(r.spike.tau); ints(r.spike.refractory_steps);
+    reals(r.spike.source_p); ints(r.spike.source_from); ints(r.spike.source_to); ints(r.spike.source_seed);
+    f.add(r.spike.seed); ints(r.spike.edge_rule);
+    for (const auto& p : r.spike.rules) {
+        real(p.a_plus); real(p.a_minus); real(p.tau_plus); real(p.tau_minus); real(p.w_min); real(p.w_max);
+        real(p.mu_plus); real(p.mu_minus); real(p.gain); f.add(p.nearest);
+    }
+    str(r.devices.rhs_body); str(r.devices.current_body);
+    reals(r.devices.values); reals(r.devices.initial); reals(r.devices.s_min); reals(r.devices.s_max);
+    for (const auto& src : c.sources) f.add(src.norm_fixed);
+    return "v1:" + std::to_string(split.test1) + ':' + std::to_string(split.train1) + ':' + std::to_string(split.test0)
+         + ':' + std::to_string(int_or(c.task.data_seed_text, 1)) + ':' + std::to_string(s.rest) + ':' + std::to_string(s.stim)
+         + ':' + std::to_string(r.input.hold_steps) + ':' + hex64(f.h);
 }
 
 std::vector<int> neural_forecast_channels(const NeuralConfig& c) {
@@ -1246,6 +1312,7 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
     const NeuralTask& t = c.task;
     NeuralTaskResult out;
     out.classify = true;
+    out.applied = t.use_saved_classifier;
     out.higher_better = true;
     out.metric.clear();
     out.names = { "accuracy" };
@@ -1255,13 +1322,16 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
     const ReadoutSplit sp = class_split(c);
     const ClassSteps s = class_steps(c);
     const size_t n = labels.size(), B = (size_t)s.bins;
-    std::vector<double> Y(n * (size_t)C, 0.0);
-    for (size_t i = 0; i < n; ++i) Y[i * C + (size_t)labels[i]] = 1.0;
+    std::vector<double> Y;
+    if (!out.applied) {
+        Y.assign(n * (size_t)C, 0.0);
+        for (size_t i = 0; i < n; ++i) Y[i * C + (size_t)labels[i]] = 1.0;
+    }
     const bool spike = c.schedule == NeuralSchedule::Spike;
     if (spike && res.spikes_dropped > 0) throw std::runtime_error("the spike log was cut, the features would be wrong");
     const std::vector<int> inst = r.instance_start.empty() ? std::vector<int>{ 0, r.n_nodes } : r.instance_start;
     const int nInst = (int)inst.size() - 1, P = (int)c.populations.size();
-    const auto features = [&](int q, std::vector<double>& F) {
+    const auto features = [&](int q, std::vector<double>& F, std::vector<int>& nodes) {
         if (spike) {
             // Спайки в отрезке (начало, конец] точки: прошлая попытка в признаки не протекает.
             const int want = (std::max)(1, int_or(t.features_text, 1000));
@@ -1272,6 +1342,8 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
                     M = (std::min)(want, r.observe.pop_start[(size_t)(q * P + p + 1)] - node0);
                 }
             if (node0 < 0 || M < 1) throw std::runtime_error("the readout needs a population that is not a spike source");
+            nodes.resize((size_t)M);
+            std::iota(nodes.begin(), nodes.end(), node0);
             F.assign(n * (size_t)M * B, 0.0);
             for (size_t e = 0; e < res.spike_step.size(); ++e) {
                 const int i = res.spike_node[e] - node0;
@@ -1287,6 +1359,7 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
         for (size_t i = 0; i < nSel; ++i) if (res.observed[i] >= inst[(size_t)q] && res.observed[i] < inst[(size_t)q + 1]) cols.push_back(i);
         const int M = (int)cols.size();
         if (M < 1) throw std::runtime_error("the network has no observed nodes");
+        for (size_t i : cols) nodes.push_back(res.observed[i]);
         F.assign(n * (size_t)M * B, 0.0);
         for (size_t tr = 0; tr < n; ++tr)
             for (size_t b = 0; b < B; ++b) {
@@ -1305,7 +1378,8 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
     std::vector<size_t> share((size_t)C, 0);
     for (size_t i = sp.test0; i < sp.test1; ++i) ++share[(size_t)labels[i]];
     out.chance = (double)*std::max_element(share.begin(), share.end()) / (double)T;
-    out.val.assign((size_t)nInst, nan); out.test.assign((size_t)nInst, nan); out.lambda.assign((size_t)nInst, nan);
+    if (!out.applied) { out.val.assign((size_t)nInst, nan); out.lambda.assign((size_t)nInst, nan); }
+    out.test.assign((size_t)nInst, nan);
     out.predicted.assign((size_t)nInst * T, nan);
     out.confusion.assign((size_t)nInst * C * C, nan);
     const std::vector<double> lambdas = {1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0};
@@ -1326,17 +1400,44 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
         try {
             if (nInst > 1 && q < (int)res.instance_stop.size() && res.instance_stop[(size_t)q] >= 0) throw std::runtime_error("the network diverged");
             std::vector<double> F;
-            const int M = features(q, F);
+            std::vector<int> nodes;
+            const int M = features(q, F, nodes);
+            if ((size_t)M * B > (size_t)(std::numeric_limits<int>::max)()) throw std::runtime_error("too many classifier features");
+            const int columns = M * (int)B;
             if (q == 0) out.features = M;
-            const ReadoutModel m = readout_fit(F, Y, M * (int)B, C, sp, lambdas, true);
-            out.val[(size_t)q] = m.val_accuracy;
-            out.lambda[(size_t)q] = m.lambda[0];
+            ReadoutModel m;
+            if (out.applied) {
+                const auto& saved = c.classifier;
+                if (saved.nodes != nodes || saved.M != columns || saved.K != C || saved.mean.size() != (size_t)columns
+                    || saved.scale.size() != (size_t)columns || saved.w.size() != (size_t)C * ((size_t)columns + 1))
+                    throw std::runtime_error("the feature columns differ from the saved classifier");
+                m.M = saved.M; m.K = saved.K; m.mean = saved.mean; m.scale = saved.scale; m.w = saved.w;
+            } else {
+                m = readout_fit(F, Y, columns, C, sp, lambdas, true);
+                out.val[(size_t)q] = m.val_accuracy;
+                out.lambda[(size_t)q] = m.lambda[0];
+            }
             out.test[(size_t)q] = score(m, F, out.predicted.data() + (size_t)q * T, out.confusion.data() + (size_t)q * C * C);
+            if (!out.applied && !c.sweep.enabled && nInst == 1) {
+                auto& saved = out.model;
+                saved.class_bins = (int)B; saved.classes = t.classes; saved.names = out.class_names;
+                saved.class_protocol = class_protocol(c, r);
+                for (const auto& src : c.sources) {
+                    saved.class_input_norm.push_back(src.norm_mean); saved.class_input_norm.push_back(src.norm_sd);
+                }
+                saved.spikes = spike; saved.feature_var = c.input_var;
+                saved.features_requested = (std::max)(1, int_or(t.features_text, 1000));
+                saved.sample_dt = (double)s.bin * r.h;
+                saved.nodes = std::move(nodes); saved.M = m.M; saved.K = m.K;
+                saved.mean = std::move(m.mean); saved.scale = std::move(m.scale); saved.w = std::move(m.w);
+                saved.lambda = std::move(m.lambda); saved.val = out.val; saved.test = out.test;
+            }
         } catch (const std::exception& e) {
             if (nInst == 1) throw;
             if (out.note.empty()) out.note = "network " + std::to_string(q) + ": " + e.what();
         }
     }
+    if (out.applied) return out;
     // Простая модель: тот же ridge на самих отсчётах стимула, до 50 равномерно; канал класса у всех сетей свипа общий.
     const long long hold = r.input.hold_steps, stim_rows = s.stim / hold;
     const int D = (int)(std::min)(stim_rows, 50LL);
@@ -1775,6 +1876,131 @@ void neural_merge_resumed(const NeuralResult& before, NeuralResult& after) {
     after.spikes_dropped += before.spikes_dropped;
 }
 
+NeuralSpikeStatistics neural_spike_statistics(const NeuralResult& r, const std::vector<int>& populations,
+                                              const std::vector<long long>& reset_at, const std::atomic<bool>* cancel) {
+    if (r.spikes_dropped != 0 || r.spike_step.size() != r.spike_node.size() || r.n_nodes < 1
+        || !(r.h > 0) || !std::isfinite(r.h) || populations.size() < 2
+        || populations.front() != 0 || populations.back() != r.n_nodes
+        || !std::is_sorted(reset_at.begin(), reset_at.end())) return {};
+    NeuralSpikeStatistics out;
+    out.populations.resize(populations.size() - 1);
+    std::vector<int> pop((size_t)r.n_nodes);
+    for (size_t p = 0; p < out.populations.size(); ++p) {
+        if (populations[p] >= populations[p + 1] || populations[p + 1] > r.n_nodes) return {};
+        std::fill(pop.begin() + populations[p], pop.begin() + populations[p + 1], (int)p);
+    }
+    struct Moment { unsigned long long n = 0; double mean = 0, m2 = 0; };
+    std::vector<Moment> moments((size_t)r.n_nodes);
+    std::vector<long long> previous((size_t)r.n_nodes, -1);
+    const auto intervals = [&](auto visit) {
+        std::fill(previous.begin(), previous.end(), -1);
+        size_t next = 0;
+        long long reset = 0, last = -1;
+        for (size_t e = 0; e < r.spike_step.size(); ++e) {
+            if ((e & 4095) == 0 && cancel && cancel->load(std::memory_order_relaxed)) return false;
+            const long long at = r.spike_step[e];
+            const int node = r.spike_node[e];
+            if (at < 0 || at < last || at >= r.steps_done || node < 0 || node >= r.n_nodes || previous[(size_t)node] == at)
+                return false;
+            while (next < reset_at.size() && reset_at[next] <= at) reset = reset_at[next++];
+            const long long before = previous[(size_t)node];
+            if (before >= reset) visit((size_t)node, (double)(at - before));
+            previous[(size_t)node] = last = at;
+        }
+        return true;
+    };
+    std::vector<double> max_isi(out.populations.size()), max_cv(out.populations.size());
+    if (!intervals([&](size_t node, double steps) {
+        auto& p = out.populations[(size_t)pop[node]];
+        p.mean_isi += (steps - p.mean_isi) / (double)++p.intervals;
+        max_isi[(size_t)pop[node]] = (std::max)(max_isi[(size_t)pop[node]], steps);
+        auto& m = moments[node];
+        const double d = steps - m.mean;
+        m.mean += d / (double)++m.n;
+        m.m2 += d * (steps - m.mean);
+    })) return {};
+
+    constexpr size_t bins = 32;
+    const auto cv = [](const Moment& m) { return std::sqrt((std::max)(0.0, m.m2 / (double)m.n)) / m.mean; };
+    for (size_t node = 0; node < moments.size(); ++node) if (moments[node].n >= 2) {
+        auto& p = out.populations[(size_t)pop[node]];
+        const double value = cv(moments[node]);
+        p.mean_cv += (value - p.mean_cv) / (double)++p.neurons_with_cv;
+        max_cv[(size_t)pop[node]] = (std::max)(max_cv[(size_t)pop[node]], value);
+    }
+    for (size_t i = 0; i < out.populations.size(); ++i) {
+        auto& p = out.populations[i];
+        p.mean_isi *= r.h;
+        if (p.intervals) p.isi = {(std::max)(1.0, max_isi[i] / bins) * r.h, std::vector<unsigned long long>(bins)};
+        if (p.neurons_with_cv) p.cv = {(max_cv[i] > 0 ? max_cv[i] : 1.0) / bins, std::vector<unsigned long long>(bins)};
+    }
+    const auto add = [&](NeuralSpikeHistogram& h, double value) {
+        ++h.counts[(std::min)(bins - 1, (size_t)(value / h.bin_width))];
+    };
+    if (!intervals([&](size_t node, double steps) { add(out.populations[(size_t)pop[node]].isi, steps * r.h); })) return {};
+    for (size_t node = 0; node < moments.size(); ++node) if (moments[node].n >= 2)
+        add(out.populations[(size_t)pop[node]].cv, cv(moments[node]));
+    out.complete = true;
+    return out;
+}
+
+std::vector<NeuralResultView> neural_result_views(const NeuralConfig& c) {
+    using View = NeuralResultView;
+    std::vector<View> views;
+    const auto& r = c.result;
+    const auto& task = c.task_result;
+    if (!r.ok) return views;
+    if (!r.spike_count.empty()) { views.push_back(View::Activity); views.push_back(View::SpikeStatistics); }
+    if (!task.test.empty() && !task.names.empty()) {
+        views.push_back(View::Readout);
+        if (task.forecast && task.names.size() >= 2 && task.points >= 2 && task.truth.size() == task.predicted.size())
+            views.push_back(View::ForecastPhase);
+    }
+    if (!r.means.empty()) views.push_back(View::Means);
+    if (!r.traces.empty()) views.push_back(View::Nodes);
+    if (!r.order.empty() || !r.spread.empty()) views.push_back(View::Synchronisation);
+    if (!r.lyapunov.empty() && !r.lyap_log.empty()) views.push_back(View::Lyapunov);
+    if (!c.input_view.empty()) views.push_back(View::Input);
+    if (!r.weight_trace.empty() || !r.device_trace.empty()) views.push_back(View::Weights);
+    if (!c.sweep_values.empty() && (!c.pop_rate.empty() || !c.sweep_order.empty() || !c.sweep_spread.empty()
+                                    || !c.sweep_lyap.empty() || !task.test.empty())) views.push_back(View::Sweep);
+    return views;
+}
+
+NeuralBinnedRates neural_population_rates(const NeuralConfig& c, int instance, double requested_bin) {
+    NeuralBinnedRates out;
+    const auto& r = c.result;
+    const int pops = c.pops_per_instance;
+    if (instance < 0 || instance + 1 >= (int)c.instance_start.size() || pops < 1 || r.spike_step.size() != r.spike_node.size()) return out;
+    const size_t first = (size_t)instance * pops;
+    if (first + pops >= c.pop_start.size()) return out;
+    out.t0 = (std::max)(r.t0, (double)c.result_context.first_record_step * r.h);
+    const long long stop = instance < (int)r.instance_stop.size() ? r.instance_stop[(size_t)instance] : -1;
+    out.t_end = (double)(stop >= 0 ? stop : r.steps_done) * r.h;
+    const double span = out.t_end - out.t0;
+    if (!(span > 0) || !std::isfinite(span)) return out;
+    constexpr int max_bins = 16384;
+    out.bin_width = std::isfinite(requested_bin) && requested_bin > 0 ? (std::max)(requested_bin, span / max_bins) : span / 512;
+    out.bin_width = (std::min)(span, out.bin_width);
+    out.points = std::clamp((int)std::ceil(span / out.bin_width - 1e-12), 1, max_bins);
+    out.values.assign((size_t)out.points * pops, 0.0);
+    const auto begin = c.pop_start.begin() + first, end = begin + pops + 1;
+    for (size_t e = 0; e < r.spike_node.size(); ++e) {
+        const int node = r.spike_node[e];
+        if (node < *begin || node >= *(end - 1)) continue;
+        const double t = (double)(r.spike_step[e] + 1) * r.h - out.t0;
+        if (t < 0 || t > span) continue;
+        const int b = (std::min)(out.points - 1, (int)(t / out.bin_width));
+        const auto pop = std::upper_bound(begin, end, node) - begin - 1;
+        out.values[(size_t)b * pops + pop] += 1;
+    }
+    for (int b = 0; b < out.points; ++b) {
+        const double width = b + 1 == out.points ? span - b * out.bin_width : out.bin_width;
+        for (int p = 0; p < pops; ++p) out.values[(size_t)b * pops + p] /= width * (begin[p + 1] - begin[p]);
+    }
+    return out;
+}
+
 std::string neural_spike_csv(const NeuralConfig& c) {
     std::ostringstream o;
     o.precision(17);
@@ -2004,10 +2230,13 @@ void NeuralSession::add_config() {
     if (!configs.empty()) {
         c = configs.back();
         c.result = NeuralResult{};
+        c.result_context = {};
+        c.spike_statistics = {};
         c.instance_start.clear(); c.sweep_values.clear(); c.sweep2_values.clear(); c.sweep_order.clear(); c.sweep_spread.clear();
         c.sweep_lyap.clear(); c.input_view.clear(); c.pop_rate.clear(); c.weight_summary.clear();
         c.task_result = NeuralTaskResult{};
         c.checkpoint.reset();
+        c.checkpoint_from_result = false;
         c.last_run_ok = false;
         c.last_error.clear();
         c.data_generation = 0;
@@ -2029,7 +2258,7 @@ void NeuralSession::remove_config(int i) {
     if (active_config_index >= (int)configs.size()) active_config_index = (int)configs.size() - 1;
 }
 
-bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool resume) {
+bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool resume, std::string settings_key) {
     if (in_flight || config_idx < 0 || config_idx >= (int)configs.size()) return false;
     NeuralConfig& c = configs[(size_t)config_idx];
     if (resume && !c.checkpoint) return false;
@@ -2038,7 +2267,7 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
     last_run_label.clear();
 
     NeuralConfig snap = c;
-    snap.result = NeuralResult{};
+    if (!resume || !snap.checkpoint_from_result) snap.result = NeuralResult{};
     cancel_token = std::make_shared<std::atomic<bool>>(false);
     progress_token = std::make_shared<std::atomic<float>>(0.0f);
     in_flight = true;
@@ -2047,7 +2276,7 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
 
     // Граф на 10 млн дуг строится секунды: всё это в рабочем потоке, а не в кадре.
     run_future = std::async(std::launch::async,
-        [&engine, snap = std::move(snap), sys_copy = sys, cs = custom_schemes, v = vars, q = params, resume,
+        [&engine, snap = std::move(snap), sys_copy = sys, cs = custom_schemes, v = vars, q = params, resume, settings_key = std::move(settings_key),
          cancel = cancel_token, progress = progress_token]() {
         NeuralOutcome out;
         try {
@@ -2074,6 +2303,11 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
                     if (plan.instance_hashes[q] != job.readout.graph_hash)
                         throw std::runtime_error("the saved readout was trained on another graph (hash " + job.readout.graph_hash + ", now "
                                                  + plan.instance_hashes[q] + (plan.instance_hashes.size() > 1 ? " in network " + std::to_string(q) : std::string()) + ")");
+            if (job.task.enabled && job.task.kind == NeuralTaskKind::Classification && job.task.use_saved_classifier) {
+                if (plan.hash != job.classifier.graph_hash) throw std::runtime_error("the saved classifier was trained on another graph");
+                if (class_protocol(job, plan.request) != job.classifier.class_protocol)
+                    throw std::runtime_error("the data, trial protocol or network settings differ from the saved classifier");
+            }
             out.resumed = resume;
             out.watched_per_instance = plan.watched_per_instance;
             out.watch_labels = plan.watch_labels;
@@ -2155,6 +2389,41 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
             out.input_view_t0 = plan.input_view_t0;
             out.input_view_dt = plan.input_view_dt;
             neural_sweep_summary(out, plan.request.observe.order_var);
+            if (out.result.ok && !out.result.cancelled) {
+                auto& ctx = out.context;
+                ctx.settings_key = settings_key;
+                ctx.label = snap.label;
+                ctx.variables = v;
+                ctx.device_state = snap.device.state_name;
+                ctx.sweep = snap.sweep; ctx.sweep2 = snap.sweep2;
+                ctx.reset_at = plan.request.reset_at;
+                for (const auto& pop : snap.populations) ctx.populations.push_back(pop.name);
+                for (const auto& source : snap.sources) ctx.sources.push_back(source.name);
+                if (resume && snap.result.ok && snap.result.steps_done == snap.checkpoint->step) {
+                    neural_merge_resumed(snap.result, out.result);
+                    ctx.mixed_settings = snap.result_context.mixed_settings || ctx.settings_key != snap.result_context.settings_key;
+                    ctx.partial_history = snap.result_context.partial_history;
+                    ctx.first_record_step = snap.result_context.first_record_step;
+                } else if (resume) {
+                    ctx.partial_history = true;
+                    ctx.first_record_step = snap.checkpoint->step;
+                }
+                if (job.protocol == NeuralProtocol::Trials && !ctx.mixed_settings) {
+                    auto& trials = ctx.trials;
+                    const double h = plan.request.h;
+                    trials.first_step = steps_of(plan.request.transient, h, "the transient");
+                    trials.rest_steps = steps_of(num_or(job.rest_text, 0.0), h, "the rest time");
+                    trials.stimulus_steps = steps_of(num_or(job.stimulus_text, 0.0), h, "the stimulus time");
+                    trials.count = int_or(job.trials_text, 0);
+                    if (job.task.enabled && job.task.kind == NeuralTaskKind::Classification) {
+                        trials.classes = neural_class_labels(job);
+                        trials.class_names = out.task_result.class_names;
+                    }
+                }
+                if (!out.result.spike_count.empty() && !ctx.partial_history)
+                    out.spike_statistics = neural_spike_statistics(out.result, out.pop_start, ctx.reset_at, cancel.get());
+                if (cancel->load(std::memory_order_relaxed)) out.result.cancelled = true;
+            }
         } catch (const std::exception& e) {
             // Обучение выхода идёт после удачного расчёта, его отказ не должен выглядеть успехом.
             out.result.ok = false;
@@ -2195,9 +2464,11 @@ bool NeuralSession::poll() {
             c.build_seconds = out.build_seconds;
         }
         if (out.result.ok) {
-            if (out.resumed) neural_merge_resumed(c.result, out.result);
             c.result = std::move(out.result);
+            c.result_context = std::move(out.context);
+            c.spike_statistics = std::move(out.spike_statistics);
             c.checkpoint = c.result.checkpoint;
+            c.checkpoint_from_result = c.checkpoint != nullptr;
             c.result.checkpoint.reset();
             c.watched_per_instance = out.watched_per_instance;
             c.watch_labels = std::move(out.watch_labels);
@@ -2215,7 +2486,7 @@ bool NeuralSession::poll() {
             c.pops_per_instance = out.pops_per_instance;
             c.pop_start = std::move(out.pop_start);
             c.pop_rate = std::move(out.pop_rate);
-            ++c.data_generation;
+            c.data_generation = ++result_serial;
             const bool spikes = c.schedule == NeuralSchedule::Spike && c.sweep_values.empty();
             if (c.csv_save_enabled && !c.csv_output_path.empty() && (spikes || !c.sweep_values.empty())) {
                 std::ofstream f(c.csv_output_path, std::ios::binary);

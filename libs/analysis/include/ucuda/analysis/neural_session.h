@@ -17,6 +17,7 @@ struct NeuralSession : NeuralState {
     std::shared_ptr<std::atomic<bool>>  cancel_token;
     std::shared_ptr<std::atomic<float>> progress_token;
     std::chrono::steady_clock::time_point last_run_completed_at;
+    int result_serial = 0; // unique among configurations, even after deletion/reordering
     NeuralSession() = default;
     NeuralSession(NeuralSession&&) = default;
     NeuralSession& operator=(NeuralSession&&) = default;
@@ -27,7 +28,7 @@ struct NeuralSession : NeuralState {
     void add_config();
     void remove_config(int i);
     // resume: продолжить с контрольной точки конфигурации до её T max.
-    bool run_async(ParametricEngine& engine, int config_idx, bool resume = false);
+    bool run_async(ParametricEngine& engine, int config_idx, bool resume = false, std::string settings_key = {});
     void request_cancel();
     bool poll();
 };
@@ -80,6 +81,18 @@ void neural_checkpoint_save(const std::string& path, const NeuralCheckpoint& c);
 std::shared_ptr<NeuralCheckpoint> neural_checkpoint_load(const std::string& path);
 // Ранняя часть записи из прошлого расчёта: продолжение пишет только свою часть.
 void neural_merge_resumed(const NeuralResult& before, NeuralResult& after);
+// Complete ordered spike logs only; intervals never cross a trial reset. CV is per neuron (at least two ISIs).
+NeuralSpikeStatistics neural_spike_statistics(const NeuralResult& r, const std::vector<int>& populations,
+                                             const std::vector<long long>& reset_at, const std::atomic<bool>* cancel = nullptr);
+enum class NeuralResultView { Activity, SpikeStatistics, Means, Nodes, Synchronisation, Lyapunov, Input, Weights, Readout, ForecastPhase, Sweep };
+// Display eligibility is based on the last successful result, never the editable schedule or task.
+std::vector<NeuralResultView> neural_result_views(const NeuralConfig& c);
+struct NeuralBinnedRates {
+    double t0 = 0, t_end = 0, bin_width = 0;
+    int points = 0;
+    std::vector<double> values; // [bin][population], spikes per neuron per unit time
+};
+NeuralBinnedRates neural_population_rates(const NeuralConfig& c, int instance, double requested_bin);
 // Конфигурация одного значения: в эксперименте меняется только то, что свипается.
 NeuralConfig neural_sweep_instance(const NeuralConfig& c, int index, double value);
 NeuralPlan neural_plan(const System& sys, const std::vector<CustomScheme>& custom_schemes,

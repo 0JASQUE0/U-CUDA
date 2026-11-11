@@ -108,7 +108,6 @@ struct NeuralViewState {
     int sync_kind = 0;   // 0 = R, 1 = разброс по узлам
     int sweep_kind = 0;  // Neural Sweep: то же, 2 = показатель Ляпунова, 3 = NRMSE выхода; у спайков 0 = частота, 1 = NRMSE
     bool spread_log[2] = { true, true };   // окна Synchronisation и Neural Sweep; у R оси всегда линейная
-    int lyap_kind = 0;   // 0 = показатель от значения свипа, 1 = накопленное среднее одной сети
     int map_kind = 0;    // Neural Map: как sweep_kind
     int map_pop = 0;
     bool map_log = true; // разброс в log10: он меняется на 7 порядков
@@ -359,6 +358,7 @@ public:
     bool run_order(int idx);
     bool run_network(int idx);
     bool run_neural(int idx, bool resume = false);
+    std::string neural_result_settings_key(int idx) const;
     // Сброс движка вместе с кэшами модулей (смена системы в Custom). Сначала дожидается
     // фонового прогрева: его поток держит ссылку на движок.
     void reset_engine();
