@@ -282,6 +282,10 @@ struct PlotWindowPrefs {
     bool colorbar = true;
     bool axes3d   = true;   // оси координат 3D-сцены
     bool smooth   = false;  // сглаживание карт (PlotRenderer::draw_heatmap, smooth)
+    // Оси: перестановка X<->Y (карты; срезы Custom) и инверсия. Источник — эти поля: вид в начале
+    // render() берёт их отсюда, пункты меню пишут сюда.
+    bool swap_axes = false;
+    bool invert_x  = false, invert_y = false;
     // Цвета серий из меню легенды (ПКМ по квадрату -> legend_color_popup). Ключ — подпись серии,
     // а не индекс (серии сдвигаются, цвет должен остаться на своей кривой); альфа — от вызывающего.
     std::map<std::string, ImVec4> series_colors;
@@ -303,6 +307,10 @@ void plot_set_series_color_links(int scope, std::vector<std::vector<std::string>
 void plot_install_settings_handler();
 PlotWindowPrefs& plot_window_prefs_current();
 bool plot_toolbar_hidden();
+// Вид окна (галки Show, swap, инверсия) строкой "key=v;..." — для сохранённых раскладок окон.
+// window_name — имя корневого окна ImGui; окна может ещё не быть (настройки ждут его появления).
+std::string plot_window_prefs_to_string(const std::string& window_name);
+void        plot_window_prefs_from_string(const std::string& window_name, const std::string& s);
 // Подменю «Show» меню диаграммы: что из её элементов видно (галки не закрывают меню);
 // Ctrl+Shift+клик ставит то же значение во всех окнах диаграмм текущей вкладки. Пункты —
 // только те, что у вида есть: legend — есть легенда, axes2d — подписи и числа осей X/Y,

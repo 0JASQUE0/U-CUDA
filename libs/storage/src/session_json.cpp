@@ -793,7 +793,14 @@ void write_basins_phase_projections(std::ostringstream& o,
     o << "[";
     for (size_t k = 0; k < projs.size(); ++k) {
         if (k) o << ",";
-        const Projection& p = projs[k];
+        write_phase_projection(o, projs[k]);
+    }
+    o << "]";
+}
+
+
+void write_phase_projection(std::ostringstream& o, const Projection& p) {
+    {
         o << "{\"label\":"; jstr(o, p.label);
         o << ",\"type\":" << (int)p.type;
         o << ",\"ax\":" << p.axis_x << ",\"ay\":" << p.axis_y << ",\"az\":" << p.axis_z;
@@ -808,7 +815,6 @@ void write_basins_phase_projections(std::ostringstream& o,
         for (size_t v = 0; v < p.show_var.size(); ++v) { if (v) o << ","; o << (p.show_var[v] ? "true" : "false"); }
         o << "]}";
     }
-    o << "]";
 }
 
 
@@ -1294,6 +1300,30 @@ bool save_ctrl_library(std::string* err) {
 using namespace ucuda::storage_detail;
 
 
+
+std::string session_to_json_projections(const std::vector<Projection>& projs) {
+    std::ostringstream o;
+    write_basins_phase_projections(o, projs);
+    return o.str();
+}
+
+std::string session_to_json_projection(const Projection& proj) {
+    std::ostringstream o;
+    o << "[";
+    write_phase_projection(o, proj);
+    o << "]";
+    return o.str();
+}
+
+bool session_from_json_projections(const std::string& json, std::vector<Projection>& projs) {
+    try {
+        JP p(json);
+        read_basins_phase_projections(p, projs);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 
 bool load_ctrl_library(const std::string& path, std::string* err) { return ucuda::storage_detail::load_ctrl_library(path, err); }
 bool save_ctrl_library(std::string* err) { return ucuda::storage_detail::save_ctrl_library(err); }

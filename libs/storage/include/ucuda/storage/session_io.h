@@ -111,6 +111,13 @@ bool session_from_json_order_windows(const std::string& json, std::vector<OrderP
 std::string session_to_json_dft1d_windows(const std::vector<Dft1DPlotWindow>& wins);
 bool session_from_json_dft1d_windows(const std::string& json, std::vector<Dft1DPlotWindow>& wins);
 
+// Проекции Phase analysis отдельно от сессии — массив в формате блока "projections".
+// Нужны сохранённым раскладкам окон (layouts/*.layout): по ним недостающая проекция
+// создаётся заново.
+std::string session_to_json_projections(const std::vector<Projection>& projs);
+std::string session_to_json_projection(const Projection& proj);   // массив из одной проекции
+bool session_from_json_projections(const std::string& json, std::vector<Projection>& projs);
+
 // Custom-tab bundle (`_last_custom.json`) — wraps shared pipeline config plus
 // each of the five owned sub-sessions in one file. Sub-sessions are embedded
 // as nested objects using the existing per-mode writers, so future fields on

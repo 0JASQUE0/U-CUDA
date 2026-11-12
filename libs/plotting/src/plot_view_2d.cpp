@@ -1,4 +1,5 @@
 #include "ucuda/plotting/plot_view_2d.h"
+#include "imgui_internal.h"   // MarkIniSettingsDirty (вид окна в imgui.ini)
 #include "ucuda/domain/grid_snap.h"
 #include "ucuda/domain/num_parse.h"   // parse_num_checked — поля min/max осей
 #include <algorithm>
@@ -169,7 +170,8 @@ void Plot2DView::do_autofit() {
             }
         }
         if (!y_axis.lock && !y_axis.user_range) {
-            y_axis.view_min = wymin; y_axis.view_max = wymax;
+            if (y_fit_use_explicit) { y_axis.view_min = y_fit_min; y_axis.view_max = y_fit_max; }
+            else                    { y_axis.view_min = wymin;     y_axis.view_max = wymax; }
         }
         view_valid = true;
     }
@@ -177,6 +179,11 @@ void Plot2DView::do_autofit() {
         // Нет данных, но есть явный X-диапазон → ось всё равно показываем.
         x_axis.view_min = x_fit_min;
         x_axis.view_max = x_fit_max;
+        view_valid = true;
+    }
+    else if (y_fit_use_explicit && !y_axis.lock && !y_axis.user_range) {
+        y_axis.view_min = y_fit_min;
+        y_axis.view_max = y_fit_max;
         view_valid = true;
     }
     else if (shared_x_range) view_valid = true;
@@ -196,6 +203,11 @@ void Plot2DView::fit_x() {
 
 void Plot2DView::fit_y() {
     y_axis.user_range = false;   // явный Auto fit отменяет ручной диапазон
+    if (y_fit_use_explicit) {
+        y_axis.view_min = y_fit_min;
+        y_axis.view_max = y_fit_max;
+        return;
+    }
     double xmin, xmax, ymin, ymax;
     if (data_bbox(xmin, xmax, ymin, ymax))
         axis_range_from_data(ymin, ymax, series_ylog_cached, pad_y, pad_frac, pad_degenerate_rel, y_axis.view_min, y_axis.view_max);
@@ -215,6 +227,9 @@ void Plot2DView::render(PlotRenderer& renderer,
     PlotWindowPrefs& wp = plot_window_prefs_current();
     const bool show_x_label = wp.x_label, show_x_ticks = wp.x_ticks;
     const bool show_y_label = wp.y_label, show_y_ticks = wp.y_ticks;
+    // Инверсия осей — вид окна (переживает перезапуск, хранится в раскладках окон).
+    x_axis.invert = wp.invert_x;
+    y_axis.invert = wp.invert_y;
     const bool legend_on = show_legend && wp.legend;
 
     // 1. Пересобираем кэш, если сменилось поколение данных ИЛИ режим осей. Лог-ось переносит саму
@@ -383,7 +398,11 @@ void Plot2DView::render(PlotRenderer& renderer,
             axis_range_from_data(xmn, xmx, series_xlog_cached, pad_x, pad_frac, pad_degenerate_rel, clamp_lo_x, clamp_hi_x);
             has_bounds_x = true;
         }
-        if (ok) {
+        if (y_fit_use_explicit) {
+            clamp_lo_y = std::min(y_fit_min, y_fit_max);
+            clamp_hi_y = std::max(y_fit_min, y_fit_max);
+            has_bounds_y = true;
+        } else if (ok) {
             // На лог-Y — так же, как по X: границы мировые, запас в лог-домене.
             axis_range_from_data(ymn, ymx, series_ylog_cached, pad_y, pad_frac, pad_degenerate_rel, clamp_lo_y, clamp_hi_y);
             has_bounds_y = true;
@@ -424,16 +443,16 @@ void Plot2DView::render(PlotRenderer& renderer,
     float margin_left, margin_top, margin_right, margin_bottom;
     plot_2d_margins_for(y_axis, y_axis.name.empty() ? "y" : y_axis.name.c_str(),
                         margin_left, margin_top, margin_right, margin_bottom);
-    // Скрытые в меню подписи и числа осей не держат места: график растёт на освободившееся.
-    // Верх и право держали половину крайней подписи Y / X — без чисел хватает воздуха.
+    // Скрытые в меню подписи и числа осей не держат места: график растёт на освободившееся —
+    // но только в своём направлении (слева у Y, снизу у X).
     if (!show_y_ticks || !show_y_label) {
         margin_left = show_y_ticks
             ? plot_y_axis_margin(y_axis, "")
             : plot_left_margin_for_width(0.0f, show_y_label);
     }
     margin_bottom = plot_bottom_margin_for(show_x_ticks, show_x_label);
-    if (!show_y_ticks) margin_top   = 8.0f;
-    if (!show_x_ticks) margin_right = 8.0f;
+    // Верх и право — постоянные, даже без чисел осей: тики Y не должны менять высоту графика,
+    // а тики X — ширину, иначе рамки соседних окон с разными галками перестают совпадать.
     // Полоса подписей x_bands — поверх итогового верхнего поля; общий левый отступ
     // (выравнивание соседних окон) главнее локального.
     const float band_height = x_bands ? ImGui::GetFontSize() + 5.0f : 0.0f;
@@ -1089,9 +1108,15 @@ void Plot2DView::render(PlotRenderer& renderer,
             }
             return wx;
         };
+        // Крест по Y (переставленные оси среза): отдаём мировой Y курсора.
+        auto cursor_w = [&]() -> double {
+            if (!crosshair_along_y) return cursor_wx();
+            const double my = 1.0 - (double)(io.MousePos.y - img_pos.y) / (double)plot_h;
+            return y_at(my);
+        };
         bool crosshair_held = ImGui::IsMouseDown(ImGuiMouseButton_Middle)
                            || (ImGui::IsMouseDown(ImGuiMouseButton_Left) && io.KeyShift);
-        if (crosshair_held && on_left_drag) on_left_drag(cursor_wx());
+        if (crosshair_held && on_left_drag) on_left_drag(cursor_w());
 
         bool crosshair_released = ImGui::IsMouseReleased(ImGuiMouseButton_Middle)
                                || (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && io.KeyShift);
@@ -1105,7 +1130,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             }
         }
         if (crosshair_released && on_left_click && !plot_dbl)
-            on_left_click(cursor_wx());
+            on_left_click(cursor_w());
     }
 
     // 9. Двойные клики
@@ -1274,8 +1299,8 @@ void Plot2DView::render(PlotRenderer& renderer,
         ImGui::MenuItem("Lock X axis", nullptr, &x_axis.lock);
         ImGui::MenuItem("Lock Y axis", nullptr, &y_axis.lock);
         ImGui::Separator();
-        ImGui::MenuItem("Invert X", nullptr, &x_axis.invert);
-        ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert);
+        if (ImGui::MenuItem("Invert X", nullptr, &x_axis.invert)) { wp.invert_x = x_axis.invert; ImGui::MarkIniSettingsDirty(); }
+        if (ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert)) { wp.invert_y = y_axis.invert; ImGui::MarkIniSettingsDirty(); }
         ImGui::Separator();
         if (ImGui::MenuItem("Copy image to clipboard")) {
             request_plot_screenshot(block_origin,
@@ -1327,7 +1352,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             ImGui::SetTooltip("Set by the min / max fields: the view is not pulled back to the data\n"
                               "and survives new data. Auto fit X turns it off.");
         ImGui::MenuItem("Lock X axis", nullptr, &x_axis.lock);
-        ImGui::MenuItem("Invert X", nullptr, &x_axis.invert);
+        if (ImGui::MenuItem("Invert X", nullptr, &x_axis.invert)) { wp.invert_x = x_axis.invert; ImGui::MarkIniSettingsDirty(); }
         ImGui::EndPopup();
     }
     std::snprintf(pop_id, sizeof(pop_id), "##yaxis_menu_%d", owner_id);
@@ -1343,7 +1368,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             ImGui::SetTooltip("Set by the min / max fields: the view is not pulled back to the data\n"
                               "and survives new data. Auto fit Y turns it off.");
         ImGui::MenuItem("Lock Y axis", nullptr, &y_axis.lock);
-        ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert);
+        if (ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert)) { wp.invert_y = y_axis.invert; ImGui::MarkIniSettingsDirty(); }
         ImGui::EndPopup();
     }
 

@@ -13,21 +13,14 @@
 #include "tab_order.h"
 #include "tab_parametric.h"
 #include "tab_phase.h"
+#include "dock_layout.h"
 using namespace ucuda::ui_detail;
 
-// Пресеты раскладки окон (кнопка Layout в шапке). У каждой вкладки приложения свой
+// Раскладки окон (кнопка Layout в шапке, dock_layout.h). У каждой вкладки приложения свой
 // dockspace (MainDockspace_<mode>): перестройка одной вкладки не трогает окна других,
 // а докинг вкладок перестаёт мешать друг другу в общем дереве узлов.
 namespace {
-enum class LayoutPreset { None = -1, Tabs, Columns, Rows, Grid };
-constexpr const char* kLayoutPresetNames[] = { "Tabs", "Columns", "Rows", "Grid" };
-
-struct LayoutRequest {
-    int          mode   = -1;
-    LayoutPreset preset = LayoutPreset::None;
-};
-LayoutRequest g_layout_request;
-int           g_prev_frame_mode = -1;
+int g_prev_frame_mode = -1;
 
 const char* controls_window_for(AppModel::AppMode m) {
     switch (m) {
@@ -43,9 +36,77 @@ const char* controls_window_for(AppModel::AppMode m) {
     }
 }
 
+// Окна-объекты вкладок Parametric / DFT1D / Order: заголовок "<label>###<tag><id>_g<gen>".
+// Раскладка хранит JSON окна, а недостающее создаёт с новым id.
+template <class Win, class ToJson, class FromJson>
+DockWindowFactory window_list_factory(std::vector<Win>& wins, int& next_id, bool& dirty, const int& gen,
+                                      const char* tag, ToJson to_json, FromJson from_json) {
+    DockWindowFactory f;
+    auto title = [tag, &gen](const Win& w) {
+        return w.label + "###" + tag + std::to_string(w.id) + "_g" + std::to_string(gen);
+    };
+    f.describe = [&wins, title, to_json](const std::string& name) -> std::string {
+        for (const Win& w : wins)
+            if (title(w) == name) return to_json(std::vector<Win>{ w });
+        return {};
+    };
+    f.create = [&wins, &next_id, &dirty, title, from_json](const std::string& json) -> std::string {
+        std::vector<Win> v;
+        if (!from_json(json, v) || v.empty()) return {};
+        Win w = v.front();
+        w.id = next_id++;
+        wins.push_back(w);
+        dirty = true;
+        return title(w);
+    };
+    return f;
+}
+
+// Создание недостающих окон сохранённой раскладки — для вкладок, где окна — объекты модели.
+bool layout_factory_for(AppModel& model, DockWindowFactory& f) {
+    switch (model.app_mode) {
+    case AppModel::AppMode::Analysis: {
+        PhaseAnalysisSession& s = model.phase_session;
+        auto title = [&s](const Projection& pr, size_t i) {
+            return pr.label + "##proj" + std::to_string(i) + "_g" + std::to_string(s.layout_generation);
+        };
+        f.describe = [&s, title](const std::string& name) -> std::string {
+            for (size_t i = 0; i < s.projections.size(); ++i)
+                if (title(s.projections[i], i) == name)
+                    return session_to_json_projection(s.projections[i]);
+            return {};
+        };
+        f.create = [&s, title](const std::string& json) -> std::string {
+            std::vector<Projection> v;
+            if (!session_from_json_projections(json, v) || v.empty()) return {};
+            s.projections.push_back(std::move(v.front()));
+            return title(s.projections.back(), s.projections.size() - 1);
+        };
+        return true;
+    }
+    case AppModel::AppMode::Parametric:
+        f = window_list_factory(model.parametric_plot_windows, model.next_parametric_plot_window_id,
+                                model.parametric_plot_windows_dirty, model.parametric_layout_generation, "pwin",
+                                session_to_json_parametric_windows, session_from_json_parametric_windows);
+        return true;
+    case AppModel::AppMode::Dft1D:
+        f = window_list_factory(model.dft1d_plot_windows, model.next_dft1d_plot_window_id,
+                                model.dft1d_plot_windows_dirty, model.dft1d_layout_generation, "dftwin",
+                                session_to_json_dft1d_windows, session_from_json_dft1d_windows);
+        return true;
+    case AppModel::AppMode::Order:
+        f = window_list_factory(model.order_plot_windows, model.next_order_plot_window_id,
+                                model.order_plot_windows_dirty, model.order_layout_generation, "orderwin",
+                                session_to_json_order_windows, session_from_json_order_windows);
+        return true;
+    default:
+        return false;
+    }
+}
+
 // Окна вкладки — те, что рисовались в прошлом кадре (окна других вкладок не рисуются).
 // Порядок — порядок Begin в кадре, т.е. как их перечисляет код вкладки.
-void apply_layout_preset(ImGuiID dock_id, ImVec2 size, const char* controls, LayoutPreset preset) {
+void process_layout(AppModel& model, int mode, ImGuiID dock_id, ImVec2 size, const char* controls) {
     ImGuiContext& g = *GImGui;
     const int last_frame = ImGui::GetFrameCount() - 1;
     std::vector<ImGuiWindow*> wins;
@@ -61,82 +122,11 @@ void apply_layout_preset(ImGuiID dock_id, ImVec2 size, const char* controls, Lay
     std::sort(wins.begin(), wins.end(), [](const ImGuiWindow* a, const ImGuiWindow* b) {
         return a->BeginOrderWithinContext < b->BeginOrderWithinContext;
     });
-    apply_dock_layout(dock_id, size, side, wins, (int)preset);
+    DockWindowFactory factory;
+    const bool has_factory = layout_factory_for(model, factory);
+    dock_layout_process(mode, dock_id, size, side, wins, has_factory ? &factory : nullptr);
 }
 }  // namespace
-
-namespace ucuda::ui_detail {
-const char* const kDockLayoutNames[kDockLayoutCount] = { "Tabs", "Columns", "Rows", "Grid" };
-
-namespace {
-// k равных частей узла node (размер size): первая — со стороны dir, остальные — за ней.
-// Размер каждой части задаётся явно: доля 1/(k-i) от остатка не годится — ImGui отдаёт
-// всё лишнее центральному узлу dockspace, и последняя ячейка выходила вдвое шире.
-std::vector<ImGuiID> split_even(ImGuiID node, ImVec2 size, ImGuiDir dir, int k) {
-    std::vector<ImGuiID> out;
-    const bool horiz = dir == ImGuiDir_Left || dir == ImGuiDir_Right;
-    const float cell = (horiz ? size.x : size.y) / (float)k;
-    for (int i = 0; i < k - 1; ++i) {
-        ImGuiID first = 0, rest = 0;
-        ImGui::DockBuilderSplitNode(node, dir, 1.0f / (float)(k - i), &first, &rest);
-        const float rest_len = cell * (float)(k - i - 1);
-        ImGui::DockBuilderSetNodeSize(first, horiz ? ImVec2(cell, size.y) : ImVec2(size.x, cell));
-        ImGui::DockBuilderSetNodeSize(rest,  horiz ? ImVec2(rest_len, size.y) : ImVec2(size.x, rest_len));
-        out.push_back(first);
-        node = rest;
-    }
-    out.push_back(node);
-    return out;
-}
-}  // namespace
-
-void apply_dock_layout(ImGuiID dock_id, ImVec2 size, const char* side_window,
-                       const std::vector<ImGuiWindow*>& wins, int preset) {
-    ImGui::DockBuilderRemoveNode(dock_id);
-    ImGui::DockBuilderAddNode(dock_id, ImGuiDockNodeFlags_DockSpace);
-    ImGui::DockBuilderSetNodeSize(dock_id, size);
-    ImGuiID plots = dock_id;
-    ImVec2  plots_size = size;
-    if (side_window) {
-        ImGuiID right = 0;
-        ImGui::DockBuilderSplitNode(dock_id, ImGuiDir_Right, 0.30f, &right, &plots);
-        const float side_w = std::floor(size.x * 0.30f);
-        plots_size = ImVec2(size.x - side_w, size.y);
-        ImGui::DockBuilderSetNodeSize(right, ImVec2(side_w, size.y));
-        ImGui::DockBuilderSetNodeSize(plots, plots_size);
-        ImGui::DockBuilderDockWindow(side_window, right);
-    }
-    const int n = (int)wins.size();
-    if (n > 0) {
-        std::vector<ImGuiID> cells;
-        switch (preset) {
-        case 1: cells = split_even(plots, plots_size, ImGuiDir_Left, n); break;   // Columns
-        case 2: cells = split_even(plots, plots_size, ImGuiDir_Up, n);   break;   // Rows
-        case 3: {                                                                  // Grid
-            const int cols = (int)std::ceil(std::sqrt((double)n));
-            const int rows = (n + cols - 1) / cols;
-            const std::vector<ImGuiID> row_ids = split_even(plots, plots_size, ImGuiDir_Up, rows);
-            const ImVec2 row_size(plots_size.x, plots_size.y / (float)rows);
-            for (int r = 0; r < rows; ++r) {
-                const int in_row = (std::min)(cols, n - r * cols);
-                for (ImGuiID c : split_even(row_ids[r], row_size, ImGuiDir_Left, in_row)) cells.push_back(c);
-            }
-            break;
-        }
-        default: cells.assign((size_t)n, plots); break;   // Tabs: всё в один узел
-        }
-        for (int i = 0; i < n; ++i) ImGui::DockBuilderDockWindow(wins[i]->Name, cells[(size_t)i]);
-    }
-    ImGui::DockBuilderFinish(dock_id);
-}
-
-int dock_layout_request_take(int mode) {
-    if (g_layout_request.mode != mode) return -1;
-    const int p = (int)g_layout_request.preset;
-    g_layout_request = {};
-    return p;
-}
-}  // namespace ucuda::ui_detail
 
 
 namespace ucuda::ui_detail {
@@ -661,13 +651,12 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             if (ImGui::Button("Layout")) ImGui::OpenPopup("##layout_presets");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(model.app_mode == AppModel::AppMode::Custom
-                    ? "Arrange the plots of the active workspace tab:\nas tabs, columns, rows or a grid."
-                    : "Arrange the windows of this tab: controls on the right,\n"
-                      "plots as tabs, columns, rows or a grid.");
+                    ? "Arrange the plots of the active workspace tab: tabs, columns, rows,\n"
+                      "grid, or a layout you saved."
+                    : "Arrange the windows of this tab: controls on the right, plots as tabs,\n"
+                      "columns, rows, grid, or a layout you saved.");
             if (ImGui::BeginPopup("##layout_presets")) {
-                for (int p = 0; p < IM_ARRAYSIZE(kLayoutPresetNames); ++p)
-                    if (ImGui::MenuItem(kLayoutPresetNames[p]))
-                        g_layout_request = { (int)model.app_mode, (LayoutPreset)p };
+                dock_layout_menu((int)model.app_mode);
                 ImGui::EndPopup();
             }
         }
@@ -872,14 +861,12 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         const ImGuiID dockspace_id = ImGui::GetID(ds_name.c_str());
         // Вкладка без сохранённой раскладки (первый запуск или переход со старого общего
         // dockspace) — раскладывается вкладками сама.
-        if (!ImGui::DockBuilderGetNode(dockspace_id) && g_layout_request.mode != mode_i)
-            g_layout_request = { mode_i, LayoutPreset::Tabs };
+        if (!ImGui::DockBuilderGetNode(dockspace_id) && !dock_layout_has_request(mode_i))
+            dock_layout_request(mode_i, kDockTabs);
         // Применяем со второго кадра на вкладке: список окон берётся из прошлого кадра.
-        if (g_layout_request.mode == mode_i && g_prev_frame_mode == mode_i) {
-            apply_layout_preset(dockspace_id, ImGui::GetContentRegionAvail(),
-                                controls_window_for(model.app_mode), g_layout_request.preset);
-            g_layout_request = {};
-        }
+        if (g_prev_frame_mode == mode_i)
+            process_layout(model, mode_i, dockspace_id, ImGui::GetContentRegionAvail(),
+                           controls_window_for(model.app_mode));
         g_prev_frame_mode = mode_i;
         ImGui::DockSpace(dockspace_id, ImVec2(0, 0), ImGuiDockNodeFlags_None);
     }
