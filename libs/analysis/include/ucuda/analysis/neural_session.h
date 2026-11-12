@@ -71,7 +71,10 @@ NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest
 std::vector<int> neural_forecast_channels(const NeuralConfig& c);
 // Обучение по первому прогону (r1, res1) и замыкание второго: r2 = тот же план до конца прогноза, с res1.checkpoint.
 // Первая строка прогноза считается здесь и пишется в r2, остальные считает выход на GPU (r2.feedback); авторегрессия тут же.
-void neural_forecast_prepare(const NeuralConfig& c, const NeuralRequest& r1, const NeuralResult& res1, NeuralRequest& r2, NeuralTaskResult& out);
+// fit_samples fixes the split across starts. Rows [fit_samples, start) only warm up the state and initialise the baselines.
+// The caller uses the same training-prefix input normalisation in both requests. Zero fits up to the start.
+void neural_forecast_prepare(const NeuralConfig& c, const NeuralRequest& r1, const NeuralResult& res1,
+                             NeuralRequest& r2, NeuralTaskResult& out, size_t fit_samples = 0);
 // Прогноз сети из второго прогона, ошибка и время верного прогноза.
 void neural_forecast_finish(const NeuralResult& res2, NeuralTaskResult& out);
 // Спайки строками: шаг, время, узел. Время спайка шага n = (n + 1) h.

@@ -77,6 +77,30 @@ starts at threshold but falls below it before the first threshold check.
 This is a small regression, not the 4-second, 4000-node benchmark or a
 cross-simulator reproduction. A skipped GPU test does not validate the engine.
 
+## Autonomous Lorenz forecast from fixed starts
+
+`neural_forecast_gpu` runs the stage-scheduled Tanh reservoir on CUDA and the
+autoregression and NVAR baselines on CPU. The synthetic source is Lorenz
+(`sigma = 10`, `rho = 28`, `beta = 8/3`), sampled every 0.02 source time
+units. The 96-node reservoir uses graph seed 1. Input normalisation, readout
+fitting and baseline selection use the split of samples `[0, 2000)`. The five
+starts at samples 2200, 2900, 3600, 4300 and 5000 use only earlier samples to
+initialise the reservoir and lag features. Each start uses the same graph,
+split and normalisation.
+
+```powershell
+cmake --build --preset windows-release --target neural_forecast_test
+ctest --preset windows-release -V -R '^neural_forecast_gpu$'
+```
+
+The test checks the common input history and graph, alignment of the forecast
+target, unchanged fit across starts, and independence from changes to the
+future target. It reports the horizon to the first normalised RMS error
+above 0.5 for each model and start, in Lyapunov times (`lambda = 0.906`), with
+the mean and range across starts. A forecast still within threshold at the
+end of the 600-step window is marked censored and contributes a lower bound.
+The horizons describe this fixed configuration and are not pass thresholds.
+
 ## Saved classifier and LIF trial protocol
 
 `neural_classifier_cpu` checks old Neural JSON, the v1 regression file format

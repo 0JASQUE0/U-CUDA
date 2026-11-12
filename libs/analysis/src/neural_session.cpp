@@ -1661,14 +1661,18 @@ static void forecast_error(const NeuralTaskResult& o, const std::vector<double>&
     valid = (double)good * o.dt;
 }
 
-void neural_forecast_prepare(const NeuralConfig& c, const NeuralRequest& r1, const NeuralResult& res1, NeuralRequest& r2, NeuralTaskResult& out) {
+void neural_forecast_prepare(const NeuralConfig& c, const NeuralRequest& r1, const NeuralResult& res1,
+                             NeuralRequest& r2, NeuralTaskResult& out, size_t fit_samples) {
     const NeuralTask& t = c.task;
     const std::vector<int> chans = neural_forecast_channels(c);
     const size_t K = chans.size(), ch = (size_t)r1.input.channels;
     if (K < 1 || ch < 1 || r1.input.stage_rows != 1 || r2.input.stage_rows != 1 || (size_t)r2.input.channels != ch)
         throw std::runtime_error("the forecast needs an input of one row per sample");
-    // Точка S видела строки до S - 1: точки 0..S-1 учат выход, точка S даёт первую строку прогноза.
+    // Точка S видела строки до S - 1 и даёт первую строку прогноза. Разбиение ограничено первыми fit отсчётами.
     const size_t S = (size_t)(std::llround(r1.t_max / r1.h) / r1.pre_scaller);
+    const size_t fit = fit_samples == 0 ? S : fit_samples;
+    if (fit > S) throw std::runtime_error("the forecast starts before the end of the fitting record");
+    if (r1.input.samples.size() / ch < S) throw std::runtime_error("the forecast needs input history up to the start");
     const size_t L = (size_t)int_or(t.forecast_length_text, 500);
     if (r2.input.samples.size() / ch < S + L + 1) throw std::runtime_error("the forecast run is shorter than the forecast");
     if (res1.observed_vars.size() != 1) throw std::runtime_error("the forecast reads one node variable");
@@ -1680,7 +1684,7 @@ void neural_forecast_prepare(const NeuralConfig& c, const NeuralRequest& r1, con
     std::vector<double> Y(S * K);
     for (size_t p = 0; p < S; ++p)
         for (size_t k = 0; k < K; ++k) Y[p * K + k] = r1.input.samples[p * ch + (size_t)chans[k]];
-    const ReadoutSplit sp = task_split(t, S);
+    const ReadoutSplit sp = task_split(t, fit);
     const double lam = num_or(t.lambda_text, 0.0);
     const std::vector<double> lambdas = lam > 0.0 ? std::vector<double>{ lam } : std::vector<double>{ 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0 };
     const ReadoutModel m = readout_fit(F, Y, M, (int)K, sp, lambdas);
@@ -1752,8 +1756,8 @@ void neural_forecast_prepare(const NeuralConfig& c, const NeuralRequest& r1, con
     ReadoutModel ar;
     for (int D : {1, 2, 5, 10, 20, 50}) {
         if ((size_t)D * K + 1 >= sp.train1 - sp.train0) break;
-        std::vector<double> G(S * K * (size_t)D);
-        for (size_t p = 0; p < S; ++p) ar_row(Y, p, D, G.data() + p * K * (size_t)D);
+        std::vector<double> G(fit * K * (size_t)D);
+        for (size_t p = 0; p < fit; ++p) ar_row(Y, p, D, G.data() + p * K * (size_t)D);
         try {
             ReadoutModel q = readout_fit(G, Y, D * (int)K, (int)K, sp, base_lambdas);
             double v = 0.0;
@@ -1788,16 +1792,16 @@ void neural_forecast_prepare(const NeuralConfig& c, const NeuralRequest& r1, con
         for (size_t a = 0; a < n; ++a)
             for (size_t b = a; b < n; ++b) g[at++] = g[a] * g[b];
     };
-    std::vector<double> dY(S * K, 0.0);
-    for (size_t p = 1; p < S; ++p)
+    std::vector<double> dY(fit * K, 0.0);
+    for (size_t p = 1; p < fit; ++p)
         for (size_t k = 0; k < K; ++k) dY[p * K + k] = Y[p * K + k] - Y[(p - 1) * K + k];
     best = std::numeric_limits<double>::infinity();
     ReadoutModel nv;
     for (int D : {1, 2, 3, 4}) {
         const size_t Mn = nvar_size(D);
         if (Mn + 1 >= sp.train1 - sp.train0) break;
-        std::vector<double> G(S * Mn);
-        for (size_t p = 0; p < S; ++p) nvar_row(Y, p, D, G.data() + p * Mn);
+        std::vector<double> G(fit * Mn);
+        for (size_t p = 0; p < fit; ++p) nvar_row(Y, p, D, G.data() + p * Mn);
         try {
             ReadoutModel q = readout_fit(G, dY, (int)Mn, (int)K, sp, base_lambdas);
             double v = 0.0;

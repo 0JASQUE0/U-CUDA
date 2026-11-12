@@ -180,3 +180,28 @@ and all eight selected checks passed (`activity-trials-validation.xml`).
 The LIF fixture produced 30 spikes in High current, zero in Low current,
 and zero during rest. Classifier replay retained the same annotations;
 continuous spiking published no trial bands. Visual inspection remains manual.
+
+## Autonomous Lorenz forecast from fixed starts, 12 November 2026
+
+The Release headless run of `neural_forecast_gpu` passed on an RTX 4090
+with CUDA 12.6. The fixed fitting prefix and five held-out starts are
+described in the [forecast protocol](README.md#autonomous-lorenz-forecast-from-fixed-starts).
+All three models crossed the threshold within the forecast window at
+every start. Horizons are in Lyapunov times.
+
+| Start sample | Source time after warmup | Tanh reservoir | Autoregression | NVAR |
+|---:|---:|---:|---:|---:|
+| 2200 | 44 | 0.21744 | 0.18120 | 8.53452 |
+| 2900 | 58 | 2.40996 | 0.36240 | 9.27744 |
+| 3600 | 72 | 0.27180 | 0.12684 | 9.45864 |
+| 4300 | 86 | 0.74292 | 0.16308 | 7.55604 |
+| 5000 | 100 | 1.55832 | 0.28992 | 8.48016 |
+| Mean | | 1.04009 | 0.22469 | 8.66136 |
+| Range | | 0.21744–2.40996 | 0.12684–0.36240 | 7.55604–9.45864 |
+
+The spread is across initialisation times on one trajectory and one graph
+seed. The comparison measures short-term forecast skill for this setup.
+
+`adaptive_cpu`, `adaptive_gpu`, `architecture`, `layer_rules`,
+`vcxproj_sync` and `gpu_smoke` also passed without skips. The GUI build
+and full regression suite were not run.
