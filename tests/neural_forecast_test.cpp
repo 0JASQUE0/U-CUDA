@@ -265,17 +265,154 @@ void evaluate_attractor(ParametricEngine& engine) {
         }
     }
 }
+
+// Both equations are driven by this prescribed time function, sampled every 0.25 units.
+double prescribed_input(int sample) {
+    constexpr double pi = 3.14159265358979323846;
+    return 0.15 + 0.8 * std::sin(2 * pi * 0.25 * (sample * 0.25));
+}
+
+std::vector<double> monolithic_pair(double h, double eps) {
+    const int steps_per_sample = (int)std::lround(0.25 / h);
+    std::array<double, 2> x{1.5, 1.5 + eps};
+    std::vector<double> growth;
+    for (int sample = 0; sample < 64; ++sample) {
+        const double input = prescribed_input(sample);
+        const auto rhs = [input](double v) { return -0.7 * v - 0.2 * v * v * v + input; };
+        for (int step = 0; step < steps_per_sample; ++step) {
+            for (double& v : x) {
+                const double a = rhs(v);
+                const double b = rhs(v + h * a / 2);
+                const double c = rhs(v + h * b / 2);
+                const double d = rhs(v + h * c);
+                v += h / 6 * (a + 2 * b + 2 * c + d);
+            }
+        }
+        if ((sample + 1) % 2 != 0) continue;
+        const double delta = x[1] - x[0];
+        if (sample + 1 > 16) growth.push_back(std::log(std::abs(delta) / eps));
+        x[1] = x[0] + std::copysign(eps, delta);
+    }
+    return growth;
+}
+
+void check_conditional_lyapunov(ParametricEngine& engine) {
+    constexpr double eps = 1e-6, interval = 0.5;
+    const auto reference = monolithic_pair(0.0078125, eps);
+    const double expected = std::accumulate(reference.begin(), reference.end(), 0.0) / (reference.size() * interval);
+    require(reference.size() == 24 && std::isfinite(expected) && expected < -0.7, "invalid contracting reference");
+    System sys;
+    sys.vars = {"x"};
+    sys.rhs = {"-0.7*x-0.2*x*x*x"};
+    NeuralConfig c;
+    c.schedule = NeuralSchedule::Stage;
+    c.populations.resize(1);
+    c.populations[0].size_text = "1";
+    c.populations[0].initial_conditions = {{"x", "1.5"}};
+    c.laws = {NetCouplingLaw{}};
+    auto& source = c.sources.emplace_back();
+    source.kind = NeuralSourceKind::Sine;
+    source.amplitude_text = "0.8";
+    source.frequency_text = "0.25";
+    source.offset_text = "0.15";
+    c.links = {{0, 0, "1", "0", "1"}};
+    c.input_hold_text = "0.25";
+    c.transient_text = "4";
+    c.t_max_text = "12";
+    std::cout << std::setprecision(10) << "monolithic CPU reference: conditional LLE=" << expected << '\n';
+    for (int hold : {2, 4}) {
+        c.h_text = hold == 2 ? "0.125" : "0.0625";
+        c.pre_scaller_text = std::to_string(hold);
+        auto plan = neural_plan(sys, {}, sys.vars, sys.params, c);
+        auto& req = plan.request;
+        require(req.input.stage_rows == 1 && req.input.samples.size() == 65, "wrong prescribed input grid");
+        for (size_t row = 0; row < req.input.samples.size(); ++row)
+            require(std::abs(req.input.samples[row] - prescribed_input((int)row)) < 1e-14, "prescribed inputs differ");
+        const NeuralResult plain = engine.run_neural(req);
+        req.lyapunov.enabled = true;
+        req.lyapunov.eps = eps;
+        req.lyapunov.interval = interval;
+        req.lyapunov.settle = 4;
+        req.steps_per_sync = hold + 1;
+        const NeuralResult run = engine.run_neural(req);
+        require(plain.ok && run.ok && !run.diverged && run.traces == plain.traces, "conditional clone changed the driven trajectory");
+        require(run.lyap_log.size() == reference.size() && run.lyapunov.size() == 1, "conditional exponent has the wrong window");
+        const auto matched_grid = monolithic_pair(req.h, eps);
+        for (size_t block = 0; block < matched_grid.size(); ++block)
+            require(std::abs(run.lyap_log[block] - matched_grid[block]) < 2e-6, "growth disagrees with the monolithic pair");
+        const double error = std::abs(run.lyapunov.front() - expected);
+        require(error < (hold == 2 ? 1e-5 : 1e-6), "conditional exponent disagrees with the refined CPU reference");
+        std::cout << "GPU h=" << req.h << ", conditional LLE=" << run.lyapunov.front()
+                  << ", error=" << error << ", run_ms=" << run.wall_ms << '\n';
+    }
+}
+
+void check_reservoir_replicas(ParametricEngine& engine) {
+    constexpr int horizon = 64;
+    constexpr double fraction = 1e-5;
+    // Keep the same training-prefix normalisation as the forecast, including past this short test.
+    auto plan = reservoir_plan(fixture(), fit_samples);
+    auto& req = plan.request;
+    req.t_max = horizon;
+    std::array<NeuralResult, 3> replicas;
+    const auto initial = req.initial_conditions;
+    const size_t nodes = req.observe.nodes.size();
+    require(nodes == 96 && req.observe.vars.size() == 1, "the replica test needs the full reservoir state");
+    for (int i = 0; i < (int)replicas.size(); ++i) {
+        for (size_t j = 0; j < initial.size(); ++j) req.initial_conditions[j] = initial[j] + i - 1;
+        replicas[i] = engine.run_neural(req);
+        require(replicas[i].ok && !replicas[i].diverged && replicas[i].traces.size() == (horizon + 1) * nodes,
+                "driven replica did not complete");
+    }
+    std::vector<double> distance(horizon + 1);
+    for (size_t a = 0; a < replicas.size(); ++a) for (size_t b = a + 1; b < replicas.size(); ++b) {
+        for (size_t p = 0; p < distance.size(); ++p) {
+            double sum = 0;
+            for (size_t j = 0; j < nodes; ++j) {
+                const double d = replicas[a].traces[p * nodes + j] - replicas[b].traces[p * nodes + j];
+                sum += d * d;
+            }
+            require(std::isfinite(sum), "non-finite separation");
+            distance[p] = (std::max)(distance[p], std::sqrt(sum / nodes));
+        }
+    }
+    require(distance.front() == 2, "replicas did not start apart");
+    const double threshold = distance.front() * fraction;
+    size_t settled = distance.size();
+    while (settled > 0 && distance[settled - 1] <= threshold) --settled;
+    require(settled <= horizon - 8, "replicas did not forget their initial states for the final eight samples");
+    std::cout << "network_time,max_pairwise_rms\n";
+    for (int time : {0, 4, 8, 16, 32, horizon}) std::cout << time << ',' << distance[time] << '\n';
+    std::cout << "first sample staying below " << threshold << " through " << horizon << ": " << settled << '\n';
+
+    req.initial_conditions = initial;
+    req.transient = 16;
+    req.t_max = horizon - req.transient;
+    req.lyapunov.enabled = true;
+    req.lyapunov.interval = 1;
+    req.lyapunov.settle = req.transient;
+    const NeuralResult run = engine.run_neural(req);
+    require(run.ok && !run.diverged && run.lyap_blocks == 48 && run.lyapunov.size() == 1 &&
+            std::isfinite(run.lyapunov.front()) && run.lyapunov.front() < 0, "expected a negative conditional reservoir exponent");
+    std::cout << "reservoir conditional LLE per network time: " << run.lyapunov.front() << '\n';
+}
 }
 
 int main(int argc, char** argv) {
     try {
         const bool attractor = argc == 2 && std::string(argv[1]) == "--attractor";
         const bool linear = argc == 2 && std::string(argv[1]) == "--lyapunov";
-        require(argc == 1 || attractor || linear, "usage: neural_forecast_test [--attractor | --lyapunov]");
+        const bool conditional = argc == 2 && std::string(argv[1]) == "--conditional";
+        require(argc == 1 || attractor || linear || conditional,
+                "usage: neural_forecast_test [--attractor | --lyapunov | --conditional]");
         if (cuInit(0) != CUDA_SUCCESS) { std::cout << "No CUDA device; forecast check skipped\n"; return 77; }
         ParametricEngine engine;
         if (attractor) evaluate_attractor(engine);
         else if (linear) check_closed_loop_lyapunov(engine);
+        else if (conditional) {
+            check_conditional_lyapunov(engine);
+            check_reservoir_replicas(engine);
+        }
         else evaluate(engine);
         return 0;
     } catch (const std::exception& e) {

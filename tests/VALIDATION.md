@@ -240,3 +240,27 @@ Release builds passed with CMake headless and Visual Studio Release|x64.
 The forecast and closed-loop Lyapunov tests, `adaptive_cpu`, `adaptive_gpu`,
 `gpu_smoke`, `architecture`, `layer_rules` and `vcxproj_sync` passed without
 skips. The full regression suite and manual GUI checks were not run.
+
+## Initial-state forgetting and conditional Lyapunov exponent, 12 November 2026
+
+The [conditional protocol](README.md#initial-state-forgetting-and-conditional-lyapunov-exponent)
+passed on RTX 4090 in Release. Each of the 24 renormalisation blocks was
+checked against the independent CPU pair using the same time grid.
+The refined CPU reference gave −0.7862247533 per network time unit.
+
+| GPU integration step | Conditional exponent | Absolute error against refined reference |
+|---:|---:|---:|
+| 0.125 | −0.7862245207 | 2.33e-7 |
+| 0.0625 | −0.7862245577 | 1.96e-7 |
+
+Under the same prescribed Lorenz input, the maximum pairwise RMS distance
+of the three Tanh reservoir replicas fell from 2 at time 0 to
+0.06801 at time 8, 0.002144 at time 16, and 1.34e-8 at time 32.
+It stayed below 2e-5 from time 23 through 64. The driven reservoir's
+conditional exponent over time 16–64 was −0.6586620415 per network time
+unit. This describes the fixed input, graph and initial states used here.
+
+The Release test target built and all eight selected checks passed without
+skips. The selection included the three Neural forecast and Lyapunov
+checks, `adaptive_cpu`, `gpu_smoke`, `architecture`, `layer_rules` and
+`vcxproj_sync`. The full regression suite was not run.

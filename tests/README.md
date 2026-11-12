@@ -130,6 +130,31 @@ and the reference exponent 0.906 from the forecast protocol. Statistics
 and the exponent describe this configuration. The exact sample map
 provides the regression thresholds.
 
+### Initial-state forgetting and conditional Lyapunov exponent
+
+`neural_conditional_lyapunov_gpu` compares a Stage GPU run of
+`x' = -0.7*x - 0.2*x^3 + u(t)` with an independent CPU RK4 integration
+of the two perturbed equations together. Both equations use the same
+prescribed sine input held for 0.25 time units. Only the node state is
+perturbed. The test checks every half-unit renormalisation block against
+the CPU pair at the corresponding step. The aggregate exponent is also
+checked against a CPU reference at step 0.0078125, with limits of
+`1e-5` and `1e-6` at GPU steps 0.125 and 0.0625 respectively.
+
+The same check runs three replicas of the 96-node Tanh reservoir under
+the prescribed Lorenz input of the forecast fixture. They start with
+state offsets of −1, 0 and +1. The test records the maximum pairwise
+RMS distance across all nodes through 64 network time units. The distance
+must stay below `1e-5` times its initial value for the final eight samples.
+It also measures the reservoir's conditional exponent after a washout
+of 16 units. This is a property of the driven reservoir. The autonomous
+experiment uses feedback and measures the exponent of a different system.
+
+```powershell
+cmake --build --preset windows-release --target neural_forecast_test
+ctest --preset windows-release -V -R '^neural_conditional_lyapunov_gpu$'
+```
+
 ## Saved classifier and LIF trial protocol
 
 `neural_classifier_cpu` checks old Neural JSON, the v1 regression file format
