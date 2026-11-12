@@ -66,19 +66,19 @@ NeuralConfig fixture() {
     return neural_task_config(c);
 }
 
-void evaluate(ParametricEngine& engine) {
-    const NeuralConfig config = fixture();
+NeuralPlan reservoir_plan(NeuralConfig config, int end) {
     System sys;
     sys.vars = {"x"};
     sys.params = {"b"};
     sys.rhs = {"-x+b"};
-    auto plan = [&](int end) {
-        NeuralConfig run = config;
-        // Sample time is one network time unit. Keep the normalisation from the fixed fitting record.
-        run.t_max_text = std::to_string(end);
-        return neural_plan(sys, {}, sys.vars, sys.params, run);
-    };
+    // Sample time is one network time unit. Keep the normalisation from the fixed fitting record.
+    config.t_max_text = std::to_string(end);
+    return neural_plan(sys, {}, sys.vars, sys.params, config);
+}
 
+void evaluate(ParametricEngine& engine) {
+    const NeuralConfig config = fixture();
+    const auto plan = [&](int end) { return reservoir_plan(config, end); };
     const auto reference = plan(starts.back() + forecast_samples);
     std::vector<double> weights, lambda;
     int ar_order = 0, nvar_order = 0;
@@ -146,13 +146,137 @@ void evaluate(ParametricEngine& engine) {
                   << ',' << *range.first << ',' << *range.second << '\n';
     }
 }
+
+void check_closed_loop_lyapunov(ParametricEngine& engine) {
+    const double dt = 0.25, gain = 0.5;
+    const double multiplier = 1 + gain * dt;
+    System sys;
+    sys.vars = {"x"};
+    sys.rhs = {"0"};
+    NeuralConfig c;
+    c.populations.resize(1);
+    c.populations[0].size_text = "1";
+    c.populations[0].initial_conditions = {{"x", "1"}};
+    c.input_hold_text = "0.25";
+    c.t_max_text = "8";
+    c.laws = {NetCouplingLaw{}};
+    c.sources.resize(2);
+    for (auto& source : c.sources) {
+        source.kind = NeuralSourceKind::Constant;
+        source.amplitude_text = "0";
+    }
+    c.links = {{1, 0, "1", "0", "1"}};
+    for (auto schedule : {NeuralSchedule::Stage, NeuralSchedule::Heun, NeuralSchedule::Post, NeuralSchedule::Old}) {
+        c.schedule = schedule;
+        for (int hold : {2, 4}) {
+            c.h_text = hold == 2 ? "0.125" : "0.0625";
+            c.pre_scaller_text = std::to_string(hold);
+            auto plan = neural_plan(sys, {}, sys.vars, sys.params, c);
+            NeuralRequest& req = plan.request;
+            req.feedback = {3, {0}, {1}, {gain, 0}};
+            const NeuralResult plain = engine.run_neural(req);
+            require(plain.ok && !plain.diverged && plain.feedback_rows.size() == 30, "linear feedback: " + plain.error);
+            for (size_t j = 0; j < plain.feedback_rows.size(); ++j)
+                require(std::abs(plain.feedback_rows[j] - gain * std::pow(multiplier, (double)j)) < 1e-10,
+                        "linear closed-loop signal disagrees with the exact sample map");
+            req.lyapunov.enabled = true;
+            req.lyapunov.eps = 1e-5;
+            req.lyapunov.interval = 0.5;
+            req.lyapunov.settle = 0.5;
+            req.steps_per_sync = hold + 1;
+            const NeuralResult twin = engine.run_neural(req);
+            require(twin.ok && !twin.diverged && twin.lyapunov.size() == 1 && twin.lyap_blocks == 13,
+                    "linear closed-loop Lyapunov: " + twin.error);
+            require(twin.feedback_rows == plain.feedback_rows && twin.traces == plain.traces, "clone changed the primary forecast");
+            require(std::abs(twin.lyapunov.front() - std::log(multiplier) / dt) < 1e-8,
+                    "closed-loop exponent disagrees with the exact sample map");
+            req.lyapunov.interval = req.h;
+            const NeuralResult off_grid = engine.run_neural(req);
+            require(!off_grid.ok && off_grid.error.find("sample time") != std::string::npos,
+                    "an interval off the sample grid was accepted");
+            std::cout << neural_schedule_name(schedule) << ", hold=" << hold
+                      << ", plain_ms=" << plain.wall_ms << ", clone_ms=" << twin.wall_ms << '\n';
+        }
+    }
 }
 
-int main() {
+void attractor_stats(const char* model, double h, int length, const std::vector<double>& samples,
+                     size_t first, size_t last, double lle) {
+    for (int k = 0; k < channels; ++k) {
+        double sum = 0;
+        for (size_t i = first; i < last; ++i) {
+            const double v = samples[i * channels + k];
+            require(std::isfinite(v), "incomplete attractor record");
+            sum += v;
+        }
+        const double mean = sum / (last - first);
+        double variance = 0, lag = 0;
+        for (size_t i = first; i < last; ++i) {
+            const double d = samples[i * channels + k] - mean;
+            variance += d * d;
+            if (i > first) lag += d * (samples[(i - 1) * channels + k] - mean);
+        }
+        std::cout << model << ',' << h << ',' << length << ',' << k << ',' << mean << ','
+                  << std::sqrt(variance / (last - first)) << ',' << (variance > 0 ? lag / variance : 0) << ',' << lle << '\n';
+    }
+}
+
+void evaluate_attractor(ParametricEngine& engine) {
+    NeuralConfig config = fixture();
+    constexpr int start = starts.front(), settle = 500, duration = 4000, interval = 5;
+    config.task.forecast_length_text = std::to_string(duration);
+    auto teacher = reservoir_plan(config, start);
+    auto preparation = reservoir_plan(config, start + duration);
+    const auto reference_input = preparation.request.input.samples;
+    const auto history = engine.run_neural(teacher.request);
+    require(history.ok && !history.diverged, "attractor fitting run failed: " + history.error);
+    NeuralTaskResult targets;
+    neural_forecast_prepare(config, teacher.request, history, preparation.request, targets, fit_samples);
+    NeuralFeedback feedback = preparation.request.feedback;
+    // Both steps use this fixed readout; evaluate it at the first autonomous sample on-device.
+    feedback.from_row = start;
+
+    std::cout << std::setprecision(8) << "model,h,autonomous_samples,channel,mean,sd,lag1,lle_in_source_time\n";
+    for (int length : {2000, duration})
+        attractor_stats("Lorenz", 0.01, length, targets.truth, settle, length + 1, source_lle);
+    for (const char* h : {"0.1", "0.05"}) {
+        config.h_text = h;
+        config.pre_scaller_text = std::string(h) == "0.1" ? "10" : "20";
+        auto autonomous = reservoir_plan(config, start + duration);
+        auto& req = autonomous.request;
+        require(autonomous.hash == teacher.hash && req.observe.nodes == teacher.request.observe.nodes &&
+                req.input.samples == reference_input,
+                "the step study changed the graph, features or input");
+        req.feedback = feedback;
+        req.lyapunov.enabled = true;
+        req.lyapunov.interval = interval;
+        req.lyapunov.settle = settle;
+        const NeuralResult run = engine.run_neural(req);
+        require(run.ok && !run.diverged && run.lyap_blocks == (duration - settle) / interval &&
+                run.lyap_log.size() == (size_t)run.lyap_blocks && run.feedback_rows.size() == targets.truth.size(),
+                "autonomous attractor run failed: " + run.error);
+        std::cerr << "Reservoir h=" << req.h << ": " << run.wall_ms << " ms, " << run.lyap_blocks << " measured intervals\n";
+        for (int length : {2000, duration}) {
+            const int count = (length - settle) / interval;
+            const double sum = std::accumulate(run.lyap_log.begin(), run.lyap_log.begin() + count, 0.0);
+            const double lle = sum / (count * run.lyap_dt * source_dt);
+            require(std::isfinite(lle), "invalid autonomous exponent");
+            attractor_stats("reservoir", req.h, length, run.feedback_rows, settle, length + 1, lle);
+        }
+    }
+}
+}
+
+int main(int argc, char** argv) {
     try {
+        const bool attractor = argc == 2 && std::string(argv[1]) == "--attractor";
+        const bool linear = argc == 2 && std::string(argv[1]) == "--lyapunov";
+        require(argc == 1 || attractor || linear, "usage: neural_forecast_test [--attractor | --lyapunov]");
         if (cuInit(0) != CUDA_SUCCESS) { std::cout << "No CUDA device; forecast check skipped\n"; return 77; }
         ParametricEngine engine;
-        evaluate(engine);
+        if (attractor) evaluate_attractor(engine);
+        else if (linear) check_closed_loop_lyapunov(engine);
+        else evaluate(engine);
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Neural forecast test failed: " << e.what() << '\n';

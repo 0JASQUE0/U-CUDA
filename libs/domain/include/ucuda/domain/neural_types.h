@@ -47,7 +47,7 @@ struct NeuralLyapunov {
     bool   enabled = false;
     double eps = 1.0e-8;
     double interval = 1.0;     // время между перенормировками, кратно h
-    double settle = 100.0;     // столько времени до записи направление выстраивается, сумма не копится
+    double settle = 100.0;     // время выстраивания направления: до записи, при обратной связи — после её включения
     unsigned long long seed = 1;
     std::vector<unsigned long long> instance_seed;   // [instances], пусто = seed у всех
 };
@@ -128,7 +128,8 @@ struct NeuralCheckpoint {
 
 // Замкнутый выход: с строки from_row вход каналов channels считает сама сеть, y_k = w[k][M] + sum_i w[k][i] * row[cols_i],
 // где row это строка записи точки p (после шага p * hold_steps), а результат идёт в строку входа p, до её шагов.
-// Только непрерывные расписания, stage_rows = 1, pre_scaller = hold_steps, без transient и показателя Ляпунова.
+// Только непрерывные расписания, stage_rows = 1, pre_scaller = hold_steps, без transient.
+// Для показателя Ляпунова каждый клон вычисляет свою строку входа.
 struct NeuralFeedback {
     long long from_row = -1;          // -1 = вход задан целиком
     std::vector<int> cols;            // [M], номера в строке записи

@@ -55,7 +55,9 @@ add_executable(neural_forecast_test neural_forecast_test.cpp)
 target_link_libraries(neural_forecast_test PRIVATE ucuda::analysis ucuda::cuda ucuda::platform CUDA::cuda_driver)
 ucuda_runtime(neural_forecast_test)
 add_test(NAME neural_forecast_gpu COMMAND neural_forecast_test)
-set_tests_properties(neural_forecast_gpu PROPERTIES LABELS "regression;gpu" RUN_SERIAL TRUE TIMEOUT 180 SKIP_RETURN_CODE 77)
+add_test(NAME neural_closed_loop_lyapunov_gpu COMMAND neural_forecast_test --lyapunov)
+set_tests_properties(neural_forecast_gpu neural_closed_loop_lyapunov_gpu PROPERTIES
+    LABELS "regression;gpu" RUN_SERIAL TRUE TIMEOUT 180 SKIP_RETURN_CODE 77)
 
 if(UNIX)
     add_executable(platform_test platform_test.cpp)

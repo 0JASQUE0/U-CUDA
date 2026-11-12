@@ -205,3 +205,38 @@ seed. The comparison measures short-term forecast skill for this setup.
 `adaptive_cpu`, `adaptive_gpu`, `architecture`, `layer_rules`,
 `vcxproj_sync` and `gpu_smoke` also passed without skips. The GUI build
 and full regression suite were not run.
+
+## Closed-loop attractor and Lyapunov exponent, 12 November 2026
+
+The [closed-loop protocol](README.md#closed-loop-lyapunov-exponent-and-long-run-statistics)
+uses the same 96-node reservoir and fixed readout at both steps. The first
+500 autonomous samples were discarded. The 2,000-sample window is a prefix
+of the 4,000-sample run. Reported channel statistics are
+triples in x, y, z order and use the normalisation fitted before the test.
+The reservoir exponent is expressed per source time unit. The Lorenz
+exponent in the table is the 0.906 reference used in the protocol.
+
+| System | Integration step | Autonomous samples | Mean | Standard deviation | Lag-one correlation | Largest exponent |
+|---|---:|---:|---|---|---|---:|
+| Lorenz | 0.01 | 2000 | 0.037, 0.027, 0.044 | 0.994, 0.979, 0.952 | 0.993, 0.989, 0.982 | 0.906 |
+| Lorenz | 0.01 | 4000 | 0.048, 0.036, 0.023 | 0.991, 0.984, 0.972 | 0.993, 0.989, 0.983 | 0.906 |
+| Reservoir | 0.1 | 2000 | 0.742, 0.648, 0.057 | 0.774, 0.739, 0.720 | 0.991, 0.986, 0.987 | 0.1773 |
+| Reservoir | 0.1 | 4000 | 0.949, 0.823, 0.085 | 0.538, 0.507, 0.472 | 0.991, 0.987, 0.987 | -0.0957 |
+| Reservoir | 0.05 | 2000 | 0.095, 0.084, -0.051 | 0.969, 0.972, 1.034 | 0.992, 0.987, 0.983 | 1.0138 |
+| Reservoir | 0.05 | 4000 | 0.395, 0.342, 0.018 | 0.929, 0.906, 0.861 | 0.994, 0.989, 0.983 | 0.6704 |
+
+The reservoir stays bounded across the measured windows. The exponent
+changes materially with integration step and window length. The positive
+x and y means at 4,000 samples show a bias relative to the source, even
+with the smaller step. These runs leave convergence and reproduction of
+the Lorenz attractor unconfirmed for this reservoir.
+
+The analytical GPU check passed on RTX 4090 at both integration steps
+for Stage, Heun, Post and Old. In each case, the measured exponent agreed
+with the exact discrete map within `1e-8` per network time unit. The primary
+trajectory and feedback were identical with and without the clone.
+
+Release builds passed with CMake headless and Visual Studio Release|x64.
+The forecast and closed-loop Lyapunov tests, `adaptive_cpu`, `adaptive_gpu`,
+`gpu_smoke`, `architecture`, `layer_rules` and `vcxproj_sync` passed without
+skips. The full regression suite and manual GUI checks were not run.

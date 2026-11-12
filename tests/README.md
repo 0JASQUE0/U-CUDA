@@ -101,6 +101,35 @@ the mean and range across starts. A forecast still within threshold at the
 end of the 600-step window is marked censored and contributes a lower bound.
 The horizons describe this fixed configuration and are not pass thresholds.
 
+### Closed-loop Lyapunov exponent and long-run statistics
+
+`neural_closed_loop_lyapunov_gpu` checks an independent exact sample map
+for a one-node system with held feedback `u = a*x`. Over a sample of
+duration `dt`, the map multiplies `x` by `1 + a*dt`, so the exponent is
+`log(1 + a*dt) / dt`. The check covers all four continuous schedules,
+two integration steps at fixed `dt`, a delayed feedback start, an
+off-grid interval, and exact agreement of the primary trajectory with
+the run without a clone.
+
+```powershell
+cmake --build --preset windows-release --target neural_forecast_test
+ctest --preset windows-release --output-on-failure -R '^neural_closed_loop_lyapunov_gpu$'
+& .\build\windows\bin\Release\neural_forecast_test.exe --attractor
+```
+
+The long run uses the first held-out start and the fixed readout fitted
+at network step 0.1. Both runs use the same graph, observations, input
+normalisation and readout. Network steps 0.1 and 0.05 give the same
+input sample interval, 0.02 in source time. The first 500 autonomous
+samples are excluded. The report compares mean, population standard
+deviation and lag-one autocorrelation of the normalised x, y and z
+over 2,000 and 4,000 autonomous samples. It also reports the exponent
+in inverse source time, using a renormalisation every five samples.
+The source comparison uses the Lorenz trajectory over the same windows
+and the reference exponent 0.906 from the forecast protocol. Statistics
+and the exponent describe this configuration. The exact sample map
+provides the regression thresholds.
+
 ## Saved classifier and LIF trial protocol
 
 `neural_classifier_cpu` checks old Neural JSON, the v1 regression file format
