@@ -3,6 +3,7 @@
 #include "gui_plot.h"
 #include "tab_custom.h"
 #include "tab_phase.h"
+#include "dock_layout.h"
 using namespace ucuda::ui_detail;
 
 void gui_process_deferred(AppModel& model, const GuiCallbacks& cb) {
@@ -207,11 +208,18 @@ void draw_custom_workspace_panel(CustomSession& cs,
                     [&](const WorkspaceTab& t){ return t.id == ws.active_tab_id; })) {
         const ImGuiID active_id = ws_dock_id(ws.active_tab_id, sys);
         // Кнопка Layout в шапке: окна, пристыкованные в дерево активной вкладки, — по пресету.
-        const int preset = dock_layout_request_take((int)AppModel::AppMode::Custom);
-        if (preset >= 0) {
+        const int custom_mode = (int)AppModel::AppMode::Custom;
+        // Первый запуск Custom (раскладки рабочей области ещё нет) — встроенная "Default".
+        // Только при единственной вкладке: новая вкладка "+" пустая, и Default перетащил бы в
+        // неё окна соседних вкладок.
+        if (!ImGui::DockBuilderGetNode(active_id) && ws.tabs.size() == 1 && !dock_layout_has_request(custom_mode))
+            dock_layout_request_saved(custom_mode, "Default", /*delay_frames*/ 3);
+        if (dock_layout_has_request(custom_mode)) {
             std::vector<ImGuiWindow*> wins;
+            const int last_frame = ImGui::GetFrameCount() - 1;
             for (ImGuiWindow* w : GImGui->Windows) {
-                if (!w->DockNode || w->RootWindow != w) continue;
+                // Только окна, что рисуются: объект удалённой проекции ImGui хранит с прежней стыковкой.
+                if (!w->DockNode || w->RootWindow != w || w->LastFrameActive < last_frame) continue;
                 ImGuiDockNode* root = w->DockNode;
                 while (root->ParentNode) root = root->ParentNode;
                 if (root->ID == active_id) wins.push_back(w);
@@ -219,10 +227,73 @@ void draw_custom_workspace_panel(CustomSession& cs,
             std::sort(wins.begin(), wins.end(), [](const ImGuiWindow* a, const ImGuiWindow* b) {
                 return a->BeginOrderWithinContext < b->BeginOrderWithinContext;
             });
-            if (!wins.empty()) {
-                apply_dock_layout(active_id, ImGui::GetContentRegionAvail(), nullptr, wins, preset);
-                ws.dirty = true;
-            }
+            // Проекции фазы (Level 3) — объекты сессии: недостающие раскладка создаёт заново.
+            // Заголовок — как в draw_projection_windows с суффиксом системы.
+            PhaseAnalysisSession& ps = cs.phase_session;
+            const std::string sfx = custom_win_suffix(sys);
+            auto title = [&ps, sfx](const Projection& pr, size_t i) {
+                return pr.label + "##proj" + std::to_string(i) + "_g" + std::to_string(ps.layout_generation) + sfx;
+            };
+            DockWindowFactory factory;
+            factory.describe = [&ps, title](const std::string& name) -> std::string {
+                for (size_t i = 0; i < ps.projections.size(); ++i)
+                    if (title(ps.projections[i], i) == name) return session_to_json_projection(ps.projections[i]);
+                return {};
+            };
+            factory.create = [&ps, &cs, title](const std::string& json) -> std::string {
+                std::vector<Projection> v;
+                if (!session_from_json_projections(json, v) || v.empty()) return {};
+                ps.projections.push_back(std::move(v.front()));
+                cs.workspace.dirty = true;
+                return title(ps.projections.back(), ps.projections.size() - 1);
+            };
+            // Галки уровней и диаграмм: какие окна Custom вообще показывает. Раскладка хранит их,
+            // чтобы на другой системе включились те же 2D-карты и срезы, а лишние выключились.
+            CustomTabSharedConfig& sh = cs.shared;
+            struct Flag { const char* key; bool* v; };
+            const Flag flags[] = {
+                { "l2d", &sh.level_2d_enabled }, { "l1d", &sh.level_1d_enabled }, { "l3", &sh.level_phase_enabled },
+                { "bif2d", &sh.bif2d_enabled }, { "lle2d", &sh.lle2d_enabled }, { "ls2d", &sh.ls2d_enabled },
+                { "bifx", &sh.bif1d_x_enabled }, { "bify", &sh.bif1d_y_enabled },
+                { "llex", &sh.lle1d_x_enabled }, { "lley", &sh.lle1d_y_enabled },
+                { "lsx", &sh.ls1d_x_enabled },  { "lsy", &sh.ls1d_y_enabled },
+            };
+            factory.save_state = [&sh, flags]() {
+                std::string out;
+                for (const Flag& f : flags) out += std::string(f.key) + "=" + (*f.v ? "1" : "0") + ";";
+                out += "l3kind=" + std::to_string(sh.level3_kind) + ";";
+                return out;
+            };
+            factory.load_state = [&sh, &cs, flags](const std::string& st) {
+                bool changed = false;
+                auto value = [&st](const std::string& key, std::string& v) {
+                    const std::string pat = key + "=";
+                    size_t p = 0;
+                    while ((p = st.find(pat, p)) != std::string::npos) {
+                        if (p == 0 || st[p - 1] == ';') {
+                            const size_t e = st.find(';', p);
+                            v = st.substr(p + pat.size(), e == std::string::npos ? std::string::npos : e - p - pat.size());
+                            return true;
+                        }
+                        ++p;
+                    }
+                    return false;
+                };
+                std::string v;
+                for (const Flag& f : flags)
+                    if (value(f.key, v)) {
+                        const bool b = v == "1";
+                        if (*f.v != b) { *f.v = b; changed = true; }
+                    }
+                if (value("l3kind", v)) {
+                    const int k = std::atoi(v.c_str()) == 1 ? 1 : 0;
+                    if (sh.level3_kind != k) { sh.level3_kind = k; changed = true; }
+                }
+                if (changed) cs.workspace.dirty = true;
+                return changed;
+            };
+            dock_layout_process(custom_mode, active_id, ImGui::GetContentRegionAvail(), nullptr, wins, &factory);
+            ws.dirty = true;
         }
         ImGui::DockSpace(active_id, ImVec2(0, 0), ImGuiDockNodeFlags_None);
     }
@@ -860,20 +931,47 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
             ImGui::PopID(); ImGui::End(); continue;
         }
 
-        // Autofit по данным, как в Parametric (configure_sweep_x_axis).
-        view.x_fit_use_explicit = false;
+        // X-диапазон — весь свип среза (он же ось 2D-карты), а не bbox данных: там, где
+        // траектория уходит в бесконечность, точек нет, и ось срезалась (0..0.398 вместо 0..0.5),
+        // а крест среза переставал совпадать с осью карты.
+        // Оси среза переставлены (меню ПКМ «Swap axes»): параметр свипа — по вертикали.
+        // Флаг — вид окна (PlotWindowPrefs::swap_axes): сохраняется в imgui.ini и в раскладках окон.
+        PlotWindowPrefs& slice_wp = plot_window_prefs_current();
+        const bool swap = slice_wp.swap_axes;
+        // Swap меняется не только из меню, но и раскладкой окон или Ctrl+Shift: старые
+        // диапазоны осей при этом относятся к другим величинам — перефит при любой смене.
+        {
+            static std::unordered_map<const void*, bool> last_swap;
+            auto [it, fresh] = last_swap.try_emplace(&view, swap);
+            if (!fresh && it->second != swap) {
+                it->second = swap;
+                view.x_axis.user_range = view.y_axis.user_range = false;
+                view.view_valid = false;
+            }
+        }
+        view.x_fit_use_explicit = !swap && param_hi != param_lo;
+        view.y_fit_use_explicit =  swap && param_hi != param_lo;
+        view.x_fit_min = view.y_fit_min = std::min(param_lo, param_hi);
+        view.x_fit_max = view.y_fit_max = std::max(param_lo, param_hi);
+        view.pad_x = swap;    // данные (пики, λ) по X — с запасом, свип по Y — вплотную
+        view.pad_y = !swap;
         // Лог-ось — как в Parametric; узлы движка лежат лог-равномерно, ось
         // и snap обязаны это повторить. log при lo<=0 невозможен (движок
         // такой Run отклоняет), но проверку держим здесь тоже — конфиг мог
         // прийти из старой сессии.
-        view.x_axis.log_scale = slice_log && std::min(param_lo, param_hi) > 0.0;
+        const bool sweep_log = slice_log && std::min(param_lo, param_hi) > 0.0;
+        view.x_axis.log_scale = !swap && sweep_log;
+        view.y_axis.log_scale =  swap && sweep_log;
 
         // Sweep-position crosshair — vertical line at fix_x (X-slice)
         // or fix_y (Y-slice), synced with the slider / drag on 2D heatmaps.
         // Hidden if Level 1D isn't the driver (falls out to NaN → no draw).
-        view.crosshair_x = cs.shared.level_1d_enabled
+        const double cross = cs.shared.level_1d_enabled
                            ? lslots[i].fix_pt
                            : std::numeric_limits<double>::quiet_NaN();
+        view.crosshair_x = swap ? std::numeric_limits<double>::quiet_NaN() : cross;
+        view.crosshair_y = swap ? cross : std::numeric_limits<double>::quiet_NaN();
+        view.crosshair_along_y = swap;
         // Красим вертикальный крест по тому свипу, которому принадлежит срез: один цвет на 2D
         // хитмапе и её 1D срезе показывает, на какую ось смотришь.
         //  cfg_idx == 1 → X-срез → совпадает с вертикальной X-линией хитмапы
@@ -881,6 +979,7 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
         view.crosshair_x_color = (lslots[i].cfg_idx == 2)
                                   ? 0xFFFF9028u   // orange = Y sweep
                                   : 0xFF50A0FFu;  // blue   = X sweep
+        view.crosshair_y_color = view.crosshair_x_color;
 
         // Перетаскивание креста: MMB или Shift+LMB внутри плота двигает соответствующий fix_*
         // вдоль оси свипа этого среза (cfg_idx 1 → fix_x, 2 → fix_y). Отпускание запускает общий
@@ -924,6 +1023,9 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
         // раньше в Custom он стоял только на crosshair-драге, поэтому tooltip
         // здесь показывал промежуточные X, которых в данных нет.
         apply_snap_x(view, snap_lo, snap_hi, snap_n);
+        // При переставленных осях по X идут данные, а не узлы свипа: привязку X снимаем
+        // (узел свипа ловит snap_to_grid в колбэках креста ниже).
+        if (swap) view.snap_x_to_grid = false;
         view.on_left_drag = [&cs, slice_is_x, snap_to_grid](double world_x) {
             double w = snap_to_grid(world_x);
             if (slice_is_x) {
@@ -1051,6 +1153,17 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
         }
         init_vis.assign(series_in.size(), true);
         glob_vis.assign(series_in.size(), true);
+        if (swap) {
+            // Пары (параметр, значение) -> (значение, параметр); подписи осей — следом.
+            for (auto& buf : bufs)
+                for (size_t k = 0; k + 1 < buf.size(); k += 2) std::swap(buf[k], buf[k + 1]);
+            std::swap(view.x_axis.name, view.y_axis.name);
+            view.show_zero_x = view.show_zero_y;
+            view.show_zero_y = false;
+            series_gen = series_gen * 2 + 1;   // другая раскладка данных — новая заливка VBO
+        } else {
+            series_gen = series_gen * 2;
+        }
 
         // Right-click "Export data..." — паритет с Parametric, где он есть у
         // всех 1D-графиков. В Custom его не было ни на одном из 6 слотов.
@@ -1079,7 +1192,15 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                                           : &cs.shared.axis_y_hi_text)
                          : (vr_slice_is_x ? &cs.shared.sweep_x_hi_text
                                           : &cs.shared.sweep_y_hi_text)) };
-        view.popup_extras = [i, &lslots, &cs, &cb, &vrt, &model, &view]() {
+        view.popup_extras = [i, &lslots, &cs, &cb, &vrt, &model, &view, swap, &slice_wp]() {
+            bool sw = swap;
+            if (ImGui::MenuItem("Swap axes", nullptr, &sw)) {
+                slice_wp.swap_axes = sw;   // перефит — на следующем кадре, по смене флага
+                ImGui::MarkIniSettingsDirty();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Sweep parameter on the vertical axis (e.g. a Y slice\n"
+                                  "next to the vertical axis of the 2D map).");
             const bool busy = (lslots[i].kind == L1Kind::Bif) ? cs.bif_session.in_flight
                             : (lslots[i].kind == L1Kind::LLE) ? cs.lle_session.in_flight
                                                               : cs.ls_session.in_flight;
@@ -1096,7 +1217,7 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                         data_export::export_ls1d(cs.ls_session.curves[ci].result, path);
                 }
             });
-            draw_view_range_menu(vrt, view.x_axis, view.y_axis, /*swapped*/ false, &model);
+            draw_view_range_menu(vrt, view.x_axis, view.y_axis, /*swapped*/ swap, &model);
         };
 
         // Autofit whenever the underlying result changed (bif/lle/ls each
@@ -1119,7 +1240,7 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                     /*owner_id*/ (0xC10000 + i) ^ sys_owner_delta,
                     series_gen,
                     series_in, init_vis, glob_vis, fit);
-        handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
+        handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ swap, &model);
         ImGui::PopID();
         ImGui::End();
     }

@@ -1095,6 +1095,8 @@ bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o) {
     // не забираем: без тулбара её некуда показать (окно тоже не рисует свою стрелку).
     if (plot_toolbar_hidden()) return false;
     bool changed = false;
+    // Вид окна — до попапа: внутри него «текущее окно» уже сам попап.
+    PlotWindowPrefs& wp = plot_window_prefs_current();
     // Шапка окна-владельца — только первому тулбару кадра (см. set_heatmap_toolbar_head).
     std::function<void()> head;
     if (g_toolbar_head) {
@@ -1143,7 +1145,13 @@ bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o) {
         }
         if (o.show_swap) {
             ImGui::SeparatorText("Axes");
-            if (ImGui::Checkbox("Swap axes", &hv.swap_axes)) changed = true;
+            // Swap — вид окна (plot_axis.h): карта берёт его из wp в render().
+            hv.swap_axes = wp.swap_axes;
+            if (ImGui::Checkbox("Swap axes", &hv.swap_axes)) {
+                wp.swap_axes = hv.swap_axes;
+                ImGui::MarkIniSettingsDirty();
+                changed = true;
+            }
         }
         ImGui::EndPopup();
     }

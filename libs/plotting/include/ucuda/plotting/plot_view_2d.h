@@ -148,6 +148,10 @@ public:
     bool   x_fit_use_explicit = false;
     double x_fit_min = 0.0;
     double x_fit_max = 1.0;
+    // То же по Y — у среза с переставленными осями (параметр свипа идёт по вертикали).
+    bool   y_fit_use_explicit = false;
+    double y_fit_min = 0.0;
+    double y_fit_max = 1.0;
     // The caller supplies the current X range for stacked plots. A local data
     // refresh must preserve it; explicit fit commands still reset it.
     bool shared_x_range = false;
@@ -248,6 +252,9 @@ public:
     // the cursor during a drag while the heavy recompute waits for
     // release (on_left_click).
     std::function<void(double world_x)> on_left_drag;
+    // Крест — горизонтальная линия (параметр свипа по Y): on_left_drag / on_left_click
+    // получают мировой Y курсора, привязки к узлам по X нет.
+    bool crosshair_along_y = false;
 
     // Vertical/horizontal crosshair overlay drawn on top of the data.
     // NaN disables the corresponding axis; both NaN (default) → nothing

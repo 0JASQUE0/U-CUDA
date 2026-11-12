@@ -793,7 +793,8 @@ int g_window_scope = -1;   // вкладка приложения текущег
 
 bool prefs_default(const PlotWindowPrefs& p) {
     return p.toolbar && p.legend && p.x_label && p.x_ticks && p.y_label && p.y_ticks &&
-           p.colorbar && p.axes3d && !p.smooth && p.series_colors.empty();
+           p.colorbar && p.axes3d && !p.smooth && !p.swap_axes && !p.invert_x && !p.invert_y &&
+           p.series_colors.empty();
 }
 
 // Секция [UcudaPlot][#RecentColours] — недавние цвета меню легенды (legend_recent_colors).
@@ -826,6 +827,9 @@ void prefs_read_line(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const ch
     else if (std::sscanf(line, "Legend=%d", &v) == 1)   p.legend   = v != 0;
     else if (std::sscanf(line, "Axes3D=%d", &v) == 1)   p.axes3d   = v != 0;
     else if (std::sscanf(line, "Smooth=%d", &v) == 1)   p.smooth   = v != 0;
+    else if (std::sscanf(line, "Swap=%d", &v) == 1)     p.swap_axes = v != 0;
+    else if (std::sscanf(line, "InvertX=%d", &v) == 1)  p.invert_x = v != 0;
+    else if (std::sscanf(line, "InvertY=%d", &v) == 1)  p.invert_y = v != 0;
     else {
         // Color=r,g,b,a,<подпись серии> — подпись последней: в ней могут быть запятые.
         float r, g, b, a;
@@ -841,10 +845,10 @@ void prefs_write_all(ImGuiContext*, ImGuiSettingsHandler*, ImGuiTextBuffer* out)
         if (prefs_default(p)) continue;
         out->appendf("[UcudaPlot][%s]\n", name.c_str());
         out->appendf("Toolbar=%d\nLegend=%d\nXLabel=%d\nXTicks=%d\nYLabel=%d\nYTicks=%d\n"
-                     "Colorbar=%d\nAxes3D=%d\nSmooth=%d\n",
+                     "Colorbar=%d\nAxes3D=%d\nSmooth=%d\nSwap=%d\nInvertX=%d\nInvertY=%d\n",
                      (int)p.toolbar, (int)p.legend, (int)p.x_label, (int)p.x_ticks,
                      (int)p.y_label, (int)p.y_ticks, (int)p.colorbar, (int)p.axes3d,
-                     (int)p.smooth);
+                     (int)p.smooth, (int)p.swap_axes, (int)p.invert_x, (int)p.invert_y);
         for (const auto& [label, c] : p.series_colors) {
             if (label.find('\n') != std::string::npos) continue;   // строка ini — одна строка
             out->appendf("Color=%.4f,%.4f,%.4f,%.4f,%s\n", c.x, c.y, c.z, c.w, label.c_str());
@@ -890,6 +894,47 @@ void plot_set_window_scope(int scope) {
 
 bool plot_toolbar_hidden() {
     return !plot_window_prefs_current().toolbar;
+}
+
+namespace {
+struct PrefsField { const char* key; bool PlotWindowPrefs::* field; };
+constexpr PrefsField kPrefsFields[] = {
+    { "toolbar", &PlotWindowPrefs::toolbar }, { "legend", &PlotWindowPrefs::legend },
+    { "xlabel", &PlotWindowPrefs::x_label },  { "xticks", &PlotWindowPrefs::x_ticks },
+    { "ylabel", &PlotWindowPrefs::y_label },  { "yticks", &PlotWindowPrefs::y_ticks },
+    { "colorbar", &PlotWindowPrefs::colorbar }, { "axes3d", &PlotWindowPrefs::axes3d },
+    { "smooth", &PlotWindowPrefs::smooth },   { "swap", &PlotWindowPrefs::swap_axes },
+    { "invx", &PlotWindowPrefs::invert_x },   { "invy", &PlotWindowPrefs::invert_y },
+};
+}
+
+std::string plot_window_prefs_to_string(const std::string& window_name) {
+    const auto it = window_prefs().find(window_name);
+    const PlotWindowPrefs p = it != window_prefs().end() ? it->second : PlotWindowPrefs{};
+    std::string out;
+    for (const PrefsField& f : kPrefsFields) {
+        out += f.key;
+        out += (p.*(f.field)) ? "=1;" : "=0;";
+    }
+    return out;
+}
+
+void plot_window_prefs_from_string(const std::string& window_name, const std::string& s) {
+    if (s.empty()) return;
+    PlotWindowPrefs& p = window_prefs()[window_name];
+    for (const PrefsField& f : kPrefsFields) {
+        const std::string pat = std::string(f.key) + "=";
+        size_t pos = 0;
+        while ((pos = s.find(pat, pos)) != std::string::npos) {
+            if (pos == 0 || s[pos - 1] == ';') {
+                const size_t v = pos + pat.size();
+                if (v < s.size()) p.*(f.field) = s[v] == '1';
+                break;
+            }
+            ++pos;
+        }
+    }
+    ImGui::MarkIniSettingsDirty();
 }
 
 // Галка меню «Show». Ctrl+Shift+клик — то же значение во всех окнах той же вкладки приложения

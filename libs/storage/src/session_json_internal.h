@@ -194,6 +194,8 @@ void write_basins_phase_projections(std::ostringstream& o,
 
 
 void read_basins_phase_projections(JP& p, std::vector<Projection>& out) ;
+// Один элемент массива проекций (тот же объект, что пишет write_basins_phase_projections).
+void write_phase_projection(std::ostringstream& o, const Projection& p) ;
 
 
 void write_basins_config(std::ostringstream& o, const BasinsConfig& c,

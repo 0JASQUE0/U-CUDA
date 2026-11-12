@@ -58,7 +58,13 @@
            него MSVC кодирует их в системную ANSI (CP1251) и UI показывает ромбики.
            /bigobj: крупные файлы UI могут превысить 65279 секций объектного файла (C1128). -->
       <AdditionalOptions>/utf-8 /bigobj %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(SolutionDir)libs\domain\include;$(SolutionDir)libs\platform\include;$(SolutionDir)libs\equations\include;$(SolutionDir)libs\numerics\include;$(SolutionDir)libs\storage\include;$(SolutionDir)libs\cuda\include;$(SolutionDir)libs\analysis\include;$(SolutionDir)libs\ocr\include;$(SolutionDir)libs\application\include;$(SolutionDir)libs\plotting\include;$(SolutionDir)libs\ui\include;$(SolutionDir)libs\cuda\include\ucuda\cuda;$(SolutionDir)resources\kernels;$(SolutionDir)third_party\glad\include;$(SolutionDir)third_party\stb;$(CUDA_PATH)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- Предкомпилированный заголовок (pch.h: STL + ImGui) подключается ко всем .cpp через /FI —
+           исходники его не включают, CMake-сборка тестов идёт без него. Полная пересборка
+           тратила 62 % времени компилятора на разбор этих заголовков. -->
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <ForcedIncludeFiles>pch.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <AdditionalIncludeDirectories>$(SolutionDir)libs\domain\include;$(SolutionDir)libs\platform\include;$(SolutionDir)libs\equations\include;$(SolutionDir)libs\numerics\include;$(SolutionDir)libs\storage\include;$(SolutionDir)libs\cuda\include;$(SolutionDir)libs\analysis\include;$(SolutionDir)libs\ocr\include;$(SolutionDir)libs\application\include;$(SolutionDir)libs\plotting\include;$(SolutionDir)libs\ui\include;$(SolutionDir)libs\cuda\include\ucuda\cuda;$(SolutionDir)resources\kernels;$(SolutionDir)third_party\glad\include;$(SolutionDir)third_party\stb;$(CUDA_PATH)\include;$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -206,7 +212,15 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
     <ClCompile Include="..\libs\ui\src\system_tab.cpp" />
     <ClCompile Include="..\libs\ui\src\widgets.cpp" />
     <ClCompile Include="..\libs\ui\src\workspace.cpp" />
-    <ClCompile Include="..\third_party\glad\src\glad.c" />
+    <ClCompile Include="..\libs\ui\src\dock_layout.cpp" />
+    <ClCompile Include="..\third_party\glad\src\glad.c">
+      <!-- C-файл: C++-PCH к нему не подходит. -->
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="pch.cpp">
+      <PrecompiledHeader>Create</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\apps\desktop\app_main.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -302,6 +316,8 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
     <ClInclude Include="..\libs\ui\include\ucuda\ui\gui.h" />
     <ClInclude Include="..\libs\ui\include\ucuda\ui\gui_tree_state.h" />
     <ClInclude Include="..\libs\ui\src\gui_common.h" />
+    <ClInclude Include="..\libs\ui\src\dock_layout.h" />
+    <ClInclude Include="pch.h" />
     <ClInclude Include="..\libs\ui\src\gui_fields.h" />
     <ClInclude Include="..\libs\ui\src\gui_inputs.h" />
     <ClInclude Include="..\libs\ui\src\gui_integration.h" />

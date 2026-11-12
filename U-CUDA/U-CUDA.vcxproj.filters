@@ -453,9 +453,13 @@
     <ClCompile Include="..\libs\ui\src\workspace.cpp">
       <Filter>libs\ui\src</Filter>
     </ClCompile>
+    <ClCompile Include="..\libs\ui\src\dock_layout.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
     <ClCompile Include="..\third_party\glad\src\glad.c">
       <Filter>third_party</Filter>
     </ClCompile>
+    <ClCompile Include="pch.cpp" />
     <ClCompile Include="..\apps\desktop\app_main.cpp">
       <Filter>apps\desktop</Filter>
     </ClCompile>
@@ -735,6 +739,10 @@
     <ClInclude Include="..\libs\ui\src\gui_common.h">
       <Filter>libs\ui\src</Filter>
     </ClInclude>
+    <ClInclude Include="..\libs\ui\src\dock_layout.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="pch.h" />
     <ClInclude Include="..\libs\ui\src\gui_fields.h">
       <Filter>libs\ui\src</Filter>
     </ClInclude>

@@ -41,7 +41,7 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
     hv.autoscale        = c.autoscale_color;
     hv.manual_vmin_text = c.c_min_text;
     hv.manual_vmax_text = c.c_max_text;
-    hv.swap_axes        = c.swap_axes;
+    // swap_axes — вид окна (PlotWindowPrefs): карта берёт его в render(), конфиг только отражает.
     {
         HeatmapToolbarOpts topts;
         topts.persist_colormap = [&](int cm) { c.colormap_idx = cm; };
@@ -62,7 +62,7 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
     c.autoscale_color = hv.autoscale;              // view → config
     c.c_min_text      = hv.manual_vmin_text;
     c.c_max_text      = hv.manual_vmax_text;
-    c.swap_axes       = hv.swap_axes;
+    c.swap_axes       = plot_window_prefs_current().swap_axes;
 
     if (!c.last_run_ok) {
         ImGui::TextDisabled("No data yet. Press Run.");

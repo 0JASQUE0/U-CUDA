@@ -1,4 +1,5 @@
 ﻿#include "ucuda/plotting/heatmap_view.h"
+#include "imgui_internal.h"   // MarkIniSettingsDirty (вид окна в imgui.ini)
 #include "ucuda/domain/grid_snap.h"
 #include "ucuda/domain/num_parse.h"   // parse_num для поля "Levels" (общий разбор выражений)
 #include <algorithm>
@@ -255,6 +256,10 @@ void HeatmapView::render(PlotRenderer& renderer,
     PlotWindowPrefs& wp = plot_window_prefs_current();
     const bool show_x_label = wp.x_label, show_x_ticks = wp.x_ticks;
     const bool show_y_label = wp.y_label, show_y_ticks = wp.y_ticks;
+    // Swap и инверсия — тоже вид окна (переживают перезапуск, хранятся в раскладках окон).
+    swap_axes     = wp.swap_axes;
+    x_axis.invert = wp.invert_x;
+    y_axis.invert = wp.invert_y;
     const bool show_colorbar = wp.colorbar;
 
     // Одноразовый (см. heatmap_view.h): забираем сразу, чтобы он не пережил вызов ни на одном пути.
@@ -366,9 +371,10 @@ void HeatmapView::render(PlotRenderer& renderer,
     // (см. left_margin_px_). Нижний держит тики + имя оси X, поэтому растёт
     // вместе с кеглем подписей.
     // Скрытые в меню («Axes display») подписи, числа и colorbar место не держат — см. Plot2DView.
-    // Крайние подписи Y и colorbar'а выходят на полстроки за верх и низ плота.
+    // Крайние подписи Y и colorbar'а выходят на полстроки за верх и низ плота. Верх и право —
+    // постоянные: тики Y не меняют высоту карты, тики X — ширину (рамки соседних окон совпадают).
     const float margin_left   = left_margin_px_;
-    const float margin_top    = (show_y_ticks || show_colorbar) ? 20.0f : 8.0f;
+    const float margin_top    = 20.0f;
     const float margin_bottom = std::max(plot_bottom_margin_for(show_x_ticks, show_x_label),
                                          show_colorbar ? plot_text_line_height() * 0.5f + 4.0f : 0.0f);
     // Геометрия colorbar'а — kColorbar* в heatmap_view.h (шарится с FastSync).
@@ -390,8 +396,7 @@ void HeatmapView::render(PlotRenderer& renderer,
     // полос, а с раздвинутым диапазоном единственная полоса не проходила эту проверку, уходила в
     // непрерывную ветку и подписывалась серединой — 1.5 вместо 1.
     const std::vector<ColorbarTick> tick_vals = colorbar_ticks(vmin_raw, vmax_raw, n_disc);
-    const float margin_right = show_colorbar ? colorbar_total_width(tick_vals)
-                                             : (show_x_ticks ? 20.0f : 8.0f);
+    const float margin_right = show_colorbar ? colorbar_total_width(tick_vals) : 20.0f;
 
     int plot_w = std::max(64, (int)(avail_size.x - margin_left - margin_right));
     int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));
@@ -637,8 +642,8 @@ void HeatmapView::render(PlotRenderer& renderer,
         ImGui::MenuItem("Lock X axis", nullptr, &x_axis.lock);
         ImGui::MenuItem("Lock Y axis", nullptr, &y_axis.lock);
         ImGui::Separator();
-        ImGui::MenuItem("Invert X", nullptr, &x_axis.invert);
-        ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert);
+        if (ImGui::MenuItem("Invert X", nullptr, &x_axis.invert)) { wp.invert_x = x_axis.invert; ImGui::MarkIniSettingsDirty(); }
+        if (ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert)) { wp.invert_y = y_axis.invert; ImGui::MarkIniSettingsDirty(); }
         ImGui::Separator();
         plot_show_menu(wp, PlotShowColorbar | PlotShowAxes2D | PlotShowSmooth);
         ImGui::Separator();

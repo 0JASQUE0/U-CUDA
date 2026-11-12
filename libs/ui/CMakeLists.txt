@@ -6,6 +6,7 @@ ucuda_library(ui
     src/fastsync.cpp
     src/field_names.cpp
     src/gui.cpp
+    src/dock_layout.cpp
     src/integration_widgets.cpp
     src/library.cpp
     src/library_list.cpp
