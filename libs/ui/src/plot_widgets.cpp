@@ -659,6 +659,15 @@ bool draw_style_toolbar(const char* label, const char* id_suffix,
     if (ImGui::Checkbox((std::string(label) + "##" + sfx).c_str(), &enabled))
         changed = true;
 
+    // В меню диаграммы — настройки сразу под флажком, без стрелки.
+    if (plot_toolbar_in_menu()) {
+        if (enabled && body) {
+            ImGui::Indent();
+            changed |= body();
+            ImGui::Unindent();
+        }
+        return changed;
+    }
     const std::string pop_id = "##stylepop_" + sfx;
     if (enabled) {
         ImGui::SameLine(0.0f, 4.0f);
@@ -732,15 +741,7 @@ void draw_proj_style_controls(Projection& pr, const char* sfx, const char* point
         ImGui::SetTooltip("%s\nWith Custom line style on too: points on top of the line.\n"
                           "Ctrl+Shift+click: all projections of this tab", points_tip);
 
-    const std::string pop_id = "##stylepop_" + s;
-    if (pr.custom_line_style || pr.draw_points) {
-        ImGui::SameLine(0.0f, 4.0f);
-        if (ImGui::ArrowButton(("##styleopen_" + s).c_str(), ImGuiDir_Down))
-            ImGui::OpenPopup(pop_id.c_str());
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Line and point style");
-    }
-    constrain_popup_height_below_item();
-    if (ImGui::BeginPopup(pop_id.c_str())) {
+    auto contents = [&]() {
         if (pr.custom_line_style) {
             ImGui::SeparatorText("Line");
             ImGui::SetNextItemWidth(150);
@@ -767,6 +768,22 @@ void draw_proj_style_controls(Projection& pr, const char* sfx, const char* point
                 ImGui::EndCombo();
             }
         }
+    };
+    // В меню диаграммы — настройки сразу под флажками, без стрелки.
+    if (plot_toolbar_in_menu()) {
+        contents();
+        return;
+    }
+    const std::string pop_id = "##stylepop_" + s;
+    if (pr.custom_line_style || pr.draw_points) {
+        ImGui::SameLine(0.0f, 4.0f);
+        if (ImGui::ArrowButton(("##styleopen_" + s).c_str(), ImGuiDir_Down))
+            ImGui::OpenPopup(pop_id.c_str());
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Line and point style");
+    }
+    constrain_popup_height_below_item();
+    if (ImGui::BeginPopup(pop_id.c_str())) {
+        contents();
         ImGui::EndPopup();
     }
 }
@@ -1139,24 +1156,7 @@ bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o) {
     ImGui::PushID(&hv);
     const char* pop_id = "##heatmap_style";
     int cmap_idx = (int)hv.colormap;
-    const float h = ImGui::GetFrameHeight();
-    colormap_strip_item(cmap_idx, h * 4.0f, h);
-    const bool strip_clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
-    const bool strip_hovered = ImGui::IsItemHovered();
-    ImGui::SameLine(0.0f, 4.0f);
-    if (ImGui::ArrowButton("##heatmap_style_open", ImGuiDir_Down) || strip_clicked)
-        ImGui::OpenPopup(pop_id);
-    if (strip_hovered || ImGui::IsItemHovered()) {
-        if (hv.autoscale)
-            ImGui::SetTooltip("%s\nColor scale: auto%s", colormap_label(cmap_idx),
-                              hv.swap_axes ? "\nAxes swapped" : "");
-        else
-            ImGui::SetTooltip("%s\nColor scale: %s .. %s%s", colormap_label(cmap_idx),
-                              hv.manual_vmin_text.c_str(), hv.manual_vmax_text.c_str(),
-                              hv.swap_axes ? "\nAxes swapped" : "");
-    }
-    constrain_popup_height_below_item();
-    if (ImGui::BeginPopup(pop_id)) {
+    auto contents = [&]() {
         if (head) head();
         ImGui::SeparatorText("Colormap");
         if (colormap_combo("##cmap", &cmap_idx, ImGui::GetFontSize() * 12.0f)) {
@@ -1182,6 +1182,35 @@ bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o) {
                 changed = true;
             }
         }
+    };
+    // В меню диаграммы — содержимое меню карты сразу, без полоски и стрелки (лишний щелчок);
+    // доп. элементы вызывающего — следом.
+    if (plot_toolbar_in_menu()) {
+        contents();
+        ImGui::PopID();
+        if (o.extras) o.extras();
+        if (o.extras_tail) o.extras_tail();
+        return changed;
+    }
+    const float h = ImGui::GetFrameHeight();
+    colormap_strip_item(cmap_idx, h * 4.0f, h);
+    const bool strip_clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+    const bool strip_hovered = ImGui::IsItemHovered();
+    ImGui::SameLine(0.0f, 4.0f);
+    if (ImGui::ArrowButton("##heatmap_style_open", ImGuiDir_Down) || strip_clicked)
+        ImGui::OpenPopup(pop_id);
+    if (strip_hovered || ImGui::IsItemHovered()) {
+        if (hv.autoscale)
+            ImGui::SetTooltip("%s\nColor scale: auto%s", colormap_label(cmap_idx),
+                              hv.swap_axes ? "\nAxes swapped" : "");
+        else
+            ImGui::SetTooltip("%s\nColor scale: %s .. %s%s", colormap_label(cmap_idx),
+                              hv.manual_vmin_text.c_str(), hv.manual_vmax_text.c_str(),
+                              hv.swap_axes ? "\nAxes swapped" : "");
+    }
+    constrain_popup_height_below_item();
+    if (ImGui::BeginPopup(pop_id)) {
+        contents();
         ImGui::EndPopup();
     }
     ImGui::PopID();

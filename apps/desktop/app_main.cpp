@@ -115,6 +115,12 @@ static const CamoPalette kCamoPalettes[AppSettings::kCamoCount] = {
       {0.82f, 0.86f, 0.72f, 0.45f}, {0.81f, 0.85f, 0.72f}, {0.09f, 0.13f, 0.07f},
       {0.91f, 0.93f, 0.84f}, {0.32f, 0.44f, 0.27f}, {0.43f, 0.28f, 0.20f},
       {0.47f, 0.54f, 0.37f}, {0.92f, 0.94f, 0.88f} },
+    // Flecktarn (Бундесвер): тёмно-зелёная основа, светлый текст, светло-зелёный акцент,
+    // бурое (цвет пятен) нажатое.
+    { "flecktarn.ppm", false,
+      {0.09f, 0.11f, 0.08f, 0.52f}, {0.14f, 0.16f, 0.12f}, {0.91f, 0.92f, 0.82f},
+      {0.20f, 0.23f, 0.16f}, {0.52f, 0.58f, 0.32f}, {0.50f, 0.29f, 0.16f},
+      {0.24f, 0.28f, 0.19f}, {0.08f, 0.09f, 0.07f} },
 };
 
 static void apply_camo_palette(ImVec4* c, const CamoPalette& p, bool has_texture) {

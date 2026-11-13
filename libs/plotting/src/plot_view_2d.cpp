@@ -456,8 +456,24 @@ void Plot2DView::render(PlotRenderer& renderer,
     // Полоса подписей x_bands — поверх итогового верхнего поля; общий левый отступ
     // (выравнивание соседних окон) главнее локального.
     const float band_height = x_bands ? ImGui::GetFontSize() + 5.0f : 0.0f;
-    margin_top += band_height;
-    if (shared_margin_left > 0) margin_left = shared_margin_left;
+    if (!wp.fit_pane) {
+        margin_top += band_height;
+        if (shared_margin_left > 0) margin_left = shared_margin_left;
+    } else {
+        // Fit to pane: каждое поле узкое, если ему нечего держать. Ось X (числа или имя) держит
+        // низ, а слева и справа — запас под крайние числа; ось Y держит лево, а сверху и снизу —
+        // запас под крайние числа. Общий левый отступ соседних окон выравнивает подписи Y — без
+        // них он не нужен.
+        const bool x_shown = show_x_ticks || show_x_label;
+        const bool y_shown = show_y_ticks || show_y_label;
+        const float compact = plot_compact_margin();
+        if (y_shown && shared_margin_left > 0) margin_left = shared_margin_left;
+        if (!y_shown && !x_shown) margin_left = compact;
+        if (!x_shown) margin_right = compact;
+        if (!y_shown) margin_top = compact;
+        if (!x_shown && !y_shown) margin_bottom = compact;
+        margin_top += band_height;
+    }
     last_margin_left   = margin_left;
     last_margin_top    = margin_top;
     last_margin_right  = margin_right;
@@ -1194,7 +1210,8 @@ void Plot2DView::render(PlotRenderer& renderer,
         double cx = XW(sx0 + mx * (sx1 - sx0));
         double cy = y_at(my);
 
-        const float drag_threshold = 5.0f;
+        // Тот же порог, что у карт: щелчок с дрожанием руки — меню, а не рамка.
+        const float drag_threshold = plot_rmb_drag_threshold();
 
         if (!rect_zoom_pending_ && !rect_zoom_active_ &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Right))

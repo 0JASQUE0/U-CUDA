@@ -373,10 +373,19 @@ void HeatmapView::render(PlotRenderer& renderer,
     // Скрытые в меню («Axes display») подписи, числа и colorbar место не держат — см. Plot2DView.
     // Крайние подписи Y и colorbar'а выходят на полстроки за верх и низ плота. Верх и право —
     // постоянные: тики Y не меняют высоту карты, тики X — ширину (рамки соседних окон совпадают).
-    const float margin_left   = left_margin_px_;
-    const float margin_top    = 20.0f;
-    const float margin_bottom = std::max(plot_bottom_margin_for(show_x_ticks, show_x_label),
-                                         show_colorbar ? plot_text_line_height() * 0.5f + 4.0f : 0.0f);
+    // Fit to pane (вид окна): каждое поле узкое, если ему нечего держать — ось X держит низ и
+    // запас слева/справа под крайние числа, ось Y — лево и запас сверху/снизу, colorbar — право и
+    // запас сверху/снизу под свои крайние числа. Без Fit — прежние поля.
+    const bool fit = wp.fit_pane;
+    const bool x_shown = show_x_ticks || show_x_label;
+    const bool y_shown = show_y_ticks || show_y_label;
+    const float compact = plot_compact_margin();
+    const float margin_left   = (!fit || x_shown || y_shown) ? left_margin_px_ : compact;
+    const float margin_top    = (!fit || y_shown || show_colorbar) ? 20.0f : compact;
+    const float margin_bottom = (!fit || x_shown || y_shown || show_colorbar)
+                              ? std::max(plot_bottom_margin_for(show_x_ticks, show_x_label),
+                                         show_colorbar ? plot_text_line_height() * 0.5f + 4.0f : 0.0f)
+                              : compact;
     // Геометрия colorbar'а — kColorbar* в heatmap_view.h (шарится с FastSync).
 
     // Resolve the active number of discrete bands. discrete_levels overrides
@@ -396,7 +405,8 @@ void HeatmapView::render(PlotRenderer& renderer,
     // полос, а с раздвинутым диапазоном единственная полоса не проходила эту проверку, уходила в
     // непрерывную ветку и подписывалась серединой — 1.5 вместо 1.
     const std::vector<ColorbarTick> tick_vals = colorbar_ticks(vmin_raw, vmax_raw, n_disc);
-    const float margin_right = show_colorbar ? colorbar_total_width(tick_vals) : 20.0f;
+    const float margin_right = show_colorbar ? colorbar_total_width(tick_vals)
+                             : (!fit || x_shown) ? 20.0f : compact;
 
     int plot_w = std::max(64, (int)(avail_size.x - margin_left - margin_right));
     int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));
@@ -620,12 +630,9 @@ void HeatmapView::render(PlotRenderer& renderer,
     // ImGui's mouse-drag threshold so the gesture matches the rest of the UI.
     char ctx_id[64];
     std::snprintf(ctx_id, sizeof(ctx_id), "##hm_ctx_%d", owner_id);
-    if (plot_hov && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
-        ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Right, 0.0f);
-        if (std::abs(d.x) + std::abs(d.y) < ImGui::GetIO().MouseDragThreshold) {
-            ImGui::OpenPopup(ctx_id);
-        }
-    }
+    // Щелчок, а не протяжка: рамка приближения так и не появилась (см. 8c).
+    if (plot_hov && ImGui::IsMouseReleased(ImGuiMouseButton_Right) && rect_zoom_pending_ != 0)
+        ImGui::OpenPopup(ctx_id);
     if (ImGui::BeginPopup(ctx_id)) {
         // Блок осей — тот же набор, что в Plot2DView (plot_view_2d.cpp, «12. Rect-zoom + popup»).
         // Раньше у хитмапы этих пунктов не было вовсе: одна и та же диаграмма в 1D-режиме умела
@@ -713,11 +720,8 @@ void HeatmapView::render(PlotRenderer& renderer,
                              double fit_lo, double fit_hi) {
             char aid[64];
             std::snprintf(aid, sizeof(aid), "##hm_%s_menu_%d", tag, owner_id);
-            if (hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
-                ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Right, 0.0f);
-                if (std::abs(d.x) + std::abs(d.y) < ImGui::GetIO().MouseDragThreshold)
-                    ImGui::OpenPopup(aid);
-            }
+            if (hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right) && rect_zoom_pending_ != 0)
+                ImGui::OpenPopup(aid);
             if (ImGui::BeginPopup(aid)) {
                 char lbl[64];
                 std::snprintf(lbl, sizeof(lbl), "Auto fit %s", tag);
@@ -882,12 +886,25 @@ void HeatmapView::render(PlotRenderer& renderer,
     // на release назначаем новый view по выделенной зоне; во время drag'а рисуем рамку (ниже).
     // wx/wy приходят из mouse_world в vis-домене → на release конвертим в node-домен для
     // x_axis.view_min/max: view = vis + step/2 для min и view = vis - step/2 для max.
+    // Рамка не сразу: сначала ПКМ «нажата», и только когда мышь ушла дальше порога, начинается
+    // протяжка. Иначе щелчок с дрожанием руки и открывал меню, и приближал к крошечной рамке.
     bool rmb_down = ImGui::IsMouseDown(ImGuiMouseButton_Right);
-    if (rect_zoom_mode_ == 0 && rmb_down) {
+    if (rect_zoom_mode_ == 0 && rect_zoom_pending_ == 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         double wx, wy; mouse_world(wx, wy);
-        if (plot_hov)      { rect_zoom_mode_ = 1; rect_zoom_x0_ = wx; rect_zoom_y0_ = wy; }
-        else if (xax_hov)  { rect_zoom_mode_ = 2; rect_zoom_x0_ = wx; }
-        else if (yax_hov)  { rect_zoom_mode_ = 3; rect_zoom_y0_ = wy; }
+        if (plot_hov)      { rect_zoom_pending_ = 1; rect_zoom_x0_ = wx; rect_zoom_y0_ = wy; }
+        else if (xax_hov)  { rect_zoom_pending_ = 2; rect_zoom_x0_ = wx; }
+        else if (yax_hov)  { rect_zoom_pending_ = 3; rect_zoom_y0_ = wy; }
+        rect_zoom_press_ = ImGui::GetIO().MousePos;
+    }
+    if (rect_zoom_pending_ != 0) {
+        const ImVec2 m = ImGui::GetIO().MousePos;
+        const float dx = m.x - rect_zoom_press_.x, dy = m.y - rect_zoom_press_.y;
+        if (!rmb_down) {
+            rect_zoom_pending_ = 0;   // щелчок — меню уже открыто выше
+        } else if (dx * dx + dy * dy > plot_rmb_drag_threshold() * plot_rmb_drag_threshold()) {
+            rect_zoom_mode_ = rect_zoom_pending_;
+            rect_zoom_pending_ = 0;
+        }
     }
     if (rect_zoom_mode_ != 0 && !rmb_down) {
         double wx, wy; mouse_world(wx, wy);

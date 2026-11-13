@@ -819,6 +819,7 @@ int g_window_scope = -1;   // вкладка приложения текущег
 bool prefs_default(const PlotWindowPrefs& p) {
     return p.toolbar && p.legend && p.x_label && p.x_ticks && p.y_label && p.y_ticks &&
            p.colorbar && p.axes3d && !p.smooth && !p.swap_axes && !p.invert_x && !p.invert_y &&
+           !p.fit_pane &&
            p.series_colors.empty();
 }
 
@@ -855,6 +856,7 @@ void prefs_read_line(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const ch
     else if (std::sscanf(line, "Swap=%d", &v) == 1)     p.swap_axes = v != 0;
     else if (std::sscanf(line, "InvertX=%d", &v) == 1)  p.invert_x = v != 0;
     else if (std::sscanf(line, "InvertY=%d", &v) == 1)  p.invert_y = v != 0;
+    else if (std::sscanf(line, "FitPane=%d", &v) == 1)  p.fit_pane = v != 0;
     else {
         // Color=r,g,b,a,<подпись серии> — подпись последней: в ней могут быть запятые.
         float r, g, b, a;
@@ -870,10 +872,11 @@ void prefs_write_all(ImGuiContext*, ImGuiSettingsHandler*, ImGuiTextBuffer* out)
         if (prefs_default(p)) continue;
         out->appendf("[UcudaPlot][%s]\n", name.c_str());
         out->appendf("Toolbar=%d\nLegend=%d\nXLabel=%d\nXTicks=%d\nYLabel=%d\nYTicks=%d\n"
-                     "Colorbar=%d\nAxes3D=%d\nSmooth=%d\nSwap=%d\nInvertX=%d\nInvertY=%d\n",
+                     "Colorbar=%d\nAxes3D=%d\nSmooth=%d\nSwap=%d\nInvertX=%d\nInvertY=%d\nFitPane=%d\n",
                      (int)p.toolbar, (int)p.legend, (int)p.x_label, (int)p.x_ticks,
                      (int)p.y_label, (int)p.y_ticks, (int)p.colorbar, (int)p.axes3d,
-                     (int)p.smooth, (int)p.swap_axes, (int)p.invert_x, (int)p.invert_y);
+                     (int)p.smooth, (int)p.swap_axes, (int)p.invert_x, (int)p.invert_y,
+                     (int)p.fit_pane);
         for (const auto& [label, c] : p.series_colors) {
             if (label.find('\n') != std::string::npos) continue;   // строка ini — одна строка
             out->appendf("Color=%.4f,%.4f,%.4f,%.4f,%s\n", c.x, c.y, c.z, c.w, label.c_str());
@@ -967,6 +970,8 @@ void plot_toolbar_menu() {
     ImGui::EndMenu();
 }
 
+bool plot_toolbar_in_menu() { return g_toolbar_menu_drawing; }
+
 void plot_toolbar_menu_mark_changed(const void* key) {
     if (g_toolbar_menu_drawing) toolbar_menu_changed()[key] = ImGui::GetFrameCount();
 }
@@ -1013,6 +1018,7 @@ constexpr PrefsField kPrefsFields[] = {
     { "colorbar", &PlotWindowPrefs::colorbar }, { "axes3d", &PlotWindowPrefs::axes3d },
     { "smooth", &PlotWindowPrefs::smooth },   { "swap", &PlotWindowPrefs::swap_axes },
     { "invx", &PlotWindowPrefs::invert_x },   { "invy", &PlotWindowPrefs::invert_y },
+    { "fit", &PlotWindowPrefs::fit_pane },
 };
 }
 
@@ -1136,6 +1142,13 @@ void plot_show_menu(PlotWindowPrefs& p, unsigned items) {
         prefs_item(p, "Y label", &PlotWindowPrefs::y_label);
         prefs_item(p, "Y tick labels", &PlotWindowPrefs::y_ticks);
     }
+    ImGui::Separator();
+    prefs_item(p, "Fit to pane", &PlotWindowPrefs::fit_pane);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Narrow margins around the plot: each side keeps room only for what is\n"
+                          "shown next to it (X axis - bottom, Y axis - left, colorbar - right);\n"
+                          "the other sides shrink to a thin edge. Off: the usual margins, which\n"
+                          "keep the frames of neighbouring windows aligned.");
     ImGui::Separator();
     ImGui::TextDisabled("Ctrl+Shift+click: all plots of this tab");
     ImGui::PopItemFlag();
