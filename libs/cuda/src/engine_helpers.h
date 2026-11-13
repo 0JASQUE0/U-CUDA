@@ -5,6 +5,14 @@
 #include <cstdlib>
 #include <cstring>
 
+// Path separator for files located relative to exe_dir(). Windows keeps the
+// historical backslash; POSIX needs '/'.
+#ifdef _WIN32
+#define UCUDA_PATH_SEP "\\"
+#else
+#define UCUDA_PATH_SEP "/"
+#endif
+
 // Phase 2: реальная реализация. NVRTC компилит наш шаблон, который через #include
 // подтягивает cudaLibrary.cuh / cudaLibrary.cu из NonLinAnal. User's KRS определена
 // в шаблоне, default-версия в NonLinAnal закрыта #ifndef __CUDACC_RTC__.

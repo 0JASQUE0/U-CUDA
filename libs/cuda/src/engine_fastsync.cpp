@@ -121,11 +121,13 @@ FastSyncResult ParametricEngine::Impl::run_fastsync(const FastSyncRequest& req) 
             // идут параллельно по точкам, так что по времени это 2 * iterOfSynchr * pts.
             // Первая версия отдавала весь бар первой фазе — он доходил до 90%
             // и там вставал.
-            const double fsW1 = (double)amountOfPointsForSkip + (double)traj_len_pts;
-            const double fsW2 = 2.0 * (double)req.iter_of_synchr * (double)traj_len_pts;
-            const double fsW  = (fsW1 + fsW2) > 0 ? (fsW1 + fsW2) : 1.0;
-            const double fsT1 = (double)traj_len_pts;                                 // тиков в фазе 1
-            const double fsT2 = (double)nPts * (double)req.iter_of_synchr;       // тиков в фазе 2
+            // Declared without initializers: the FS0_FAIL goto below jumps past them,
+            // which MSVC accepts but standard C++ (GCC/Clang) rejects for initialized locals.
+            double fsW1; fsW1 = (double)amountOfPointsForSkip + (double)traj_len_pts;
+            double fsW2; fsW2 = 2.0 * (double)req.iter_of_synchr * (double)traj_len_pts;
+            double fsW; fsW = (fsW1 + fsW2) > 0 ? (fsW1 + fsW2) : 1.0;
+            double fsT1; fsT1 = (double)traj_len_pts;                                 // тиков в фазе 1
+            double fsT2; fsT2 = (double)nPts * (double)req.iter_of_synchr;       // тиков в фазе 2
 
             // См. пояснение в grid-ветке: Request хранит их как vector<double>,
             // а буферы — numb, поэтому конверсия обязательна для всех, не
@@ -351,9 +353,9 @@ FastSyncResult ParametricEngine::Impl::run_fastsync(const FastSyncRequest& req) 
             // шагов на ячейку; проходы вперёд-назад после него не тикают, поэтому
             // бар доходит до ста на хвосте чанка и ждёт там.
             if (!sig.alloc(err)) goto FS1_FAIL;
-            const int    progressStride = progress_stride_for((size_t)amountOfPointsInBlock);
-            const double ticksPerCell   = (double)((size_t)amountOfPointsInBlock / (size_t)progressStride);
-            const double ticksTotal     = (double)total_cells * ticksPerCell;
+            int progressStride; progressStride = progress_stride_for((size_t)amountOfPointsInBlock);
+            double ticksPerCell; ticksPerCell = (double)((size_t)amountOfPointsInBlock / (size_t)progressStride);
+            double ticksTotal; ticksTotal = (double)total_cells * ticksPerCell;
 
             {
                 numb   ranges_arr[4] = { (numb)req.axis_x_lo, (numb)req.axis_x_hi, (numb)req.axis_y_lo, (numb)req.axis_y_hi };
@@ -376,7 +378,7 @@ FastSyncResult ParametricEngine::Impl::run_fastsync(const FastSyncRequest& req) 
             // fillFSTransientIC с ОДНИМ TT на обоих и только для нефиксируемой IC: свипуемая сторона
             // стартовала сырой, а прогон в один поток на длинных TT ловил TDR.
 
-            size_t amountOfIteration = (total_cells + nPtsLimiter - 1) / nPtsLimiter;
+            size_t amountOfIteration; amountOfIteration = (total_cells + nPtsLimiter - 1) / nPtsLimiter;
             for (size_t i = 0; i < amountOfIteration; ++i) {
                 size_t cur_limiter = nPtsLimiter;
                 if (i == amountOfIteration - 1) cur_limiter = total_cells - originalNPtsLimiter * i;

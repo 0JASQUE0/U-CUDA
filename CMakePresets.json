@@ -26,6 +26,21 @@
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
     },
     {
+      "name": "linux-wsl",
+      "displayName": "Linux / WSL2 (Ubuntu, Release)",
+      "description": "Ubuntu packages under WSL2: system GCC, CUDA from /usr/local/cuda, GPU arch of this machine, GLFW on X11 (XWayland/WSLg).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_ARCHITECTURES": "native",
+        "CMAKE_CUDA_COMPILER": "/usr/local/cuda/bin/nvcc",
+        "CUDAToolkit_ROOT": "/usr/local/cuda",
+        "GLFW_BUILD_WAYLAND": "OFF"
+      }
+    },
+    {
       "name": "windows",
       "displayName": "Windows / Visual Studio 2022",
       "generator": "Visual Studio 17 2022",
@@ -38,6 +53,7 @@
   "buildPresets": [
     { "name": "linux-debug", "configurePreset": "linux-debug", "jobs": 4 },
     { "name": "linux-release", "configurePreset": "linux-release", "jobs": 4 },
+    { "name": "linux-wsl", "configurePreset": "linux-wsl", "jobs": 8 },
     { "name": "windows-debug", "configurePreset": "windows", "configuration": "Debug", "jobs": 4 },
     { "name": "windows-release", "configurePreset": "windows", "configuration": "Release", "jobs": 4 }
   ],
@@ -45,6 +61,7 @@
     { "name": "windows-debug", "configurePreset": "windows", "configuration": "Debug", "output": { "outputOnFailure": true } },
     { "name": "windows-release", "configurePreset": "windows", "configuration": "Release", "output": { "outputOnFailure": true } },
     { "name": "linux-debug", "configurePreset": "linux-debug", "output": { "outputOnFailure": true } },
-    { "name": "linux-release", "configurePreset": "linux-release", "output": { "outputOnFailure": true } }
+    { "name": "linux-release", "configurePreset": "linux-release", "output": { "outputOnFailure": true } },
+    { "name": "linux-wsl", "configurePreset": "linux-wsl", "output": { "outputOnFailure": true } }
   ]
 }

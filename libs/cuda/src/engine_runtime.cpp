@@ -44,10 +44,15 @@ void dump_module_ptx(const char* src_name, const std::string& src, const std::st
     const unsigned long n = env_value("UCUDA_NVRTC_PTX_DIR", dir, 4096);
     if (n == 0 || n >= 4096) return;
     static std::atomic<int> seq{0};
-    const std::string base = std::string(dir, n) + "\\" + src_name + "_" + std::to_string(seq++);
+    const std::string base = std::string(dir, n) + UCUDA_PATH_SEP + src_name + "_" + std::to_string(seq++);
     for (const auto& [ext, text] : { std::pair<const char*, const std::string*>{ ".cu", &src }, { ".ptx", &ptx } }) {
         FILE* f = nullptr;
+#ifdef _WIN32
         if (fopen_s(&f, (base + ext).c_str(), "wb") == 0 && f) { std::fwrite(text->data(), 1, text->size(), f); std::fclose(f); }
+#else
+        f = std::fopen((base + ext).c_str(), "wb");
+        if (f) { std::fwrite(text->data(), 1, text->size(), f); std::fclose(f); }
+#endif
     }
 }
 }
@@ -417,7 +422,7 @@ bool EngineSources::load_sources(std::string& err) {
             srcs_peak_epoch  = ep;
             return true;
         }
-        std::string root = exe_dir() + "\\kernels\\";
+        std::string root = exe_dir() + UCUDA_PATH_SEP "kernels" UCUDA_PATH_SEP;
         std::string e;
         src_template          = read_text_file(root + "bifurcation1d.template.cu",      e); if (!e.empty()) { err = e; return false; }
         src_template_cont     = read_text_file(root + "bifurcation1d_cont.template.cu", e); if (!e.empty()) { err = e; return false; }
@@ -741,9 +746,16 @@ bool EngineModuleBuilder::build_module(const SrcSnapshot& snap_in,
         std::string cuda_include_opt;
         {
             char buf[4096];
+#ifdef _WIN32
             unsigned long nlen = env_value("CUDA_PATH", buf, 4096);
             if (nlen > 0 && nlen < 4096)
                 cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
+#else
+            // POSIX: CUDA_PATH is optional; fall back to the toolkit found by CMake.
+            (void)buf;
+            const std::string inc = platform::cuda_include_dir();
+            if (!inc.empty()) cuda_include_opt = "-I" + inc;
+#endif
         }
         if (cuda_include_opt.empty()) {
             err = "the CUDA_PATH environment variable is not set - NVRTC will not find math_constants.h "
