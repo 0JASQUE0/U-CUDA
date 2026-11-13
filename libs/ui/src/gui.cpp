@@ -1211,6 +1211,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             if (ImGui::RadioButton("DDPM", &theme_idx, 2 + AppSettings::kCamoDdpm)) theme_changed = true;
             ImGui::SameLine();
             if (ImGui::RadioButton("Flora", &theme_idx, 2 + AppSettings::kCamoFlora)) theme_changed = true;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Flecktarn", &theme_idx, 2 + AppSettings::kCamoFlecktarn)) theme_changed = true;
             if (theme_changed) {
                 model.dark_theme     = (theme_idx == 0 || theme_idx == 2);
                 model.contrast_theme = (theme_idx == 2);

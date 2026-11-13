@@ -292,6 +292,11 @@ struct PlotWindowPrefs {
     bool colorbar = true;
     bool axes3d   = true;   // оси координат 3D-сцены
     bool smooth   = false;  // сглаживание карт (PlotRenderer::draw_heatmap, smooth)
+    // Fit to pane: каждое поле вокруг диаграммы держит место только под то, что к нему
+    // примыкает (ось X — низ и запас слева/справа, ось Y — лево и запас сверху/снизу,
+    // colorbar — право и запас сверху/снизу), остальные — plot_compact_margin(). Выключено —
+    // прежние поля (верх и право постоянные, рамки соседних окон совпадают).
+    bool fit_pane = false;
     // Оси: перестановка X<->Y (карты; срезы Custom) и инверсия. Источник — эти поля: вид в начале
     // render() берёт их отсюда, пункты меню пишут сюда.
     bool swap_axes = false;
@@ -318,6 +323,14 @@ void plot_install_settings_handler();
 PlotWindowPrefs& plot_window_prefs_current();
 bool plot_toolbar_hidden();
 
+// ПКМ по диаграмме: протяжка дальше этого порога (px) — рамка приближения, иначе щелчок —
+// меню. Полтора порога перетаскивания ImGui: при обычном не меньше 9 px.
+inline float plot_rmb_drag_threshold() { return ImGui::GetIO().MouseDragThreshold * 1.5f; }
+
+// Узкое поле диаграммы в режиме Fit to pane (PlotWindowPrefs::fit_pane) — со стороны, где
+// нечего держать; вместе с отступом окна ImGui — около 10 px.
+inline float plot_compact_margin() { return 2.0f; }
+
 // Тулбар окна в меню диаграммы (ПКМ -> Toolbar). Код вкладки, рисующий тулбар окна, отдаёт
 // каждый его элемент сюда (plot_toolbar_menu_add) — до проверки plot_toolbar_hidden(), так что
 // меню работает и при скрытом тулбаре. Элементы живут один кадр и только для окна, где их
@@ -342,6 +355,9 @@ void plot_toolbar_menu();
 // редактируемого объекта) и отдают её своим обычным вызовом на следующем кадре.
 void plot_toolbar_menu_mark_changed(const void* key);
 bool plot_toolbar_menu_take_changed(const void* key);
+// true, пока меню диаграммы рисует элементы тулбара: функции тулбара показывают содержимое
+// своих выпадающих меню прямо в нём, без кнопки-стрелки (в меню она — лишний щелчок).
+bool plot_toolbar_in_menu();
 // Вид окна (галки Show, swap, инверсия) строкой "key=v;..." — для сохранённых раскладок окон.
 // window_name — имя корневого окна ImGui; окна может ещё не быть (настройки ждут его появления).
 std::string plot_window_prefs_to_string(const std::string& window_name);

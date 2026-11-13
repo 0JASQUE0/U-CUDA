@@ -92,7 +92,8 @@ void Plot3DView::render(PlotRenderer& renderer,
 
     // 3. Отступы и размеры (3D не нужен margin под подписи осей, они лежат внутри -
     //    но небольшой зазор от краёв оставляем, чтобы рамка ImGui не сливалась с полем)
-    const float margin = 4.0f;
+    // Fit to pane — узкое поле, как у 2D и карт; без него — прежний зазор.
+    const float margin = wp.fit_pane ? plot_compact_margin() : 4.0f;
     int plot_w = (std::max)(64, (int)(avail_size.x - margin * 2));
     int plot_h = (std::max)(64, (int)(avail_size.y - margin * 2));
 
@@ -311,7 +312,7 @@ void Plot3DView::render(PlotRenderer& renderer,
     static float rzoom_start_y[64] = { 0 };
 
     ImGuiIO& io = ImGui::GetIO();
-    const float drag_threshold = 5.0f;
+    const float drag_threshold = plot_rmb_drag_threshold();   // общий порог щелчка ПКМ (plot_axis.h)
 
     if (plot_h_ov || plot_a) {
         // Orbit правой

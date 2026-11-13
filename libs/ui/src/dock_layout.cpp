@@ -430,23 +430,24 @@ void chain_items(ImGuiDockNode* n, int axis, std::vector<ImGuiDockNode*>& out) {
     }
 }
 
-void set_len(ImGuiDockNode* n, int axis, float len) {
-    ImVec2 s = n->Size;
-    (axis == 0 ? s.x : s.y) = len;
+// Размеры по цепочке снизу вверх: элементу — его длина из lens, разрезу — сумма детей плюс
+// разделитель между ними (как считает ImGui: дети делят длину узла минус DockingSeparatorSize).
+// Возвращает длину n по оси.
+// Поперечный размер (cross) — у всех узлов цепочки тот же, что у неё самой: иначе элементы
+// (строки сетки) хранят прежнюю длину, и их собственные ячейки делились от разных длин.
+float assign_chain(ImGuiDockNode* n, int axis, const std::unordered_map<const ImGuiDockNode*, float>& lens,
+                   float cross) {
+    float l;
+    if (n->IsSplitNode() && (int)n->SplitAxis == axis)
+        l = assign_chain(n->ChildNodes[0], axis, lens, cross)
+          + assign_chain(n->ChildNodes[1], axis, lens, cross)
+          + ImGui::GetStyle().DockingSeparatorSize;
+    else
+        l = lens.at(n);
+    ImVec2 s;
+    s[axis] = l;
+    s[axis ^ 1] = cross;
     ImGui::DockBuilderSetNodeSize(n->ID, s);
-}
-
-// Размеры по цепочке снизу вверх: элементу — per (или его прежний размер, если в нём
-// панель настроек), разрезу — сумма детей. Возвращает длину n по оси.
-float assign_chain(ImGuiDockNode* n, int axis, float per, const char* side) {
-    if (n->IsSplitNode() && (int)n->SplitAxis == axis) {
-        const float l = assign_chain(n->ChildNodes[0], axis, per, side)
-                      + assign_chain(n->ChildNodes[1], axis, per, side);
-        set_len(n, axis, l);
-        return l;
-    }
-    const float l = has_window(n, side) ? axis_len(n, axis) : per;
-    set_len(n, axis, l);
     return l;
 }
 
@@ -486,9 +487,23 @@ void equalize(ImGuiDockNode* n, const char* side) {
         if (has_window(it, side)) fixed += axis_len(it, axis);
         else ++free_n;
     }
-    if (free_n > 0) {
-        const float per = std::floor((axis_len(n, axis) - fixed) / (float)free_n);
-        if (per > 0) assign_chain(n, axis, per, side);
+    // Место ячеек — длина цепочки минус разделители между элементами и панель настроек. Границы
+    // — накопленным округлением (k-я граница = round(k * ячейка)): строки одной длины и с
+    // одним числом ячеек получают те же границы, как бы ни были вложены их разрезы
+    // ([a | [b | c]] или [[a | b] | c]). Раньше делили длину с разделителями и округляли каждую
+    // ячейку вниз — границы соседних строк расходились на 1-2 px.
+    const float sep   = ImGui::GetStyle().DockingSeparatorSize;
+    const float avail = axis_len(n, axis) - sep * (float)(items.size() - 1) - fixed;
+    if (free_n > 0 && avail >= (float)free_n) {
+        std::unordered_map<const ImGuiDockNode*, float> lens;
+        int k = 0;
+        for (ImGuiDockNode* it : items) {
+            if (has_window(it, side)) { lens[it] = axis_len(it, axis); continue; }
+            lens[it] = std::round(avail * (float)(k + 1) / (float)free_n)
+                     - std::round(avail * (float)k / (float)free_n);
+            ++k;
+        }
+        assign_chain(n, axis, lens, axis_len(n, axis ^ 1));
     }
     for (ImGuiDockNode* it : items) equalize(it, side);
 }
@@ -722,6 +737,10 @@ void dock_layout_process(int mode, ImGuiID dock_id, ImVec2 size, const char* sid
     Request r = g_req;
     g_req = {};
     ImGuiDockNode* root = ImGui::DockBuilderGetNode(dock_id);
+    // Раскладку меняет код (Grid, пресет, сохранённая раскладка): запомненные доли разрезов
+    // (dock_keep_split_ratios) устарели. Иначе вложенный разрез, чью длину изменил Grid, считался
+    // растянутым снаружи и возвращал прежнюю долю — выравнивание отменялось.
+    if (r.kind == ReqKind::Preset || r.kind == ReqKind::Apply) split_memo().clear();
 
     switch (r.kind) {
     case ReqKind::Preset:
