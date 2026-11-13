@@ -638,12 +638,24 @@ void configure_param_plot_view(Plot2DView& view, ParamPlotKind kind) {
 
 
 namespace ucuda::ui_detail {
+void toolbar_row(const std::function<void()>& items) {
+    plot_toolbar_menu_add(items);
+    if (plot_toolbar_hidden()) return;
+    PlotToolbarNest nest;   // общие функции тулбара внутри строки не регистрируются второй раз
+    items();
+}
+
 bool draw_style_toolbar(const char* label, const char* id_suffix,
                                bool& enabled,
                                const std::function<bool()>& body) {
-    if (plot_toolbar_hidden()) return false;   // скрыт в меню диаграммы (Toolbar)
+    // В меню диаграммы — тот же элемент; правка там отдаётся вызывающему следующим кадром.
+    plot_toolbar_menu_add([lbl = std::string(label), id = std::string(id_suffix), en = &enabled, body]() {
+        if (draw_style_toolbar(lbl.c_str(), id.c_str(), *en, body)) plot_toolbar_menu_mark_changed(en);
+    });
+    const bool menu_changed = plot_toolbar_menu_take_changed(&enabled);
+    if (plot_toolbar_hidden()) return menu_changed;   // скрыт в меню диаграммы (Toolbar)
     const std::string sfx = id_suffix;
-    bool changed = false;
+    bool changed = menu_changed;
     if (ImGui::Checkbox((std::string(label) + "##" + sfx).c_str(), &enabled))
         changed = true;
 
@@ -705,6 +717,10 @@ ProjStyleGroupScope::ProjStyleGroupScope(std::vector<Projection>* group) : prev_
 ProjStyleGroupScope::~ProjStyleGroupScope() { g_proj_style_group = prev_; }
 
 void draw_proj_style_controls(Projection& pr, const char* sfx, const char* points_tip) {
+    // В меню диаграммы — те же флажки и стрелка; стиль вид берёт из pr со следующего кадра.
+    plot_toolbar_menu_add([p = &pr, id = std::string(sfx), tip = std::string(points_tip ? points_tip : "")]() {
+        draw_proj_style_controls(*p, id.c_str(), tip.c_str());
+    });
     if (plot_toolbar_hidden()) return;   // скрыт в меню диаграммы (Toolbar); стиль действует
     const std::string s = sfx;
     proj_style_checkbox(pr, "Custom line style##" + s, &Projection::custom_line_style);
@@ -771,8 +787,14 @@ void draw_proj_line_style(Projection& pr, const char* sfx, const char* points_ti
 
 namespace ucuda::ui_detail {
 bool draw_point_style_toolbar(BifurcationDiagramConfig& bd, const char* id_suffix) {
+    // В меню отдаётся этот вызов целиком: лямбда ниже держит ссылку на локальную sfx.
+    plot_toolbar_menu_add([b = &bd, id = std::string(id_suffix)]() {
+        if (draw_point_style_toolbar(*b, id.c_str())) plot_toolbar_menu_mark_changed(b);
+    });
+    const bool menu_changed = plot_toolbar_menu_take_changed(&bd);
+    PlotToolbarNest nest;
     const std::string sfx = id_suffix;
-    return draw_style_toolbar("Custom point style", id_suffix, bd.custom_point_style,
+    return menu_changed | draw_style_toolbar("Custom point style", id_suffix, bd.custom_point_style,
         [&bd, &sfx]() {
             if (bd.point_marker < 0 || bd.point_marker >= kPointMarkerCount) bd.point_marker = 0;
             bool ch = false;
@@ -1091,10 +1113,17 @@ bool take_heatmap_toolbar_head_used() {
 }
 
 bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o) {
+    // В меню диаграммы — тот же тулбар (опции копией: их лямбды ссылаются на объекты вкладки,
+    // живые до конца кадра); правка там отдаётся вызывающему следующим кадром.
+    plot_toolbar_menu_add([h = &hv, o]() {
+        if (draw_heatmap_toolbar(*h, o)) plot_toolbar_menu_mark_changed(h);
+    });
+    const bool menu_changed = plot_toolbar_menu_take_changed(&hv);
     // Тулбар скрыт в меню карты (Toolbar): ни строки, ни extras — карте вся высота. Шапку окна
     // не забираем: без тулбара её некуда показать (окно тоже не рисует свою стрелку).
-    if (plot_toolbar_hidden()) return false;
-    bool changed = false;
+    if (plot_toolbar_hidden()) return menu_changed;
+    PlotToolbarNest nest;   // extras вызывающего — часть этого элемента меню
+    bool changed = menu_changed;
     // Вид окна — до попапа: внутри него «текущее окно» уже сам попап.
     PlotWindowPrefs& wp = plot_window_prefs_current();
     // Шапка окна-владельца — только первому тулбару кадра (см. set_heatmap_toolbar_head).

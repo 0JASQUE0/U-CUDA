@@ -152,6 +152,12 @@ bool draw_style_toolbar(const char* label, const char* id_suffix,
                                bool& enabled,
                                const std::function<bool()>& body);
 
+// Строка тулбара окна диаграммы, собранная вручную: рисуется на месте, если тулбар не скрыт
+// (Show -> Toolbar), и та же строка доступна в меню диаграммы (ПКМ -> Toolbar). items может
+// ссылаться на объекты вкладки: меню вызывает его в том же кадре, при отрисовке вида окна.
+// Общие функции тулбара внутри items отдельно в меню не попадают.
+void toolbar_row(const std::function<void()>& items);
+
 
 void draw_proj_line_style(Projection& pr, const char* sfx, const char* points_tip);
 

@@ -295,7 +295,9 @@ void draw_custom_workspace_panel(CustomSession& cs,
             dock_layout_process(custom_mode, active_id, ImGui::GetContentRegionAvail(), nullptr, wins, &factory);
             ws.dirty = true;
         }
+        dock_snap_dragged_split(active_id);
         ImGui::DockSpace(active_id, ImVec2(0, 0), ImGuiDockNodeFlags_None);
+        dock_keep_split_ratios(active_id);
     }
 
     // Deferred tab close — move every window still docked in the closing

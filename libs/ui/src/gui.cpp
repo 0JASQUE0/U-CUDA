@@ -868,7 +868,9 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             process_layout(model, mode_i, dockspace_id, ImGui::GetContentRegionAvail(),
                            controls_window_for(model.app_mode));
         g_prev_frame_mode = mode_i;
+        dock_snap_dragged_split(dockspace_id);
         ImGui::DockSpace(dockspace_id, ImVec2(0, 0), ImGuiDockNodeFlags_None);
+        dock_keep_split_ratios(dockspace_id, controls_window_for(model.app_mode));
     }
 
     ImGui::End(); // MainHost

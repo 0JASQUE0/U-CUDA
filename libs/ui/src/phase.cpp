@@ -465,7 +465,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                 // ---------------- toolbar ----------------
                 // Скрыт в меню карты (Show → Toolbar) вместе с таблицей метрик: карте вся высота.
                 const bool rqa_bar = !plot_toolbar_hidden();
-                if (rqa_bar) {
+                toolbar_row([&]() {
                 ImGui::SetNextItemWidth(150);
                 const char* vmnames[] = { "Distance matrix", "Recurrence plot" };
                 ImGui::Combo("##rqvm", &pr.rqa_view_mode, vmnames, IM_ARRAYSIZE(vmnames));
@@ -489,7 +489,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     ImGui::Text("n=%d   dt=%.4g s   eps=%.5g   RR=%.3f%%",
                                 rq->n, rq->dt, rq->eps_used, 100.0 * rq->metrics.RR);
                 }
-                }   // rqa_bar
+                });   // rqa_bar
 
                 // ---------------- параметры ----------------
                 if (ImGui::BeginPopup("rqa_cfg")) {
@@ -872,15 +872,15 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                 else {
                     if (!projection_views(pr).view2d) projection_views(pr).view2d = std::make_unique<Plot2DView>();
                     // log Y — пересчётом в log10 h (лог-оси Y у Plot2DView нет), как у окон Order.
-                    const bool prev_ylog = pr.y_log;
-                    if (!plot_toolbar_hidden()) {   // часть тулбара (Show → Toolbar)
+                    toolbar_row([&pr]() {   // часть тулбара (Show → Toolbar)
+                        const bool was = pr.y_log;
                         ImGui::Checkbox("log Y##stepsize", &pr.y_log);
-                        if (pr.y_log != prev_ylog) pr.fit_pending = true;
+                        if (pr.y_log != was) pr.fit_pending = true;
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("Y axis in log10 h: steps spread over orders of magnitude\n"
                                               "(stiff parts, rejections near h_min) become readable.");
                         ImGui::SameLine();
-                    }
+                    });
                     draw_proj_line_style(pr, "stepsize",
                         "Draw the accepted steps as markers instead of a line.");
                     projection_views(pr).view2d->x_axis.name = "t";
