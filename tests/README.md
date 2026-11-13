@@ -238,6 +238,25 @@ Desktop smoke check with the LIF fixture above:
    above the error plot and its optional phase portrait, the memory/XOR
    delay curves, and the sweep curve (one axis) or heatmap (two axes).
 
+For the external MNIST workflow, open the saved 560-node column session
+and load the pilot CSV as described in the [MNIST guide](../resources/NEURAL_MNIST_RU.md).
+Check the frame grid and routing with 1 and 28 frames per stimulus.
+Restore the saved timing and run the pilot, then switch
+the matrix between counts and percentages. Click a nonzero off-diagonal
+cell, then change the CSV field and reopen that cell. The last successful
+result should still show the same sample IDs. Keep the classifier,
+reload the original CSV and replay it to verify that the matrix is reproduced.
+Click **+** after the experiment tabs and verify that the new tab is selected.
+Scroll to the bottom of its settings and run it using the toolbar above the
+settings. With a replica sweep, visit each result for the first time and check
+that switching instances preserves the matrix column widths in both modes
+and the **Sweep** view remains available alongside **Classification**.
+Switch Task between classification, forecast and memory, then disable
+readout. Check that Input, Network and Analysis remain in place and that
+Readout shows the selected task's fields when enabled.
+`neural_classifier_cpu` covers grid errors and `neural_classifier_gpu`
+covers test-row identity, error selection and result-view eligibility.
+
 ## First baseline and subsequent comparisons
 
 ```powershell

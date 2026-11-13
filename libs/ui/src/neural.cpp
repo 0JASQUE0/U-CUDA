@@ -6,6 +6,7 @@
 #include "tab_library.h"
 #include "tab_neural.h"
 #include "ucuda/storage/neural_dataset_io.h"
+#include <numeric>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
@@ -332,16 +333,17 @@ static void neural_take_system(SystemLibrary& lib, const std::string& name, Neur
     }
 }
 
-static void draw_neural_input(SystemLibrary& lib, NeuralSession& s, NeuralConfig& c) {
-    if (!ImGui::CollapsingHeader("Input", ImGuiTreeNodeFlags_DefaultOpen)) return;
+static void draw_neural_input(SystemLibrary& lib, NeuralSession& s, NeuralConfig& c, bool dataset_presentation = false) {
     if (!s.vars.empty()) {
         const std::vector<const char*> items = c_str_list(s.vars);
         if (c.input_var < 0 || c.input_var >= (int)items.size()) c.input_var = 0;
         ImGui::SetNextItemWidth(kFieldW);
         ImGui::Combo("input variable", &c.input_var, items.data(), (int)items.size());
     }
-    InputNumStr("sample time", c.input_hold_text, kFieldW);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Each sample is held this long, a multiple of h. 0 = a new sample every step.");
+    if (!dataset_presentation) {
+        InputNumStr("sample time", c.input_hold_text, kFieldW);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Each sample is held this long, a multiple of h. 0 = a new sample every step.");
+    }
     const bool external = c.task.enabled && c.task.kind == NeuralTaskKind::Classification && c.task.dataset;
     int remove = -1;
     if (!external) {
@@ -425,7 +427,7 @@ static void draw_neural_input(SystemLibrary& lib, NeuralSession& s, NeuralConfig
         const char* from = l.source >= 0 && l.source < (int)sources.size() ? sources[(size_t)l.source] : "?";
         const char* to = l.population >= 0 && l.population < (int)pops.size() ? pops[(size_t)l.population] : "?";
         const std::string title = std::string(from) + " -> " + to + "###link";
-        if (ImGui::TreeNodeEx(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::TreeNodeEx(title.c_str(), dataset_presentation ? ImGuiTreeNodeFlags_None : ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::SetNextItemWidth(kFieldW);
             ImGui::Combo("from", &l.source, sources.data(), (int)sources.size());
             ImGui::SetNextItemWidth(kFieldW);
@@ -445,31 +447,42 @@ static void draw_neural_input(SystemLibrary& lib, NeuralSession& s, NeuralConfig
     if (sources.empty()) ImGui::EndDisabled();
 }
 
-// Классификация: попытка = образец, источник = класс.
-static void draw_neural_classes(NeuralConfig& c) {
+static void draw_neural_dataset(NeuralConfig& c) {
     NeuralTask& t = c.task;
     if (InputTextStr("Dataset CSV", t.dataset_path, kFieldW + 240.0f)) {
         t.dataset.reset();
         ++t.dataset_revision;
     }
-    if (ImGui::Button("Load dataset") && !t.dataset_path.empty()) {
+    ImGui::BeginDisabled(t.dataset_path.empty());
+    if (ImGui::Button("Load dataset")) {
         try {
             t.dataset = std::make_shared<NeuralDataset>(load_neural_dataset_csv(std::filesystem::u8path(t.dataset_path)));
             ++t.dataset_revision;
             c.last_error.clear();
-        } catch (const std::exception& e) { c.last_error = e.what(); }
+        } catch (const std::exception& e) { ImGui::OpenPopup("Dataset load failed"); c.last_error = e.what(); }
     }
-    if (!t.dataset_path.empty()) {
-        ImGui::SetNextItemWidth(kFieldW);
-        ImGui::InputInt("Frames per stimulus", &t.dataset_frames);
-        t.dataset_frames = (std::max)(1, t.dataset_frames);
-        if (t.dataset)
-            ImGui::Text("%zu samples, %zu values per sample", t.dataset->samples.size(), t.dataset->channels.size());
-        else ImGui::TextDisabled("Load the CSV to run external trials.");
-        InputNumStr("feature nodes", t.features_text, kFieldW);
-        InputNumStr("feature points per stimulus", t.bins_text, kFieldW);
-        return;
+    ImGui::EndDisabled();
+    if (ImGui::BeginPopup("Dataset load failed")) {
+        ImGui::TextUnformatted(c.last_error.c_str());
+        ImGui::EndPopup();
     }
+    if (t.dataset)
+        ImGui::Text("%zu samples, %zu values per sample", t.dataset->samples.size(), t.dataset->channels.size());
+    else if (!t.dataset_path.empty()) ImGui::TextDisabled("Load the CSV to run external trials.");
+
+}
+
+static void draw_neural_features(NeuralTask& t) {
+    InputNumStr("feature nodes", t.features_text, kFieldW);
+    InputNumStr("feature points per stimulus", t.bins_text, kFieldW);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The stimulus is cut into this many equal parts; a part gives the state of every feature node at its end,\n"
+                          "or with spikes the spike count of the node inside it. 1 = the state at the end of the stimulus.");
+}
+
+// Классификация: попытка = образец, источник = класс.
+static void draw_neural_classes(NeuralConfig& c) {
+    NeuralTask& t = c.task;
     t.classes.erase(std::remove_if(t.classes.begin(), t.classes.end(), [&](int q) { return q < 0 || q >= (int)c.sources.size(); }), t.classes.end());
     if (c.sources.size() < 2) { ImGui::TextDisabled("Add two or more input sources in Input: each one can be a class."); return; }
     ImGui::TextUnformatted("classes");
@@ -481,11 +494,6 @@ static void draw_neural_classes(NeuralConfig& c) {
             std::sort(t.classes.begin(), t.classes.end());
         }
     }
-    InputNumStr("feature nodes", t.features_text, kFieldW);
-    InputNumStr("feature points per stimulus", t.bins_text, kFieldW);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("The stimulus is cut into this many equal parts; a part gives the state of every feature node at its end,\n"
-                          "or with spikes the spike count of the node inside it. 1 = the state at the end of the stimulus.");
     InputNumStr("train share", t.train_text, kFieldW);
     InputNumStr("validation share", t.val_text, kFieldW);
     InputNumStr("data seed", t.data_seed_text, kFieldW);
@@ -576,9 +584,7 @@ static void draw_neural_forecast(NeuralConfig& c) {
 
 static void draw_neural_saved(NeuralConfig& c, bool classifier);
 
-static void draw_neural_readout(NeuralConfig& c) {
-    if (!ImGui::CollapsingHeader("Readout")) return;
-    NeuralTask& t = c.task;
+static void draw_neural_task_picker(NeuralTask& t) {
     ImGui::Checkbox("use a readout on the response", &t.enabled);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Ridge on the state of the nodes, or on filtered spikes.\n"
@@ -591,14 +597,28 @@ static void draw_neural_readout(NeuralConfig& c) {
                                          "Memory capacity: recall the delayed input", "XOR of two delayed bits of the input",
                                          "Autonomous forecast: the readout drives the input" };
     ImGui::SetNextItemWidth(kFieldW + 160.0f);
-    if (ImGui::Combo("task", &kind, kinds, IM_ARRAYSIZE(kinds))) t.kind = (NeuralTaskKind)kind;
-    if (t.kind == NeuralTaskKind::Forecast) { draw_neural_forecast(c); return; }
+    if (ImGui::Combo("Task", &kind, kinds, IM_ARRAYSIZE(kinds))) t.kind = (NeuralTaskKind)kind;
+}
+
+static void draw_neural_readout_control(NeuralTask& t) {
     ImGui::Checkbox("control: the same network with K = 0", &t.control_k0);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("A second run with the same nodes, input, feature nodes and data, but every recurrent link is 0.\n"
                           "The difference to the main run is what the links add; the readout of the control is trained anew.\n"
                           "Not with a sweep: sweep over K instead.");
-    if (t.kind == NeuralTaskKind::Classification) { draw_neural_classes(c); draw_neural_saved(c, true); return; }
+}
+
+static void draw_neural_readout(NeuralConfig& c) {
+    if (!c.task.enabled) return;
+    NeuralTask& t = c.task;
+    if (t.kind == NeuralTaskKind::Forecast) { draw_neural_forecast(c); return; }
+    draw_neural_readout_control(t);
+    if (t.kind == NeuralTaskKind::Classification) {
+        draw_neural_features(t);
+        if (!t.dataset && t.dataset_path.empty()) draw_neural_classes(c);
+        draw_neural_saved(c, true);
+        return;
+    }
     if (t.kind == NeuralTaskKind::Memory || t.kind == NeuralTaskKind::Xor) { draw_neural_delayed(c); return; }
     std::vector<int> systems;
     for (int i = 0; i < (int)c.sources.size(); ++i) if (c.sources[(size_t)i].kind == NeuralSourceKind::System) systems.push_back(i);
@@ -786,51 +806,40 @@ static void draw_neural_lyapunov(NeuralConfig& c) {
                           "Close exponents turn the direction slowly: slow modes of many nodes need thousands.");
 }
 
-void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
-    NeuralSession& s = model.neural_session;
-    if (s.configs.empty()) {
-        ImGui::TextDisabled("No system loaded. Pick a system in the list above.");
-        return;
+static void draw_neural_presentation(SystemLibrary& lib, NeuralSession& s, NeuralConfig& c) {
+    auto& t = c.task;
+    InputNumStr("Input step", c.input_hold_text, kFieldW);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 uses the integration step. Otherwise the input step must be a multiple of it.");
+    draw_neural_protocol(c);
+    ImGui::SetNextItemWidth(kFieldW);
+    ImGui::InputInt("Frames per stimulus", &t.dataset_frames);
+    t.dataset_frames = (std::max)(1, t.dataset_frames);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("1 holds the vector throughout the stimulus. More frames present it in sequence.");
+    if (t.dataset && t.dataset->channels.size() % (size_t)t.dataset_frames == 0) {
+        const size_t channels = t.dataset->channels.size() / (size_t)t.dataset_frames;
+        ImGui::Text("%zu channels x %d frames", channels, t.dataset_frames);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Changing the frame count changes what the channel indices refer to. Review the routing below.");
+        const auto invalid = std::count_if(c.links.begin(), c.links.end(), [channels](const NeuralLink& link) {
+            return link.source < 0 || (size_t)link.source >= channels;
+        });
+        if (invalid)
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%zu links reference missing channels.", (size_t)invalid);
     }
-    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size()) s.active_config_index = 0;
-
-    {
-        RunAllGroup g;
-        g.pick_id = "pneural_";
-        g.n       = (int)s.configs.size();
-        g.label   = [&s](int i) { return s.configs[i].label; };
-        g.enqueue = [&model](int i) { model.enqueue_neural(i); };
-        draw_run_and_run_all("##run_all_neural", s.in_flight, false, s.in_flight, 160.0f,
-                             [&model, &s]() {
-                                 model.run_neural(s.active_config_index);
-                             },
-                             {},
-                             { g },
-                             [&model]() { model.start_next_in_neural_queue(); },
-                             model.neural_queue().size());
-        ImGui::SameLine();
-        if (!s.in_flight) ImGui::BeginDisabled();
-        if (ImGui::Button("Stop", ImVec2(90, 0))) { s.request_cancel(); model.clear_neural_queue(); }
-        if (!s.in_flight) ImGui::EndDisabled();
+    try { neural_validate_dataset_presentation(c); }
+    catch (const std::exception& e) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.7f, 0.3f, 1.0f));
+        ImGui::TextWrapped("%s", e.what());
+        ImGui::PopStyleColor();
     }
-    ImGui::Separator();
-
-    const TabBarResult tabs = draw_config_tab_bar(
-        "##neural_tabs", "neural_tab_", (int)s.configs.size(), s.in_flight, s.running_config_index,
-        [&s](int i) { return s.configs[i].label; }, {}, [&s]() { s.add_config(); });
-    if (tabs.active >= 0) s.active_config_index = tabs.active;
-    if (tabs.to_remove >= 0) model.remove_neural_config(tabs.to_remove);
-    if (s.active_config_index >= (int)s.configs.size()) s.active_config_index = (int)s.configs.size() - 1;
-    NeuralConfig& c = s.configs[(size_t)s.active_config_index];
-
-    draw_label_rename("Label##neural", c.label);
-    // Ошибка сверху: внизу под свёрнутыми разделами её не видно, а старые числа выглядят как результат.
-    if (!c.last_error.empty()) draw_error_box("##neural_err", c.last_error);
-    if (c.hash_mismatch && ImGui::Button("Rebuild as a new experiment")) {
-        c.graph_hash.clear(); c.graph_recipe.clear();
-        c.hash_mismatch = false; c.last_error.clear();
+    if (ImGui::TreeNode("Channel routing")) {
+        if (t.dataset) draw_neural_input(lib, s, c, true);
+        else ImGui::TextDisabled("Load the CSV to see its channels.");
+        ImGui::TreePop();
     }
+}
 
+static void draw_neural_network(NeuralSession& s, NeuralConfig& c) {
     ImGui::SetNextItemWidth(kFieldW + 100.0f);
     if (ImGui::BeginCombo("coupling in time", neural_schedule_name(c.schedule))) {
         for (NeuralSchedule v : kNeuralSchedules)
@@ -858,9 +867,14 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
     draw_integration_block("Integration", c.schedule == NeuralSchedule::Stage || spiking ? std::string("RK4") : c.scheme,
                            s.custom_schemes, f, nullptr, s.sys.is_map);
 
-    if (ImGui::CollapsingHeader("Network", ImGuiTreeNodeFlags_DefaultOpen)) {
-        InputNumStr("coupling K", c.coupling_text, kFieldW);
-        InputNumStr("seed", c.seed_text, kFieldW);
+    InputNumStr("coupling K", c.coupling_text, kFieldW);
+    InputNumStr("seed", c.seed_text, kFieldW);
+    if (spiking) draw_neural_spiking(s, c);
+}
+
+static void draw_neural_recording(const NeuralSession& s, NeuralConfig& c) {
+    const bool spiking = c.schedule == NeuralSchedule::Spike;
+    if (ImGui::CollapsingHeader("Recording", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("observed nodes per population", c.observed_per_pop_text, kFieldW);
         if (!spiking) {
             std::vector<const char*> names = { "off" };
@@ -888,20 +902,17 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::TextDisabled("recorded variables");
         InputNumStr("output limit, MB", c.output_limit_text, kFieldW);
     }
-    if (spiking) draw_neural_spiking(s, c);
-    draw_neural_input(lib, s, c);
-    draw_neural_protocol(c);
-    draw_neural_readout(c);
-    draw_neural_sweep(s, c);
-    if (!spiking) draw_neural_lyapunov(c);
-    draw_neural_populations(s, c);
-    draw_neural_projections(c, s.vars);
+}
+
+static void draw_neural_network_advanced(AppModel& model, NeuralSession& s, NeuralConfig& c) {
+    const bool spiking = c.schedule == NeuralSchedule::Spike;
     if (!spiking) draw_neural_laws(s, c);
     if (c.schedule == NeuralSchedule::Stage) draw_neural_device(c);
     draw_neural_checkpoint(model, s, c);
+}
 
-    if (c.arcs > 0 || c.last_run_ok) {
-        ImGui::Separator();
+static void draw_neural_last_run(const NeuralConfig& c) {
+    if ((c.arcs > 0 || c.last_run_ok) && ImGui::CollapsingHeader("Last run")) {
         if (!c.last_run_ok && c.result.ok)
             ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "The last run failed (see the error at the top): the numbers below are from the run before.");
         ImGui::Text("%d nodes, %lld arcs, in-degree %d..%d", c.result.n_nodes, c.arcs, c.degree_min, c.degree_max);
@@ -1029,8 +1040,102 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
         else if (c.result.diverged)
             ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "%d node(s) diverged, the run stopped at step %lld", c.result.n_diverged, c.result.steps_done);
     }
+}
+
+static void draw_neural_experiment(AppModel& model, SystemLibrary& lib, NeuralSession& s, int index) {
+    NeuralConfig& c = s.configs[(size_t)index];
+    if (!ImGui::BeginChild("##neural_settings", ImVec2(0, 0), ImGuiChildFlags_None,
+                          ImGuiWindowFlags_HorizontalScrollbar)) {
+        ImGui::EndChild();
+        return;
+    }
+
+    // Ошибка сверху: внизу под свёрнутыми разделами её не видно, а старые числа выглядят как результат.
+    if (!c.last_error.empty()) draw_error_box("##neural_err", c.last_error);
+    if (c.hash_mismatch && ImGui::Button("Rebuild as a new experiment")) {
+        c.graph_hash.clear(); c.graph_recipe.clear();
+        c.hash_mismatch = false; c.last_error.clear();
+    }
+
+    if (ImGui::BeginTabBar("##neural_workflow", ImGuiTabBarFlags_FittingPolicyScroll)) {
+        if (ImGui::BeginTabItem("Task")) {
+            draw_label_rename("Label##neural", c.label);
+            draw_neural_task_picker(c.task);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Input")) {
+            const bool classification = c.task.enabled && c.task.kind == NeuralTaskKind::Classification;
+            if (classification) draw_neural_dataset(c);
+            const bool external = classification && (!c.task.dataset_path.empty() || c.task.dataset);
+            if (external) draw_neural_presentation(lib, s, c);
+            else {
+                draw_neural_input(lib, s, c);
+                draw_neural_protocol(c);
+            }
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Network")) {
+            draw_neural_network(s, c);
+            draw_neural_populations(s, c);
+            draw_neural_projections(c, s.vars);
+            draw_neural_network_advanced(model, s, c);
+            ImGui::EndTabItem();
+        }
+        if (c.task.enabled && ImGui::BeginTabItem("Readout")) {
+            draw_neural_readout(c);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Analysis")) {
+            draw_neural_recording(s, c);
+            draw_neural_sweep(s, c);
+            if (c.schedule != NeuralSchedule::Spike) draw_neural_lyapunov(c);
+            draw_neural_last_run(c);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+
     if (!c.model_text.empty() && !s.sys.rhs.empty() && c.model_text != neural_model_text(s.sys))
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "The system changed since this experiment was last run.");
+    ImGui::EndChild();
+}
+
+void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
+    NeuralSession& s = model.neural_session;
+    if (s.configs.empty()) {
+        ImGui::TextDisabled("No system loaded. Pick a system in the list above.");
+        return;
+    }
+    if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size()) s.active_config_index = 0;
+
+    {
+        RunAllGroup g;
+        g.pick_id = "pneural_";
+        g.n       = (int)s.configs.size();
+        g.label   = [&s](int i) { return s.configs[i].label; };
+        g.enqueue = [&model](int i) { model.enqueue_neural(i); };
+        draw_run_and_run_all("##run_all_neural", s.in_flight, false, s.in_flight, 160.0f,
+                             [&model, &s]() {
+                                 model.run_neural(s.active_config_index);
+                             },
+                             {},
+                             { g },
+                             [&model]() { model.start_next_in_neural_queue(); },
+                             model.neural_queue().size());
+        ImGui::SameLine();
+        if (!s.in_flight) ImGui::BeginDisabled();
+        if (ImGui::Button("Stop", ImVec2(90, 0))) { s.request_cancel(); model.clear_neural_queue(); }
+        if (!s.in_flight) ImGui::EndDisabled();
+    }
+    ImGui::Separator();
+
+    const TabBarResult tabs = draw_config_tab_bar(
+        "##neural_tabs", "neural_tab_", (int)s.configs.size(), s.in_flight, s.running_config_index,
+        [&s](int i) { return s.configs[i].label; },
+        [&model, &lib, &s](int i) { draw_neural_experiment(model, lib, s, i); },
+        [&s]() { s.add_config(); });
+    if (tabs.active >= 0) s.active_config_index = tabs.active;
+    if (tabs.to_remove >= 0) model.remove_neural_config(tabs.to_remove);
 }
 
 // Номер показываемого экземпляра и что с ним стало.
@@ -1152,42 +1257,6 @@ static void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, P
     const bool byValue = sweep;
     const bool spread = (sync && vs.sync_kind == 1) || (sweep && !spikes && vs.sweep_kind == 1);
     const int taskInst = (std::max)(0, (std::min)(vs.instance, task.instances - 1));
-    if (readout && task.classify) {
-        // Матрица ошибок теста: строка = истинный класс, столбец = ответ.
-        const int C = (int)task.class_names.size();
-        const size_t at = (size_t)taskInst * C * C;
-        if (C < 1 || task.confusion.size() < at + (size_t)C * C || !std::isfinite(task.confusion[at])) {
-            ImGui::TextDisabled(task.note.empty() ? "This network gave no readout." : task.note.c_str());
-            return;
-        }
-        ImGui::Text("test accuracy %.3f on %d trials, chance %.3f", task.test[(size_t)taskInst], task.points, task.chance);
-        if (!task.delay_test.empty()) { ImGui::SameLine(); ImGui::TextDisabled("ridge on %d stimulus samples %.3f", task.delay_length, task.delay_test[0]); }
-        ImGui::TextDisabled("Rows: the true class, columns: the answer of the readout.");
-        if (ImGui::BeginTable("##neural_confusion", C + 2, ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
-            ImGui::TableSetupColumn("true \\ answer");
-            for (int k = 0; k < C; ++k) ImGui::TableSetupColumn(task.class_names[(size_t)k].c_str());
-            ImGui::TableSetupColumn("right");
-            ImGui::TableHeadersRow();
-            for (int i = 0; i < C; ++i) {
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(task.class_names[(size_t)i].c_str());
-                double row = 0.0;
-                for (int k = 0; k < C; ++k) row += task.confusion[at + (size_t)i * C + k];
-                for (int k = 0; k < C; ++k) {
-                    ImGui::TableNextColumn();
-                    const double v = task.confusion[at + (size_t)i * C + k];
-                    if (i == k) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "%.0f", v);
-                    else if (v > 0.0) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "%.0f", v);
-                    else ImGui::TextDisabled("0");
-                }
-                ImGui::TableNextColumn();
-                ImGui::Text("%.0f / %.0f", task.confusion[at + (size_t)i * C + i], row);
-            }
-            ImGui::EndTable();
-        }
-        return;
-    }
     // Memory и XOR: кривая значения от задержки d, сеть, та же сеть при K = 0 и линейная модель по задержкам.
     const bool delayMemory = readout && task.by_delay && !task.names.empty() && task.names[0] == "MC";
     const int delayFirst = delayMemory ? 1 : 0, delayD = (int)task.names.size() - delayFirst;
@@ -1699,7 +1768,154 @@ struct NeuralResultsUI {
     NeuralHistogramPlot isi, cv;
     int epoch = -1;
     int statistics_population = 0;
+    bool confusion_percent = false;
 };
+
+static void draw_classification_comparison(const NeuralSession& session, const NeuralConfig& c) {
+    const auto& task = c.task_result;
+    const auto& ctx = c.result_context;
+    const auto comparable = [&task, &c](const NeuralConfig& other) {
+        return &other == &c || (!task.external_test_key.empty() && other.result.ok &&
+               other.task_result.classify && other.task_result.external_test_key == task.external_test_key);
+    };
+    const bool other_runs = std::any_of(session.configs.begin(), session.configs.end(), [&](const NeuralConfig& other) {
+        return &other != &c && comparable(other);
+    });
+    if (!other_runs && task.test.size() <= 1 && task.delay_test.empty() && task.control_test.empty()) return;
+    if (!ImGui::TreeNode("Comparison")) return;
+    if (ImGui::BeginTable("##neural_comparison", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("Configuration");
+        ImGui::TableSetupColumn("Seed");
+        ImGui::TableSetupColumn("Accuracy");
+        ImGui::TableSetupColumn("Correct");
+        ImGui::TableSetupColumn("Run, s");
+        ImGui::TableHeadersRow();
+        const auto row = [&](const std::string& name, const std::string& seed, double accuracy, double seconds) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(name.c_str());
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(seed.c_str());
+            ImGui::TableNextColumn();
+            if (std::isfinite(accuracy)) ImGui::Text("%.2f%%", 100 * accuracy); else ImGui::TextDisabled("Unavailable");
+            ImGui::TableNextColumn();
+            if (std::isfinite(accuracy)) ImGui::Text("%lld / %d", std::llround(accuracy * task.points), task.points);
+            ImGui::TableNextColumn();
+            if (seconds >= 0.0) ImGui::Text("%.2f", seconds);
+        };
+        for (const auto& run : session.configs) {
+            if (!comparable(run)) continue;
+            const auto& recorded = run.result_context;
+            const auto& scores = run.task_result.test;
+            const bool replicas = !run.sweep_values.empty() && run.sweep2_values.empty() &&
+                                  recorded.sweep.kind == NeuralSweepKind::Replica;
+            double sum = 0.0;
+            size_t valid = 0;
+            for (size_t i = 0; i < scores.size(); ++i) {
+                std::string name = recorded.label;
+                if (!replicas && scores.size() > 1) name += " / Network " + std::to_string(i + 1);
+                const std::string seed = replicas && i < run.sweep_values.size() ?
+                    fmt_num_shortest(run.sweep_values[i]) : recorded.seed;
+                row(name, seed, scores[i], scores.size() == 1 ? run.result.wall_ms / 1000.0 : -1.0);
+                if (std::isfinite(scores[i])) { sum += scores[i]; ++valid; }
+            }
+            if (replicas && valid > 1) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn(); ImGui::Text("%s / Mean across seeds", recorded.label.c_str());
+                ImGui::TableSetColumnIndex(2); ImGui::Text("%.2f%%", 100 * sum / valid);
+                ImGui::TableSetColumnIndex(4); ImGui::Text("%.2f total", run.result.wall_ms / 1000.0);
+            }
+        }
+        if (!task.delay_test.empty()) row(task.test_sample_ids.empty() ? "Ridge on stimulus" : "Ridge on input vectors", "", task.delay_test[0], -1.0);
+        if (!task.control_test.empty()) row("Network, K = 0", ctx.seed, task.control_test[0], -1.0);
+        ImGui::EndTable();
+    }
+    ImGui::TreePop();
+}
+
+static void draw_classification(const NeuralSession& session, const NeuralConfig& c, int instance, NeuralResultsUI& ui) {
+    const auto& task = c.task_result;
+    const size_t classes = task.class_names.size();
+    const size_t at = (size_t)instance * classes * classes;
+    if ((size_t)instance >= task.test.size() || !std::isfinite(task.test[(size_t)instance]) ||
+        !classes || task.confusion.size() < at + classes * classes) {
+        ImGui::TextWrapped("%s", task.note.empty() ? "No classification result for this network." : task.note.c_str());
+        return;
+    }
+    const double accuracy = task.test[(size_t)instance];
+    const char* baseline = task.test_sample_ids.empty() ? "Ridge on stimulus" : "Ridge on input vectors";
+    ImGui::Text("%.2f%%   %lld / %d correct", accuracy * 100, std::llround(accuracy * task.points), task.points);
+    if (!task.delay_test.empty())
+        ImGui::TextDisabled("%+.2f pp vs %s (%.2f%%)", 100 * (accuracy - task.delay_test[0]), baseline, 100 * task.delay_test[0]);
+    if (ImGui::RadioButton("Count", !ui.confusion_percent)) ui.confusion_percent = false;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("% of true class", ui.confusion_percent)) ui.confusion_percent = true;
+    // Keep the layout across instances and reserve space for both display modes.
+    const float count_width = ImGui::CalcTextSize(std::to_string(task.points).c_str()).x;
+    const float value_width = (std::max)(count_width, ImGui::CalcTextSize("100.0%").x);
+    float label_width = ImGui::CalcTextSize("True / Predicted").x;
+    for (const auto& name : task.class_names)
+        label_width = (std::max)(label_width, ImGui::CalcTextSize(name.c_str()).x);
+    if (ImGui::BeginTable("##neural_confusion", (int)classes + 1,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoSavedSettings)) {
+        ImGui::TableSetupColumn("True / Predicted", ImGuiTableColumnFlags_WidthFixed, label_width);
+        for (const auto& name : task.class_names)
+            ImGui::TableSetupColumn(name.c_str(), ImGuiTableColumnFlags_WidthFixed,
+                                    (std::max)(value_width, ImGui::CalcTextSize(name.c_str()).x));
+        ImGui::TableHeadersRow();
+        for (size_t i = 0; i < classes; ++i) {
+            const double* row = task.confusion.data() + at + i * classes;
+            const double total = std::accumulate(row, row + classes, 0.0);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(task.class_names[i].c_str());
+            ImGui::PushID((int)i);
+            for (size_t k = 0; k < classes; ++k) {
+                ImGui::TableNextColumn();
+                const double count = row[k];
+                char value[32];
+                if (ui.confusion_percent && total > 0) std::snprintf(value, sizeof value, "%.1f%%", 100 * count / total);
+                else if (ui.confusion_percent) std::snprintf(value, sizeof value, "-");
+                else std::snprintf(value, sizeof value, "%.0f", count);
+                if (i == k) {
+                    ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "%s", value);
+                    continue;
+                }
+                if (count == 0) {
+                    ImGui::TextDisabled("%s", value);
+                    continue;
+                }
+                if (task.test_sample_ids.empty()) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "%s", value);
+                    continue;
+                }
+                ImGui::PushID(c.data_generation);
+                ImGui::PushID(instance);
+                ImGui::PushID((int)k);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.6f, 0.3f, 1.0f));
+                const bool open_errors = ImGui::Selectable((std::string(value) + "###cell").c_str());
+                ImGui::PopStyleColor();
+                if (open_errors) ImGui::OpenPopup("##errors");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show misclassified samples");
+                if (ImGui::BeginPopup("##errors")) {
+                    ImGui::Text("True %s / Predicted %s", task.class_names[i].c_str(), task.class_names[k].c_str());
+                    const auto samples = neural_classification_errors(task, instance, (int)i, (int)k);
+                    if (ImGui::BeginChild("##samples", ImVec2(260, 200), ImGuiChildFlags_Borders)) {
+                        ImGuiListClipper clipper;
+                        clipper.Begin((int)samples.size());
+                        while (clipper.Step()) for (int sample = clipper.DisplayStart; sample < clipper.DisplayEnd; ++sample)
+                            ImGui::TextUnformatted(task.test_sample_ids[samples[(size_t)sample]].c_str());
+                    }
+                    ImGui::EndChild();
+                    ImGui::EndPopup();
+                }
+                ImGui::PopID();
+                ImGui::PopID();
+                ImGui::PopID();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    draw_classification_comparison(session, c);
+}
 
 ImVec4 trial_stimulus_color(int label, size_t classes, int colormap) {
     const float t = label >= 0 && classes > 1 ? 0.15f + 0.7f * (float)label / (float)(classes - 1) : 0.6f;
@@ -1905,9 +2121,11 @@ void draw_neural_results(AppModel& model) {
             tab("Spike statistics", [&] { draw_spike_statistics(c, model.neural_view.instance, ui, model.heatmap_colormap); });
             break;
         case View::Readout:
-            if (task.forecast) tab("Forecast", [&] { stack(kNeuralReadout, kNeuralForecastError, ui.forecast,
+            if (task.classify)
+                tab("Classification", [&] { draw_classification(s, c, model.neural_view.instance, ui); });
+            else if (task.forecast) tab("Forecast", [&] { stack(kNeuralReadout, kNeuralForecastError, ui.forecast,
                                                            task.t0, task.t0 + task.dt * (task.points - 1)); });
-            else tab(task.classify ? "Classification" : task.by_delay ? (task.names[0] == "MC" ? "Memory" : "XOR") : "Readout",
+            else tab(task.by_delay ? (task.names[0] == "MC" ? "Memory" : "XOR") : "Readout",
                      [&] { draw(kNeuralReadout); });
             break;
         case View::ForecastPhase: tab("Phase portrait", [&] { draw(kNeuralForecastPhase); }); break;

@@ -216,6 +216,8 @@ struct NeuralTaskResult {
     std::vector<double> control_test, control_val;   // [target], та же сеть при K = 0; пусто = контроль выключен
     std::vector<std::string> class_names;  // [C]
     std::vector<double> confusion;         // [instance][истинный][ответ], тест, число попыток
+    std::vector<std::string> test_sample_ids; // external sample IDs in prediction order
+    std::string external_test_key;            // external input and labels in test order
     double chance = 0.0;                   // доля самого частого класса в тесте
     // Forecast: names = подключённые входы, test/val = NRMSE на один отсчёт под настоящим входом; truth/predicted =
     // автономная часть, t0 = её начало. error = нормированная ошибка по отсчётам, ar_* = авторегрессия ar_order.
@@ -242,6 +244,7 @@ struct NeuralTrialTimeline {
 // Non-persistent labels and settings of the last successful run, independent of the editable config.
 struct NeuralResultContext {
     std::string settings_key, label, device_state;
+    std::string seed;
     std::vector<std::string> variables, populations, sources;
     NeuralSweep sweep, sweep2;
     NeuralTrialTimeline trials;

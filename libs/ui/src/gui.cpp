@@ -1015,7 +1015,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Neural) {
-        if (ImGui::Begin("Neural Controls", nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
+        if (ImGui::Begin("Neural Controls")) {
             draw_neural_controls(model, lib);
         }
         ImGui::End();

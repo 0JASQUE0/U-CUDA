@@ -27,6 +27,7 @@ Use [README.md](README.md) to locate the owning module. Consult [ARCHITECTURE.md
 
 ## Verification
 
+- Автоматические тесты добавляются вместе с изменениями. Запускай их только перед открытием pull request. Перечень проверок ниже относится к этому запуску.
 - Каждая новая функция или изменение поведения, результат которого можно объективно проверить, сопровождается автоматическими тестами в том же изменении. Функция считается завершённой после прохождения соответствующих проверок. Исправление ошибки сопровождается регрессионным тестом, воспроизводящим её.
 - Numerical and performance-sensitive changes must add or extend accuracy/convergence checks and benchmarks for every supported CPU/GPU path. Do not weaken tolerances or replace baselines merely to make tests pass.
 - If automated verification is objectively impossible, document the reason and a reproducible manual check in the change description.
