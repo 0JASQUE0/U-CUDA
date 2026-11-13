@@ -288,7 +288,8 @@ void external_trial_grid() {
     NeuralState loaded;
     require(session_from_json_neural(session_to_json_neural(s), loaded) &&
             loaded.configs.size() == 1 && loaded.configs.front().task.dataset_path == c.task.dataset_path &&
-            !loaded.configs.front().task.dataset, "dataset path did not round-trip without embedding sample data");
+            !loaded.configs.front().task.dataset,
+            "dataset path did not round-trip without embedding sample data");
     bool needs_load = false;
     try { neural_task_config(loaded.configs.front()); }
     catch (const std::runtime_error& e) { needs_load = std::string(e.what()).find("load the external dataset") != std::string::npos; }
@@ -320,6 +321,65 @@ void external_trial_grid() {
             "external vector frames must arrive in column order, with zero in the next rest");
     require(session_from_json_neural(session_to_json_neural(s), loaded) &&
             loaded.configs.front().task.dataset_frames == 2, "external frame count did not round-trip");
+    neural_validate_dataset_presentation(c);
+    c.stimulus_text = "0.5";
+    try {
+        neural_validate_dataset_presentation(c);
+        throw std::logic_error("an extra input step was accepted in frame mode");
+    } catch (const std::runtime_error& e) {
+        require(std::string(e.what()).find("frame count times the input sample time") != std::string::npos,
+                "wrong diagnostic for a stimulus that does not match the frame grid");
+    }
+    c.task.dataset_frames = 3;
+    try {
+        neural_validate_dataset_presentation(c);
+        throw std::logic_error("a dataset width incompatible with the frame count was accepted");
+    } catch (const std::runtime_error& e) {
+        require(std::string(e.what()).find("width must be divisible") != std::string::npos,
+                "wrong diagnostic for an incompatible frame count");
+    }
+}
+
+void external_result_snapshot(ParametricEngine& engine) {
+    auto s = external_session(false);
+    auto& c = s.configs.front();
+    auto data = std::make_shared<NeuralDataset>(*c.task.dataset);
+    std::fill(data->values.begin(), data->values.end(), 0.0);
+    c.task.dataset = data;
+    run(s, engine);
+    require(c.last_run_ok, c.last_error);
+    c.task.dataset.reset();
+    const auto& result = c.task_result;
+    require(result.test_sample_ids == std::vector<std::string>{"0", "3", "6", "9", "12", "15"},
+            "the completed run lost its original test sample IDs");
+    require(!result.external_test_key.empty(), "the completed test split cannot be compared");
+    const auto views = neural_result_views(c);
+    require(!views.empty() && views.front() == NeuralResultView::Readout &&
+            std::find(views.begin(), views.end(), NeuralResultView::Input) != views.end() &&
+            std::find(views.begin(), views.end(), NeuralResultView::Nodes) != views.end(),
+            "classification must retain input and node views");
+    c.sweep_values = {1, 2};
+    require(neural_result_views(c).back() == NeuralResultView::Sweep, "classification must retain sweep results");
+    c.sweep_values.clear();
+    const int predicted = (int)result.predicted.front();
+    const auto samples = neural_classification_errors(result, 0, 1 - predicted, predicted);
+    const auto cell = (size_t)(1 - predicted) * 2 + predicted;
+    require(!samples.empty() && samples.size() == (size_t)result.confusion[cell],
+            "the drill-down does not reproduce the selected confusion cell");
+    for (size_t sample : samples)
+        require(data->samples[3 * sample].id == result.test_sample_ids[sample] &&
+                data->samples[3 * sample].label == result.class_names[(size_t)(1 - predicted)],
+                "an error opened a sample from the wrong class or split");
+    require(neural_classification_errors(result, 1, 1 - predicted, predicted).empty() &&
+            neural_classification_errors(result, 0, predicted, predicted).empty(),
+            "invalid instance or diagonal cell gave a drill-down");
+    const std::string key = result.external_test_key;
+    auto changed = std::make_shared<NeuralDataset>(*data);
+    changed->values[0] = 0.5;
+    c.task.dataset = changed;
+    run(s, engine);
+    require(c.last_run_ok && c.task_result.external_test_key != key,
+            "different test vectors would be grouped in the same comparison");
 }
 
 void external_replay(bool spike, ParametricEngine& engine) {
@@ -559,6 +619,7 @@ int main(int argc, char** argv) {
         replay(true, engine);
         external_replay(false, engine);
         external_replay(true, engine);
+        external_result_snapshot(engine);
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Neural classifier test failed: " << e.what() << '\n';
