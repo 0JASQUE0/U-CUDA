@@ -12,6 +12,7 @@ endif()
 
 ucuda_library(storage
     src/app_config.cpp
+    src/neural_dataset_io.cpp
     src/session_basins.cpp
     src/session_custom.cpp
     src/session_dft1d.cpp

@@ -1,0 +1,6 @@
+﻿add_executable(ucuda_neural_batch main.cpp)
+target_link_libraries(ucuda_neural_batch PRIVATE ucuda::application ucuda::analysis ucuda::cuda ucuda::storage ucuda::platform)
+ucuda_runtime(ucuda_neural_batch)
+if(WIN32)
+    target_sources(ucuda_neural_batch PRIVATE "${PROJECT_SOURCE_DIR}/tests/utf8.manifest")
+endif()

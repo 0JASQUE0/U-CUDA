@@ -216,6 +216,9 @@
     <ClCompile Include="..\libs\storage\src\session_network.cpp">
       <Filter>libs\storage\src</Filter>
     </ClCompile>
+    <ClCompile Include="..\libs\storage\src\neural_dataset_io.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
     <ClCompile Include="..\libs\storage\src\session_neural.cpp">
       <Filter>libs\storage\src</Filter>
     </ClCompile>

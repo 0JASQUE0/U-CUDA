@@ -30,6 +30,29 @@ Build with `cmake --build --preset windows-debug --target ucuda_storage`. Requir
 
 ## Compatibility and platforms
 
+`load_neural_dataset_csv` reads dense labelled vectors from a local UTF-8 CSV.
+The header starts with `id,split,label,group`, followed by unique channel names.
+Each row contains a unique sample ID, an explicit split (`train`, `validation`
+or `test`), a label, an optional group ID and one finite decimal value per
+channel. Group IDs must stay in one split. The loader preserves row and channel
+order. Fields are comma-delimited and unquoted. The group field can be empty,
+and both LF and CRLF are accepted. All three splits must contain rows.
+
+The loader caps the input file at 512 MiB, each row at 1 MiB, and the decoded
+data at 1,000,000 rows and 64 Mi values. Values keep their original scale.
+
+For a Neural classification run, enter the path in **Dataset CSV** and select
+**Load dataset**. In **Input**, link the CSV channels to populations. In
+**Protocol**, select separate trials and restart from the initial conditions.
+The CSV determines the trial count. Trials are grouped by split and preserve
+their relative file order within each split. The stimulus holds each vector at
+its original scale; the rest supplies zero input. The first path requires
+fixed links and runs with continuous or spiking nodes.
+
+The session stores the path and classifier, while the CSV stays external.
+After reopening the session, load the CSV before running. The saved classifier
+checks the dataset and trial protocol before repeating the held-out test.
+
 Old JSON sessions, systems, settings, missing optional fields, and CSV column order/format are compatibility contracts. Keep path behavior portable and never overwrite the user-owned `U-CUDA/library/` while testing.
 
 See [the library map](../README.md) and [the architecture document](../../ARCHITECTURE.md).

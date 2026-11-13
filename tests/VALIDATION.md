@@ -180,3 +180,87 @@ and all eight selected checks passed (`activity-trials-validation.xml`).
 The LIF fixture produced 30 spikes in High current, zero in Low current,
 and zero during rest. Classifier replay retained the same annotations;
 continuous spiking published no trial bands. Visual inspection remains manual.
+
+## Autonomous Lorenz forecast from fixed starts, 12 November 2026
+
+The Release headless run of `neural_forecast_gpu` passed on an RTX 4090
+with CUDA 12.6. The fixed fitting prefix and five held-out starts are
+described in the [forecast protocol](README.md#autonomous-lorenz-forecast-from-fixed-starts).
+All three models crossed the threshold within the forecast window at
+every start. Horizons are in Lyapunov times.
+
+| Start sample | Source time after warmup | Tanh reservoir | Autoregression | NVAR |
+|---:|---:|---:|---:|---:|
+| 2200 | 44 | 0.21744 | 0.18120 | 8.53452 |
+| 2900 | 58 | 2.40996 | 0.36240 | 9.27744 |
+| 3600 | 72 | 0.27180 | 0.12684 | 9.45864 |
+| 4300 | 86 | 0.74292 | 0.16308 | 7.55604 |
+| 5000 | 100 | 1.55832 | 0.28992 | 8.48016 |
+| Mean | | 1.04009 | 0.22469 | 8.66136 |
+| Range | | 0.21744–2.40996 | 0.12684–0.36240 | 7.55604–9.45864 |
+
+The spread is across initialisation times on one trajectory and one graph
+seed. The comparison measures short-term forecast skill for this setup.
+
+`adaptive_cpu`, `adaptive_gpu`, `architecture`, `layer_rules`,
+`vcxproj_sync` and `gpu_smoke` also passed without skips. The GUI build
+and full regression suite were not run.
+
+## Closed-loop attractor and Lyapunov exponent, 12 November 2026
+
+The [closed-loop protocol](README.md#closed-loop-lyapunov-exponent-and-long-run-statistics)
+uses the same 96-node reservoir and fixed readout at both steps. The first
+500 autonomous samples were discarded. The 2,000-sample window is a prefix
+of the 4,000-sample run. Reported channel statistics are
+triples in x, y, z order and use the normalisation fitted before the test.
+The reservoir exponent is expressed per source time unit. The Lorenz
+exponent in the table is the 0.906 reference used in the protocol.
+
+| System | Integration step | Autonomous samples | Mean | Standard deviation | Lag-one correlation | Largest exponent |
+|---|---:|---:|---|---|---|---:|
+| Lorenz | 0.01 | 2000 | 0.037, 0.027, 0.044 | 0.994, 0.979, 0.952 | 0.993, 0.989, 0.982 | 0.906 |
+| Lorenz | 0.01 | 4000 | 0.048, 0.036, 0.023 | 0.991, 0.984, 0.972 | 0.993, 0.989, 0.983 | 0.906 |
+| Reservoir | 0.1 | 2000 | 0.742, 0.648, 0.057 | 0.774, 0.739, 0.720 | 0.991, 0.986, 0.987 | 0.1773 |
+| Reservoir | 0.1 | 4000 | 0.949, 0.823, 0.085 | 0.538, 0.507, 0.472 | 0.991, 0.987, 0.987 | -0.0957 |
+| Reservoir | 0.05 | 2000 | 0.095, 0.084, -0.051 | 0.969, 0.972, 1.034 | 0.992, 0.987, 0.983 | 1.0138 |
+| Reservoir | 0.05 | 4000 | 0.395, 0.342, 0.018 | 0.929, 0.906, 0.861 | 0.994, 0.989, 0.983 | 0.6704 |
+
+The reservoir stays bounded across the measured windows. The exponent
+changes materially with integration step and window length. The positive
+x and y means at 4,000 samples show a bias relative to the source, even
+with the smaller step. These runs leave convergence and reproduction of
+the Lorenz attractor unconfirmed for this reservoir.
+
+The analytical GPU check passed on RTX 4090 at both integration steps
+for Stage, Heun, Post and Old. In each case, the measured exponent agreed
+with the exact discrete map within `1e-8` per network time unit. The primary
+trajectory and feedback were identical with and without the clone.
+
+Release builds passed with CMake headless and Visual Studio Release|x64.
+The forecast and closed-loop Lyapunov tests, `adaptive_cpu`, `adaptive_gpu`,
+`gpu_smoke`, `architecture`, `layer_rules` and `vcxproj_sync` passed without
+skips. The full regression suite and manual GUI checks were not run.
+
+## Initial-state forgetting and conditional Lyapunov exponent, 12 November 2026
+
+The [conditional protocol](README.md#initial-state-forgetting-and-conditional-lyapunov-exponent)
+passed on RTX 4090 in Release. Each of the 24 renormalisation blocks was
+checked against the independent CPU pair using the same time grid.
+The refined CPU reference gave −0.7862247533 per network time unit.
+
+| GPU integration step | Conditional exponent | Absolute error against refined reference |
+|---:|---:|---:|
+| 0.125 | −0.7862245207 | 2.33e-7 |
+| 0.0625 | −0.7862245577 | 1.96e-7 |
+
+Under the same prescribed Lorenz input, the maximum pairwise RMS distance
+of the three Tanh reservoir replicas fell from 2 at time 0 to
+0.06801 at time 8, 0.002144 at time 16, and 1.34e-8 at time 32.
+It stayed below 2e-5 from time 23 through 64. The driven reservoir's
+conditional exponent over time 16–64 was −0.6586620415 per network time
+unit. This describes the fixed input, graph and initial states used here.
+
+The Release test target built and all eight selected checks passed without
+skips. The selection included the three Neural forecast and Lyapunov
+checks, `adaptive_cpu`, `gpu_smoke`, `architecture`, `layer_rules` and
+`vcxproj_sync`. The full regression suite was not run.

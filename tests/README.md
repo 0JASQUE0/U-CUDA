@@ -77,6 +77,84 @@ starts at threshold but falls below it before the first threshold check.
 This is a small regression, not the 4-second, 4000-node benchmark or a
 cross-simulator reproduction. A skipped GPU test does not validate the engine.
 
+## Autonomous Lorenz forecast from fixed starts
+
+`neural_forecast_gpu` runs the stage-scheduled Tanh reservoir on CUDA and the
+autoregression and NVAR baselines on CPU. The synthetic source is Lorenz
+(`sigma = 10`, `rho = 28`, `beta = 8/3`), sampled every 0.02 source time
+units. The 96-node reservoir uses graph seed 1. Input normalisation, readout
+fitting and baseline selection use the split of samples `[0, 2000)`. The five
+starts at samples 2200, 2900, 3600, 4300 and 5000 use only earlier samples to
+initialise the reservoir and lag features. Each start uses the same graph,
+split and normalisation.
+
+```powershell
+cmake --build --preset windows-release --target neural_forecast_test
+ctest --preset windows-release -V -R '^neural_forecast_gpu$'
+```
+
+The test checks the common input history and graph, alignment of the forecast
+target, unchanged fit across starts, and independence from changes to the
+future target. It reports the horizon to the first normalised RMS error
+above 0.5 for each model and start, in Lyapunov times (`lambda = 0.906`), with
+the mean and range across starts. A forecast still within threshold at the
+end of the 600-step window is marked censored and contributes a lower bound.
+The horizons describe this fixed configuration and are not pass thresholds.
+
+### Closed-loop Lyapunov exponent and long-run statistics
+
+`neural_closed_loop_lyapunov_gpu` checks an independent exact sample map
+for a one-node system with held feedback `u = a*x`. Over a sample of
+duration `dt`, the map multiplies `x` by `1 + a*dt`, so the exponent is
+`log(1 + a*dt) / dt`. The check covers all four continuous schedules,
+two integration steps at fixed `dt`, a delayed feedback start, an
+off-grid interval, and exact agreement of the primary trajectory with
+the run without a clone.
+
+```powershell
+cmake --build --preset windows-release --target neural_forecast_test
+ctest --preset windows-release --output-on-failure -R '^neural_closed_loop_lyapunov_gpu$'
+& .\build\windows\bin\Release\neural_forecast_test.exe --attractor
+```
+
+The long run uses the first held-out start and the fixed readout fitted
+at network step 0.1. Both runs use the same graph, observations, input
+normalisation and readout. Network steps 0.1 and 0.05 give the same
+input sample interval, 0.02 in source time. The first 500 autonomous
+samples are excluded. The report compares mean, population standard
+deviation and lag-one autocorrelation of the normalised x, y and z
+over 2,000 and 4,000 autonomous samples. It also reports the exponent
+in inverse source time, using a renormalisation every five samples.
+The source comparison uses the Lorenz trajectory over the same windows
+and the reference exponent 0.906 from the forecast protocol. Statistics
+and the exponent describe this configuration. The exact sample map
+provides the regression thresholds.
+
+### Initial-state forgetting and conditional Lyapunov exponent
+
+`neural_conditional_lyapunov_gpu` compares a Stage GPU run of
+`x' = -0.7*x - 0.2*x^3 + u(t)` with an independent CPU RK4 integration
+of the two perturbed equations together. Both equations use the same
+prescribed sine input held for 0.25 time units. Only the node state is
+perturbed. The test checks every half-unit renormalisation block against
+the CPU pair at the corresponding step. The aggregate exponent is also
+checked against a CPU reference at step 0.0078125, with limits of
+`1e-5` and `1e-6` at GPU steps 0.125 and 0.0625 respectively.
+
+The same check runs three replicas of the 96-node Tanh reservoir under
+the prescribed Lorenz input of the forecast fixture. They start with
+state offsets of −1, 0 and +1. The test records the maximum pairwise
+RMS distance across all nodes through 64 network time units. The distance
+must stay below `1e-5` times its initial value for the final eight samples.
+It also measures the reservoir's conditional exponent after a washout
+of 16 units. This is a property of the driven reservoir. The autonomous
+experiment uses feedback and measures the exponent of a different system.
+
+```powershell
+cmake --build --preset windows-release --target neural_forecast_test
+ctest --preset windows-release -V -R '^neural_conditional_lyapunov_gpu$'
+```
+
 ## Saved classifier and LIF trial protocol
 
 `neural_classifier_cpu` checks old Neural JSON, the v1 regression file format

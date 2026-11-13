@@ -50,6 +50,16 @@ add_test(NAME neural_results_cpu COMMAND neural_results_test)
 add_test(NAME neural_results_gpu COMMAND neural_results_test --gpu)
 set_tests_properties(neural_results_cpu PROPERTIES LABELS "regression;cpu" TIMEOUT 30)
 set_tests_properties(neural_results_gpu PROPERTIES LABELS "regression;gpu" RUN_SERIAL TRUE TIMEOUT 120 SKIP_RETURN_CODE 77)
+
+add_executable(neural_forecast_test neural_forecast_test.cpp)
+target_link_libraries(neural_forecast_test PRIVATE ucuda::analysis ucuda::cuda ucuda::platform CUDA::cuda_driver)
+ucuda_runtime(neural_forecast_test)
+add_test(NAME neural_forecast_gpu COMMAND neural_forecast_test)
+add_test(NAME neural_closed_loop_lyapunov_gpu COMMAND neural_forecast_test --lyapunov)
+add_test(NAME neural_conditional_lyapunov_gpu COMMAND neural_forecast_test --conditional)
+set_tests_properties(neural_forecast_gpu neural_closed_loop_lyapunov_gpu neural_conditional_lyapunov_gpu PROPERTIES
+    LABELS "regression;gpu" RUN_SERIAL TRUE TIMEOUT 180 SKIP_RETURN_CODE 77)
+
 if(UNIX)
     add_executable(platform_test platform_test.cpp)
     target_link_libraries(platform_test PRIVATE ucuda::numerics ucuda::ocr ucuda::platform)
@@ -150,7 +160,7 @@ endif()
 set(U_CUDA_TEST_BACKEND "all" CACHE STRING "Test backend: all, cpu, gpu")
 if(WIN32)
     # Keep CRT argv, filesystem paths and JSON reasons UTF-8 on Windows too.
-    foreach(test_target adaptive_test architecture_test gpu_smoke neural_cuba_test neural_classifier_test neural_results_test ucuda_regression ucuda_dae_tests
+    foreach(test_target adaptive_test architecture_test gpu_smoke neural_cuba_test neural_classifier_test neural_results_test neural_forecast_test ucuda_regression ucuda_dae_tests
             ucuda_benchmark ucuda_test_tool ${upstream_targets})
         target_sources(${test_target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/utf8.manifest")
     endforeach()
@@ -162,7 +172,7 @@ set(U_CUDA_TEST_BASELINE "${PROJECT_SOURCE_DIR}/tests/baselines/active.json" CAC
 foreach(mode smoke regression performance all)
     set(check_targets ucuda_test_tool ucuda_regression gpu_smoke)
     if(mode STREQUAL regression OR mode STREQUAL all)
-        list(APPEND check_targets ucuda_dae_tests ucuda_parity_observations adaptive_test architecture_test neural_cuba_test neural_classifier_test neural_results_test ${upstream_targets})
+        list(APPEND check_targets ucuda_dae_tests ucuda_parity_observations adaptive_test architecture_test neural_cuba_test neural_classifier_test neural_results_test neural_forecast_test ${upstream_targets})
     endif()
     if(mode STREQUAL performance OR mode STREQUAL all)
         list(APPEND check_targets ucuda_benchmark)
