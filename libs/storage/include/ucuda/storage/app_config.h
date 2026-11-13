@@ -60,6 +60,15 @@ struct AppConfig {
     // Переключается в Settings. apply_ui_scale в app_main.cpp перечитывает
     // это поле через model.dark_theme и пересоздаёт style на каждом изменении.
     bool dark_theme = true;
+    // High Contrast (чёрный фон). Пишется вместе с dark_theme = true, так что
+    // сборка без этого поля откроет конфиг как обычную Dark.
+    bool contrast_theme = false;
+    // Камуфляжная тема (AppSettings::CamoTheme): 0 нет, 1 Multicam, 2 DPM, 3 DDPM.
+    // Пишется вместе с dark_theme = false.
+    int camo_theme = 0;
+    // Пользовательские цвета темы: "bg=#rrggbb;text=...;frame=...;accent=...;plot=...".
+    // Пустая строка = все цвета берутся из темы. Разбор — AppSettings::theme_colors_from_string.
+    std::string theme_colors;
 
     // Последний выбранный тип анализа (значение AppModel::AppMode как int).
     // На старте app_main выставляет model.app_mode из этого поля (после

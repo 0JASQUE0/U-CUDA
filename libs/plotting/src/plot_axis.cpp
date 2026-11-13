@@ -50,8 +50,25 @@ static int g_tick_precision = 4;
 // стиль, чтобы plot-код не зависел от того, активен ли ImGui контекст.
 static bool g_plot_light = false;
 
-void set_plot_light_theme(bool light) { g_plot_light = light; }
-bool plot_light_theme()               { return g_plot_light; }
+static bool  g_plot_contrast = false;
+static bool  g_plot_bg_set   = false;
+static float g_plot_bg[3]    = {0, 0, 0};
+
+void set_plot_light_theme(bool light)       { g_plot_light = light; }
+void set_plot_contrast_theme(bool contrast) { g_plot_contrast = contrast; }
+void set_plot_bg_override(bool has, float r, float g, float b) {
+    g_plot_bg_set = has;
+    g_plot_bg[0] = r; g_plot_bg[1] = g; g_plot_bg[2] = b;
+}
+bool plot_bg_is_custom() { return g_plot_bg_set || g_plot_contrast; }
+bool plot_light_theme() {
+    if (g_plot_bg_set)
+        return 0.299f * g_plot_bg[0] + 0.587f * g_plot_bg[1] + 0.114f * g_plot_bg[2] > 0.5f;
+    return g_plot_light;
+}
+// Контрастная палитра действует, пока фон тёмный: на светлом пользовательском
+// фоне белые подписи пропали бы.
+static bool plot_contrast_active() { return g_plot_contrast && !plot_light_theme(); }
 
 // Screenshot-to-clipboard sink. См. plot_axis.h.
 static std::function<void(ImVec2, ImVec2)> g_screenshot_sink;
@@ -103,24 +120,31 @@ int digit_step_input_callback(ImGuiInputTextCallbackData* data) {
 }
 
 ImU32 plot_col_text() {
-    return g_plot_light ? IM_COL32( 30,  30,  40, 255)
-                        : IM_COL32(220, 220, 230, 255);
+    if (plot_contrast_active()) return IM_COL32(255, 255, 255, 255);
+    return plot_light_theme() ? IM_COL32( 30,  30,  40, 255)
+                              : IM_COL32(220, 220, 230, 255);
 }
 ImU32 plot_col_axis() {
-    return g_plot_light ? IM_COL32( 60,  60,  80, 220)
-                        : IM_COL32(200, 200, 210, 200);
+    if (plot_contrast_active()) return IM_COL32(255, 255, 255, 255);
+    return plot_light_theme() ? IM_COL32( 60,  60,  80, 220)
+                              : IM_COL32(200, 200, 210, 200);
 }
 ImU32 plot_col_grid() {
-    return g_plot_light ? IM_COL32(170, 170, 180, 200)
-                        : IM_COL32( 80,  80,  90, 120);
+    if (plot_contrast_active()) return IM_COL32(110, 110, 110, 170);
+    return plot_light_theme() ? IM_COL32(170, 170, 180, 200)
+                              : IM_COL32( 80,  80,  90, 120);
 }
 ImU32 plot_col_border() {
-    return g_plot_light ? IM_COL32(100, 100, 110, 220)
-                        : IM_COL32(120, 120, 130, 200);
+    if (plot_contrast_active()) return IM_COL32(220, 220, 220, 255);
+    return plot_light_theme() ? IM_COL32(100, 100, 110, 220)
+                              : IM_COL32(120, 120, 130, 200);
 }
 void plot_bg_color(float& r, float& g, float& b, float& a) {
-    if (g_plot_light) { r = 0.985f; g = 0.985f; b = 0.985f; a = 1.0f; }
-    else              { r = 0.080f; g = 0.080f; b = 0.100f; a = 1.0f; }
+    a = 1.0f;
+    if (g_plot_bg_set)   { r = g_plot_bg[0]; g = g_plot_bg[1]; b = g_plot_bg[2]; return; }
+    if (g_plot_contrast) { r = 0.0f; g = 0.0f; b = 0.0f; return; }
+    if (g_plot_light) { r = 0.985f; g = 0.985f; b = 0.985f; }
+    else              { r = 0.080f; g = 0.080f; b = 0.100f; }
 }
 
 // ---------------------------------------------------------------------------

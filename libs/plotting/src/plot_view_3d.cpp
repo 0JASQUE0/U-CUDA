@@ -110,8 +110,11 @@ void Plot3DView::render(PlotRenderer& renderer,
     plot_bg_color(bgc[0], bgc[1], bgc[2], bgc[3]);
     // 3D-сцена чуть темнее dark / чуть тусклее light, чтобы axes-стрелки
     // оставались читабельными в обоих случаях.
-    if (plot_light_theme()) { bgc[0] = 0.965f; bgc[1] = 0.965f; bgc[2] = 0.965f; }
-    else                    { bgc[0] = 0.050f; bgc[1] = 0.050f; bgc[2] = 0.080f; }
+    // Пользовательский фон и чёрный фон High Contrast берём как есть.
+    if (!plot_bg_is_custom()) {
+        if (plot_light_theme()) { bgc[0] = 0.965f; bgc[1] = 0.965f; bgc[2] = 0.965f; }
+        else                    { bgc[0] = 0.050f; bgc[1] = 0.050f; bgc[2] = 0.080f; }
+    }
 
     // Кадр перерисовывается, только если что-то из того, что в него входит, поменялось: у
     // каждой проекции свой PlotRenderer, и неподвижная сцена (камера стоит, данные те же)

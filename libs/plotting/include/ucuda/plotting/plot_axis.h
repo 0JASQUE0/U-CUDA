@@ -191,7 +191,17 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
 // цвета были захардкожены под Dark, и на Light подписи/сетка/рамки осей
 // сливались с белым фоном плотов.
 void set_plot_light_theme(bool light);
+// true, если фон плотов светлый: по теме, а при пользовательском фоне — по его
+// яркости (от неё зависят цвета подписей, сетки и подложки легенды).
 bool plot_light_theme();
+// High Contrast: чёрный фон плотов, белые подписи и оси, заметная сетка.
+void set_plot_contrast_theme(bool contrast);
+// Пользовательский фон плотов (Settings -> Theme colors -> Plot background).
+// has = false возвращает фон темы.
+void set_plot_bg_override(bool has, float r, float g, float b);
+// true, если фон задан пользователем или темой High Contrast — тогда 3D-вид
+// берёт его как есть, без своей подкраски.
+bool plot_bg_is_custom();
 
 ImU32 plot_col_text();        // подписи осей, тики, ярлыки серий
 ImU32 plot_col_axis();        // линии x=0 / y=0 на плоте (акцент)

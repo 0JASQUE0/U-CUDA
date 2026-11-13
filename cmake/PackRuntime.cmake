@@ -35,3 +35,5 @@ file(COPY "${source_root}/tools/ocr/ocr_server.py" DESTINATION "${destination}")
 file(COPY "${source_root}/resources/library_template" DESTINATION "${destination}")
 file(COPY "${source_root}/resources/fonts/" DESTINATION "${destination}/fonts"
      FILES_MATCHING PATTERN "*.otf" PATTERN "*.ttf" PATTERN "OFL.txt")
+file(COPY "${source_root}/resources/themes/" DESTINATION "${destination}/themes"
+     FILES_MATCHING PATTERN "*.ppm")

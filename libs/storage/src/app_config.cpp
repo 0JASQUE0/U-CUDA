@@ -236,6 +236,13 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
     bool dark = true;
     if (parse_bool_field(body, "dark_theme", dark))
         out.dark_theme = dark;
+    bool contrast = false;
+    if (parse_bool_field(body, "contrast_theme", contrast))
+        out.contrast_theme = contrast;
+    int camo = 0;
+    if (parse_int_field(body, "camo_theme", camo))
+        out.camo_theme = camo;
+    parse_string_field(body, "theme_colors", out.theme_colors);
     int lam = 0;
     if (parse_int_field(body, "last_app_mode", lam))
         out.last_app_mode = lam;
@@ -309,6 +316,9 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         f << "  \"tick_precision\": "         << cfg.tick_precision << ",\n";
         f << "  \"series_palette\": "         << cfg.series_palette << ",\n";
         f << "  \"dark_theme\": "             << (cfg.dark_theme ? "true" : "false") << ",\n";
+        f << "  \"contrast_theme\": "         << (cfg.contrast_theme ? "true" : "false") << ",\n";
+        f << "  \"camo_theme\": "             << cfg.camo_theme << ",\n";
+        f << "  \"theme_colors\": \""         << json_escape(cfg.theme_colors) << "\",\n";
         f << "  \"last_app_mode\": "          << cfg.last_app_mode << ",\n";
         f << "  \"last_system_name\": \""     << json_escape(cfg.last_system_name) << "\",\n";
         // Пороги пишем с максимальной точностью double: 1e-14 и -1e25 должны
