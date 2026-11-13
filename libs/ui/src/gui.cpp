@@ -1055,6 +1055,9 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             cfg.tick_precision         = m.tick_precision;
             cfg.series_palette         = m.series_palette;
             cfg.dark_theme             = m.dark_theme;
+            cfg.contrast_theme         = m.contrast_theme;
+            cfg.camo_theme             = m.camo_theme;
+            cfg.theme_colors           = AppSettings::theme_colors_to_string(m.theme_colors);
             cfg.peak                   = m.peak;
             cfg.nvrtc_fmad             = m.nvrtc_fmad;
             cfg.nvrtc_rdc              = m.nvrtc_rdc;
@@ -1188,18 +1191,79 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
 
             ImGui::Separator();
             ImGui::Text("Theme");
-            // Радио по Dark/Light. apply_ui_scale в app_main.cpp ловит изменение
-            // через applied_dark_theme и пересобирает style + scale.
-            int theme_idx = model.dark_theme ? 0 : 1;
+            // Радио по Dark/Light/High Contrast. app_main.cpp ловит изменение
+            // через applied_dark_theme / applied_contrast и пересобирает style.
+            // Индексы: 0 Dark, 1 Light, 2 High Contrast, 2 + camo — камуфляжные.
+            int theme_idx = model.dark_theme ? (model.contrast_theme ? 2 : 0)
+                          : (model.camo_theme > AppSettings::kCamoNone ? 2 + model.camo_theme : 1);
             bool theme_changed = false;
             if (ImGui::RadioButton("Dark", &theme_idx, 0)) theme_changed = true;
             ImGui::SameLine();
             if (ImGui::RadioButton("Light", &theme_idx, 1)) theme_changed = true;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("High Contrast", &theme_idx, 2)) theme_changed = true;
+            if (ImGui::RadioButton("Multicam", &theme_idx, 2 + AppSettings::kCamoMulticam)) theme_changed = true;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("DPM", &theme_idx, 2 + AppSettings::kCamoDpm)) theme_changed = true;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("DDPM", &theme_idx, 2 + AppSettings::kCamoDdpm)) theme_changed = true;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Flora", &theme_idx, 2 + AppSettings::kCamoFlora)) theme_changed = true;
             if (theme_changed) {
-                model.dark_theme = (theme_idx == 0);
+                model.dark_theme     = (theme_idx == 0 || theme_idx == 2);
+                model.contrast_theme = (theme_idx == 2);
+                model.camo_theme     = theme_idx > 2 ? theme_idx - 2 : AppSettings::kCamoNone;
                 persist_settings(model);
             }
             ImGui::TextDisabled("Color palette for ImGui controls. Plots use their own colormap.");
+
+            // Основные цвета темы. Галочка включает свой цвет поверх темы;
+            // без неё пипетка показывает текущий цвет темы, и первая же правка
+            // включает галочку. Стиль применяется вживую (app_main сравнивает
+            // theme_colors), а в файл пишем, когда пипетку отпустили.
+            if (ImGui::TreeNode("Theme colors")) {
+                static const char* kSlotLabels[AppSettings::kThemeColorCount] = {
+                    "Window background", "Text", "Field background", "Accent", "Plot background" };
+                static const ImGuiCol kSlotStyle[AppSettings::kThemeColorCount] = {
+                    ImGuiCol_WindowBg, ImGuiCol_Text, ImGuiCol_FrameBg, ImGuiCol_CheckMark, ImGuiCol_COUNT };
+                auto& tc = model.theme_colors;
+                for (int s = 0; s < AppSettings::kThemeColorCount; ++s) {
+                    ImGui::PushID(s);
+                    float shown[3];
+                    if (tc.set[s]) {
+                        shown[0] = tc.rgb[s][0]; shown[1] = tc.rgb[s][1]; shown[2] = tc.rgb[s][2];
+                    } else if (kSlotStyle[s] == ImGuiCol_COUNT) {
+                        float a = 1.0f;
+                        plot_bg_color(shown[0], shown[1], shown[2], a);
+                    } else {
+                        const ImVec4 v = ImGui::GetStyle().Colors[kSlotStyle[s]];
+                        shown[0] = v.x; shown[1] = v.y; shown[2] = v.z;
+                    }
+                    bool on = tc.set[s];
+                    if (ImGui::Checkbox("##on", &on)) {
+                        tc.set[s] = on;
+                        if (on) { tc.rgb[s][0] = shown[0]; tc.rgb[s][1] = shown[1]; tc.rgb[s][2] = shown[2]; }
+                        model.theme_colors_dirty = true;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::ColorEdit3(kSlotLabels[s], shown, ImGuiColorEditFlags_NoInputs)) {
+                        tc.set[s] = true;
+                        tc.rgb[s][0] = shown[0]; tc.rgb[s][1] = shown[1]; tc.rgb[s][2] = shown[2];
+                        model.theme_colors_dirty = true;
+                    }
+                    ImGui::PopID();
+                }
+                if (ImGui::Button("Reset to theme")) {
+                    tc = AppSettings::ThemeColors{};
+                    model.theme_colors_dirty = true;
+                }
+                ImGui::TextDisabled("Ticked colours override the theme; untick to return to the theme colour.");
+                ImGui::TreePop();
+            }
+            if (model.theme_colors_dirty && !ImGui::IsAnyItemActive()) {
+                model.theme_colors_dirty = false;
+                persist_settings(model);
+            }
 
             // Видимость вкладок и схем. Обе маски — чисто интерфейсные: на
             // расчёты, сохранённые сессии и system.json они не влияют, только

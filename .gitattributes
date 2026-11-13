@@ -2,3 +2,6 @@
 tests/baselines/*-data/*.json text eol=lf
 tests/baselines/*-history/*.json text eol=lf
 tests/baselines/*.json text eol=lf
+
+# Theme textures are raw binary PPM: no line-ending conversion.
+*.ppm binary

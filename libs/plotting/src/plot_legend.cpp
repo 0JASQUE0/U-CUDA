@@ -49,7 +49,13 @@ void draw_legend(ImDrawList* dl,
         // Bg+border легенды зависит от темы: на dark — почти-чёрный полупрозрачный
         // блок, на light — почти-белый. Без этого в light-теме легенда оставалась
         // чёрным пятном поверх белого плота.
-        ImU32 bg_col     = plot_light_theme() ? IM_COL32(248, 248, 248, 200)
+        float pr = 0, pg = 0, pb = 0, pa = 1;
+        plot_bg_color(pr, pg, pb, pa);
+        // Подложка — цвет фона плота, полупрозрачно: так она совпадает и с
+        // чёрным фоном High Contrast, и с пользовательским фоном.
+        ImU32 bg_col     = plot_bg_is_custom()
+                         ? IM_COL32((int)(pr * 255), (int)(pg * 255), (int)(pb * 255), 210)
+                         : plot_light_theme() ? IM_COL32(248, 248, 248, 200)
                                               : IM_COL32( 20,  20,  25, 180);
         ImU32 border_col = plot_col_border();
         dl->AddRectFilled(leg_min, leg_max, bg_col, 4.0f);

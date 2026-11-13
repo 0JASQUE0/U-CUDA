@@ -8,6 +8,7 @@
 #include "ucuda/plotting/gpu_line_series_3d.h"
 #include "ucuda/plotting/plot_camera_3d.h"
 #include "imgui.h"
+#include "imgui_internal.h"   // GImGui->Windows: подкладка узора темы Military
 #include "implot.h"
 #include "implot3d.h"
 #include "imgui_impl_glfw.h"
@@ -45,6 +46,194 @@
 std::string exe_dir() { return platform::executable_dir(); }
 
 static const char* OCR_SCRIPT_NAME = "ocr_server.py";
+
+// Бинарный PPM (P6, maxval 255) → GL-текстура (повтор делается раскладкой
+// плитками в inject_window_backdrops, не режимом GL_REPEAT). Формат выбран ради
+// загрузчика в десяток строк: декодера PNG/JPEG в проекте нет. 0 — файла нет
+// или он битый; тема тогда остаётся без узора.
+static GLuint load_ppm_texture(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return 0;
+    int w = 0, h = 0, maxval = 0;
+    const bool ok = std::fscanf(f, "P6 %d %d %d", &w, &h, &maxval) == 3 &&
+                    w > 0 && h > 0 && w <= 4096 && h <= 4096 && maxval == 255 &&
+                    std::fgetc(f) != EOF;   // один пробельный символ после заголовка
+    std::vector<unsigned char> px(ok ? (size_t)w * h * 3 : 0);
+    const bool read = ok && std::fread(px.data(), 1, px.size(), f) == px.size();
+    std::fclose(f);
+    if (!read) return 0;
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+// Палитры камуфляжных тем, индекс — AppSettings::CamoTheme. Задаются
+// несколько опорных цветов, остальные цвета ImGui выводятся из них в
+// apply_camo_palette. Фон окон — узор из texture под полупрозрачной вуалью
+// veil; без файла текстуры вуаль становится сплошной.
+struct CamoPalette {
+    const char* texture;   // файл в <exe>/themes/
+    bool  light;           // светлая основа (тёмный текст) или тёмная
+    float veil[4];         // WindowBg поверх узора
+    float popup[3];        // всплывающие окна, меню, подсказки
+    float text[3];
+    float frame[3];        // поля ввода
+    float accent[3];       // кнопки, выделение, вкладки
+    float accent_dark[3];  // нажатое, активный заголовок окна
+    float title[3];        // заголовки окон
+    float plot[3];         // фон графиков
+};
+static const CamoPalette kCamoPalettes[AppSettings::kCamoCount] = {
+    {},
+    // Multicam: песок и хаки, оливковый акцент, тёмно-коричневый текст.
+    { "multicam.ppm", true,
+      {0.88f, 0.84f, 0.74f, 0.42f}, {0.87f, 0.83f, 0.73f}, {0.12f, 0.10f, 0.06f},
+      {0.93f, 0.90f, 0.82f}, {0.42f, 0.48f, 0.28f}, {0.33f, 0.39f, 0.20f},
+      {0.55f, 0.52f, 0.40f}, {0.93f, 0.91f, 0.85f} },
+    // DPM (лесной): тёмная основа, светлый хаки текст, оливковый акцент.
+    { "dpm.ppm", false,
+      {0.09f, 0.10f, 0.06f, 0.55f}, {0.13f, 0.15f, 0.10f}, {0.91f, 0.89f, 0.78f},
+      {0.20f, 0.22f, 0.14f}, {0.47f, 0.55f, 0.27f}, {0.36f, 0.27f, 0.16f},
+      {0.24f, 0.27f, 0.16f}, {0.08f, 0.09f, 0.06f} },
+    // DDPM (пустынный): светлый песок, коричневый акцент, тёмно-коричневый текст.
+    { "ddpm.ppm", true,
+      {0.92f, 0.86f, 0.72f, 0.42f}, {0.90f, 0.84f, 0.71f}, {0.17f, 0.10f, 0.05f},
+      {0.95f, 0.91f, 0.81f}, {0.60f, 0.41f, 0.24f}, {0.46f, 0.30f, 0.16f},
+      {0.67f, 0.55f, 0.39f}, {0.95f, 0.92f, 0.85f} },
+    // Flora (ВСР-98): светло-оливковая основа, зелёный акцент, коричневое нажатое,
+    // тёмно-зелёный текст.
+    { "flora.ppm", true,
+      {0.82f, 0.86f, 0.72f, 0.45f}, {0.81f, 0.85f, 0.72f}, {0.09f, 0.13f, 0.07f},
+      {0.91f, 0.93f, 0.84f}, {0.32f, 0.44f, 0.27f}, {0.43f, 0.28f, 0.20f},
+      {0.47f, 0.54f, 0.37f}, {0.92f, 0.94f, 0.88f} },
+};
+
+static void apply_camo_palette(ImVec4* c, const CamoPalette& p, bool has_texture) {
+    auto v = [](const float* x, float a) { return ImVec4(x[0], x[1], x[2], a); };
+    auto lerp = [](ImVec4 a, ImVec4 b, float t) {
+        return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t);
+    };
+    const ImVec4 popup = v(p.popup, 1.0f), text = v(p.text, 1.0f), frame = v(p.frame, 1.0f);
+    const ImVec4 acc = v(p.accent, 1.0f), accd = v(p.accent_dark, 1.0f), title = v(p.title, 1.0f);
+    auto alpha = [](ImVec4 x, float a) { x.w = a; return x; };
+
+    c[ImGuiCol_WindowBg]         = ImVec4(p.veil[0], p.veil[1], p.veil[2], has_texture ? p.veil[3] : 1.0f);
+    c[ImGuiCol_DockingEmptyBg]   = alpha(c[ImGuiCol_WindowBg], has_texture ? p.veil[3] * 0.7f : 1.0f);
+    c[ImGuiCol_ChildBg]          = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_PopupBg]          = alpha(popup, 0.98f);
+    c[ImGuiCol_MenuBarBg]        = alpha(lerp(title, popup, 0.35f), 0.85f);
+    c[ImGuiCol_TitleBg]          = title;
+    c[ImGuiCol_TitleBgActive]    = accd;
+    c[ImGuiCol_TitleBgCollapsed] = alpha(title, 0.80f);
+    c[ImGuiCol_Text]             = text;
+    c[ImGuiCol_TextDisabled]     = lerp(text, popup, 0.45f);
+    c[ImGuiCol_Border]           = alpha(lerp(text, popup, 0.55f), 0.60f);
+    c[ImGuiCol_Separator]        = alpha(lerp(text, popup, 0.50f), 0.60f);
+    c[ImGuiCol_SeparatorHovered] = alpha(acc, 0.80f);
+    c[ImGuiCol_SeparatorActive]  = accd;
+    c[ImGuiCol_FrameBg]          = alpha(frame, 0.85f);
+    c[ImGuiCol_FrameBgHovered]   = alpha(lerp(frame, acc, 0.25f), 0.95f);
+    c[ImGuiCol_FrameBgActive]    = lerp(frame, acc, 0.40f);
+    c[ImGuiCol_Button]           = alpha(acc, 0.55f);
+    c[ImGuiCol_ButtonHovered]    = alpha(acc, 0.85f);
+    c[ImGuiCol_ButtonActive]     = accd;
+    c[ImGuiCol_Header]           = alpha(acc, 0.40f);
+    c[ImGuiCol_HeaderHovered]    = alpha(acc, 0.70f);
+    c[ImGuiCol_HeaderActive]     = alpha(accd, 0.90f);
+    // Галочка контрастна к полю: на светлом поле темнее акцента, на тёмном светлее.
+    c[ImGuiCol_CheckMark]        = p.light ? lerp(accd, ImVec4(0, 0, 0, 1), 0.35f)
+                                           : lerp(acc, ImVec4(1, 1, 1, 1), 0.35f);
+    c[ImGuiCol_SliderGrab]       = alpha(acc, 0.90f);
+    c[ImGuiCol_SliderGrabActive] = p.light ? accd : lerp(acc, ImVec4(1, 1, 1, 1), 0.25f);
+    c[ImGuiCol_Tab]              = alpha(lerp(title, popup, 0.40f), 0.90f);
+    c[ImGuiCol_TabHovered]       = acc;
+    c[ImGuiCol_TabSelected]      = lerp(acc, popup, 0.30f);
+    c[ImGuiCol_TabSelectedOverline] = accd;
+    c[ImGuiCol_TabDimmed]        = alpha(lerp(title, popup, 0.60f), 0.90f);
+    c[ImGuiCol_TabDimmedSelected] = lerp(acc, popup, 0.50f);
+    c[ImGuiCol_ScrollbarBg]      = alpha(popup, 0.50f);
+    c[ImGuiCol_ScrollbarGrab]    = alpha(lerp(title, text, 0.15f), 0.80f);
+    c[ImGuiCol_ScrollbarGrabHovered] = alpha(lerp(title, text, 0.30f), 0.90f);
+    c[ImGuiCol_ScrollbarGrabActive]  = lerp(title, text, 0.45f);
+    c[ImGuiCol_ResizeGrip]       = alpha(acc, 0.25f);
+    c[ImGuiCol_ResizeGripHovered] = alpha(acc, 0.67f);
+    c[ImGuiCol_ResizeGripActive] = alpha(accd, 0.95f);
+    c[ImGuiCol_TableHeaderBg]    = lerp(title, popup, 0.40f);
+    c[ImGuiCol_TableBorderStrong] = lerp(text, popup, 0.55f);
+    c[ImGuiCol_TableBorderLight] = lerp(text, popup, 0.75f);
+    c[ImGuiCol_TextSelectedBg]   = alpha(acc, 0.35f);
+    c[ImGuiCol_DockingPreview]   = alpha(acc, 0.60f);
+    c[ImGuiCol_NavCursor]        = accd;
+    c[ImGuiCol_TextLink]         = p.light ? lerp(accd, ImVec4(0, 0, 0, 1), 0.2f) : lerp(acc, ImVec4(1, 1, 1, 1), 0.3f);
+    c[ImGuiCol_DragDropTarget]   = accd;
+}
+
+// Подкладка узора под окна (камуфляжные темы). ImGui рисует фон окна внутри Begin,
+// и вставить картинку между фоном и содержимым без правки всех 36 вызовов Begin
+// нельзя. Поэтому после Render перед списком отрисовки каждого корневого окна
+// вставляется отдельный список с узором на всю его площадь, а WindowBg темы
+// полупрозрачный и ложится сверху вуалью. Узор непрозрачен, так что окно,
+// лежащее поверх другого, его не просвечивает; UV берутся от экранных
+// координат, поэтому рисунок непрерывен через границы окон. Дочерние окна
+// (ChildBg прозрачный), всплывающие окна и подсказки (PopupBg сплошной)
+// пропускаются.
+static void inject_window_backdrops(ImDrawData* dd, GLuint tex, float tile_px,
+                                    std::vector<std::unique_ptr<ImDrawList>>& pool) {
+    if (!dd || dd->CmdListsCount == 0 || tile_px <= 0.0f) return;
+    ImGuiContext& g = *GImGui;
+    ImVector<ImDrawList*> out;
+    out.reserve(dd->CmdListsCount * 2);
+    size_t used = 0;
+    const ImTextureRef ref((ImTextureID)(intptr_t)tex);
+    for (ImDrawList* list : dd->CmdLists) {
+        const ImGuiWindow* win = nullptr;
+        for (ImGuiWindow* w : g.Windows)
+            if (w->DrawList == list) { win = w; break; }
+        const ImGuiWindowFlags skip = ImGuiWindowFlags_ChildWindow | ImGuiWindowFlags_Popup |
+                                      ImGuiWindowFlags_Tooltip | ImGuiWindowFlags_NoBackground;
+        if (win && win->Active && !win->Hidden && !(win->Flags & skip) &&
+            win->Size.x > 0.0f && win->Size.y > 0.0f) {
+            if (used == pool.size())
+                pool.push_back(std::make_unique<ImDrawList>(ImGui::GetDrawListSharedData()));
+            ImDrawList* bd = pool[used++].get();
+            bd->_ResetForNewFrame();
+            bd->PushClipRect(dd->DisplayPos,
+                             ImVec2(dd->DisplayPos.x + dd->DisplaySize.x, dd->DisplayPos.y + dd->DisplaySize.y));
+            // Раскладка плитками по экранной сетке с шагом tile_px, UV каждой
+            // плитки внутри [0,1]. На GL_REPEAT полагаться нельзя: бэкенд ImGui
+            // ставит текстурам CLAMP_TO_EDGE, и за первой плиткой узор
+            // растягивался полосами.
+            const ImVec2 a = win->Pos;
+            const ImVec2 b(win->Pos.x + win->Size.x, win->Pos.y + win->Size.y);
+            for (float ty = std::floor(a.y / tile_px) * tile_px; ty < b.y; ty += tile_px) {
+                for (float tx = std::floor(a.x / tile_px) * tile_px; tx < b.x; tx += tile_px) {
+                    const ImVec2 p0(std::max(a.x, tx), std::max(a.y, ty));
+                    const ImVec2 p1(std::min(b.x, tx + tile_px), std::min(b.y, ty + tile_px));
+                    if (p1.x <= p0.x || p1.y <= p0.y) continue;
+                    bd->AddImage(ref, p0, p1,
+                                 ImVec2((p0.x - tx) / tile_px, (p0.y - ty) / tile_px),
+                                 ImVec2((p1.x - tx) / tile_px, (p1.y - ty) / tile_px));
+                }
+            }
+            bd->PopClipRect();
+            out.push_back(bd);
+            dd->TotalVtxCount += bd->VtxBuffer.Size;
+            dd->TotalIdxCount += bd->IdxBuffer.Size;
+        }
+        out.push_back(list);
+    }
+    dd->CmdLists.swap(out);
+    dd->CmdListsCount = dd->CmdLists.Size;
+}
 
 static bool dir_exists(const std::string& p) {
     return std::filesystem::is_directory(p);
@@ -452,6 +641,9 @@ int main() {
             model.tick_precision = app_cfg.tick_precision;
         model.series_palette = app_cfg.series_palette;
         model.dark_theme = app_cfg.dark_theme;
+        model.contrast_theme = app_cfg.contrast_theme && app_cfg.dark_theme;
+        model.camo_theme = app_cfg.dark_theme ? 0 : app_cfg.camo_theme;
+        model.theme_colors = AppSettings::theme_colors_from_string(app_cfg.theme_colors);
 
         // Маски видимости из Settings: какие вкладки показывать в верхнем ряду
         // и какие встроенные схемы предлагать в "Schemes to generate".
@@ -504,7 +696,146 @@ int main() {
     bool  applied_font_builtin = !model.use_builtin_font;  // !=, форсирует первый apply
     bool  applied_dark_theme   = !model.dark_theme;        // != — то же самое для темы
     bool  applied_math_font    = !model.plot_math_font;    // != — и для LaTeX-подписей
+    bool  applied_contrast     = !model.contrast_theme;
+    int   applied_camo         = -1;
+    // Узоры камуфляжных тем: текстура грузится при первом включении темы, списки
+    // подкладки переиспользуются от кадра к кадру (inject_window_backdrops).
+    GLuint camo_tex[AppSettings::kCamoCount]   = {};
+    bool   camo_tried[AppSettings::kCamoCount] = {};
+    std::vector<std::unique_ptr<ImDrawList>> camo_lists;
+    AppSettings::ThemeColors applied_theme_colors = model.theme_colors;
     const MathFontPaths math_fonts = resolve_math_font_paths(dir);
+
+    // Стиль каждый раз пересоздаём от дефолтов + выбранной темы. Раньше
+    // кэшировали `base_style` после StyleColorsDark — но это блокировало
+    // переключение Dark/Light в Settings, потому что новая палитра не
+    // попадала в base_style. Перестроение дешёвое (memcpy + цвет-таблица),
+    // поэтому его можно звать на каждом кадре перетаскивания пипетки цвета —
+    // в отличие от apply_ui_scale, который ещё и пересобирает шрифты.
+    auto apply_theme = [&](float scale) {
+        ImGuiStyle& st = ImGui::GetStyle();
+        st = ImGuiStyle{};
+        const int camo = (!model.dark_theme && model.camo_theme > AppSettings::kCamoNone &&
+                          model.camo_theme < AppSettings::kCamoCount) ? model.camo_theme : 0;
+        const CamoPalette* pal = camo ? &kCamoPalettes[camo] : nullptr;
+        if (pal ? !pal->light : model.dark_theme) ImGui::StyleColorsDark();
+        else                                      ImGui::StyleColorsLight();
+        ImVec4* c = st.Colors;
+        const bool contrast = model.dark_theme && model.contrast_theme;
+        if (pal) {
+            if (!camo_tried[camo]) {
+                camo_tried[camo] = true;
+                camo_tex[camo] = load_ppm_texture(dir + "themes/" + pal->texture);
+            }
+            apply_camo_palette(c, *pal, camo_tex[camo] != 0);
+        }
+        if (contrast) {
+            // High Contrast: фон окон чисто чёрный, текст белый, рамки у всех
+            // полей и окон светлые, акцентные заливки непрозрачные.
+            const ImVec4 black(0, 0, 0, 1);
+            c[ImGuiCol_WindowBg] = c[ImGuiCol_PopupBg] = c[ImGuiCol_MenuBarBg] = black;
+            c[ImGuiCol_TitleBg] = c[ImGuiCol_TitleBgCollapsed] = c[ImGuiCol_ScrollbarBg] = black;
+            c[ImGuiCol_DockingEmptyBg] = black;
+            c[ImGuiCol_TitleBgActive]  = ImVec4(0.12f, 0.12f, 0.12f, 1);
+            c[ImGuiCol_Text]           = ImVec4(1, 1, 1, 1);
+            c[ImGuiCol_TextDisabled]   = ImVec4(0.72f, 0.72f, 0.72f, 1);
+            c[ImGuiCol_Border]         = ImVec4(0.70f, 0.70f, 0.70f, 1);
+            c[ImGuiCol_Separator]      = ImVec4(0.55f, 0.55f, 0.55f, 1);
+            c[ImGuiCol_FrameBg]        = ImVec4(0.08f, 0.08f, 0.08f, 1);
+            c[ImGuiCol_FrameBgHovered] = ImVec4(0.20f, 0.20f, 0.20f, 1);
+            c[ImGuiCol_FrameBgActive]  = ImVec4(0.28f, 0.28f, 0.28f, 1);
+            c[ImGuiCol_Button]         = ImVec4(0.10f, 0.30f, 0.62f, 1);
+            c[ImGuiCol_Header]         = ImVec4(0.10f, 0.30f, 0.62f, 1);
+            c[ImGuiCol_Tab]            = ImVec4(0.10f, 0.10f, 0.10f, 1);
+            c[ImGuiCol_TabDimmed]      = ImVec4(0.06f, 0.06f, 0.06f, 1);
+            c[ImGuiCol_TableBorderStrong] = ImVec4(0.65f, 0.65f, 0.65f, 1);
+            c[ImGuiCol_TableBorderLight]  = ImVec4(0.40f, 0.40f, 0.40f, 1);
+            c[ImGuiCol_ScrollbarGrab]  = ImVec4(0.45f, 0.45f, 0.45f, 1);
+            st.FrameBorderSize = 1.0f;
+            st.PopupBorderSize = 1.0f;
+        }
+
+        // Пользовательские основные цвета поверх темы. Производные оттенки
+        // (наведение, нажатие, выделение) получаем смешиванием, как это
+        // делает сама ImGui в StyleColorsDark/Light для своего синего.
+        const auto& tc = model.theme_colors;
+        auto rgb  = [&](int s, float a) { return ImVec4(tc.rgb[s][0], tc.rgb[s][1], tc.rgb[s][2], a); };
+        auto lerp = [](ImVec4 a, ImVec4 b, float t) {
+            return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t);
+        };
+        if (tc.set[AppSettings::kThemeBg]) {
+            const ImVec4 bg = rgb(AppSettings::kThemeBg, 1.0f);
+            c[ImGuiCol_WindowBg] = c[ImGuiCol_MenuBarBg] = c[ImGuiCol_TitleBg] = bg;
+            c[ImGuiCol_TitleBgCollapsed] = c[ImGuiCol_ScrollbarBg] = c[ImGuiCol_DockingEmptyBg] = bg;
+            c[ImGuiCol_PopupBg] = rgb(AppSettings::kThemeBg, 0.97f);
+        }
+        if (tc.set[AppSettings::kThemeText]) {
+            c[ImGuiCol_Text]         = rgb(AppSettings::kThemeText, 1.0f);
+            c[ImGuiCol_TextDisabled] = lerp(c[ImGuiCol_Text], c[ImGuiCol_WindowBg], 0.45f);
+            c[ImGuiCol_TextDisabled].w = 1.0f;
+        }
+        if (tc.set[AppSettings::kThemeFrame]) {
+            const ImVec4 f = rgb(AppSettings::kThemeFrame, 1.0f);
+            c[ImGuiCol_FrameBg]        = f;
+            c[ImGuiCol_FrameBgHovered] = lerp(f, c[ImGuiCol_Text], 0.12f);
+            c[ImGuiCol_FrameBgActive]  = lerp(f, c[ImGuiCol_Text], 0.22f);
+            c[ImGuiCol_FrameBgHovered].w = c[ImGuiCol_FrameBgActive].w = 1.0f;
+        }
+        if (tc.set[AppSettings::kThemeAccent]) {
+            const int a = AppSettings::kThemeAccent;
+            const ImVec4 bg = c[ImGuiCol_WindowBg];
+            c[ImGuiCol_Button]            = rgb(a, contrast ? 0.70f : 0.40f);
+            c[ImGuiCol_ButtonHovered]     = rgb(a, 1.00f);
+            c[ImGuiCol_ButtonActive]      = lerp(rgb(a, 1.0f), ImVec4(0, 0, 0, 1), 0.15f);
+            c[ImGuiCol_Header]            = rgb(a, contrast ? 0.60f : 0.31f);
+            c[ImGuiCol_HeaderHovered]     = rgb(a, 0.80f);
+            c[ImGuiCol_HeaderActive]      = rgb(a, 1.00f);
+            c[ImGuiCol_CheckMark]         = rgb(a, 1.00f);
+            c[ImGuiCol_SliderGrab]        = lerp(rgb(a, 1.0f), bg, 0.15f);
+            c[ImGuiCol_SliderGrabActive]  = rgb(a, 1.00f);
+            c[ImGuiCol_TitleBgActive]     = lerp(rgb(a, 1.0f), bg, 0.60f);
+            c[ImGuiCol_TabHovered]        = rgb(a, 0.80f);
+            c[ImGuiCol_TabSelected]       = lerp(rgb(a, 1.0f), bg, 0.40f);
+            c[ImGuiCol_TabSelectedOverline] = rgb(a, 1.00f);
+            c[ImGuiCol_TabDimmedSelected] = lerp(rgb(a, 1.0f), bg, 0.65f);
+            c[ImGuiCol_SeparatorHovered]  = rgb(a, 0.78f);
+            c[ImGuiCol_SeparatorActive]   = rgb(a, 1.00f);
+            c[ImGuiCol_ResizeGrip]        = rgb(a, 0.20f);
+            c[ImGuiCol_ResizeGripHovered] = rgb(a, 0.67f);
+            c[ImGuiCol_ResizeGripActive]  = rgb(a, 0.95f);
+            c[ImGuiCol_TextSelectedBg]    = rgb(a, 0.35f);
+            c[ImGuiCol_DockingPreview]    = rgb(a, 0.70f);
+            c[ImGuiCol_TextLink]          = rgb(a, 1.00f);
+            c[ImGuiCol_NavCursor]         = rgb(a, 1.00f);
+            c[ImGuiCol_DragDropTarget]    = rgb(a, 1.00f);
+        }
+        // Фон отмеченного чекбокса — цвет поля, подкрашенный акцентом темы
+        // (Button несёт акцент во всех темах, включая пользовательский), а не
+        // просто FrameBg: иначе на светлых темах галочка стоит на белом квадрате.
+        // В тёмной камуфляжной теме подкраска сильнее; в светлых — слабее,
+        // иначе квадрат сливается с вуалью над узором.
+        {
+            ImVec4 f = c[ImGuiCol_FrameBg], a = c[ImGuiCol_Button];
+            const float t = (pal && !pal->light) ? 0.45f : 0.25f;
+            c[ImGuiCol_CheckboxSelectedBg] = ImVec4(f.x + (a.x - f.x) * t, f.y + (a.y - f.y) * t,
+                                                    f.z + (a.z - f.z) * t, 1.0f);
+        }
+        st.ScaleAllSizes(scale);
+
+        // Плот-палитра (текст/сетка/рамки/фон FBO) живёт отдельно от ImGui
+        // style — её читают plot_view_2d/3d, heatmap_view, plot_legend и
+        // colorbar в gui.cpp. Тригерится одновременно со сменой темы.
+        set_plot_light_theme(!model.dark_theme);
+        set_plot_contrast_theme(contrast);
+        const int p = AppSettings::kThemePlotBg;
+        if (tc.set[p])
+            set_plot_bg_override(true, tc.rgb[p][0], tc.rgb[p][1], tc.rgb[p][2]);
+        else if (pal)
+            set_plot_bg_override(true, pal->plot[0], pal->plot[1], pal->plot[2]);
+        else
+            set_plot_bg_override(false, 0, 0, 0);
+    };
+
     auto apply_ui_scale = [&](float scale) {
         ImGuiIO& io = ImGui::GetIO();
         io.Fonts->Clear();
@@ -572,18 +903,7 @@ int main() {
         // В ImGui 1.92+ backend сам обновит fonts texture при следующем NewFrame
         // через ImTextureData::Status — ручных Destroy/Create не нужно.
 
-        // Стиль каждый раз пересоздаём от дефолтов + выбранной темы. Раньше
-        // кэшировали `base_style` после StyleColorsDark — но это блокировало
-        // переключение Dark/Light в Settings, потому что новая палитра не
-        // попадала в base_style. Перестроение дешёвое (memcpy + цвет-таблица).
-        ImGui::GetStyle() = ImGuiStyle{};
-        if (model.dark_theme) ImGui::StyleColorsDark();
-        else                  ImGui::StyleColorsLight();
-        ImGui::GetStyle().ScaleAllSizes(scale);
-        // Плот-палитра (текст/сетка/рамки/фон FBO) живёт отдельно от ImGui
-        // style — её читают plot_view_2d/3d, heatmap_view, plot_legend и
-        // colorbar в gui.cpp. Тригерится одновременно со сменой темы.
-        set_plot_light_theme(!model.dark_theme);
+        apply_theme(scale);
     };
 
     while (!glfwWindowShouldClose(window)) {
@@ -626,6 +946,17 @@ int main() {
             applied_font_builtin = model.use_builtin_font;
             applied_dark_theme   = model.dark_theme;
             applied_math_font    = model.plot_math_font;
+            applied_contrast     = model.contrast_theme;
+            applied_theme_colors = model.theme_colors;
+            applied_camo         = model.camo_theme;
+        } else if (model.contrast_theme != applied_contrast ||
+                   model.camo_theme     != applied_camo     ||
+                   model.theme_colors   != applied_theme_colors) {
+            // Только цвета: шрифты не трогаем, хватает пересборки стиля.
+            apply_theme(applied_ui_scale);
+            applied_contrast     = model.contrast_theme;
+            applied_camo         = model.camo_theme;
+            applied_theme_colors = model.theme_colors;
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -656,6 +987,10 @@ int main() {
         draw_gui(model, library, cb);
 
         ImGui::Render();
+        if (!model.dark_theme && model.camo_theme > AppSettings::kCamoNone &&
+            model.camo_theme < AppSettings::kCamoCount && camo_tex[model.camo_theme] != 0)
+            inject_window_backdrops(ImGui::GetDrawData(), camo_tex[model.camo_theme],
+                                    512.0f * applied_ui_scale, camo_lists);
         int w, h; glfwGetFramebufferSize(window, &w, &h);
         glViewport(0, 0, w, h);
         glClearColor(0.1f, 0.1f, 0.12f, 1.0f);
@@ -687,6 +1022,12 @@ int main() {
     }
 
     release_gui_resources();
+    // Списки подкладки узора и текстуры камуфляжа — до DestroyContext:
+    // деструктор ImDrawList обращается к общим данным контекста (_Data), и
+    // после его уничтожения выход из программы падал на чтении памяти.
+    camo_lists.clear();
+    for (GLuint& t : camo_tex)
+        if (t) { glDeleteTextures(1, &t); t = 0; }
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImPlot3D::DestroyContext();
