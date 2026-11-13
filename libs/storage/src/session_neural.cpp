@@ -381,6 +381,9 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c, bo
         o << ",\"features\":"; jstr(o, c.task.features_text);
         if (c.task.use_saved) o << ",\"use_saved\":true";
         if (c.task.use_saved_classifier) o << ",\"use_saved_classifier\":true";
+        if (!c.task.dataset_path.empty()) { o << ",\"dataset_path\":"; jstr(o, c.task.dataset_path); }
+        if (c.task.dataset_frames != 1) o << ",\"dataset_frames\":" << c.task.dataset_frames;
+        if (settings_only && c.task.dataset) o << ",\"dataset_revision\":" << c.task.dataset_revision;
         if (c.task.kind == NeuralTaskKind::Memory) o << ",\"kind\":\"memory\"";
         if (c.task.kind == NeuralTaskKind::Xor) o << ",\"kind\":\"xor\"";
         if (c.task.kind == NeuralTaskKind::Memory || c.task.kind == NeuralTaskKind::Xor) { o << ",\"max_delay\":"; jstr(o, c.task.max_delay_text); }
@@ -627,6 +630,8 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
                 else if (k == "features") c.task.features_text = p.str();
                 else if (k == "use_saved") c.task.use_saved = p.boolean();
                 else if (k == "use_saved_classifier") c.task.use_saved_classifier = p.boolean();
+                else if (k == "dataset_path") c.task.dataset_path = p.str();
+                else if (k == "dataset_frames") c.task.dataset_frames = std::stoi(p.str_or_num());
                 else if (k == "kind") {
                     const std::string v = p.str();
                     c.task.kind = v == "classification" ? NeuralTaskKind::Classification : v == "memory" ? NeuralTaskKind::Memory

@@ -5,6 +5,7 @@
 #include "gui_plot.h"
 #include "tab_library.h"
 #include "tab_neural.h"
+#include "ucuda/storage/neural_dataset_io.h"
 #include <stdexcept>
 #include <tuple>
 #include <utility>
@@ -341,73 +342,82 @@ static void draw_neural_input(SystemLibrary& lib, NeuralSession& s, NeuralConfig
     }
     InputNumStr("sample time", c.input_hold_text, kFieldW);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Each sample is held this long, a multiple of h. 0 = a new sample every step.");
+    const bool external = c.task.enabled && c.task.kind == NeuralTaskKind::Classification && c.task.dataset;
     int remove = -1;
-    for (size_t i = 0; i < c.sources.size(); ++i) {
-        NeuralSource& q = c.sources[i];
-        ImGui::PushID((int)i + 3000);
-        const std::string title = q.name + ": " + neural_source_name(q.kind) + "###src";
-        if (ImGui::TreeNodeEx(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-            InputTextStr("name", q.name, kFieldW);
-            ImGui::SetNextItemWidth(kFieldW + 100.0f);
-            if (ImGui::BeginCombo("source", neural_source_name(q.kind))) {
-                for (NeuralSourceKind v : kNeuralSources)
-                    if (ImGui::Selectable(neural_source_name(v), v == q.kind)) q.kind = v;
-                ImGui::EndCombo();
-            }
-            if (q.kind == NeuralSourceKind::System) {
+    if (!external) {
+        for (size_t i = 0; i < c.sources.size(); ++i) {
+            NeuralSource& q = c.sources[i];
+            ImGui::PushID((int)i + 3000);
+            const std::string title = q.name + ": " + neural_source_name(q.kind) + "###src";
+            if (ImGui::TreeNodeEx(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                InputTextStr("name", q.name, kFieldW);
                 ImGui::SetNextItemWidth(kFieldW + 100.0f);
-                if (ImGui::BeginCombo("system", q.system_name.empty() ? "(pick a system)" : q.system_name.c_str())) {
-                    for (const std::string& name : library_list_cached(lib).names)
-                        if (ImGui::Selectable(name.c_str(), name == q.system_name)) neural_take_system(lib, name, q, c.last_error);
+                if (ImGui::BeginCombo("source", neural_source_name(q.kind))) {
+                    for (NeuralSourceKind v : kNeuralSources)
+                        if (ImGui::Selectable(neural_source_name(v), v == q.kind)) q.kind = v;
                     ImGui::EndCombo();
                 }
-                if (!q.vars.empty()) {
-                    const std::vector<const char*> items = c_str_list(q.vars);
-                    if (q.variable < 0 || q.variable >= (int)items.size()) q.variable = 0;
-                    ImGui::SetNextItemWidth(kFieldW);
-                    ImGui::Combo("signal", &q.variable, items.data(), (int)items.size());
-                }
-                InputNumStr("integration step", q.step_text, kFieldW);
-                InputNumStr("time scale", q.time_scale_text, kFieldW);
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Source time per unit of network time.");
-                InputNumStr("source transient", q.skip_text, kFieldW);
-                ImGui::Checkbox("normalise to zero mean, unit deviation", &q.normalize);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Each source by its own mean and deviation. For classes of one system this hides\n"
-                                      "the difference in amplitude and level: the network has to tell the dynamics apart.");
-                // Снимок из библиотеки правится здесь же: классы одной системы различаются параметрами.
-                if (!q.params.empty() || !q.vars.empty()) {
-                    if (ImGui::TreeNode("parameters and initial conditions")) {
-                        for (const std::string& n : q.params) InputNumStr((n + "##srcpar").c_str(), q.param_values[n], kFieldW);
-                        for (const std::string& n : q.vars) InputNumStr((n + "(0)##srcic").c_str(), q.initial_conditions[n], kFieldW);
-                        ImGui::TreePop();
+                if (q.kind == NeuralSourceKind::System) {
+                    ImGui::SetNextItemWidth(kFieldW + 100.0f);
+                    if (ImGui::BeginCombo("system", q.system_name.empty() ? "(pick a system)" : q.system_name.c_str())) {
+                        for (const std::string& name : library_list_cached(lib).names)
+                            if (ImGui::Selectable(name.c_str(), name == q.system_name)) neural_take_system(lib, name, q, c.last_error);
+                        ImGui::EndCombo();
+                    }
+                    if (!q.vars.empty()) {
+                        const std::vector<const char*> items = c_str_list(q.vars);
+                        if (q.variable < 0 || q.variable >= (int)items.size()) q.variable = 0;
+                        ImGui::SetNextItemWidth(kFieldW);
+                        ImGui::Combo("signal", &q.variable, items.data(), (int)items.size());
+                    }
+                    InputNumStr("integration step", q.step_text, kFieldW);
+                    InputNumStr("time scale", q.time_scale_text, kFieldW);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Source time per unit of network time.");
+                    InputNumStr("source transient", q.skip_text, kFieldW);
+                    ImGui::Checkbox("normalise to zero mean, unit deviation", &q.normalize);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Each source by its own mean and deviation. For classes of one system this hides\n"
+                                          "the difference in amplitude and level: the network has to tell the dynamics apart.");
+                    // Снимок из библиотеки правится здесь же: классы одной системы различаются параметрами.
+                    if (!q.params.empty() || !q.vars.empty()) {
+                        if (ImGui::TreeNode("parameters and initial conditions")) {
+                            for (const std::string& n : q.params) InputNumStr((n + "##srcpar").c_str(), q.param_values[n], kFieldW);
+                            for (const std::string& n : q.vars) InputNumStr((n + "(0)##srcic").c_str(), q.initial_conditions[n], kFieldW);
+                            ImGui::TreePop();
+                        }
                     }
                 }
+                InputNumStr(q.kind == NeuralSourceKind::Noise ? "deviation" : "amplitude", q.amplitude_text, kFieldW);
+                if (q.kind == NeuralSourceKind::Sine || q.kind == NeuralSourceKind::Square) {
+                    InputNumStr("frequency", q.frequency_text, kFieldW);
+                    InputNumStr("phase, rad", q.phase_text, kFieldW);
+                }
+                InputNumStr("offset", q.offset_text, kFieldW);
+                if (ImGui::Button("Remove source")) remove = (int)i;
+                ImGui::TreePop();
             }
-            InputNumStr(q.kind == NeuralSourceKind::Noise ? "deviation" : "amplitude", q.amplitude_text, kFieldW);
-            if (q.kind == NeuralSourceKind::Sine || q.kind == NeuralSourceKind::Square) {
-                InputNumStr("frequency", q.frequency_text, kFieldW);
-                InputNumStr("phase, rad", q.phase_text, kFieldW);
-            }
-            InputNumStr("offset", q.offset_text, kFieldW);
-            if (ImGui::Button("Remove source")) remove = (int)i;
-            ImGui::TreePop();
+            ImGui::PopID();
         }
-        ImGui::PopID();
-    }
-    if (remove >= 0) {
-        c.sources.erase(c.sources.begin() + remove);
-        c.links.erase(std::remove_if(c.links.begin(), c.links.end(), [&](const NeuralLink& l) { return l.source == remove; }), c.links.end());
-        for (NeuralLink& l : c.links) l.source -= l.source > remove;
-    }
-    if (ImGui::Button("Add source")) {
-        NeuralSource q;
-        q.name = "input " + std::to_string(c.sources.size() + 1);
-        c.sources.push_back(std::move(q));
+        if (remove >= 0) {
+            c.sources.erase(c.sources.begin() + remove);
+            c.links.erase(std::remove_if(c.links.begin(), c.links.end(), [&](const NeuralLink& l) { return l.source == remove; }), c.links.end());
+            for (NeuralLink& l : c.links) l.source -= l.source > remove;
+        }
+        if (ImGui::Button("Add source")) {
+            NeuralSource q;
+            q.name = "input " + std::to_string(c.sources.size() + 1);
+            c.sources.push_back(std::move(q));
+        }
     }
     remove = -1;
     std::vector<const char*> sources, pops;
-    for (const NeuralSource& q : c.sources) sources.push_back(q.name.c_str());
+    if (external) {
+        const auto& channels = c.task.dataset->channels;
+        const size_t frames = (size_t)(std::max)(1, c.task.dataset_frames);
+        for (size_t row = 0; row < channels.size() / frames; ++row)
+            sources.push_back(channels[row * frames].c_str());
+    }
+    else for (const NeuralSource& q : c.sources) sources.push_back(q.name.c_str());
     for (const NeuralPopulation& p : c.populations) pops.push_back(p.name.c_str());
     for (size_t i = 0; i < c.links.size(); ++i) {
         NeuralLink& l = c.links[i];
@@ -430,14 +440,36 @@ static void draw_neural_input(SystemLibrary& lib, NeuralSession& s, NeuralConfig
         ImGui::PopID();
     }
     if (remove >= 0) c.links.erase(c.links.begin() + remove);
-    if (c.sources.empty()) ImGui::BeginDisabled();
+    if (sources.empty()) ImGui::BeginDisabled();
     if (ImGui::Button("Add link")) c.links.push_back(NeuralLink{});
-    if (c.sources.empty()) ImGui::EndDisabled();
+    if (sources.empty()) ImGui::EndDisabled();
 }
 
 // Классификация: попытка = образец, источник = класс.
 static void draw_neural_classes(NeuralConfig& c) {
     NeuralTask& t = c.task;
+    if (InputTextStr("Dataset CSV", t.dataset_path, kFieldW + 240.0f)) {
+        t.dataset.reset();
+        ++t.dataset_revision;
+    }
+    if (ImGui::Button("Load dataset") && !t.dataset_path.empty()) {
+        try {
+            t.dataset = std::make_shared<NeuralDataset>(load_neural_dataset_csv(std::filesystem::u8path(t.dataset_path)));
+            ++t.dataset_revision;
+            c.last_error.clear();
+        } catch (const std::exception& e) { c.last_error = e.what(); }
+    }
+    if (!t.dataset_path.empty()) {
+        ImGui::SetNextItemWidth(kFieldW);
+        ImGui::InputInt("Frames per stimulus", &t.dataset_frames);
+        t.dataset_frames = (std::max)(1, t.dataset_frames);
+        if (t.dataset)
+            ImGui::Text("%zu samples, %zu values per sample", t.dataset->samples.size(), t.dataset->channels.size());
+        else ImGui::TextDisabled("Load the CSV to run external trials.");
+        InputNumStr("feature nodes", t.features_text, kFieldW);
+        InputNumStr("feature points per stimulus", t.bins_text, kFieldW);
+        return;
+    }
     t.classes.erase(std::remove_if(t.classes.begin(), t.classes.end(), [&](int q) { return q < 0 || q >= (int)c.sources.size(); }), t.classes.end());
     if (c.sources.size() < 2) { ImGui::TextDisabled("Add two or more input sources in Input: each one can be a class."); return; }
     ImGui::TextUnformatted("classes");
@@ -672,14 +704,17 @@ static void draw_neural_protocol(NeuralConfig& c) {
     ImGui::SetNextItemWidth(kFieldW + 100.0f);
     if (ImGui::Combo("protocol", &kind, kinds, IM_ARRAYSIZE(kinds))) c.protocol = (NeuralProtocol)kind;
     if (c.protocol != NeuralProtocol::Trials) return;
-    InputNumStr("trials", c.trials_text, kFieldW);
+    const bool external = c.task.enabled && c.task.kind == NeuralTaskKind::Classification && c.task.dataset;
+    const std::string trial_count = external ? std::to_string(c.task.dataset->samples.size()) : c.trials_text;
+    if (external) ImGui::Text("%s dataset trials", trial_count.c_str());
+    else InputNumStr("trials", c.trials_text, kFieldW);
     InputNumStr("rest before the stimulus", c.rest_text, kFieldW);
     InputNumStr("stimulus", c.stimulus_text, kFieldW);
     ImGui::Checkbox("restart each trial from the initial conditions", &c.reset_state);
     if (c.reset_state) ImGui::TextDisabled("The order parameter is off: a phase across a reset has no meaning.");
     ImGui::TextDisabled("The record lasts trials x (rest + stimulus) = %s x (%s + %s) = %g time units;\n"
                         "the t max field of Integration is not used with trials.",
-                        c.trials_text.c_str(), c.rest_text.c_str(), c.stimulus_text.c_str(), neural_record_time(c));
+                        external ? trial_count.c_str() : c.trials_text.c_str(), c.rest_text.c_str(), c.stimulus_text.c_str(), neural_record_time(c));
 }
 
 static void draw_neural_sweep_axis(NeuralSession& s, NeuralConfig& c, NeuralSweep& w) {

@@ -18,6 +18,24 @@
 
 namespace {
 
+std::vector<size_t> dataset_trials(const NeuralDataset& data) {
+    std::vector<size_t> trials;
+    trials.reserve(data.samples.size());
+    for (auto split : {NeuralDatasetSplit::Train, NeuralDatasetSplit::Validation, NeuralDatasetSplit::Test})
+        for (size_t i = 0; i < data.samples.size(); ++i)
+            if (data.samples[i].split == split) trials.push_back(i);
+    return trials;
+}
+
+std::vector<std::string> dataset_classes(const NeuralDataset& data) {
+    std::vector<std::string> names;
+    for (const auto& sample : data.samples)
+        if (sample.split == NeuralDatasetSplit::Train) names.push_back(sample.label);
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    return names;
+}
+
 void log_neural_run(const char* label, bool ok, double secs) {
     std::printf("[run] %s %s in %.2fs\n", ok ? "Done" : "Cancelled", (label && *label) ? label : "(unnamed)", secs);
     std::fflush(stdout);
@@ -179,7 +197,8 @@ void fill_input(const NeuralConfig& c, const NeuralGraph& g, uint64_t seed, Neur
     // Отсчёт на шаг и связь в стадиях: гладкий источник видит время своей стадии, иначе порядок по нему первый.
     // Прогноз подаёт выход строкой на отсчёт: гладкий вход внутри шага сеть сама не посчитает.
     const bool closed = c.task.enabled && c.task.kind == NeuralTaskKind::Forecast;
-    const bool three = (c.schedule == NeuralSchedule::Stage || c.schedule == NeuralSchedule::Spike) && in.hold_steps == 1 && !closed;
+    const bool external = c.task.enabled && c.task.kind == NeuralTaskKind::Classification && c.task.dataset;
+    const bool three = (c.schedule == NeuralSchedule::Stage || c.schedule == NeuralSchedule::Spike) && in.hold_steps == 1 && !closed && !external;
     in.stage_rows = three ? 3 : 1;
     const long long rows = total / in.hold_steps + 1;
     if ((double)rows * in.stage_rows * in.channels * sizeof(double) > 4.0e9) throw std::runtime_error("the input needs too many samples: raise the sample time");
@@ -201,7 +220,7 @@ void fill_input(const NeuralConfig& c, const NeuralGraph& g, uint64_t seed, Neur
     for (long long row = 0; row < rows; ++row) { long long tau, trial; n_active += active_at(row, tau, trial); }
     const bool classify = c.task.enabled && c.task.kind == NeuralTaskKind::Classification;
     std::vector<int> class_of((size_t)in.channels, -1), labels;
-    if (classify) {
+    if (classify && !external) {
         if (!trials) throw std::runtime_error("classification needs the protocol of separate trials");
         for (size_t k = 0; k < c.task.classes.size(); ++k) {
             const int q = c.task.classes[k];
@@ -235,7 +254,23 @@ void fill_input(const NeuralConfig& c, const NeuralGraph& g, uint64_t seed, Neur
         const double dt = (double)in.hold_steps * r.h * num_or(s.time_scale_text, 1.0);
         return source_system_series(s, three ? 2 * n + 1 : n, three ? 0.5 * dt : dt, three ? 2 : 1);
     };
-    for (int q = 0; q < in.channels; ++q) {
+    if (external) {
+        const auto& data = *c.task.dataset;
+        const auto order = dataset_trials(data);
+        const int frames = c.task.dataset_frames;
+        if (frames < 1 || order.size() != (size_t)n_trials || data.channels.size() != (size_t)in.channels * frames ||
+            data.values.size() / data.channels.size() != order.size() || data.values.size() % data.channels.size() != 0 ||
+            (frames > 1 && (stim % in.hold_steps != 0 || stim / in.hold_steps != frames)))
+            throw std::runtime_error("external classification needs the prepared dataset trial grid");
+        for (long long row = 0; row < rows; ++row) {
+            long long tau, trial;
+            if (!active_at(row, tau, trial)) continue;
+            const double* sample = data.values.data() + order[(size_t)trial] * data.channels.size();
+            double* output = in.samples.data() + (size_t)row * in.channels;
+            const size_t frame = frames == 1 ? 0 : (size_t)(tau / in.hold_steps);
+            for (int q = 0; q < in.channels; ++q) output[q] = sample[(size_t)q * frames + frame];
+        }
+    } else for (int q = 0; q < in.channels; ++q) {
         if (class_of[(size_t)q] >= 0) continue;
         const NeuralSource& s = c.sources[(size_t)q];
         SourceSeries v = make_series(q);
@@ -249,7 +284,7 @@ void fill_input(const NeuralConfig& c, const NeuralGraph& g, uint64_t seed, Neur
             ++active;
         }
     }
-    if (classify) {
+    if (classify && !external) {
         // Попытка j класса берёт кусок его траектории с отсчёта j * cycle_rows + rest_rows: система идёт и в паузе, невидимо.
         if (rest % in.hold_steps != 0 || stim % in.hold_steps != 0)
             throw std::runtime_error("the rest and the stimulus must be multiples of the input sample time");
@@ -969,7 +1004,9 @@ NeuralRequest neural_build_request(const System& sys, const std::vector<CustomSc
 
 double neural_record_time(const NeuralConfig& c) {
     if (c.protocol == NeuralProtocol::Continuous) return parse_num(c.t_max_text, 100.0);
-    return num_or(c.trials_text, 0.0) * (num_or(c.rest_text, 0.0) + num_or(c.stimulus_text, 0.0));
+    const bool external = c.task.enabled && c.task.kind == NeuralTaskKind::Classification && c.task.dataset;
+    const double trials = external ? (double)c.task.dataset->samples.size() : num_or(c.trials_text, 0.0);
+    return trials * (num_or(c.rest_text, 0.0) + num_or(c.stimulus_text, 0.0));
 }
 
 static std::vector<double> sweep_axis_values(const NeuralConfig& c, const NeuralSweep& s) {
@@ -1045,6 +1082,24 @@ static long long task_hold(const NeuralConfig& c) {
 
 // Классификация: части по попыткам, без прогрева и пропуска: пауза перед стимулом уже отделяет попытки.
 static ReadoutSplit class_split(const NeuralConfig& c) {
+    if (c.task.dataset) {
+        ReadoutSplit sp;
+        for (const auto& sample : c.task.dataset->samples) {
+            switch (sample.split) {
+            case NeuralDatasetSplit::Train: ++sp.train1; break;
+            case NeuralDatasetSplit::Validation: ++sp.val1; break;
+            case NeuralDatasetSplit::Test: ++sp.test1; break;
+            default: throw std::runtime_error("unknown dataset split");
+            }
+        }
+        if (sp.train1 < 2 || sp.val1 == 0 || sp.test1 == 0)
+            throw std::runtime_error("external classification needs at least two training samples and nonempty validation and test splits");
+        sp.val0 = sp.train1;
+        sp.val1 += sp.val0;
+        sp.test0 = sp.val1;
+        sp.test1 += sp.test0;
+        return sp;
+    }
     const long long n = int_or(c.trials_text, 0);
     if (n < 3) throw std::runtime_error("classification needs more trials");
     const double train = num_or(c.task.train_text, 0.6), val = num_or(c.task.val_text, 0.2);
@@ -1053,6 +1108,19 @@ static ReadoutSplit class_split(const NeuralConfig& c) {
 }
 
 std::vector<int> neural_class_labels(const NeuralConfig& c) {
+    if (c.task.dataset) {
+        const auto& data = *c.task.dataset;
+        const auto names = dataset_classes(data);
+        if (names.size() < 2) throw std::runtime_error("external classification needs at least two training classes");
+        std::vector<int> labels;
+        for (size_t row : dataset_trials(data)) {
+            const auto& label = data.samples[row].label;
+            const auto it = std::lower_bound(names.begin(), names.end(), label);
+            if (it == names.end() || *it != label) throw std::runtime_error("an external class is absent from training: " + label);
+            labels.push_back((int)(it - names.begin()));
+        }
+        return labels;
+    }
     const int C = (int)c.task.classes.size();
     if (C < 2) throw std::runtime_error("classification needs at least two classes");
     const ReadoutSplit sp = class_split(c);
@@ -1084,17 +1152,43 @@ static ClassSteps class_steps(const NeuralConfig& c) {
 static NeuralConfig class_config(const NeuralConfig& c) {
     NeuralConfig o = c;
     const NeuralTask& t = c.task;
+    if (!t.dataset_path.empty() && !t.dataset) throw std::runtime_error("load the external dataset before running classification");
     if (c.protocol != NeuralProtocol::Trials) throw std::runtime_error("classification needs the protocol of separate trials");
     if (num_or(c.transient_text, 0.0) != 0.0) throw std::runtime_error("set the transient to 0: the rest before each stimulus is the washout");
     if (c.lyap_on) throw std::runtime_error("a readout does not work with the Lyapunov exponent");
     o.task.use_saved = false; // separate regression option; older sessions may still have it set
-    for (size_t k = 0; k < t.classes.size(); ++k) {
-        if (t.classes[k] < 0 || t.classes[k] >= (int)c.sources.size()) throw std::runtime_error("a class points to a missing input source");
-        if (std::count(t.classes.begin(), t.classes.end(), t.classes[k]) > 1) throw std::runtime_error("a source is a class twice");
+    const bool external = (bool)t.dataset;
+    if (external) {
+        const auto& data = *t.dataset;
+        if (!c.reset_state || std::any_of(c.projections.begin(), c.projections.end(), [](const auto& p) {
+                return p.plastic >= 0 || p.device;
+            }))
+            throw std::runtime_error("external classification needs state reset and fixed links");
+        if (t.dataset_frames < 1 || data.channels.empty() || data.channels.size() % (size_t)t.dataset_frames != 0 ||
+            data.samples.size() > (size_t)(std::numeric_limits<int>::max)() ||
+            data.channels.size() > (size_t)(std::numeric_limits<int>::max)() ||
+            data.values.size() % data.channels.size() != 0 || data.values.size() / data.channels.size() != data.samples.size() ||
+            !std::all_of(data.values.begin(), data.values.end(), [](double value) { return std::isfinite(value); }))
+            throw std::runtime_error("external classification dataset has incompatible dimensions");
+        o.trials_text = std::to_string(data.samples.size());
+        o.sources.assign(data.channels.size() / t.dataset_frames, NeuralSource{});
+        for (size_t q = 0; q < o.sources.size(); ++q) {
+            o.sources[q].name = data.channels[q * t.dataset_frames];
+            o.sources[q].kind = NeuralSourceKind::Constant;
+            o.sources[q].normalize = false;
+        }
+        o.task.classes.resize(dataset_classes(data).size());
+        std::iota(o.task.classes.begin(), o.task.classes.end(), 0);
+        if (c.links.empty()) throw std::runtime_error("link at least one external channel to the network");
+    } else {
+        for (size_t k = 0; k < t.classes.size(); ++k) {
+            if (t.classes[k] < 0 || t.classes[k] >= (int)c.sources.size()) throw std::runtime_error("a class points to a missing input source");
+            if (std::count(t.classes.begin(), t.classes.end(), t.classes[k]) > 1) throw std::runtime_error("a source is a class twice");
+        }
+        bool linked = false;
+        for (const NeuralLink& l : c.links) linked = linked || std::count(t.classes.begin(), t.classes.end(), l.source) > 0;
+        if (!linked) throw std::runtime_error("link one of the class sources to the network");
     }
-    bool linked = false;
-    for (const NeuralLink& l : c.links) linked = linked || std::count(t.classes.begin(), t.classes.end(), l.source) > 0;
-    if (!linked) throw std::runtime_error("link one of the class sources to the network");
     const ClassSteps s = class_steps(c);
     const std::vector<int> labels = neural_class_labels(c);
     const ReadoutSplit sp = class_split(c);
@@ -1106,19 +1200,23 @@ static NeuralConfig class_config(const NeuralConfig& c) {
     if (t.use_saved_classifier) {
         if (saved.empty() || !saved.is_classifier()) throw std::runtime_error("there is no saved classifier: train one and press Keep");
         if (c.sweep.enabled || t.control_k0) throw std::runtime_error("the saved classifier repeats one test: turn off the sweep and the K = 0 control");
-        if (saved.classes != t.classes || saved.names.size() != t.classes.size())
+        if (saved.classes != o.task.classes || saved.names.size() != o.task.classes.size())
             throw std::runtime_error("the class order differs from the saved classifier");
-        for (size_t k = 0; k < t.classes.size(); ++k)
-            if (saved.names[k] != c.sources[(size_t)t.classes[k]].name) throw std::runtime_error("the class names differ from the saved classifier");
+        const auto external_names = external ? dataset_classes(*t.dataset) : std::vector<std::string>{};
+        for (size_t k = 0; k < o.task.classes.size(); ++k)
+            if (saved.names[k] != (external ? external_names[k] : c.sources[(size_t)t.classes[k]].name))
+                throw std::runtime_error("the class names differ from the saved classifier");
         if (saved.class_bins != s.bins || saved.features_requested != M || saved.spikes != spike || saved.feature_var != c.input_var)
             throw std::runtime_error("the features differ from the saved classifier");
-        if (saved.class_input_norm.size() != 2 * c.sources.size()) throw std::runtime_error("the sources differ from the saved classifier");
+        if (saved.class_input_norm.size() != 2 * o.sources.size()) throw std::runtime_error("the sources differ from the saved classifier");
     }
     const bool three = (c.schedule == NeuralSchedule::Stage || spike) && hold == 1;
     const int per_sample = three ? 2 : 1;
     std::vector<long long> train_rows(c.sources.size(), (long long)sp.train1 * (s.stim / hold));
-    for (int q : t.classes) train_rows[(size_t)q] = 0;
-    for (size_t i = 0; i < sp.train1; ++i) train_rows[(size_t)t.classes[(size_t)labels[i]]] += s.cycle / hold;
+    if (!external) {
+        for (int q : t.classes) train_rows[(size_t)q] = 0;
+        for (size_t i = 0; i < sp.train1; ++i) train_rows[(size_t)t.classes[(size_t)labels[i]]] += s.cycle / hold;
+    }
     // Compute the scaler on training rows only, then use exactly those numbers for the entire run.
     // For class sources the trajectory advances through the rest too; auxiliary sources advance only on stimulus rows.
     for (size_t q = 0; q < o.sources.size(); ++q) {
@@ -1167,7 +1265,9 @@ static std::string class_protocol(const NeuralConfig& c, const NeuralRequest& r)
     const auto str = [&](const std::string& v) { f.add(v.size()); for (unsigned char x : v) f.add(x); };
     f.add((uint64_t)r.schedule); f.add(r.amountOfX); f.add(r.amountOfValues);
     real(r.h); real(r.max_value); f.add(r.input.channels); f.add(r.input.stage_rows);
-    ints(r.reset_at); ints(r.input.node_channel); reals(r.input.node_gain); reals(r.input.samples);
+    if (!c.task.dataset) ints(r.reset_at);
+    ints(r.input.node_channel); reals(r.input.node_gain);
+    if (!c.task.dataset) reals(r.input.samples);
     ints(r.observe.nodes); ints(r.observe.vars);
     str(r.krs_body); str(r.rhs_body); str(r.coupling_body);
     reals(r.values); reals(r.initial_conditions);
@@ -1181,7 +1281,18 @@ static std::string class_protocol(const NeuralConfig& c, const NeuralRequest& r)
     str(r.devices.rhs_body); str(r.devices.current_body);
     reals(r.devices.values); reals(r.devices.initial); reals(r.devices.s_min); reals(r.devices.s_max);
     for (const auto& src : c.sources) f.add(src.norm_fixed);
-    return "v1:" + std::to_string(split.test1) + ':' + std::to_string(split.train1) + ':' + std::to_string(split.test0)
+    if (c.task.dataset) {
+        const auto& data = *c.task.dataset;
+        if (c.task.dataset_frames != 1) f.add(c.task.dataset_frames);
+        for (const auto& name : data.channels) str(name);
+        const size_t width = data.channels.size();
+        for (size_t row : dataset_trials(data)) {
+            const auto& sample = data.samples[row];
+            str(sample.id); str(sample.label); str(sample.group);
+            for (size_t q = 0; q < width; ++q) real(data.values[row * width + q]);
+        }
+    }
+    return std::string(c.task.dataset ? "dataset-v2:" : "v1:") + std::to_string(split.test1) + ':' + std::to_string(split.train1) + ':' + std::to_string(split.test0)
          + ':' + std::to_string(int_or(c.task.data_seed_text, 1)) + ':' + std::to_string(s.rest) + ':' + std::to_string(s.stim)
          + ':' + std::to_string(r.input.hold_steps) + ':' + hex64(f.h);
 }
@@ -1308,7 +1419,8 @@ static std::vector<double> task_delays(const NeuralRequest& r, int channel, size
 }
 
 // Классификация: строка признаков на попытку, точка b стимула даёт столбцы i * B + b.
-static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralRequest& r, const NeuralResult& res) {
+static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralRequest& r, const NeuralResult& res,
+                                       const std::vector<double>* batched = nullptr) {
     const NeuralTask& t = c.task;
     NeuralTaskResult out;
     out.classify = true;
@@ -1317,7 +1429,8 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
     out.metric.clear();
     out.names = { "accuracy" };
     const int C = (int)t.classes.size();
-    for (int q : t.classes) out.class_names.push_back(c.sources[(size_t)q].name);
+    if (t.dataset) out.class_names = dataset_classes(*t.dataset);
+    else for (int q : t.classes) out.class_names.push_back(c.sources[(size_t)q].name);
     const std::vector<int> labels = neural_class_labels(c);
     const ReadoutSplit sp = class_split(c);
     const ClassSteps s = class_steps(c);
@@ -1401,7 +1514,9 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
             if (nInst > 1 && q < (int)res.instance_stop.size() && res.instance_stop[(size_t)q] >= 0) throw std::runtime_error("the network diverged");
             std::vector<double> F;
             std::vector<int> nodes;
-            const int M = features(q, F, nodes);
+            const int M = batched ? (int)r.observe.nodes.size() : features(q, F, nodes);
+            if (batched) nodes = r.observe.nodes;
+            const auto& feature_rows = batched ? *batched : F;
             if ((size_t)M * B > (size_t)(std::numeric_limits<int>::max)()) throw std::runtime_error("too many classifier features");
             const int columns = M * (int)B;
             if (q == 0) out.features = M;
@@ -1413,11 +1528,11 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
                     throw std::runtime_error("the feature columns differ from the saved classifier");
                 m.M = saved.M; m.K = saved.K; m.mean = saved.mean; m.scale = saved.scale; m.w = saved.w;
             } else {
-                m = readout_fit(F, Y, columns, C, sp, lambdas, true);
+                m = readout_fit(feature_rows, Y, columns, C, sp, lambdas, true);
                 out.val[(size_t)q] = m.val_accuracy;
                 out.lambda[(size_t)q] = m.lambda[0];
             }
-            out.test[(size_t)q] = score(m, F, out.predicted.data() + (size_t)q * T, out.confusion.data() + (size_t)q * C * C);
+            out.test[(size_t)q] = score(m, feature_rows, out.predicted.data() + (size_t)q * T, out.confusion.data() + (size_t)q * C * C);
             if (!out.applied && !c.sweep.enabled && nInst == 1) {
                 auto& saved = out.model;
                 saved.class_bins = (int)B; saved.classes = t.classes; saved.names = out.class_names;
@@ -1440,20 +1555,97 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
     if (out.applied) return out;
     // Простая модель: тот же ridge на самих отсчётах стимула, до 50 равномерно; канал класса у всех сетей свипа общий.
     const long long hold = r.input.hold_steps, stim_rows = s.stim / hold;
-    const int D = (int)(std::min)(stim_rows, 50LL);
+    const int D = t.dataset ? (int)t.dataset->channels.size() : (int)(std::min)(stim_rows, 50LL);
     const size_t sub = (size_t)r.input.stage_rows, ch = (size_t)r.input.channels;
-    std::vector<double> G(n * (size_t)D);
-    for (size_t tr = 0; tr < n; ++tr)
-        for (int d = 0; d < D; ++d) {
-            const long long row = ((long long)tr * s.cycle + s.rest) / hold + ((long long)(d + 1) * stim_rows) / D - 1;
-            G[tr * D + (size_t)d] = r.input.samples[(size_t)row * sub * ch + (size_t)t.classes[0]];
+    std::vector<double> G;
+    if (t.dataset) {
+        const auto order = dataset_trials(*t.dataset);
+        G.reserve(t.dataset->values.size());
+        for (size_t row : order) {
+            const double* values = t.dataset->values.data() + row * D;
+            G.insert(G.end(), values, values + D);
         }
+    } else {
+        G.resize(n * (size_t)D);
+        for (size_t tr = 0; tr < n; ++tr)
+            for (int d = 0; d < D; ++d) {
+                const long long first = ((long long)tr * s.cycle + s.rest) / hold;
+                const long long row = first + ((long long)(d + 1) * stim_rows) / D - 1;
+                G[tr * D + (size_t)d] = r.input.samples[(size_t)row * sub * ch + (size_t)t.classes[0]];
+            }
+    }
     try {
         const ReadoutModel m = readout_fit(G, Y, D, C, sp, lambdas, true);
         out.delay_test = { score(m, G, nullptr, nullptr) };
         out.delay_length = D;
     } catch (const std::exception&) {}
     return out;
+}
+
+NeuralBatchClassification neural_classify_batches(ParametricEngine& engine, const System& sys,
+    const std::vector<CustomScheme>& schemes, const NeuralConfig& config, size_t batch_size) {
+    if (!batch_size || !config.task.enabled || config.task.kind != NeuralTaskKind::Classification ||
+        !config.task.dataset || config.schedule == NeuralSchedule::Spike || config.sweep.enabled || config.task.control_k0)
+        throw std::runtime_error("batch classification needs external continuous trials, a positive batch size and one network");
+    const NeuralConfig job = neural_task_config(config);
+    const auto& data = *job.task.dataset;
+    const auto order = dataset_trials(data);
+    const auto timing = class_steps(job);
+    const size_t width = data.channels.size();
+    NeuralBatchClassification result;
+    NeuralRequest layout;
+    std::vector<double> features;
+    const auto start = std::chrono::steady_clock::now();
+    for (size_t first = 0; first < order.size();) {
+        const size_t count = (std::min)(batch_size, order.size() - first);
+        auto subset = std::make_shared<NeuralDataset>();
+        subset->channels = data.channels;
+        subset->samples.reserve(count);
+        subset->values.reserve(count * width);
+        for (size_t i = first; i < first + count; ++i) {
+            const size_t row = order[i];
+            subset->samples.push_back(data.samples[row]);
+            const double* values = data.values.data() + row * width;
+            subset->values.insert(subset->values.end(), values, values + width);
+        }
+        NeuralConfig batch = job;
+        batch.task.dataset = std::move(subset);
+        batch.trials_text = std::to_string(count);
+        batch.keep_checkpoint = false;
+        auto plan = neural_plan(sys, schemes, sys.vars, sys.params, batch);
+        const auto& req = plan.request;
+        const size_t nodes = req.observe.nodes.size(), bins = (size_t)timing.bins;
+        if (!nodes || req.observe.vars.size() != 1) throw std::runtime_error("invalid batch observation layout");
+        if (first == 0) {
+            result.graph_hash = plan.hash;
+            layout = req;
+            std::vector<double>().swap(layout.input.samples);
+            if (nodes > features.max_size() / bins / order.size()) throw std::runtime_error("batch feature matrix is too large");
+            features.resize(order.size() * nodes * bins);
+            if (job.task.use_saved_classifier &&
+                (job.classifier.graph_hash != plan.hash || job.classifier.class_protocol != class_protocol(job, layout)))
+                throw std::runtime_error("the data, graph or trial protocol differs from the saved classifier");
+        } else if (plan.hash != result.graph_hash || req.observe.nodes != layout.observe.nodes) {
+            throw std::runtime_error("batch graph or feature layout changed");
+        }
+        const auto observed = engine.run_neural(req);
+        if (!observed.ok || observed.diverged) throw std::runtime_error("classification batch at sample " +
+            std::to_string(first) + " failed: " + (observed.error.empty() ? "network diverged" : observed.error));
+        result.peak_device_bytes = (std::max)(result.peak_device_bytes, observed.device_bytes);
+        for (size_t i = 0; i < count; ++i)
+            for (size_t b = 0; b < bins; ++b) {
+                const auto step = (long long)i * timing.cycle + timing.rest + (long long)(b + 1) * timing.bin;
+                const size_t point = (size_t)(step / req.pre_scaller);
+                if (point >= observed.traces.size() / nodes) throw std::runtime_error("incomplete batch observation");
+                for (size_t j = 0; j < nodes; ++j)
+                    features[((first + i) * nodes + j) * bins + b] = observed.traces[point * nodes + j];
+            }
+        first += count;
+    }
+    result.extraction_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    result.task = class_evaluate(job, layout, NeuralResult{}, &features);
+    if (!result.task.applied) result.task.model.graph_hash = result.graph_hash;
+    return result;
 }
 
 NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest& r, const NeuralResult& res) {
@@ -2402,7 +2594,7 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
                 ctx.sweep = snap.sweep; ctx.sweep2 = snap.sweep2;
                 ctx.reset_at = plan.request.reset_at;
                 for (const auto& pop : snap.populations) ctx.populations.push_back(pop.name);
-                for (const auto& source : snap.sources) ctx.sources.push_back(source.name);
+                for (const auto& source : job.sources) ctx.sources.push_back(source.name);
                 if (resume && snap.result.ok && snap.result.steps_done == snap.checkpoint->step) {
                     neural_merge_resumed(snap.result, out.result);
                     ctx.mixed_settings = snap.result_context.mixed_settings || ctx.settings_key != snap.result_context.settings_key;

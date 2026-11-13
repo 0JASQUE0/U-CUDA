@@ -67,6 +67,15 @@ NeuralConfig neural_task_config(const NeuralConfig& c);
 std::vector<int> neural_class_labels(const NeuralConfig& c);
 // Обучение выхода по готовому расчёту. c из neural_task_config, r его запрос.
 NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest& r, const NeuralResult& res);
+struct NeuralBatchClassification {
+    NeuralTaskResult task;
+    std::string graph_hash;
+    size_t peak_device_bytes = 0;
+    double extraction_ms = 0;
+};
+// Fixed-link continuous external trials. Extract in bounded chunks and fit one readout on the original split.
+NeuralBatchClassification neural_classify_batches(ParametricEngine& engine, const System& sys,
+    const std::vector<CustomScheme>& schemes, const NeuralConfig& config, size_t batch_size);
 // Прогноз: подключённые входы по номеру источника, они же цели.
 std::vector<int> neural_forecast_channels(const NeuralConfig& c);
 // Обучение по первому прогону (r1, res1) и замыкание второго: r2 = тот же план до конца прогноза, с res1.checkpoint.

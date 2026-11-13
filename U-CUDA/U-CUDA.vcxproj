@@ -127,6 +127,7 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
     <ClCompile Include="..\libs\storage\src\session_ls.cpp" />
     <ClCompile Include="..\libs\storage\src\session_metrics.cpp" />
     <ClCompile Include="..\libs\storage\src\session_network.cpp" />
+    <ClCompile Include="..\libs\storage\src\neural_dataset_io.cpp" />
     <ClCompile Include="..\libs\storage\src\session_neural.cpp" />
     <ClCompile Include="..\libs\storage\src\session_order.cpp" />
     <ClCompile Include="..\libs\storage\src\session_parametric.cpp" />

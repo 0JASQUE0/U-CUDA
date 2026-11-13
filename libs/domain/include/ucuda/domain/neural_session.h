@@ -2,6 +2,7 @@
 #include "ucuda/domain/analysis_session.h"
 #include "ucuda/domain/network_session.h"
 #include "ucuda/domain/neural_types.h"
+#include "ucuda/domain/neural_dataset.h"
 #include <map>
 #include <memory>
 #include <string>
@@ -141,6 +142,10 @@ struct NeuralTask {
     bool enabled = false;
     NeuralTaskKind kind = NeuralTaskKind::Regression;
     std::vector<int> classes;              // классификация: источники-классы
+    std::shared_ptr<const NeuralDataset> dataset; // runtime snapshot of external labelled vectors
+    std::string dataset_path;
+    int dataset_frames = 1; // split row-major vectors into this many successive columns
+    unsigned long long dataset_revision = 0; // runtime provenance when reloading the same path
     std::string bins_text = "1";           // классификация: точек признаков на стимул, последняя в его конце
     std::string data_seed_text = "1";      // классификация: метки и их порядок, не зависит от seed сети
     std::string max_delay_text = "40";     // Memory и Xor: задержки 1..max_delay
