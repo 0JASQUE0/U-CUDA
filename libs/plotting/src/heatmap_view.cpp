@@ -645,6 +645,7 @@ void HeatmapView::render(PlotRenderer& renderer,
         if (ImGui::MenuItem("Invert X", nullptr, &x_axis.invert)) { wp.invert_x = x_axis.invert; ImGui::MarkIniSettingsDirty(); }
         if (ImGui::MenuItem("Invert Y", nullptr, &y_axis.invert)) { wp.invert_y = y_axis.invert; ImGui::MarkIniSettingsDirty(); }
         ImGui::Separator();
+        plot_toolbar_menu();   // элементы тулбара окна (plot_axis.h)
         plot_show_menu(wp, PlotShowColorbar | PlotShowAxes2D | PlotShowSmooth);
         ImGui::Separator();
         ImGui::Checkbox("Discrete colorbar", &discrete);

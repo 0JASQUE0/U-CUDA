@@ -1293,6 +1293,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         if (ImGui::MenuItem("Auto fit X"))      fit_x();
         if (ImGui::MenuItem("Auto fit Y"))      fit_y();
         ImGui::Separator();
+        plot_toolbar_menu();   // элементы тулбара окна (plot_axis.h)
         // Легенда — галка окна (wp.legend), если вызывающий её вообще не выключил (show_legend).
         plot_show_menu(wp, (show_legend ? PlotShowLegend : 0u) | PlotShowAxes2D |
                            (external_colorbar ? PlotShowColorbar : 0u));

@@ -317,6 +317,31 @@ void plot_set_series_color_links(int scope, std::vector<std::vector<std::string>
 void plot_install_settings_handler();
 PlotWindowPrefs& plot_window_prefs_current();
 bool plot_toolbar_hidden();
+
+// Тулбар окна в меню диаграммы (ПКМ -> Toolbar). Код вкладки, рисующий тулбар окна, отдаёт
+// каждый его элемент сюда (plot_toolbar_menu_add) — до проверки plot_toolbar_hidden(), так что
+// меню работает и при скрытом тулбаре. Элементы живут один кадр и только для окна, где их
+// отдали: меню вида рисуется в том же кадре позже тулбара, поэтому ссылки лямбд на объекты
+// вкладки ещё живы. Пока меню рисует элементы, plot_toolbar_hidden() даёт false,
+// plot_window_prefs_current() — вид окна диаграммы, а не попапа, и новые элементы не
+// регистрируются (как и внутри PlotToolbarNest).
+void plot_toolbar_menu_add(std::function<void()> items);
+// Пока жив — элементы тулбара не регистрируются по отдельности: строка тулбара, отданная
+// целиком, вызывает внутри себя общие функции тулбара, и они не должны появиться в меню дважды.
+struct PlotToolbarNest {
+    PlotToolbarNest();
+    ~PlotToolbarNest();
+    PlotToolbarNest(const PlotToolbarNest&) = delete;
+    PlotToolbarNest& operator=(const PlotToolbarNest&) = delete;
+};
+// Подменю «Toolbar» в попапе вида — если окно в этом кадре отдало элементы. Звать внутри
+// BeginPopup меню диаграммы.
+void plot_toolbar_menu();
+// Правка элемента тулбара в меню не видна вызывающему (функция тулбара вернула «изменено»
+// внутри меню, а не в его коде). Общие функции тулбара отмечают правку по ключу (адрес
+// редактируемого объекта) и отдают её своим обычным вызовом на следующем кадре.
+void plot_toolbar_menu_mark_changed(const void* key);
+bool plot_toolbar_menu_take_changed(const void* key);
 // Вид окна (галки Show, swap, инверсия) строкой "key=v;..." — для сохранённых раскладок окон.
 // window_name — имя корневого окна ImGui; окна может ещё не быть (настройки ждут его появления).
 std::string plot_window_prefs_to_string(const std::string& window_name);

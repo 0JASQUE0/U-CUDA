@@ -615,7 +615,7 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
             };
             topts.extras = [&]() { draw_renumber(/*same_line*/ true); };
             draw_heatmap_toolbar(*active_hm, topts);
-        } else if (!plot_toolbar_hidden()) {
+        } else toolbar_row([&]() {
             // Scatter-таб: Renumber и стиль точек (форма, размер, α — per-config,
             // уходят в _last_basins.json через phase_settings_dirty).
             draw_renumber(/*same_line*/ false);
@@ -639,7 +639,7 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
                         }))
                     s.phase_settings_dirty = true;
             }
-        }
+        });
     }
     if (c.renumber_spiral) ensure_basins_spiral_cache(c);
 

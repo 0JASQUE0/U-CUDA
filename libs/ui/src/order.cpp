@@ -228,9 +228,7 @@ void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
     const StabilityResult& r = c.stab_result;
     // Строки над картой — тулбар: скрытый в её меню (Show → Toolbar) прячет их все, карта
     // занимает освободившуюся высоту. Настройки вью ниже применяются независимо от этого.
-    const bool bar = !plot_toolbar_hidden();
-
-    if (bar) {
+    toolbar_row([&]() {
     ImGui::TextDisabled("show:"); ImGui::SameLine();
     ImGui::RadioButton("1 - rho##stabview", &win.stab_view, 1); ImGui::SameLine();
     ImGui::RadioButton("rho##stabview", &win.stab_view, 0); ImGui::SameLine();
@@ -266,13 +264,13 @@ void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
             "preference region says it also still resembles the exact one.\n"
             "For A-stable schemes the difference is dramatic: the whole left\n"
             "half-plane is stable, only a small part of it is preferred.");
-    }   // bar
+    });   // bar
     // Цвета слоя живут на окне (сохраняются вместе с ним) и отдаются вью каждый
     // кадр; перезаливку текстуры при смене цвета вью делает сама.
     hv.overlay_fill_color = win.stab_pref_fill;
     hv.overlay_edge_color = win.stab_pref_edge;
     hv.overlay_edge_width = win.stab_pref_edge_w;
-    if (bar) {
+    toolbar_row([&]() {
     ImGui::SameLine();
     // Образец — контур поверх заливки, как область и выглядит на карте.
     if (ImGui::ColorButton("##stabpref_swatch", ImGui::ColorConvertU32ToFloat4(win.stab_pref_edge),
@@ -332,7 +330,7 @@ void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
             "\n"
             "While this is on, the colormap chosen in the toolbar is not used\n"
             "(it is kept and comes back when you turn this off).");
-    }   // bar
+    });   // bar
     // Раскраска отдаётся вью каждый кадр: HeatmapView общий для всех видов
     // окна, и снятая галочка обязана вернуть пользовательскую палитру сразу.
     // Серая шкала — slanCM #28 "gray", чистое чёрное -> белое.
@@ -354,7 +352,7 @@ void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
     for (size_t i = 0; i < r.rho.size(); ++i)
         if (stability_cell_preferred(r, i, pref_tol)) { pref_mask[i] = 1; ++n_pref; }
 
-    if (bar) {
+    toolbar_row([&]() {
     ImGui::SameLine();
     ImGui::TextDisabled("|"); ImGui::SameLine();
     const int n_cells = r.n_ok + r.n_bad;
@@ -368,7 +366,7 @@ void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
                               "returned nan/inf.");
     }
     ImGui::TextDisabled("k = %g, r = %g, h = %g; the boundary is rho = 1", r.k, r.r, r.h);
-    }   // bar
+    });   // bar
 
     {
         HeatmapToolbarOpts topts;
@@ -486,13 +484,13 @@ void draw_order_map_window(AppModel& model, OrderPlotWindow& win,
     }
     const OrderResult& r = c.result;
 
-    if (!plot_toolbar_hidden()) {   // тулбар карты (Show → Toolbar)
+    toolbar_row([&]() {   // тулбар карты (Show → Toolbar)
         ImGui::Checkbox("show error", &win.map_error);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Off - the map of the order p. On - log10 E1.");
         ImGui::SameLine();
         draw_order_status_line(c.label.c_str(), r.n_ok, r.n_diverged, r.n_floor, r.n_nocontract);
-    }
+    });
 
     if (!c.last_run_ok || r.p.empty() || r.n_pts_y <= 1) {
         ImGui::TextDisabled("No data yet. Press Run.");
@@ -588,7 +586,7 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
 
     // ---- Тулбар ---- (скрывается в меню графика: Show → Toolbar)
     const bool bar = !plot_toolbar_hidden();
-    if (bar) {
+    toolbar_row([&]() {
     ImGui::Checkbox("log X", &win.x_log);
     if (!is_p) {
         ImGui::SameLine();
@@ -654,7 +652,7 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
             ImGui::SetTooltip("Accepted steps per run (the rejected ones are in the node tooltip).");
         }
     }
-    }   // bar
+    });   // bar
 
     // Стиль кривых — тот же тулбар-с-попапом, что у точек бифуркационных
     // диаграмм и у Node Series: выключенный режим даёт прежний вид.
@@ -669,7 +667,7 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         // включённом custom_line_style, а цвет кривых нужен и без него.
         if (win.palette < 0 || win.palette > kOrderPaletteOkabe)
             win.palette = kOrderPaletteContrast;
-        if (bar) {
+        toolbar_row([&win, sfx]() {
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
             ImGui::Combo(("##pal" + sfx).c_str(), &win.palette,
                          kOrderPaletteNames, 3);
@@ -678,9 +676,10 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                                   "(min / avg / max). Both extra palettes are qualitative: adjacent\n"
                                   "numbers are deliberately far apart in hue, unlike the heatmap maps.");
             ImGui::SameLine();
-        }
+        });
+        // sfx — копией: элемент отдаётся и в меню диаграммы, а оно рисуется после этого блока.
         draw_style_toolbar("Custom line style", sfx.c_str(), win.custom_line_style,
-            [&win, &sfx]() {
+            [&win, sfx]() {
                 bool ch = false;
                 ImGui::SetNextItemWidth(150);
                 ch |= slider_float_typed(("Line width##" + sfx).c_str(), &win.line_width,

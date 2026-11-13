@@ -6,8 +6,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <memory>
 #include <sstream>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
 
@@ -186,7 +188,8 @@ std::unique_ptr<LNode> capture(const ImGuiDockNode* n, const DockWindowFactory* 
 
 void write_tree(std::ostream& o, const LNode& n) {
     if (n.split) {
-        o << "split " << (n.axis == 0 ? 'x' : 'y') << ' ' << n.ratio << '\n';
+        // 9 значащих цифр — доля восстанавливает пиксель и на широком экране.
+        o << "split " << (n.axis == 0 ? 'x' : 'y') << ' ' << std::setprecision(9) << n.ratio << '\n';
         write_tree(o, *n.a);
         write_tree(o, *n.b);
         return;
@@ -300,9 +303,18 @@ void build(ImGuiID node, ImVec2 size, const LNode& t, BuildCtx& c) {
     if (t.split) {
         ImGuiID a = 0, b = 0;
         ImGui::DockBuilderSplitNode(node, t.axis == 0 ? ImGuiDir_Left : ImGuiDir_Up, t.ratio, &a, &b);
+        // Размеры детей — на той же базе, что у ImGui (DockNodeTreeUpdatePosSize): длина узла
+        // минус разделитель, ячейка — округлённая доля этого остатка. Сохранённая доля — тоже
+        // от остатка (capture: l0 / (l0 + l1)), поэтому круг «сохранить -> применить» даёт те
+        // же пиксели. Раньше доля бралась от длины с разделителем и округлялась вниз; рядом с
+        // центральным узлом dockspace ImGui берёт размер ячейки как есть, а не долю, и каждый
+        // круг сдвигал границу на 1-2 px.
+        const float full  = t.axis == 0 ? size.x : size.y;
+        const float avail = std::max(0.0f, full - ImGui::GetStyle().DockingSeparatorSize);
+        const float la    = std::round(avail * t.ratio);
         ImVec2 sa = size, sb = size;
-        if (t.axis == 0) { sa.x = std::floor(size.x * t.ratio); sb.x = size.x - sa.x; }
-        else             { sa.y = std::floor(size.y * t.ratio); sb.y = size.y - sa.y; }
+        (t.axis == 0 ? sa.x : sa.y) = la;
+        (t.axis == 0 ? sb.x : sb.y) = avail - la;
         ImGui::DockBuilderSetNodeSize(a, sa);
         ImGui::DockBuilderSetNodeSize(b, sb);
         build(a, sa, *t.a, c);
@@ -482,6 +494,166 @@ void equalize(ImGuiDockNode* n, const char* side) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------- доли разрезов
+
+namespace {
+struct SplitMemo {
+    ImGuiID c0 = 0, c1 = 0;   // дети, для которых запомнена доля (другие — разрез перестроен)
+    float len = -1.0f;        // длина разреза по его оси в прошлом кадре
+    float ratio = 0.5f;       // длина первого ребёнка / (длина - разделитель)
+};
+std::unordered_map<ImGuiID, SplitMemo>& split_memo() {
+    static std::unordered_map<ImGuiID, SplitMemo> m;
+    return m;
+}
+
+bool node_inside(const ImGuiDockNode* p, const ImGuiDockNode* n) {
+    for (; p; p = p->ParentNode)
+        if (p == n) return true;
+    return false;
+}
+
+// Положения разделителей той же оси в дереве (начало полосы разделителя), кроме самого n и
+// его потомков: те едут вместе с перетаскиваемой границей.
+void collect_separators(const ImGuiDockNode* p, const ImGuiDockNode* n, int axis, std::vector<float>& out) {
+    if (!p || p->IsLeafNode()) return;
+    const ImGuiDockNode* a = p->ChildNodes[0];
+    const ImGuiDockNode* b = p->ChildNodes[1];
+    if (!a || !b) return;
+    if (p != n && (int)p->SplitAxis == axis && a->IsVisible && b->IsVisible && !node_inside(p, n))
+        out.push_back(a->Pos[axis] + a->Size[axis]);
+    collect_separators(a, n, axis, out);
+    collect_separators(b, n, axis, out);
+}
+
+// Притяжение перетаскиваемой границы разреза n: к разделителю той же оси в другой строке
+// (столбце) — граница встаёт с ним в одну линию, перекрестием, — и к середине узла (деление
+// пополам). Только в небольшом радиусе, дальше граница идёт за мышью. Возвращает длину
+// первого ребёнка.
+float snap_split(const ImGuiDockNode* n, const ImGuiDockNode* root, int axis, float avail, float c0, float min_each) {
+    const float range = ImGui::GetFontSize() * 0.6f;
+    float best = c0, best_d = range + 1.0f;
+    auto consider = [&](float cand) {
+        cand = std::round(cand);
+        if (cand < min_each || cand > avail - min_each) return;
+        const float d = std::fabs(cand - c0);
+        if (d <= range && d < best_d) { best = cand; best_d = d; }
+    };
+    consider(avail * 0.5f);
+    std::vector<float> seps;
+    collect_separators(root, n, axis, seps);
+    for (float s : seps) consider(s - n->Pos[axis]);
+    return best;
+}
+
+// Узел n уже имеет итоговые Pos/Size (rewritten — их только что переписали мы, и детей надо
+// переставить, даже если сам разрез не менялся). Повторяет распределение ImGui
+// (DockNodeTreeUpdatePosSize): разделитель DockingSeparatorSize, у невидимого ребёнка всё
+// место отдаётся видимому. SizeRef пишется, чтобы ImGui держал эти размеры и в следующих кадрах:
+// рядом с центральным узлом он берёт SizeRef соседа как есть, без него — их отношение.
+void keep_ratios(ImGuiDockNode* n, bool rewritten, const char* fixed, const ImGuiDockNode* root) {
+    if (!n || n->IsLeafNode()) return;
+    ImGuiDockNode* a = n->ChildNodes[0];
+    ImGuiDockNode* b = n->ChildNodes[1];
+    if (!a || !b) return;
+    const int axis = (int)n->SplitAxis;
+    if (axis != 0 && axis != 1) return;
+    SplitMemo& m = split_memo()[n->ID];
+    const float len = n->Size[axis];
+
+    if (!(a->IsVisible && b->IsVisible)) {
+        if (rewritten)
+            for (ImGuiDockNode* c : { a, b }) { c->Pos = n->Pos; c->Size = n->Size; }
+        m.len = len;
+        keep_ratios(a, rewritten, fixed, root);
+        keep_ratios(b, rewritten, fixed, root);
+        return;
+    }
+
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float avail = std::max(0.0f, len - st.DockingSeparatorSize);
+    const bool same = m.c0 == a->ID && m.c1 == b->ID && m.len >= 0.0f;
+    // Разрез, отделяющий панель настроек (лист с ней), — по правилам ImGui: панель держит
+    // свою ширину в пикселях, когда меняется окно приложения.
+    const bool fixed_split = fixed && ((a->IsLeafNode() && has_window(a, fixed)) ||
+                                       (b->IsLeafNode() && has_window(b, fixed)));
+    const bool changed = same && !fixed_split && std::fabs(len - m.len) > 0.5f && avail > 0.0f;
+    const float min_each = std::trunc(std::min(avail, st.WindowMinSize[axis] * 2.0f) * 0.5f);
+    float c0 = a->Size[axis];
+    if (changed)
+        c0 = std::clamp(std::round(avail * m.ratio), min_each, std::max(min_each, avail - min_each));
+    else if (avail > 0.0f)
+        m.ratio = c0 / avail;   // длина та же: доля — какой её сделали (в т.ч. перетаскиванием)
+    m.len = len;
+    m.c0 = a->ID;
+    m.c1 = b->ID;
+
+    const bool place = rewritten || (changed && c0 != a->Size[axis]);
+    if (place) {
+        ImVec2 sa = n->Size, sb = n->Size, pb = n->Pos;
+        sa[axis] = c0;
+        sb[axis] = avail - c0;
+        pb[axis] += c0 + st.DockingSeparatorSize;
+        a->Pos = n->Pos;  a->Size = sa;  a->SizeRef[axis] = sa[axis];
+        b->Pos = pb;      b->Size = sb;  b->SizeRef[axis] = sb[axis];
+    }
+    keep_ratios(a, place, fixed, root);
+    keep_ratios(b, place, fixed, root);
+}
+}  // namespace
+
+namespace {
+// ID разделителя разреза n — как его считает ImGui в DockNodeTreeUpdateSplitter: окно-хост
+// dockspace (стек ID — только его ID), PushID(node->ID), GetID("##Splitter").
+ImGuiID splitter_id(const ImGuiDockNode* n, const ImGuiWindow* host) {
+    const int node_id = (int)n->ID;
+    return ImHashStr("##Splitter", 0, ImHashData(&node_id, sizeof(node_id), host->ID));
+}
+
+ImGuiDockNode* find_active_split(ImGuiDockNode* n, const ImGuiWindow* host, ImGuiID active) {
+    if (!n || n->IsLeafNode()) return nullptr;
+    if (splitter_id(n, host) == active) return n;
+    if (ImGuiDockNode* r = find_active_split(n->ChildNodes[0], host, active)) return r;
+    return find_active_split(n->ChildNodes[1], host, active);
+}
+}  // namespace
+
+void dock_snap_dragged_split(ImGuiID dock_id) {
+    ImGuiContext& g = *GImGui;
+    // Смещение захвата, которое ImGui поставил при нажатии: от него считается «естественное»
+    // место границы под мышью. Своё на каждое перетаскивание.
+    static ImGuiID s_active = 0;
+    static float   s_offset = 0.0f;
+    if (g.ActiveId != s_active) s_active = 0;
+    if (g.ActiveId == 0) return;
+    ImGuiDockNode* root = ImGui::DockBuilderGetNode(dock_id);
+    if (!root || !root->HostWindow || g.ActiveIdWindow != root->HostWindow) return;
+    ImGuiDockNode* n = find_active_split(root, root->HostWindow, g.ActiveId);
+    if (!n) return;
+    const ImGuiDockNode* a = n->ChildNodes[0];
+    const ImGuiDockNode* b = n->ChildNodes[1];
+    const int axis = (int)n->SplitAxis;
+    if (!a || !b || !a->IsVisible || !b->IsVisible || (axis != 0 && axis != 1)) return;
+    if (s_active == 0) { s_active = g.ActiveId; s_offset = g.ActiveIdClickOffset[axis]; }
+
+    // SplitterBehavior ставит начало полосы разделителя в MousePos - ClickOffset + hover_extend
+    // (hover_extend = WindowsBorderHoverPadding). Подменой ClickOffset граница встаёт туда, куда
+    // её притянуло, — ImGui сам раскладывает окна и рисует полосу уже там, в этом же кадре.
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float ext   = g.WindowsBorderHoverPadding;
+    const float mouse = g.IO.MousePos[axis];
+    const float avail = std::max(0.0f, n->Size[axis] - st.DockingSeparatorSize);
+    const float min_each = std::trunc(std::min(avail, st.WindowMinSize[axis] * 2.0f) * 0.5f);
+    const float natural = mouse - s_offset + ext - n->Pos[axis];
+    const float c0 = snap_split(n, root, axis, avail, natural, min_each);
+    g.ActiveIdClickOffset[axis] = mouse + ext - (n->Pos[axis] + c0);
+}
+
+void dock_keep_split_ratios(ImGuiID dock_id, const char* fixed_window) {
+    ImGuiDockNode* root = ImGui::DockBuilderGetNode(dock_id);
+    keep_ratios(root, false, fixed_window, root);
+}
 
 // ---------------------------------------------------------------- API
 

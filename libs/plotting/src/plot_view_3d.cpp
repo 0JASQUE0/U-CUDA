@@ -360,6 +360,7 @@ void Plot3DView::render(PlotRenderer& renderer,
         ImGui::Separator();
         // Легенда и оси — галки окна (сохраняются в imgui.ini); show_legend / show_axes вида —
         // разрешение вызывающего.
+        plot_toolbar_menu();   // элементы тулбара окна (plot_axis.h)
         plot_show_menu(wp, (show_legend ? PlotShowLegend : 0u) | (show_axes ? PlotShowAxes3D : 0u) |
                            (external_colorbar ? PlotShowColorbar : 0u));
         ImGui::Separator();

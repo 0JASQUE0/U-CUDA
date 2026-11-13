@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cfloat>
 #include <algorithm>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -899,8 +900,90 @@ void plot_install_settings_handler() {
     ImGui::AddSettingsHandler(&h);
 }
 
-PlotWindowPrefs& plot_window_prefs_current() {
+namespace {
+// Меню «Toolbar» диаграммы: элементы тулбара окна на текущий кадр (plot_toolbar_menu_add).
+struct ToolbarMenuEntry {
+    int frame = -1;
+    std::vector<std::function<void()>> items;
+};
+std::map<std::string, ToolbarMenuEntry>& toolbar_menus() {
+    static std::map<std::string, ToolbarMenuEntry> m;
+    return m;
+}
+int  g_toolbar_nest = 0;             // > 0 — регистрация выключена (PlotToolbarNest, само меню)
+bool g_toolbar_menu_drawing = false; // меню рисует элементы тулбара
+std::map<const void*, int>& toolbar_menu_changed() {   // ключ -> кадр правки в меню
+    static std::map<const void*, int> m;
+    return m;
+}
+
+// Окно диаграммы: из попапа (меню вида, его подменю) — окно, которое его открыло.
+const ImGuiWindow* plot_owner_window() {
     const ImGuiWindow* w = ImGui::GetCurrentWindowRead();
+    while (w && (w->Flags & ImGuiWindowFlags_Popup) && w->ParentWindow) w = w->ParentWindow;
+    if (w && w->RootWindow) w = w->RootWindow;
+    return w;
+}
+}
+
+PlotToolbarNest::PlotToolbarNest()  { ++g_toolbar_nest; }
+PlotToolbarNest::~PlotToolbarNest() { --g_toolbar_nest; }
+
+void plot_toolbar_menu_add(std::function<void()> items) {
+    if (g_toolbar_nest > 0 || !items) return;
+    const ImGuiWindow* w = plot_owner_window();
+    if (!w) return;
+    const int frame = ImGui::GetFrameCount();
+    auto& menus = toolbar_menus();
+    // Окна, которых больше нет, оставляют записи; изредка вычищаем устаревшие.
+    if (menus.size() > 64)
+        for (auto it = menus.begin(); it != menus.end();)
+            it = it->second.frame < frame - 1 ? menus.erase(it) : std::next(it);
+    ToolbarMenuEntry& e = menus[w->Name];
+    if (e.frame != frame) { e.frame = frame; e.items.clear(); }
+    e.items.push_back(std::move(items));
+}
+
+void plot_toolbar_menu() {
+    if (g_toolbar_menu_drawing) return;
+    const ImGuiWindow* w = plot_owner_window();
+    if (!w) return;
+    const auto it = toolbar_menus().find(w->Name);
+    if (it == toolbar_menus().end() || it->second.frame != ImGui::GetFrameCount() || it->second.items.empty())
+        return;
+    if (!ImGui::BeginMenu("Toolbar")) return;
+    // Копия: элемент может открыть свой попап, но новых элементов в этот список не добавит
+    // (регистрация выключена), а копия ограждает и от перестройки карты окон.
+    const std::vector<std::function<void()>> items = it->second.items;
+    g_toolbar_menu_drawing = true;
+    ++g_toolbar_nest;
+    for (size_t i = 0; i < items.size(); ++i) {
+        ImGui::PushID((int)i);
+        items[i]();
+        ImGui::PopID();
+    }
+    --g_toolbar_nest;
+    g_toolbar_menu_drawing = false;
+    ImGui::EndMenu();
+}
+
+void plot_toolbar_menu_mark_changed(const void* key) {
+    if (g_toolbar_menu_drawing) toolbar_menu_changed()[key] = ImGui::GetFrameCount();
+}
+
+bool plot_toolbar_menu_take_changed(const void* key) {
+    auto& m = toolbar_menu_changed();
+    const auto it = m.find(key);
+    if (it == m.end()) return false;
+    // Правка прошлого кадра (меню рисуется после тулбара) или этого; более старая — от окна,
+    // которое с тех пор не рисовалось, её не отдаём.
+    const bool fresh = it->second >= ImGui::GetFrameCount() - 1;
+    m.erase(it);
+    return fresh;
+}
+
+PlotWindowPrefs& plot_window_prefs_current() {
+    const ImGuiWindow* w = g_toolbar_menu_drawing ? plot_owner_window() : ImGui::GetCurrentWindowRead();
     if (w && w->RootWindow) w = w->RootWindow;
     if (!w) {
         static PlotWindowPrefs fallback;   // вне окна ImGui (не бывает у живого UI)
@@ -917,6 +1000,7 @@ void plot_set_window_scope(int scope) {
 }
 
 bool plot_toolbar_hidden() {
+    if (g_toolbar_menu_drawing) return false;   // элементы рисуются в меню диаграммы
     return !plot_window_prefs_current().toolbar;
 }
 
