@@ -7,9 +7,6 @@ model_verbosity = "low"
 [skills]
 max_context_tokens = 1600
 
-[mcp_servers.blender]
-enabled = false
-
 [plugins."documents@openai-primary-runtime"]
 enabled = false
 
