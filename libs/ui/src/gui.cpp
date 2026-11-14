@@ -136,7 +136,7 @@ namespace ucuda::ui_detail {
 // почти одинаковых веток: каждая доставала из своей сессии одну и ту же четвёрку — подпись
 // запущенного конфига, время старта, cancel_token, progress_token. Ветки успели разойтись:
 // три подставляли запасное имя только при выходе индекса за границы, три — ещё и при пустом label.
-enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync, Custom, Order, Metrics, Neural };
+enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync, Custom, Order, Metrics, Neural, Tree };
 
 
 struct BusyInfo {
@@ -338,6 +338,24 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                                                         cus.basins_session.running_config_index, "basins"));
         busy.kind = BusyKind::Custom;   // в том числе для phase-ветки выше
     }
+    else if (model.tree_session.any_in_flight()) {
+        // Дерево считает по одному листу; подпись — имя узла.
+        for (const auto& [id, rt] : model.tree_session.leaves) {
+            if (!rt.in_flight()) continue;
+            const TreeNode* n = model.tree_session.tree.find(id);
+            const std::string what = "Tree: " + (n ? n->name : std::string("leaf"));
+            if      (rt.bif)    busy = busy_from(*rt.bif, BusyKind::Tree, what);
+            else if (rt.lle)    busy = busy_from(*rt.lle, BusyKind::Tree, what);
+            else if (rt.ls)     busy = busy_from(*rt.ls, BusyKind::Tree, what);
+            else if (rt.basins) busy = busy_from(*rt.basins, BusyKind::Tree, what);
+            else if (rt.phase) {
+                busy.what  = what;
+                busy.start = rt.phase->compute_start_time;
+            }
+            busy.kind = BusyKind::Tree;
+            break;
+        }
+    }
     else {
         // Nothing in flight — pick the session whose last run finished most
         // recently (across the cancellable ones) and show persistent info.
@@ -347,7 +365,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // Метки у них свои ("Custom 2D", "Custom 1D X", ...), так что префикс
         // не нужен.
         struct DoneCand { BusyKind kind; std::chrono::steady_clock::time_point ts; const std::string* label; bool ok; double secs; };
-        DoneCand candidates[12] = {
+        std::vector<DoneCand> candidates = {
             { BusyKind::Bif,    model.bifurcation_session.last_run_completed_at,
               &model.bifurcation_session.last_run_label,
               model.bifurcation_session.last_run_succeeded,
@@ -397,6 +415,17 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
               cus.basins_session.last_run_succeeded,
               cus.basins_session.last_run_seconds },
         };
+        // Листья дерева: метка конфига — имя узла (ставит TreeSession::start_leaf).
+        for (const auto& [id, rt] : model.tree_session.leaves) {
+            auto add = [&](const auto& s) {
+                candidates.push_back({ BusyKind::Tree, s.last_run_completed_at, &s.last_run_label,
+                                       s.last_run_succeeded, s.last_run_seconds });
+            };
+            if      (rt.bif)    add(*rt.bif);
+            else if (rt.lle)    add(*rt.lle);
+            else if (rt.ls)     add(*rt.ls);
+            else if (rt.basins) add(*rt.basins);
+        }
         const DoneCand* best = nullptr;
         for (const auto& c : candidates) {
             if (c.label->empty()) continue;
@@ -512,6 +541,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             else if (busy.kind == BusyKind::FastSync) queue_n = model.fastsync_queue().size();
             else if (busy.kind == BusyKind::Dft1D)    queue_n = model.dft1d_queue().size();
             else if (busy.kind == BusyKind::Custom)   queue_n = model.custom_queue().size();
+            else if (busy.kind == BusyKind::Tree)     queue_n = model.tree_queue().size();
             else if (busy.kind == BusyKind::Order)    queue_n = model.order_queue().size();
             else if (busy.kind == BusyKind::Neural)   queue_n = model.neural_queue().size();
             else                                      queue_n = model.parametric_queue().size();
@@ -578,6 +608,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     case BusyKind::Order:    model.order_session.request_cancel();       break;
                     case BusyKind::Neural:   model.neural_session.request_cancel();      break;
                     case BusyKind::Custom:   model.custom_session.request_cancel_all();  break;
+                    case BusyKind::Tree:     model.tree_session.request_cancel_all();    break;
                     default: break;
                 }
                 // Drain all batch queues so remaining items don't auto-start.

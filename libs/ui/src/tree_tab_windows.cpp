@@ -16,6 +16,7 @@ struct LeafViews {
     std::vector<double> basin_values;
     int cmap_seen = -2;
     int exp_seen  = -999;
+    int swap_seen = -1;
 };
 using ViewMap = std::map<int, LeafViews>;
 
@@ -26,7 +27,11 @@ std::string axis_label(const TreeSession& ts, const EffectiveSweep& e) {
     return (e.par_index >= 0 && e.par_index < (int)ts.params.size()) ? ts.params[e.par_index] : "param";
 }
 
-// Новое окно — в dockspace вкладки, если ни ImGui, ни imgui.ini не помнят его док.
+// Док-узел, где уже стоят окна листьев (обновляется каждый кадр).
+ImGuiID g_leaf_dock = 0;
+
+// Новое окно — к другим окнам листьев, если ни ImGui, ни imgui.ini не помнят его док. В корень
+// dockspace нельзя: после раскладки он разделён, а окно в узле-разделителе отстыковывается.
 void ensure_docked(const std::string& title) {
     if (!g_tree_dockspace_id || ImGui::GetIO().MouseDown[0]) return;
     ImGuiID persisted = 0;
@@ -34,7 +39,21 @@ void ensure_docked(const std::string& title) {
     else if (ImGuiWindowSettings* s = ImGui::FindWindowSettingsByID(ImHashStr(title.c_str())))
         persisted = s->DockId;
     if (persisted != 0) return;
-    ImGui::DockBuilderDockWindow(title.c_str(), g_tree_dockspace_id);
+    ImGuiID target = 0;
+    if (g_leaf_dock && ImGui::DockBuilderGetNode(g_leaf_dock)) target = g_leaf_dock;
+    else if (ImGuiDockNode* c = ImGui::DockBuilderGetCentralNode(g_tree_dockspace_id)) target = c->ID;
+    else if (ImGuiDockNode* r = ImGui::DockBuilderGetNode(g_tree_dockspace_id); r && r->IsLeafNode())
+        target = r->ID;
+    if (target) ImGui::DockBuilderDockWindow(title.c_str(), target);
+}
+
+// Вывести окно листа вперёд, но не в ущерб панели дерева: если окно делит с ней вкладки
+// одного узла, фокус на нём спрятал бы дерево.
+void focus_leaf_window(const std::string& title) {
+    ImGuiWindow* w   = ImGui::FindWindowByName(title.c_str());
+    ImGuiWindow* ctl = ImGui::FindWindowByName("Tree Controls");
+    if (w && ctl && w->DockNode && w->DockNode == ctl->DockNode) return;
+    ImGui::SetNextWindowFocus();
 }
 
 // Рамка цветом размерности у окна выбранного листа; клик по окну выбирает лист.
@@ -53,10 +72,11 @@ void leaf_window_frame(TreeSession& ts, int id, int slot) {
 bool begin_leaf_window(TreeSession& ts, const TreeNode& n, const std::string& title) {
     ensure_docked(title);
     if (g_tree_focus_leaf == n.id) {
-        ImGui::SetNextWindowFocus();
+        focus_leaf_window(title);
         g_tree_focus_leaf = 0;
     }
     const bool vis = ImGui::Begin(title.c_str());
+    if (ImGui::GetWindowDockID() != 0) g_leaf_dock = ImGui::GetWindowDockID();
     leaf_window_frame(ts, n.id, tree_kind_dim_slot(n.kind));
     return vis;
 }
@@ -238,20 +258,34 @@ void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
         return;
     }
 
+    // Оси переставлены (ПКМ «Swap axes»): параметр свипа по вертикали. Флаг — вид окна,
+    // он сохраняется в imgui.ini и раскладках; при смене перефит.
+    PlotWindowPrefs& wp = plot_window_prefs_current();
+    const bool swap = wp.swap_axes;
+    if (v.swap_seen != (int)swap) {
+        if (v.swap_seen != -1) {
+            view.x_axis.user_range = view.y_axis.user_range = false;
+            view.view_valid = false;
+        }
+        v.swap_seen = (int)swap;
+    }
+
     // Ось — весь свип среза, а не bbox данных: крест среза совпадает с осью карты.
-    view.x_fit_use_explicit = hi != lo;
-    view.y_fit_use_explicit = false;
-    view.x_fit_min = std::min(lo, hi);
-    view.x_fit_max = std::max(lo, hi);
-    view.pad_x = false;
-    view.pad_y = true;
+    view.x_fit_use_explicit = !swap && hi != lo;
+    view.y_fit_use_explicit =  swap && hi != lo;
+    view.x_fit_min = view.y_fit_min = std::min(lo, hi);
+    view.x_fit_max = view.y_fit_max = std::max(lo, hi);
+    view.pad_x = swap;
+    view.pad_y = !swap;
     const bool sweep_log = log && std::min(lo, hi) > 0.0;
-    view.x_axis.log_scale = sweep_log;
+    view.x_axis.log_scale = !swap && sweep_log;
+    view.y_axis.log_scale =  swap && sweep_log;
 
     // Крест — координата курсора вдоль оси среза.
-    view.crosshair_x = dir == 0 ? s.fix_x_value : s.fix_y_value;
-    view.crosshair_y = std::numeric_limits<double>::quiet_NaN();
-    view.crosshair_along_y = false;
+    const double cross = dir == 0 ? s.fix_x_value : s.fix_y_value;
+    view.crosshair_x = swap ? std::numeric_limits<double>::quiet_NaN() : cross;
+    view.crosshair_y = swap ? cross : std::numeric_limits<double>::quiet_NaN();
+    view.crosshair_along_y = swap;
     view.crosshair_x_color = dir == 1 ? 0xFFFF9028u : 0xFF50A0FFu;
     view.crosshair_y_color = view.crosshair_x_color;
 
@@ -273,6 +307,7 @@ void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
         return std::clamp(sweep_value_at(i, snap_n, slo, shi, sweep_log, false, cont), slo, shi);
     };
     apply_snap_x(view, slo, shi, snap_n);
+    if (swap) view.snap_x_to_grid = false;   // по X теперь данные; узел свипа ловит snap ниже
 
     // Перетаскивание креста по срезу двигает курсор владельца вдоль своей оси.
     const int owner = ts.cursor_owner(n.id);
@@ -366,10 +401,29 @@ void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
         }
     }
     std::vector<bool> init_vis(series.size(), true), glob_vis(series.size(), true);
+    if (swap) {
+        // Пары (параметр, значение) -> (значение, параметр), подписи осей — следом.
+        for (auto& buf : v.bufs)
+            for (size_t k = 0; k + 1 < buf.size(); k += 2) std::swap(buf[k], buf[k + 1]);
+        std::swap(view.x_axis.name, view.y_axis.name);
+        view.show_zero_x = view.show_zero_y;
+        view.show_zero_y = false;
+        series_gen = series_gen * 2 + 1;   // другая раскладка данных — новая заливка VBO
+    } else {
+        series_gen = series_gen * 2;
+    }
 
     const TreeNodeKind kind = n.kind;
     TreeLeafRuntime* rtp = &rt;
-    view.popup_extras = [kind, rtp, busy, &cb]() {
+    view.popup_extras = [kind, rtp, busy, &cb, swap, &wp]() {
+        bool sw = swap;
+        if (ImGui::MenuItem("Swap axes", nullptr, &sw)) {
+            wp.swap_axes = sw;   // перефит — на следующем кадре, по смене флага
+            ImGui::MarkIniSettingsDirty();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Sweep parameter on the vertical axis (e.g. a Y slice\n"
+                              "next to the vertical axis of the 2D map).");
         draw_export_menu_item(busy, cb, [kind, rtp](const std::string& path) {
             if      (kind == TreeNodeKind::Bif1D) data_export::export_bif1d(rtp->bif->diagrams[0].result, path);
             else if (kind == TreeNodeKind::LLE1D) data_export::export_lle1d(rtp->lle->curves[0].result, path);
@@ -379,7 +433,7 @@ void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
     const bool take_fit = *fit;
     *fit = false;
     const ImVec2 avail = ImGui::GetContentRegionAvail(), origin = ImGui::GetCursorScreenPos();
-    view.render(*v.rnd, origin, avail, owner_id, series_gen * 2, series, init_vis, glob_vis, take_fit);
+    view.render(*v.rnd, origin, avail, owner_id, series_gen, series, init_vis, glob_vis, take_fit);
     (void)model;
 }
 
@@ -462,9 +516,12 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
             draw_projection_windows(*rt.phase, cb,
                 [focus](int idx, const std::string& title) {
                     ensure_docked(title);
-                    if (focus && idx == 0) ImGui::SetNextWindowFocus();
+                    if (focus && idx == 0) focus_leaf_window(title);
                 },
-                [&ts, id, slot](int, const std::string&) { leaf_window_frame(ts, id, slot); },
+                [&ts, id, slot](int, const std::string&) {
+                    if (ImGui::GetWindowDockID() != 0) g_leaf_dock = ImGui::GetWindowDockID();
+                    leaf_window_frame(ts, id, slot);
+                },
                 "_tree" + std::to_string(id) + sys_sfx, owner_id);
             continue;
         }

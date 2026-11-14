@@ -174,6 +174,8 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend) {
     const ImVec4 col  = tree_dim_color(tree_kind_dim_slot(n->kind), active);
 
     ImGui::PushID(id);
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
     ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth
                           | ImGuiTreeNodeFlags_AllowOverlap;
     if (!ctx) fl |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
@@ -220,18 +222,17 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend) {
         if (!meta.empty()) ImGui::TextDisabled("%s", meta.c_str());
     }
 
-    // Кнопки справа: + Dup On/Off Del Lx.
+    // Кнопки — своей колонкой таблицы: строка узла их не перекрывает. Порядок слотов
+    // постоянный (+ dup on/off x Lx), пустой слот — пробел, чтобы колонки не плясали.
+    ImGui::TableSetColumnIndex(1);
     const ImGuiStyle& st = ImGui::GetStyle();
     const bool can_add = !tree_addable_children(n->kind).empty();
     const char* power = n->enabled ? "on" : "off";
     char badge[8];
     std::snprintf(badge, sizeof(badge), "L%d", level);
     auto bw = [&](const char* s) { return ImGui::CalcTextSize(s).x + st.FramePadding.x * 2.0f; };
-    float w = bw(power) + ImGui::CalcTextSize(badge).x + st.ItemSpacing.x;
-    if (can_add)        w += bw("+") + st.ItemSpacing.x;
-    if (n->parent != 0) w += bw("dup") + bw("x") + st.ItemSpacing.x * 2.0f;
-    const float right = ImGui::GetWindowContentRegionMax().x;
-    ImGui::SameLine(std::max(ImGui::GetCursorPosX(), right - w));
+    auto gap = [&](const char* s) { ImGui::Dummy(ImVec2(bw(s), 1.0f)); ImGui::SameLine(); };
+    if (!can_add) gap("+");
     if (can_add) {
         if (small_icon_button("+", "Add child", ImVec4(0.30f, 0.79f, 0.55f, 1.0f))) {
             if (!n->enabled) flash("Node is disabled - enable it first");
@@ -242,15 +243,23 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend) {
     if (n->parent != 0) {
         if (small_icon_button("dup", "Duplicate (with subtree)")) pend = { Act::Dup, id };
         ImGui::SameLine();
+    } else {
+        gap("dup");
     }
     if (small_icon_button(power, n->enabled ? "Disable node" : "Enable node",
                           n->enabled ? ImVec4(0.30f, 0.79f, 0.69f, 1.0f) : ImVec4(0.96f, 0.53f, 0.44f, 1.0f)))
         pend = { Act::Toggle, id };
-    if (n->parent != 0) {
-        ImGui::SameLine();
-        if (small_icon_button("x", "Delete (with subtree)")) pend = { Act::Del, id };
-    }
     ImGui::SameLine();
+    if (n->enabled) {   // «on» короче «off»: добиваем, чтобы x и Lx стояли ровно
+        ImGui::Dummy(ImVec2(bw("off") - bw("on"), 1.0f));
+        ImGui::SameLine();
+    }
+    if (n->parent != 0) {
+        if (small_icon_button("x", "Delete (with subtree)")) pend = { Act::Del, id };
+        ImGui::SameLine();
+    } else {
+        gap("x");
+    }
     ImGui::TextColored(col, "%s", badge);
     if (ImGui::BeginPopup("##add")) {
         add_menu_items(*n, level + 1, pend);
@@ -637,7 +646,16 @@ void draw_tree_controls(AppModel& model, SystemLibrary& lib) {
 
     Pending pend;
     if (ImGui::BeginChild("##tree_nodes", ImVec2(0, tree_h), ImGuiChildFlags_Borders)) {
-        draw_node(model, ts, ts.tree.nodes.front().id, pend);
+        const ImGuiStyle& st = ImGui::GetStyle();
+        auto bw = [&](const char* s) { return ImGui::CalcTextSize(s).x + st.FramePadding.x * 2.0f; };
+        const float btn_w = bw("+") + bw("dup") + bw("off") + bw("x") + ImGui::CalcTextSize("L10").x
+                          + st.ItemSpacing.x * 4.0f;
+        if (ImGui::BeginTable("##tree_tbl", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_NoPadOuterX)) {
+            ImGui::TableSetupColumn("node", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("actions", ImGuiTableColumnFlags_WidthFixed, btn_w);
+            draw_node(model, ts, ts.tree.nodes.front().id, pend);
+            ImGui::EndTable();
+        }
     }
     ImGui::EndChild();
     if (pend.act != Act::None) apply_pending(model, ts, pend);

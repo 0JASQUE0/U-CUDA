@@ -684,6 +684,12 @@ bool TreeSession::start_leaf(int leaf_id, ParametricEngine& engine) {
     const int dir = sl ? sl->slice_dir : 0;
     rt.pending = leaf_signature(leaf_id);
     rt.pending_armed = true;
+    // Подпись в плашке расчёта и в легенде — имя узла.
+    auto name_cfg = [&](auto& cfg) { cfg.label = leaf->name; cfg.label_is_manual = true; };
+    if (rt.bif && !rt.bif->diagrams.empty()) name_cfg(rt.bif->diagrams[0]);
+    if (rt.lle && !rt.lle->curves.empty())   name_cfg(rt.lle->curves[0]);
+    if (rt.ls && !rt.ls->curves.empty())     name_cfg(rt.ls->curves[0]);
+    if (rt.basins && !rt.basins->configs.empty()) rt.basins->configs[0].label = leaf->name;
 
     bool ok = false;
     switch (leaf->kind) {
