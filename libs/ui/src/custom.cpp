@@ -16,8 +16,9 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
                                                 : std::numeric_limits<double>::quiet_NaN();
     // Drag callback: fires every frame while LMB is held inside the plot (HeatmapView
     // on_left_drag). Cheap — just moves the crosshair via fix_x/fix_y so the shared crosshair on
-    // every 2D window follows the cursor. Recompute (Phase/Basins enqueue + param_values update)
-    // is deferred to on_left_click on release.
+    // every 2D window follows the cursor. param_values update is deferred to on_left_click on
+    // release; Phase/Basins enqueue — to the settled branch in draw_custom_controls (or to
+    // on_left_click when the 1D level is off and that branch never runs).
     hv.on_left_drag = [&cs](int, int, double snap_x, double snap_y) {
         cs.shared.fix_x_value = snap_x;
         cs.shared.fix_y_value = snap_y;
@@ -53,7 +54,9 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
             s.axis_y_par_index < (int)cs.params.size()) {
             s.param_values[cs.params[s.axis_y_par_index]] = fmt_num_shortest(snap_y);
         }
-        if (s.autorun_on_drilldown && s.level_phase_enabled) {
+        // При включённом 1D ФП/бассейны ставит ветка автопересчёта в draw_custom_controls по
+        // сдвинутым выше таймерам; второй enqueue здесь гонял расчёт дважды в той же точке.
+        if (!s.level_1d_enabled && s.autorun_on_drilldown && s.level_phase_enabled) {
             model.enqueue_custom({ s.level3_kind == 0 ? CustomQueueItem::Kind::Phase
                                              : CustomQueueItem::Kind::Basins });
         }
