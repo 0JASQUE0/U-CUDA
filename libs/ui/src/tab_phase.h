@@ -9,10 +9,14 @@ std::string phase_axis_name(const PhaseAnalysisSession& s, int ax);
 void phase_axis_combo(const char* id, PhaseAnalysisSession& s, int& axis);
 
 
+// on_recompute — запуск расчёта вместо прямого recompute_async (Custom ставит ФП в свою
+// очередь); handle_ctrl_r = false, где Ctrl+R уже занят хозяином панели (Run в Custom).
 void draw_phase_controls(PhaseAnalysisSession& s,
                                 std::function<void()> on_reset_defaults,
                                 AppModel* bc = nullptr,
-                                const GuiCallbacks* cbp = nullptr);
+                                const GuiCallbacks* cbp = nullptr,
+                                const std::function<void()>& on_recompute = {},
+                                bool handle_ctrl_r = true);
 
 
 using ProjHookFn = std::function<void(int proj_index, const std::string& title)>;

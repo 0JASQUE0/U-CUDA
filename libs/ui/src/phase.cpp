@@ -1038,7 +1038,9 @@ namespace ucuda::ui_detail {
 void draw_phase_controls(PhaseAnalysisSession& s,
                                 std::function<void()> on_reset_defaults,
                                 AppModel* bc,
-                                const GuiCallbacks* cbp) {
+                                const GuiCallbacks* cbp,
+                                const std::function<void()>& on_recompute,
+                                bool handle_ctrl_r) {
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
     // В Custom эту же панель рисует уровень 3, и источником там остаётся
     // Custom: его Shared config и есть то, что уйдёт в расчёт.
@@ -1653,8 +1655,10 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         }
     }
     else {
-        do_recompute = ImGui::Button("Recompute (Ctrl+R)", ImVec2(-1, 0));
-        if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R, false)) do_recompute = true;
+        do_recompute = ImGui::Button(handle_ctrl_r ? "Recompute (Ctrl+R)" : "Recompute",
+                                     ImVec2(-1, 0));
+        if (handle_ctrl_r && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R, false))
+            do_recompute = true;
         // Правки RQA приходят из окон проекций — другая функция GUI, свой кадр (см. rqa_dirty).
         if (s.rqa_dirty) { changed = true; s.rqa_dirty = false; }
         if (s.auto_recompute && changed) do_recompute = true;
@@ -1675,7 +1679,8 @@ void draw_phase_controls(PhaseAnalysisSession& s,
             s.continuation_peaks.clear();
             ++s.continuation_peaks_gen;
         }
-        s.recompute_async();
+        if (on_recompute) on_recompute();
+        else              s.recompute_async();
     }
 
     if (!s.result.error.empty())

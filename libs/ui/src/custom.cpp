@@ -575,7 +575,18 @@ void draw_level3_detail(AppModel& model, CustomSession& cs) {
         // everything lives inside the pipeline's L3 config (no separate top-level window). The
         // Analysis tab uses the same helper with model.phase_session; here we pass Custom's own
         // isolated cs.phase_session.
-        draw_phase_controls(cs.phase_session, nullptr, &model);
+        // Recompute / Auto recompute идут через очередь Custom: прямой recompute_async считал
+        // по устаревшим полям phase_session, без apply_shared_to_phase и точки креста.
+        // Ctrl+R здесь не ловим — его уже обрабатывает Run Custom.
+        draw_phase_controls(cs.phase_session, nullptr, &model, nullptr, [&model, &cs]() {
+            // Ждущий в очереди Phase и так прочтёт свежие поля при старте.
+            const auto& q = model.custom_queue();
+            const bool queued = std::any_of(q.begin(), q.end(), [](const CustomQueueItem& it) {
+                return it.kind == CustomQueueItem::Kind::Phase;
+            });
+            if (!queued) model.enqueue_custom({ CustomQueueItem::Kind::Phase });
+            cs.arm_auto_recompute_signatures(false, false, true);
+        }, /*handle_ctrl_r*/ false);
     } else {
         // Basins sub-panel: IC-space axes + features. All of scheme/h/t_max/
         // etc. come from shared; DBSCAN eps stays per-config.
