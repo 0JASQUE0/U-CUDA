@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>       // std::sqrt — геометрическая середина лог-диапазона
 #include <cstdio>
+#include <set>
 
 // Helpers
 
@@ -492,10 +493,26 @@ bool CustomSession::poll_all() {
 namespace {
     // Append map<string, string> sorted by key for deterministic output.
     void sig_append_map(std::string& o, const char* tag,
-                        const std::map<std::string, std::string>& m) {
+                        const std::map<std::string, std::string>& m,
+                        const std::set<std::string>* skip = nullptr) {
         o += tag; o += "{";
-        for (const auto& kv : m) { o += kv.first; o += "="; o += kv.second; o += ";"; }
+        for (const auto& kv : m) {
+            if (skip && skip->count(kv.first)) continue;
+            o += kv.first; o += "="; o += kv.second; o += ";";
+        }
         o += "}";
+    }
+    // Параметры и НУ, чьё значение при расчёте задаёт ось свипа или fix_x/fix_y, а не поле:
+    // крест пишет их в param_values, и без пропуска уровень считался бы грязным зря.
+    struct SigSkip { std::set<std::string> pv, ic; };
+    void sig_skip_axis(SigSkip& k, const CustomSession& cs, bool over_var, bool over_h,
+                       int par_index, int var_index) {
+        if (over_h) return;
+        if (over_var) {
+            if (var_index >= 0 && var_index < (int)cs.vars.size()) k.ic.insert(cs.vars[var_index]);
+        } else if (par_index >= 0 && par_index < (int)cs.params.size()) {
+            k.pv.insert(cs.params[par_index]);
+        }
     }
     void sig_append_int(std::string& o, const char* tag, int v) {
         o += tag; o += "="; o += std::to_string(v); o += ";";
@@ -511,7 +528,8 @@ namespace {
         o += tag; o += "="; o += b; o += ";";
     }
     // Shared integrator + IC + params — feed all three levels.
-    void sig_append_shared_state(std::string& o, const CustomTabSharedConfig& s) {
+    void sig_append_shared_state(std::string& o, const CustomTabSharedConfig& s,
+                                 const SigSkip* skip = nullptr) {
         sig_append_str(o, "sc", s.scheme);
         sig_append_str(o, "sym", s.symmetry_s);
         sig_append_str(o, "fpn", s.cd_fp_iters);
@@ -523,15 +541,18 @@ namespace {
         sig_append_str(o, "ct",  s.t_max_text);
         sig_append_str(o, "dec", s.pre_scaller_text);
         sig_append_str(o, "mv",  s.max_value_text);
-        sig_append_map(o, "ic", s.initial_conditions);
-        sig_append_map(o, "pv", s.param_values);
+        sig_append_map(o, "ic", s.initial_conditions, skip ? &skip->ic : nullptr);
+        sig_append_map(o, "pv", s.param_values,       skip ? &skip->pv : nullptr);
     }
 }
 
 std::string build_l2d_signature(const CustomTabSharedConfig& s, const CustomSession& cs) {
     std::string o; o.reserve(512);
     sig_append_bool(o, "en", s.level_2d_enabled);
-    sig_append_shared_state(o, s);
+    SigSkip skip;
+    sig_skip_axis(skip, cs, s.axis_x_over_var, s.axis_x_over_h, s.axis_x_par_index, s.axis_x_var_index);
+    sig_skip_axis(skip, cs, s.axis_y_over_var, s.axis_y_over_h, s.axis_y_par_index, s.axis_y_var_index);
+    sig_append_shared_state(o, s, &skip);
     sig_append_int (o, "axp",  s.axis_x_par_index);
     sig_append_bool(o, "axv",  s.axis_x_over_var);
     sig_append_bool(o, "axh",  s.axis_x_over_h);
@@ -569,17 +590,25 @@ std::string build_l2d_signature(const CustomTabSharedConfig& s, const CustomSess
     return o;
 }
 
-std::string build_l1d_signature(const CustomTabSharedConfig& s, const CustomSession& cs) {
+namespace {
+// Подпись L1D без fx/fy: хвост с ними пишут l1d_fix_*_part, чтобы автопересчёт половины срезов мог
+// проверить, что вторая половина посчитана при текущих полях.
+std::string l1d_signature_base(const CustomTabSharedConfig& s, const CustomSession& cs) {
     std::string o; o.reserve(512);
     sig_append_bool(o, "en", s.level_1d_enabled);
-    sig_append_shared_state(o, s);
-    // L1D integrator overrides.
-    sig_append_str(o, "lh",  s.l1d_h_text);
-    sig_append_str(o, "ltt", s.l1d_transient_text);
-    sig_append_str(o, "lct", s.l1d_t_max_text);
     // Effective sweep — resolves inherit vs own automatically.
     EffectiveSweep sx = effective_sweep_x(s);
     EffectiveSweep sy = effective_sweep_y(s);
+    // Обе оси свипуются или пиннятся из fix_x/fix_y (pin_fixed_* в app_queues.cpp).
+    SigSkip skip;
+    sig_skip_axis(skip, cs, sx.over_var, sx.over_h, sx.par_index, sx.var_index);
+    sig_skip_axis(skip, cs, sy.over_var, sy.over_h, sy.par_index, sy.var_index);
+    sig_append_shared_state(o, s, &skip);
+    // L1D integrator overrides. При оси по h шаг задают свип и pin_fixed_h, а pin_axis крестом
+    // переписывает l1d_h_text.
+    if (!sx.over_h && !sy.over_h) sig_append_str(o, "lh", s.l1d_h_text);
+    sig_append_str(o, "ltt", s.l1d_transient_text);
+    sig_append_str(o, "lct", s.l1d_t_max_text);
     sig_append_int (o, "sxp",  sx.par_index);
     sig_append_bool(o, "sxv",  sx.over_var);
     sig_append_bool(o, "sxh",  sx.over_h);
@@ -599,9 +628,6 @@ std::string build_l1d_signature(const CustomTabSharedConfig& s, const CustomSess
     // Переменная БД (см. build_l2d_signature). plot_inter_peaks_1d сюда НЕ
     // входит — оба массива приходят из одного прогона, это только отрисовка.
     sig_append_int (o, "wv",   s.bif_writable_var);
-    // Fix positions — X-slice pins Y at fix_y, Y-slice pins X at fix_x.
-    sig_append_double(o, "fx", s.fix_x_value);
-    sig_append_double(o, "fy", s.fix_y_value);
     sig_append_bool(o, "cnt", s.continuation_1d_enabled);
     sig_append_bool(o, "bx", s.bif1d_x_enabled);
     sig_append_bool(o, "by", s.bif1d_y_enabled);
@@ -622,6 +648,15 @@ std::string build_l1d_signature(const CustomTabSharedConfig& s, const CustomSess
         sig_append_str(o, "snt",  cs.ls_session.curves[0].nt_text);
     }
     return o;
+}
+
+// Fix positions — X-slice pins Y at fix_y, Y-slice pins X at fix_x.
+std::string l1d_fix_x_part(double fx) { std::string o; sig_append_double(o, "fx", fx); return o; }
+std::string l1d_fix_y_part(double fy) { std::string o; sig_append_double(o, "fy", fy); return o; }
+} // namespace
+
+std::string build_l1d_signature(const CustomTabSharedConfig& s, const CustomSession& cs) {
+    return l1d_signature_base(s, cs) + l1d_fix_x_part(s.fix_x_value) + l1d_fix_y_part(s.fix_y_value);
 }
 
 std::string build_l3_signature(const CustomTabSharedConfig& s, const CustomSession& cs) {
@@ -692,4 +727,29 @@ void CustomSession::commit_pending_signatures() {
     commit(sig_l2d, l2d_ok);
     commit(sig_l1d, l1d_ok);
     commit(sig_l3,  l3_ok);
+}
+
+void CustomSession::arm_auto_recompute_signatures(bool x_slices, bool y_slices, bool l3) {
+    auto arm = [](LevelSig& sig, std::string current) {
+        sig.pending       = std::move(current);
+        sig.pending_armed = true;
+    };
+    if (l3) arm(sig_l3, build_l3_signature(shared, *this));
+    if (!x_slices && !y_slices) return;
+    const std::string base = l1d_signature_base(shared, *this);
+    const std::string fx   = l1d_fix_x_part(shared.fix_x_value);
+    const std::string fy   = l1d_fix_y_part(shared.fix_y_value);
+    if (!(x_slices && y_slices)) {
+        // Нетронутая половина срезов должна быть посчитана при тех же полях и своей фиксации
+        // (Y-срезы — при fix_x, X-срезы — при fix_y), иначе уровень остаётся грязным для Run.
+        const std::string& c = sig_l1d.committed;
+        if (!sig_l1d.committed_ok || c.compare(0, base.size(), base) != 0) return;
+        const std::string tail = c.substr(base.size());
+        const bool kept_ok = x_slices
+            ? tail.compare(0, fx.size(), fx) == 0
+            : tail.size() >= fy.size() && tail.compare(tail.size() - fy.size(), fy.size(), fy) == 0
+                                       && tail.compare(0, 3, "fx=") == 0;
+        if (!kept_ok) return;
+    }
+    arm(sig_l1d, base + fx + fy);
 }

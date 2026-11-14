@@ -16,8 +16,9 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
                                                 : std::numeric_limits<double>::quiet_NaN();
     // Drag callback: fires every frame while LMB is held inside the plot (HeatmapView
     // on_left_drag). Cheap — just moves the crosshair via fix_x/fix_y so the shared crosshair on
-    // every 2D window follows the cursor. Recompute (Phase/Basins enqueue + param_values update)
-    // is deferred to on_left_click on release.
+    // every 2D window follows the cursor. param_values update is deferred to on_left_click on
+    // release; Phase/Basins enqueue — to the settled branch in draw_custom_controls (or to
+    // on_left_click when the 1D level is off and that branch never runs).
     hv.on_left_drag = [&cs](int, int, double snap_x, double snap_y) {
         cs.shared.fix_x_value = snap_x;
         cs.shared.fix_y_value = snap_y;
@@ -53,9 +54,12 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
             s.axis_y_par_index < (int)cs.params.size()) {
             s.param_values[cs.params[s.axis_y_par_index]] = fmt_num_shortest(snap_y);
         }
-        if (s.autorun_on_drilldown && s.level_phase_enabled) {
+        // При включённом 1D ФП/бассейны ставит ветка автопересчёта в draw_custom_controls по
+        // сдвинутым выше таймерам; второй enqueue здесь гонял расчёт дважды в той же точке.
+        if (!s.level_1d_enabled && s.autorun_on_drilldown && s.level_phase_enabled) {
             model.enqueue_custom({ s.level3_kind == 0 ? CustomQueueItem::Kind::Phase
                                              : CustomQueueItem::Kind::Basins });
+            cs.arm_auto_recompute_signatures(false, false, true);
         }
     };
 }
@@ -197,19 +201,18 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
             draw_field_name(p, &model.field_labels);
             if (edited) {
                 phase.param_values[p] = c.param_values[p];
-                // Bump debounce timers so the auto-recompute path (L1D
-                // partial + Phase, gated by auto_recompute_1d /
-                // autorun_on_drilldown) picks up the manual edit — same
-                // path a slider drag settle goes through, no Run needed.
-                double t = ImGui::GetTime();
-                c.last_fix_x_change_time = t;
-                c.last_fix_y_change_time = t;
-                // If this param IS the effective sweep axis, move the
-                // crosshair to the new pinned value so 1D slice plots and
-                // 2D heatmaps show it there immediately.
-                double new_val = parse_ratio_or(c.param_values[p], 0.0);
-                if (!esx.over_var && !esx.over_h && esx.par_index == i) c.fix_x_value = new_val;
-                if (!esy.over_var && !esy.over_h && esy.par_index == i) c.fix_y_value = new_val;
+                // Автопересчёт — только от параметра оси свипа: правка двигает крест по своей оси
+                // и её таймер, как сдвиг креста. Прочие параметры лишь пачкают уровни до Run.
+                const double t       = ImGui::GetTime();
+                const double new_val = parse_ratio_or(c.param_values[p], 0.0);
+                if (!esx.over_var && !esx.over_h && esx.par_index == i) {
+                    c.fix_x_value = new_val;
+                    c.last_fix_x_change_time = t;
+                }
+                if (!esy.over_var && !esy.over_h && esy.par_index == i) {
+                    c.fix_y_value = new_val;
+                    c.last_fix_y_change_time = t;
+                }
             }
             if (is_swept[i]) {
                 ImGui::SameLine();
@@ -571,7 +574,18 @@ void draw_level3_detail(AppModel& model, CustomSession& cs) {
         // everything lives inside the pipeline's L3 config (no separate top-level window). The
         // Analysis tab uses the same helper with model.phase_session; here we pass Custom's own
         // isolated cs.phase_session.
-        draw_phase_controls(cs.phase_session, nullptr, &model);
+        // Recompute / Auto recompute идут через очередь Custom: прямой recompute_async считал
+        // по устаревшим полям phase_session, без apply_shared_to_phase и точки креста.
+        // Ctrl+R здесь не ловим — его уже обрабатывает Run Custom.
+        draw_phase_controls(cs.phase_session, nullptr, &model, nullptr, [&model, &cs]() {
+            // Ждущий в очереди Phase и так прочтёт свежие поля при старте.
+            const auto& q = model.custom_queue();
+            const bool queued = std::any_of(q.begin(), q.end(), [](const CustomQueueItem& it) {
+                return it.kind == CustomQueueItem::Kind::Phase;
+            });
+            if (!queued) model.enqueue_custom({ CustomQueueItem::Kind::Phase });
+            cs.arm_auto_recompute_signatures(false, false, true);
+        }, /*handle_ctrl_r*/ false);
     } else {
         // Basins sub-panel: IC-space axes + features. All of scheme/h/t_max/
         // etc. come from shared; DBSCAN eps stays per-config.
@@ -708,11 +722,17 @@ void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
             EffectiveSweep esy = effective_sweep_y(c);
             if (x_settled) pin_axis(esx, c.fix_x_value);
             if (y_settled) pin_axis(esy, c.fix_y_value);
-            if (c.autorun_on_drilldown && c.level_phase_enabled) {
+            const bool run_l3 = c.autorun_on_drilldown && c.level_phase_enabled;
+            if (run_l3) {
                 model.enqueue_custom({ c.level3_kind == 0
                     ? CustomQueueItem::Kind::Phase
                     : CustomQueueItem::Kind::Basins });
             }
+            cs.arm_auto_recompute_signatures(c.auto_recompute_1d && y_settled,
+                                             c.auto_recompute_1d && x_settled, run_l3);
+            // Нечего считать (у сдвинутой оси нет включённых срезов) — коммит иначе ждал бы
+            // чужого завершения расчёта.
+            if (model.custom_queue().empty()) cs.commit_pending_signatures();
             if (x_settled) c.last_fix_x_change_time = 0.0;
             if (y_settled) c.last_fix_y_change_time = 0.0;
         }
