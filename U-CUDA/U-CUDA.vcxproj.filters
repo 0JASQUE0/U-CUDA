@@ -405,6 +405,12 @@
     <ClCompile Include="..\libs\ui\src\bifurcation.cpp">
       <Filter>libs\ui\src</Filter>
     </ClCompile>
+    <ClCompile Include="..\libs\ui\src\tree_tab.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\tree_tab_windows.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
     <ClCompile Include="..\libs\ui\src\custom.cpp">
       <Filter>libs\ui\src</Filter>
     </ClCompile>
@@ -774,6 +780,9 @@
       <Filter>libs\ui\src</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\ui\src\tab_basins.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\tab_tree.h">
       <Filter>libs\ui\src</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\ui\src\tab_custom.h">

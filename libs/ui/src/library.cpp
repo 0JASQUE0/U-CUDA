@@ -4,6 +4,7 @@
 #include "tab_library.h"
 #include "tab_order.h"
 #include "tab_system.h"
+#include "tab_tree.h"
 using namespace ucuda::ui_detail;
 
 
@@ -508,6 +509,11 @@ void apply_system_switch(AppModel& model, SystemLibrary& lib,
             apply_session_json(model, jc, model.custom_session, session_from_json_custom, "_last_custom");
             break;
         }
+        case AppModel::AppMode::Tree:
+            // Как у Custom: сброс движка, иначе кэш модулей прошлой системы.
+            model.reset_engine();
+            load_tree_session(model, lib);
+            break;
         case AppModel::AppMode::Order: {
             model.start_order_analysis();
             std::string jo = lib.load_session(model.loaded_name, "_last_order");

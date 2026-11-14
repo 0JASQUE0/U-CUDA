@@ -13,6 +13,7 @@
 #include "tab_order.h"
 #include "tab_parametric.h"
 #include "tab_phase.h"
+#include "tab_tree.h"
 #include "dock_layout.h"
 using namespace ucuda::ui_detail;
 
@@ -32,6 +33,7 @@ const char* controls_window_for(AppModel::AppMode m) {
     case AppModel::AppMode::Order:      return "Order Controls";
     case AppModel::AppMode::Network:    return "Network Controls";
     case AppModel::AppMode::Neural:     return "Neural Controls";
+    case AppModel::AppMode::Tree:       return "Tree Controls";
     default:                            return nullptr;
     }
 }
@@ -702,8 +704,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                             model.app_mode != AppModel::AppMode::Network;
     bool entering_neural = (AppModel::AppMode)mode == AppModel::AppMode::Neural &&
                            model.app_mode != AppModel::AppMode::Neural;
+    bool entering_tree = (AppModel::AppMode)mode == AppModel::AppMode::Tree &&
+                         model.app_mode != AppModel::AppMode::Tree;
     if (entering_phase || entering_par || entering_dft1d || entering_basins || entering_fastsync
-        || entering_custom || entering_order || entering_network || entering_neural) {
+        || entering_custom || entering_order || entering_network || entering_neural || entering_tree) {
         // обновим known_vars/known_params из живого алфавита, чтобы сравнение
         // ниже было против актуального состояния
         model.refresh_symbols();
@@ -832,6 +836,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             apply_session_json(model, jc, model.custom_session, session_from_json_custom, "_last_custom");
         }
     }
+    const bool tree_need_init = model.tree_session.loaded_system_name != model.name
+                             || model.tree_session.tree.nodes.empty()
+                             || model.tree_session.vars   != model.known_vars
+                             || model.tree_session.params != model.known_params;
+    if (entering_tree && tree_need_init) load_tree_session(model, lib);
     // Persist AppMode change so the next launch restores this tab. Compare
     // BEFORE overwriting so we only write on real transitions (not on every
     // frame while sitting in the same tab).
@@ -869,6 +878,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                            controls_window_for(model.app_mode));
         g_prev_frame_mode = mode_i;
         dock_snap_dragged_split(dockspace_id);
+        if (model.app_mode == AppModel::AppMode::Tree) g_tree_dockspace_id = dockspace_id;
         ImGui::DockSpace(dockspace_id, ImVec2(0, 0), ImGuiDockNodeFlags_None);
         dock_keep_split_ratios(dockspace_id, controls_window_for(model.app_mode));
     }
@@ -1026,6 +1036,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                                        (std::max)(380.0f, vp->WorkSize.y - 110)), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Neural Results")) draw_neural_results(model);
         ImGui::End();
+    }
+    else if (model.app_mode == AppModel::AppMode::Tree) {
+        if (ImGui::Begin("Tree Controls", nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
+            draw_tree_controls(model, lib);
+        }
+        ImGui::End();
+        draw_tree_plot_windows(model, cb);
     }
     else if (model.app_mode == AppModel::AppMode::Custom) {
         // Custom mode: split-region layout (Controls | Workspace) drawn into

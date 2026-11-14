@@ -302,6 +302,8 @@ void TreeSession::ensure_leaf_runtimes() {
                 rt.phase->load_from_record(record, vars, params);
                 rt.phase->observables.clear();
                 rt.phase->obs_exprs.clear();
+                // Окна проекций разных точек иначе не различить по заголовку.
+                for (auto& pr : rt.phase->projections) pr.label = n.name + ": " + pr.label;
             }
             break;
         case TreeNodeKind::Basins:
@@ -647,12 +649,17 @@ std::vector<int> TreeSession::dirty_leaves(int subtree_root) const {
     return out;
 }
 
+int TreeSession::cursor_owner(int id) const {
+    const int reg = region_of(id);
+    return reg ? reg : tree.nearest(id, TreeNodeKind::Slice1D);
+}
+
 std::vector<int> TreeSession::cursor_leaves(int region_id) const {
     std::vector<int> out;
     for (int id : tree.subtree(region_id)) {
         const TreeNode* n = tree.find(id);
         if (!n || tree_kind_is_context(n->kind) || tree_kind_is_2d_leaf(n->kind)) continue;
-        if (region_of(id) != region_id || !tree.is_active(id)) continue;
+        if (cursor_owner(id) != region_id || !tree.is_active(id)) continue;
         // Все контексты между листом и регионом обязаны следовать за курсором и быть живыми.
         bool follows = true;
         for (const TreeNode* c = tree.find(n->parent); c && c->id != region_id;
@@ -750,6 +757,8 @@ bool TreeSession::poll_all() {
     bool any = false;
     for (auto& [id, rt] : leaves) {
         bool done = false;
+        // Отменённый ФП оставляет прошлый result.ok и не двигает data_generation.
+        const int phase_gen = rt.phase ? rt.phase->data_generation : 0;
         if (rt.bif    && rt.bif->poll())    done = true;
         if (rt.lle    && rt.lle->poll())    done = true;
         if (rt.ls     && rt.ls->poll())     done = true;
@@ -758,8 +767,9 @@ bool TreeSession::poll_all() {
         if (!done) continue;
         any = true;
         if (rt.pending_armed) {
+            const bool cancelled = rt.phase && rt.phase->data_generation == phase_gen;
             rt.committed     = rt.pending;
-            rt.committed_ok  = rt.last_ok();
+            rt.committed_ok  = rt.last_ok() && !cancelled;
             rt.pending_armed = false;
             rt.pending.clear();
         }

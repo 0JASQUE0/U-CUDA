@@ -79,8 +79,8 @@ struct TreeSession {
     [[nodiscard]] bool leaf_dirty(int leaf_id) const;
     // Активные грязные листья поддерева в порядке обхода.
     [[nodiscard]] std::vector<int> dirty_leaves(int subtree_root) const;
-    // Активные грязные листья, чьи срез или точка следуют за курсором региона и живые.
-    [[nodiscard]] std::vector<int> cursor_leaves(int region_id) const;
+    // Активные грязные листья, чьи срез или точка следуют за курсором владельца и живые.
+    [[nodiscard]] std::vector<int> cursor_leaves(int owner_id) const;
     // Собрать конфиг и запустить расчёт листа.
     bool start_leaf(int leaf_id, ParametricEngine& engine);
     [[nodiscard]] bool any_in_flight() const;
@@ -88,8 +88,10 @@ struct TreeSession {
     // Опросить подсессии; true, если что-то завершилось.
     bool poll_all();
 
-    // Регион, чей курсор управляет узлом (для среза и точки — ближайший регион-предок).
+    // Ближайший регион-предок (включая сам узел); 0 — нет.
     [[nodiscard]] int region_of(int id) const;
+    // Чей курсор управляет узлом: регион, а без него — срез под System.
+    [[nodiscard]] int cursor_owner(int id) const;
     // Зажать курсоры регионов в их диапазоны.
     void clamp_cursors();
 };
