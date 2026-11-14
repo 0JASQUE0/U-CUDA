@@ -656,6 +656,12 @@ bool AppModel::remove_tree_node(int id) {
     return true;
 }
 
+bool AppModel::recluster_tree_basins(int leaf_id) {
+    auto it = tree_session.leaves.find(leaf_id);
+    if (it == tree_session.leaves.end() || !it->second.basins || tree_session.any_in_flight()) return false;
+    return it->second.basins->run_recluster_async(ensure_engine(), 0);
+}
+
 bool AppModel::start_next_in_tree_queue() {
     if (tree_session.any_in_flight()) return false;
     while (!tree_queue_.empty()) {

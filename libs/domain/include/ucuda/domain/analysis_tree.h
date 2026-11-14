@@ -49,6 +49,12 @@ struct TreeNode {
     bool         live = true;
     // Slice1D: 0 — вдоль X региона, 1 — вдоль Y.
     int          slice_dir = 0;
+    // Лист: свои h, transient, computing time, decimator и НУ вместо унаследованных от System
+    // (берутся из cfg листа). Бассейнам это нужно почти всегда: НУ неосевых переменных и время.
+    bool         own_integration = false;
+    // Лист: дополнительные окна того же результата (без пересчёта); значение — показатель
+    // для LS 2D (-1 — сумма), у остальных не используется.
+    std::vector<int> extra_views;
     // Поля контекста; смысл зависит от kind (см. effective_shared в tree_session.cpp):
     //   System   — интегратор, НУ, параметры, pre_scaller, max_value;
     //   Region2D — axis_x_*, axis_y_*, resolution_text, bif_writable_var, курсор fix_x/fix_y;

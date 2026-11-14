@@ -521,6 +521,14 @@ CustomTabSharedConfig TreeSession::effective_shared(int leaf_id) const {
         s.fix_x_value = pt->cfg.fix_x_value;
         s.fix_y_value = pt->cfg.fix_y_value;
     }
+    if (leaf->own_integration && !tree_kind_is_context(leaf->kind)) {
+        const auto& c = leaf->cfg;
+        s.h_text = s.l1d_h_text = c.h_text;
+        s.transient_text = s.l1d_transient_text = c.transient_text;
+        s.t_max_text = s.l1d_t_max_text = c.t_max_text;
+        s.pre_scaller_text   = c.pre_scaller_text;
+        s.initial_conditions = c.initial_conditions;
+    }
 
     // Пины закреплённых осей.
     const EffectiveSweep ex = effective_sweep_x(s);
@@ -781,6 +789,44 @@ bool TreeSession::poll_all() {
         }
     }
     return any;
+}
+
+bool TreeSession::tick_basins_phase(double now) {
+    bool done = false;
+    for (auto& [id, rt] : leaves) {
+        if (!rt.basins) continue;
+        auto& b = *rt.basins;
+        b.ensure_phase_slots();
+        if (b.poll_phase()) done = true;
+        // Автозапуск — как basins_phase_tick вкладки Basins (tick.cpp).
+        for (int i = 0; i < (int)b.configs.size(); ++i) {
+            BasinsConfig&    c  = b.configs[(size_t)i];
+            BasinsPhaseSlot& sl = *b.phase_slots[(size_t)i];
+            const std::string sig = build_basins_phase_signature(c);
+            if (sig != sl.pending_signature) { sl.pending_signature = sig; sl.pending_since = now; }
+            if (sig == sl.run_signature || !c.pp_autorun) continue;
+            if (!c.last_run_ok || c.result.basin_idx.empty() || sl.phase.in_flight) continue;
+            if (now - sl.pending_since < 0.3) continue;
+            b.request_phase_run(i);
+        }
+        b.start_next_phase();
+        if (b.phase_settings_dirty) { b.phase_settings_dirty = false; dirty = true; }
+    }
+    return done;
+}
+
+void TreeSession::enable_own_integration(int leaf_id) {
+    TreeNode* n = tree.find(leaf_id);
+    if (!n || tree_kind_is_context(n->kind) || n->own_integration) return;
+    const CustomTabSharedConfig s = effective_shared(leaf_id);
+    const bool is1d = tree_kind_is_1d_leaf(n->kind);
+    n->cfg.h_text             = is1d ? s.l1d_h_text : s.h_text;
+    n->cfg.transient_text     = is1d ? s.l1d_transient_text : s.transient_text;
+    n->cfg.t_max_text         = is1d ? s.l1d_t_max_text : s.t_max_text;
+    n->cfg.pre_scaller_text   = s.pre_scaller_text;
+    n->cfg.initial_conditions = s.initial_conditions;
+    n->own_integration = true;
+    dirty = true;
 }
 
 void TreeSession::clamp_cursors() {

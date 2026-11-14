@@ -63,7 +63,10 @@ ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
 
 namespace ucuda::ui_detail {
 void draw_basins_phase_controls(AppModel& model, int cfg_idx) {
-    BasinsAnalysisSession& s = model.basins_session;
+    draw_basins_phase_controls(model, model.basins_session, cfg_idx);
+}
+
+void draw_basins_phase_controls(AppModel& model, BasinsAnalysisSession& s, int cfg_idx) {
     if (cfg_idx < 0 || cfg_idx >= (int)s.configs.size()) return;
     BasinsConfig&    c  = s.configs[(size_t)cfg_idx];
     BasinsPhaseSlot& sl = s.phase_slot(cfg_idx);
@@ -872,6 +875,17 @@ void draw_basins_phase_windows(AppModel& model, const GuiCallbacks& cb) {
     if (s.configs.empty()) return;
     int ci = s.active_config_index;
     if (ci < 0 || ci >= (int)s.configs.size()) ci = 0;
+    // title_suffix / owner_id_delta — свои на config: docking-раскладка в
+    // imgui.ini и кэш рендереров не должны пересекаться ни между конфигами,
+    // ни с проекциями режима Phase analysis.
+    draw_basins_phase_windows(model, s, ci, cb, "##bpp" + std::to_string(ci), 0x1BA50000 + ci * 16);
+}
+
+void draw_basins_phase_windows(AppModel& model, BasinsAnalysisSession& s, int ci, const GuiCallbacks& cb,
+                               const std::string& title_suffix, int owner_id_delta,
+                               const ProjHookFn& before_begin, const ProjHookFn& after_begin) {
+    s.ensure_phase_slots();
+    if (ci < 0 || ci >= (int)s.configs.size()) return;
     BasinsConfig&    c  = s.configs[(size_t)ci];
     BasinsPhaseSlot& sl = s.phase_slot(ci);
 
@@ -915,13 +929,8 @@ void draw_basins_phase_windows(AppModel& model, const GuiCallbacks& cb) {
         }
     }
 
-    // title_suffix / owner_id_delta — свои на config: docking-раскладка в
-    // imgui.ini и кэш рендереров не должны пересекаться ни между конфигами,
-    // ни с проекциями режима Phase analysis.
     const size_t n_before = sl.phase.projections.size();
-    draw_projection_windows(sl.phase, cb, {}, {},
-                            "##bpp" + std::to_string(ci),
-                            0x1BA50000 + ci * 16,
+    draw_projection_windows(sl.phase, cb, before_begin, after_begin, title_suffix, owner_id_delta,
                             style_fn, clust);
     // Окно могли закрыть крестиком — список окон изменился, надо сохранить.
     if (sl.phase.projections.size() != n_before) s.phase_settings_dirty = true;

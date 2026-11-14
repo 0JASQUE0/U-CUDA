@@ -4,6 +4,7 @@
 #include "gui_integration.h"
 #include "gui_plot.h"
 #include "tab_phase.h"
+#include "tab_basins.h"
 #include "ucuda/storage/system_library.h"
 
 namespace ucuda::ui_detail {
@@ -70,7 +71,7 @@ std::string node_meta(const TreeSession& ts, const TreeNode& n) {
     }
 }
 
-enum class Act { None, Add, Dup, Del, Toggle, Up, Down, RunNode };
+enum class Act { None, Add, Dup, Del, Toggle, Up, Down, RunNode, NewView };
 struct Pending { Act act = Act::None; int id = 0; TreeNodeKind kind = TreeNodeKind::System; int dir = 0; };
 
 int  g_rename_id = 0;
@@ -200,6 +201,13 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend) {
     if (ImGui::BeginPopupContextItem("##ctx")) {
         ts.tree.selected_id = id;
         if (ImGui::MenuItem(ctx ? "Run subtree" : "Run node")) pend = { Act::RunNode, id };
+        if (tree_kind_is_2d_leaf(n->kind) || tree_kind_is_1d_leaf(n->kind)) {
+            if (ImGui::MenuItem("New window", nullptr, false, n->extra_views.size() < 15))
+                pend = { Act::NewView, id };
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Another window of the same result, no recomputation\n"
+                                  "(e.g. a different Lyapunov exponent of the same 2D map).");
+        }
         if (ImGui::MenuItem("Rename")) {
             g_rename_id = id;
             std::snprintf(g_rename_buf, sizeof(g_rename_buf), "%s", n->name.c_str());
@@ -299,6 +307,15 @@ void apply_pending(AppModel& model, TreeSession& ts, const Pending& p) {
         break;
     case Act::Up:   ts.move_node(p.id, -1); break;
     case Act::Down: ts.move_node(p.id, +1); break;
+    case Act::NewView: {
+        int v = 0;
+        auto it = ts.leaves.find(p.id);
+        if (it != ts.leaves.end() && it->second.ls && !it->second.ls->curves.empty())
+            v = it->second.ls->curves[0].display_exponent_idx;
+        n->extra_views.push_back(v);
+        ts.dirty = true;
+        break;
+    }
     case Act::RunNode:
         if (tree_kind_is_context(n->kind)) model.enqueue_tree(ts.dirty_leaves(p.id));
         else if (ts.tree.is_active(p.id))  model.enqueue_tree({ p.id });
@@ -518,31 +535,90 @@ bool draw_leaf_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
         break;
     }
     case TreeNodeKind::Basins: {
-        auto& bc = rt.basins->configs[0];
-        auto var_combo = [&](const char* id, int& v) {
-            ImGui::SetNextItemWidth(120.0f);
-            if (ImGui::BeginCombo(id, v >= 0 && v < (int)ts.vars.size() ? ts.vars[v].c_str() : "var")) {
-                for (int i = 0; i < (int)ts.vars.size(); ++i)
-                    if (ImGui::Selectable(ts.vars[i].c_str(), v == i)) { v = i; ch = true; }
-                ImGui::EndCombo();
-            }
-        };
-        ImGui::TextUnformatted("IC-space X var:"); ImGui::SameLine(); var_combo("##bxv", bc.axis_x_var);
-        ch |= InputNumStr("lo##bx", bc.axis_x_lo_text, kFieldW);
-        ch |= InputNumStr("hi##bx", bc.axis_x_hi_text, kFieldW);
-        ImGui::TextUnformatted("IC-space Y var:"); ImGui::SameLine(); var_combo("##byv", bc.axis_y_var);
-        ch |= InputNumStr("lo##by", bc.axis_y_lo_text, kFieldW);
-        ch |= InputNumStr("hi##by", bc.axis_y_hi_text, kFieldW);
-        ch |= InputNumStr("N##bxy", bc.n_pts_text, kFieldW);
+        // Как во вкладке Basins: оси по НУ, сетка, фичи DBSCAN, перекластеризация, портреты.
+        auto& b  = *rt.basins;
+        auto& bc = b.configs[0];
+        if (!ts.vars.empty()) {
+            if (bc.axis_x_var < 0 || bc.axis_x_var >= (int)ts.vars.size()) bc.axis_x_var = 0;
+            if (bc.axis_y_var < 0 || bc.axis_y_var >= (int)ts.vars.size())
+                bc.axis_y_var = ts.vars.size() > 1 ? 1 : 0;
+            const std::vector<const char*> items = c_str_list(ts.vars);
+            auto symlog = [&](const char* id, bool& on) {
+                ImGui::SameLine();
+                ch |= ImGui::Checkbox(id, &on);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("|x| log-spaced on [lo, hi] on both sides of 0\n"
+                                      "(nodes -hi..-lo, +lo..+hi, monotone).\n"
+                                      "lo, hi > 0; Resolution even.");
+            };
+            ImGui::SetNextItemWidth(kComboW);
+            ch |= ImGui::Combo("Axis X (IC)", &bc.axis_x_var, items.data(), (int)items.size());
+            symlog("\xC2\xB1log##tbas_xsym", bc.axis_x_symlog);
+            ch |= InputNumStr(bc.axis_x_symlog ? "|X| lo" : "X lo", bc.axis_x_lo_text, kFieldW);
+            ch |= InputNumStr(bc.axis_x_symlog ? "|X| hi" : "X hi", bc.axis_x_hi_text, kFieldW);
+            ImGui::SetNextItemWidth(kComboW);
+            ch |= ImGui::Combo("Axis Y (IC)", &bc.axis_y_var, items.data(), (int)items.size());
+            symlog("\xC2\xB1log##tbas_ysym", bc.axis_y_symlog);
+            ch |= InputNumStr(bc.axis_y_symlog ? "|Y| lo" : "Y lo", bc.axis_y_lo_text, kFieldW);
+            ch |= InputNumStr(bc.axis_y_symlog ? "|Y| hi" : "Y hi", bc.axis_y_hi_text, kFieldW);
+        }
+        ch |= InputNumStr("Resolution", bc.n_pts_text, kFieldW);
         const int wv0 = bc.writable_var;
         draw_writable_var_combo(ts.vars, bc.writable_var, "Writable var##tree_bas_wv");
         ch |= wv0 != bc.writable_var;
-        ch |= ImGui::InputInt("feature1", &bc.feature1);
-        ch |= ImGui::InputInt("feature2", &bc.feature2);
+        if (ImGui::CollapsingHeader("Features (DBSCAN axes + plot data)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (bc.feature1 < 0 || bc.feature1 >= BF_FEATURE_COUNT) bc.feature1 = BF_FEATURE1_DEFAULT;
+            if (bc.feature2 < 0 || bc.feature2 >= BF_FEATURE_COUNT) bc.feature2 = BF_FEATURE2_DEFAULT;
+            ImGui::SetNextItemWidth(220);
+            ch |= ImGui::Combo("Feature 1##tbas", &bc.feature1, kBasinFeatureNames, BF_FEATURE_COUNT);
+            ImGui::SameLine();
+            ch |= InputNumStr("mult##tbas_f1", bc.mult_feature1_text, 80);
+            ImGui::SetNextItemWidth(220);
+            ch |= ImGui::Combo("Feature 2##tbas", &bc.feature2, kBasinFeatureNames, BF_FEATURE_COUNT);
+            ImGui::SameLine();
+            ch |= InputNumStr("mult##tbas_f2", bc.mult_feature2_text, 80);
+        }
         ch |= InputNumStr("DBSCAN eps", bc.eps_dbscan_text, kFieldW);
+        ImGui::SameLine();
+        const bool can_recluster = !ts.any_in_flight() && bc.last_run_ok && !bc.result.avg_peaks.empty()
+                                && !bc.result.avg_intervals.empty() && !bc.result.helpful_array.empty();
+        if (!can_recluster) ImGui::BeginDisabled();
+        if (ImGui::Button("Clustering")) model.recluster_tree_basins(n.id);
+        if (!can_recluster) ImGui::EndDisabled();
+        ImGui::TextDisabled("Clustering radius in (Feature 1, Feature 2) space.");
+        if (ImGui::CollapsingHeader("Phase portraits")) draw_basins_phase_controls(model, b, 0);
+        if (bc.last_run_ok)
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK: %dx%d, %d clusters (+ %d FP clusters)",
+                               bc.result.n_pts, bc.result.n_pts, bc.result.n_clusters, -bc.result.min_cluster_idx);
         break;
     }
     default: break;
+    }
+
+    ImGui::SeparatorText("Integration");
+    bool own = n.own_integration;
+    if (ImGui::Checkbox("Own integration and initial conditions", &own)) {
+        if (own) ts.enable_own_integration(n.id);
+        else     n.own_integration = false;
+        ch = true;
+    }
+    if (n.own_integration) {
+        auto& c = n.cfg;
+        if (!model.is_map) ch |= InputNumStr("h##own", c.h_text, kFieldW);
+        ch |= InputNumStr(model.is_map ? "transient iterations##own" : "transient time##own", c.transient_text, kFieldW);
+        ch |= InputNumStr(model.is_map ? "iterations##own" : "computing time##own", c.t_max_text, kFieldW);
+        ch |= InputNumStr("decimator##own", c.pre_scaller_text, kFieldW);
+        const auto ic0 = c.initial_conditions;
+        draw_named_num_fields("Initial conditions##own_ic", ts.vars, c.initial_conditions,
+                              n.kind == TreeNodeKind::Basins ? "Values for non-axis variables." : nullptr);
+        ch |= ic0 != c.initial_conditions;
+    } else {
+        const CustomTabSharedConfig s = ts.effective_shared(n.id);
+        const bool is1d = tree_kind_is_1d_leaf(n.kind);
+        ImGui::TextDisabled("Inherited: h %s, transient %s, time %s",
+                            (is1d ? s.l1d_h_text : s.h_text).c_str(),
+                            (is1d ? s.l1d_transient_text : s.transient_text).c_str(),
+                            (is1d ? s.l1d_t_max_text : s.t_max_text).c_str());
     }
     if (!rt.in_flight() && !rt.committed.empty() && !rt.committed_ok) {
         const std::string err = rt.last_error();

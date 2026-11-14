@@ -387,6 +387,8 @@ public:
     void clear_tree_queue();
     // Удалить узел с поддеревом; false, если что-то из него считается.
     bool remove_tree_node(int id);
+    // Перекластеризация бассейнов листа по уже посчитанным фичам (как Clustering во вкладке Basins).
+    bool recluster_tree_basins(int leaf_id);
     void clear_all_queues();
 
     // Чтение очередей (размер для подписей, содержимое для тестов).

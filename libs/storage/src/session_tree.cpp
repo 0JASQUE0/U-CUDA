@@ -108,9 +108,15 @@ std::string tree_state_to_json(const AnalysisTree& t, const std::map<int, std::s
         o << "\"children\":[";
         for (size_t c = 0; c < n.children.size(); ++c) o << (c ? "," : "") << n.children[c];
         o << "]";
-        if (tree_kind_is_context(n.kind)) {
+        // Лист пишет cfg только со своим интегратором: иначе его поля не используются.
+        if (tree_kind_is_context(n.kind) || n.own_integration) {
             o << ",\"cfg\":"; write_shared_config(o, n.cfg);
-        } else {
+        }
+        if (!tree_kind_is_context(n.kind)) {
+            o << ",\"own_integration\":" << (n.own_integration ? "true" : "false");
+            o << ",\"extra_views\":[";
+            for (size_t c = 0; c < n.extra_views.size(); ++c) o << (c ? "," : "") << n.extra_views[c];
+            o << "]";
             auto it = leaf_json.find(n.id);
             if (it != leaf_json.end() && !it->second.empty()) o << ",\"leaf\":" << it->second;
         }
@@ -152,6 +158,8 @@ bool tree_state_from_json(const std::string& json, AnalysisTree& out, std::map<i
                                     else if (k == "live")          n.live = p.boolean();
                                     else if (k == "slice_dir")     n.slice_dir = std::stoi(p.str_or_num());
                                     else if (k == "children")      n.children = read_int_array(p);
+                                    else if (k == "own_integration") n.own_integration = p.boolean();
+                                    else if (k == "extra_views")   n.extra_views = read_int_array(p);
                                     else if (k == "cfg" || k == "leaf") {
                                         p.ws();
                                         const size_t a = p.i;

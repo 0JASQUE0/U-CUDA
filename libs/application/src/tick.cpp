@@ -293,6 +293,9 @@ void AppModel::tick(SystemLibrary& lib) {
     }
     // Tree: подписи листов коммитятся в poll_all по завершении каждого листа.
     bool tree_dirty = model.tree_session.poll_all();
+    const double tree_now =
+        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (model.tree_session.tick_basins_phase(tree_now)) tree_dirty = true;
     if (model.tree_session.dirty) {
         tree_dirty = true;
         model.tree_session.dirty = false;

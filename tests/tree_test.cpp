@@ -131,6 +131,19 @@ void signatures_follow_the_cursor() {
     require(ts.leaf_dirty(b2) && ts.leaf_dirty(bx) && ts.leaf_dirty(by) && ts.leaf_dirty(ph),
             "a non-swept parameter dirties every leaf");
 
+    // Свой интегратор листа: стартует с унаследованного, дальше живёт сам; пины осей остаются.
+    commit_all(ts);
+    ts.enable_own_integration(ph);
+    require(!ts.leaf_dirty(ph), "switching to own integration keeps the inputs");
+    ts.tree.find(ph)->cfg.t_max_text = "777";
+    ts.tree.find(ph)->cfg.param_values["a"] = "999";   // параметры листа не перекрывают System
+    const CustomTabSharedConfig own = ts.effective_shared(ph);
+    require(own.t_max_text == "777" && ts.leaf_dirty(ph) && !ts.leaf_dirty(b2), "own time is the leaf's");
+    require(own.param_values.at("a") == fmt_num_shortest(ts.tree.find(reg)->cfg.fix_x_value),
+            "the point pin still sets the swept parameter");
+    ts.tree.nodes.front().cfg.h_text = "0.002";
+    require(ts.effective_shared(ph).h_text != "0.002", "System h no longer reaches an own-integration leaf");
+
     // Правка контекста пачкает только его поддерево.
     commit_all(ts);
     ts.tree.find(sx)->cfg.n_x_1d_text = "321";
@@ -184,6 +197,12 @@ void json_round_trip() {
     a.tree.find(reg)->name = "Wide \"map\"";
     a.add_node(find_kind(a, TreeNodeKind::Point), TreeNodeKind::Basins);
     a.leaves[find_kind(a, TreeNodeKind::LLE2D)].lle->curves[0].eps_text = "3e-5";
+    // Свой интегратор и НУ листа бассейнов, доп. окна LS 2D — тоже в файле.
+    const int bas = find_kind(a, TreeNodeKind::Basins);
+    a.enable_own_integration(bas);
+    a.tree.find(bas)->cfg.t_max_text = "2000";
+    a.tree.find(bas)->cfg.initial_conditions["z"] = "16";
+    a.tree.find(find_kind(a, TreeNodeKind::LS2D))->extra_views = { 1, -1 };
     const std::string j1 = session_to_json_tree(a);
 
     TreeSession b;
@@ -193,6 +212,10 @@ void json_round_trip() {
     require(b.tree.find(reg)->cfg.fix_x_value == 0.123456789012345, "cursor keeps every digit");
     require(b.leaves[find_kind(b, TreeNodeKind::LLE2D)].lle->curves[0].eps_text == "3e-5", "leaf config restored");
     require(b.leaves.size() == a.leaves.size(), "leaf runtimes restored");
+    require(b.tree.find(bas)->own_integration && b.tree.find(bas)->cfg.t_max_text == "2000",
+            "own integration restored");
+    require(b.tree.find(find_kind(b, TreeNodeKind::LS2D))->extra_views == std::vector<int>({ 1, -1 }),
+            "extra windows restored");
 
     // Битый файл и неизвестный вид узла не трогают сессию.
     const std::string before = session_to_json_tree(b);

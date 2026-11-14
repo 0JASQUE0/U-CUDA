@@ -2,6 +2,7 @@
 #include "gui_inputs.h"
 #include "gui_plot.h"
 #include "tab_phase.h"
+#include "tab_basins.h"
 
 namespace ucuda::ui_detail {
 
@@ -17,8 +18,11 @@ struct LeafViews {
     int cmap_seen = -2;
     int exp_seen  = -999;
     int swap_seen = -1;
+    int gen_fit   = -1;   // поколение данных, под которое окно уже подогнано
 };
+// Ключ — id листа * 16 + номер окна (0 — основное, 1..15 — дополнительные).
 using ViewMap = std::map<int, LeafViews>;
+constexpr int kViewsPerLeaf = 16;
 
 std::string axis_label(const TreeSession& ts, const EffectiveSweep& e) {
     if (e.over_h) return "h";
@@ -69,20 +73,21 @@ void leaf_window_frame(TreeSession& ts, int id, int slot) {
     ImGui::GetWindowDrawList()->PopClipRect();
 }
 
-bool begin_leaf_window(TreeSession& ts, const TreeNode& n, const std::string& title) {
+bool begin_leaf_window(TreeSession& ts, const TreeNode& n, const std::string& title, bool* p_open) {
     ensure_docked(title);
     if (g_tree_focus_leaf == n.id) {
         focus_leaf_window(title);
         g_tree_focus_leaf = 0;
     }
-    const bool vis = ImGui::Begin(title.c_str());
+    const bool vis = ImGui::Begin(title.c_str(), p_open);
     if (ImGui::GetWindowDockID() != 0) g_leaf_dock = ImGui::GetWindowDockID();
     leaf_window_frame(ts, n.id, tree_kind_dim_slot(n.kind));
     return vis;
 }
 
+// exp_store — показатель LS этого окна (у основного — в конфиге, у дополнительных — в узле).
 void draw_2d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafRuntime& rt,
-                  LeafViews& v, const GuiCallbacks& cb, int owner_id) {
+                  LeafViews& v, const GuiCallbacks& cb, int owner_id, bool primary, int* exp_store) {
     if (!v.hv)  v.hv  = std::make_unique<HeatmapView>();
     if (!v.rnd) v.rnd = std::make_unique<PlotRenderer>();
     HeatmapView& hv = *v.hv;
@@ -130,9 +135,10 @@ void draw_2d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
         gen = c.data_generation_2d; flags = &c.result_2d.flags;
         log_x = c.log_scale; log_y = c.log_scale_2;
         cmap = &c.colormap_idx; fit = &c.fit_request_2d; busy = rt.ls->in_flight;
-        if (v.exp_seen != c.display_exponent_idx) {
-            v.exp_seen = c.display_exponent_idx;
-            hv.display_exponent_idx = c.display_exponent_idx;
+        if (!exp_store) exp_store = &c.display_exponent_idx;
+        if (v.exp_seen != *exp_store) {
+            v.exp_seen = *exp_store;
+            hv.display_exponent_idx = *exp_store;
         }
     }
     if (v.cmap_seen != *cmap) {
@@ -145,11 +151,12 @@ void draw_2d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
     int ls_gen = gen;
     {
         HeatmapToolbarOpts topts;
-        topts.persist_colormap = [&](int cm) { *cmap = cm; v.cmap_seen = cm; ts.dirty = true; };
+        // Колормап доп. окна живёт в его виде: основной хранится в конфиге.
+        if (primary) topts.persist_colormap = [&](int cm) { *cmap = cm; v.cmap_seen = cm; ts.dirty = true; };
         if (ls_cfg) topts.extras = [&]() {
             if (!ls_cfg->last_run_2d_ok || ls_cfg->result_2d.n_exponents <= 0) return;
             draw_ls_exponent_picker(hv, ls_cfg->result_2d.n_exponents,
-                                    [&](int j) { ls_cfg->display_exponent_idx = j; ts.dirty = true; });
+                                    [&](int j) { *exp_store = j; v.exp_seen = j; ts.dirty = true; });
             ls_resolve_plane(*ls_cfg, hv.display_exponent_idx, ls_plane, ls_vmin, ls_vmax, ls_gen);
         };
         draw_heatmap_toolbar(hv, topts);
@@ -204,8 +211,10 @@ void draw_2d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
         hv.value_is_regime_code = true;
     }
     const double* vals = ls_plane ? ls_plane : values;
-    const bool take_fit = *fit;
-    *fit = false;
+    // Основное окно гасит запрос конфига; любое окно подгоняется под новое поколение данных.
+    const bool take_fit = (primary && *fit) || v.gen_fit != gen;
+    if (primary) *fit = false;
+    v.gen_fit = gen;
     const ImVec2 avail = ImGui::GetContentRegionAvail(), origin = ImGui::GetCursorScreenPos();
     hv.render(*v.rnd, origin, avail, owner_id, ls_plane ? ls_gen : gen, n_pts, n_pts, vals,
               lx, hx, ly, hy, ls_plane ? ls_vmin : vmin, ls_plane ? ls_vmax : vmax, take_fit);
@@ -213,7 +222,7 @@ void draw_2d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
 }
 
 void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafRuntime& rt,
-                  LeafViews& v, const GuiCallbacks& cb, int owner_id) {
+                  LeafViews& v, const GuiCallbacks& cb, int owner_id, bool primary) {
     if (!v.pv)  v.pv  = std::make_unique<Plot2DView>();
     if (!v.rnd) v.rnd = std::make_unique<PlotRenderer>();
     Plot2DView& view = *v.pv;
@@ -430,8 +439,9 @@ void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
             else                                  data_export::export_ls1d(rtp->ls->curves[0].result, path);
         });
     };
-    const bool take_fit = *fit;
-    *fit = false;
+    const bool take_fit = (primary && *fit) || v.gen_fit != data_gen;
+    if (primary) *fit = false;
+    v.gen_fit = data_gen;
     const ImVec2 avail = ImGui::GetContentRegionAvail(), origin = ImGui::GetCursorScreenPos();
     view.render(*v.rnd, origin, avail, owner_id, series_gen, series, init_vis, glob_vis, take_fit);
     (void)model;
@@ -493,7 +503,9 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
         }
     }
     for (auto it = views.begin(); it != views.end();) {
-        if (!ts.tree.find(it->first)) it = views.erase(it); else ++it;
+        const TreeNode* vn = ts.tree.find(it->first / kViewsPerLeaf);
+        const int k = it->first % kViewsPerLeaf;
+        if (!vn || k > (int)vn->extra_views.size()) it = views.erase(it); else ++it;
     }
 
     const std::string& sys = model.loaded_name;
@@ -506,7 +518,7 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
         auto rit = ts.leaves.find(id);
         if (rit == ts.leaves.end()) continue;
         TreeLeafRuntime& rt = rit->second;
-        const int owner_id = ((0x7E000 + id) << 3) ^ sys_delta;
+        const int owner_id = ((0x7E000 + id) << 4) ^ sys_delta;
 
         if (n->kind == TreeNodeKind::Phase) {
             if (!rt.phase) continue;
@@ -527,15 +539,56 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
         }
 
         const std::string title = n->name + "###tree_" + std::to_string(id) + sys_sfx;
-        if (begin_leaf_window(ts, *n, title)) {
+        if (begin_leaf_window(ts, *n, title, nullptr)) {
             ImGui::PushID(id);
-            LeafViews& v = views[id];
-            if (tree_kind_is_2d_leaf(n->kind))      draw_2d_leaf(model, ts, *n, rt, v, cb, owner_id);
-            else if (tree_kind_is_1d_leaf(n->kind)) draw_1d_leaf(model, ts, *n, rt, v, cb, owner_id);
+            LeafViews& v = views[id * kViewsPerLeaf];
+            if (tree_kind_is_2d_leaf(n->kind))      draw_2d_leaf(model, ts, *n, rt, v, cb, owner_id, true, nullptr);
+            else if (tree_kind_is_1d_leaf(n->kind)) draw_1d_leaf(model, ts, *n, rt, v, cb, owner_id, true);
             else if (n->kind == TreeNodeKind::Basins) draw_basins_leaf(model, ts, *n, rt, v, owner_id);
             ImGui::PopID();
         }
         ImGui::End();
+
+        // Дополнительные окна того же результата; крестик окна убирает его.
+        int close_k = -1;
+        TreeNode* nm = ts.tree.find(id);
+        for (int k = 1; nm && k <= (int)nm->extra_views.size() && k < kViewsPerLeaf; ++k) {
+            const std::string vt = n->name + " [" + std::to_string(k + 1) + "]###tree_" + std::to_string(id)
+                                 + "_v" + std::to_string(k) + sys_sfx;
+            bool open = true;
+            if (begin_leaf_window(ts, *nm, vt, &open)) {
+                ImGui::PushID(id * kViewsPerLeaf + k);
+                LeafViews& v = views[id * kViewsPerLeaf + k];
+                if (tree_kind_is_2d_leaf(nm->kind))
+                    draw_2d_leaf(model, ts, *nm, rt, v, cb, owner_id + k, false, &nm->extra_views[k - 1]);
+                else if (tree_kind_is_1d_leaf(nm->kind))
+                    draw_1d_leaf(model, ts, *nm, rt, v, cb, owner_id + k, false);
+                ImGui::PopID();
+            }
+            ImGui::End();
+            if (!open) close_k = k;
+        }
+        if (nm && close_k > 0) {
+            nm->extra_views.erase(nm->extra_views.begin() + (close_k - 1));
+            // Окна правее сдвигаются на номер: их виды начинают заново.
+            for (int k = close_k; k < kViewsPerLeaf; ++k) views.erase(id * kViewsPerLeaf + k);
+            ts.dirty = true;
+        }
+
+        // Портреты по бассейнам — окна вкладки Basins для этой сессии.
+        // Окна появляются, когда портреты посчитаны или считаются: пустые не загромождают док.
+        if (n->kind == TreeNodeKind::Basins && rt.basins && !rt.basins->phase_slots.empty()
+            && rt.basins->phase_slots[0]
+            && (rt.basins->phase_slots[0]->has_result || rt.basins->phase_slots[0]->phase.in_flight)) {
+            const int slot = tree_kind_dim_slot(n->kind);
+            draw_basins_phase_windows(model, *rt.basins, 0, cb,
+                "_treebpp" + std::to_string(id) + sys_sfx, ((0x7E800 + id) << 4) ^ sys_delta,
+                [](int, const std::string& t) { ensure_docked(t); },
+                [&ts, id, slot](int, const std::string&) {
+                    if (ImGui::GetWindowDockID() != 0) g_leaf_dock = ImGui::GetWindowDockID();
+                    leaf_window_frame(ts, id, slot);
+                });
+        }
     }
 }
 
