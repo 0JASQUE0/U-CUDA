@@ -201,19 +201,18 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
             draw_field_name(p, &model.field_labels);
             if (edited) {
                 phase.param_values[p] = c.param_values[p];
-                // Bump debounce timers so the auto-recompute path (L1D
-                // partial + Phase, gated by auto_recompute_1d /
-                // autorun_on_drilldown) picks up the manual edit — same
-                // path a slider drag settle goes through, no Run needed.
-                double t = ImGui::GetTime();
-                c.last_fix_x_change_time = t;
-                c.last_fix_y_change_time = t;
-                // If this param IS the effective sweep axis, move the
-                // crosshair to the new pinned value so 1D slice plots and
-                // 2D heatmaps show it there immediately.
-                double new_val = parse_ratio_or(c.param_values[p], 0.0);
-                if (!esx.over_var && !esx.over_h && esx.par_index == i) c.fix_x_value = new_val;
-                if (!esy.over_var && !esy.over_h && esy.par_index == i) c.fix_y_value = new_val;
+                // Автопересчёт — только от параметра оси свипа: правка двигает крест по своей оси
+                // и её таймер, как сдвиг креста. Прочие параметры лишь пачкают уровни до Run.
+                const double t       = ImGui::GetTime();
+                const double new_val = parse_ratio_or(c.param_values[p], 0.0);
+                if (!esx.over_var && !esx.over_h && esx.par_index == i) {
+                    c.fix_x_value = new_val;
+                    c.last_fix_x_change_time = t;
+                }
+                if (!esy.over_var && !esy.over_h && esy.par_index == i) {
+                    c.fix_y_value = new_val;
+                    c.last_fix_y_change_time = t;
+                }
             }
             if (is_swept[i]) {
                 ImGui::SameLine();
