@@ -59,6 +59,7 @@ void wire_2d_heatmap_interaction(HeatmapView& hv, CustomSession& cs,
         if (!s.level_1d_enabled && s.autorun_on_drilldown && s.level_phase_enabled) {
             model.enqueue_custom({ s.level3_kind == 0 ? CustomQueueItem::Kind::Phase
                                              : CustomQueueItem::Kind::Basins });
+            cs.arm_auto_recompute_signatures(false, false, true);
         }
     };
 }
@@ -711,11 +712,17 @@ void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
             EffectiveSweep esy = effective_sweep_y(c);
             if (x_settled) pin_axis(esx, c.fix_x_value);
             if (y_settled) pin_axis(esy, c.fix_y_value);
-            if (c.autorun_on_drilldown && c.level_phase_enabled) {
+            const bool run_l3 = c.autorun_on_drilldown && c.level_phase_enabled;
+            if (run_l3) {
                 model.enqueue_custom({ c.level3_kind == 0
                     ? CustomQueueItem::Kind::Phase
                     : CustomQueueItem::Kind::Basins });
             }
+            cs.arm_auto_recompute_signatures(c.auto_recompute_1d && y_settled,
+                                             c.auto_recompute_1d && x_settled, run_l3);
+            // Нечего считать (у сдвинутой оси нет включённых срезов) — коммит иначе ждал бы
+            // чужого завершения расчёта.
+            if (model.custom_queue().empty()) cs.commit_pending_signatures();
             if (x_settled) c.last_fix_x_change_time = 0.0;
             if (y_settled) c.last_fix_y_change_time = 0.0;
         }

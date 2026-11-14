@@ -52,6 +52,9 @@ struct CustomSession : CustomState {
     // → `committed` and marks committed_ok from the sub-session's
     // last_run_* flags. Called from draw_gui after poll_all returns true.
     void commit_pending_signatures();
+    // Автопересчёт по кресту ставит срезы и L3 в очередь мимо Run: взводим их pending, иначе
+    // следующий Run пересчитал бы то же самое. x_slices/y_slices — как в enqueue_level_1d_partial.
+    void arm_auto_recompute_signatures(bool x_slices, bool y_slices, bool l3);
 };
 
 // Level-signature builders. Each returns a string that reflects EVERY input consumed by that
