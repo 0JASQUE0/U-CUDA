@@ -19,6 +19,8 @@ ucuda_library(ui
     src/phase.cpp
     src/plot_widgets.cpp
     src/system_tab.cpp
+    src/tree_tab.cpp
+    src/tree_tab_windows.cpp
     src/ui_resources.cpp
     src/widgets.cpp
     src/workspace.cpp

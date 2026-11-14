@@ -87,6 +87,7 @@ static const ModeTab kModeTabs[] = {
     { "Basins",     "Basins",         AppModel::AppMode::Basins,     false },
     { "FastSync",   "Fast Synchro",   AppModel::AppMode::FastSync,   false },
     { "Custom",     "Custom",         AppModel::AppMode::Custom,     false },
+    { "Tree",       "Tree",           AppModel::AppMode::Tree,       false },
     { "Order",      "Order",          AppModel::AppMode::Order,      false },
     { "Network",    "Network",        AppModel::AppMode::Network,    false },
     { "Neural",     "Neural",         AppModel::AppMode::Neural,     false },

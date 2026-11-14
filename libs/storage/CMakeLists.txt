@@ -23,6 +23,7 @@ ucuda_library(storage
     src/session_ls.cpp
     src/session_metrics.cpp
     src/session_network.cpp
+    src/session_tree.cpp
     src/session_neural.cpp
     src/session_order.cpp
     src/session_parametric.cpp

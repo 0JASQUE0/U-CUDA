@@ -126,6 +126,9 @@
     <CudaCompile Include="..\libs\cuda\src\host_rqa.cu">
       <Filter>libs\cuda\src</Filter>
     </CudaCompile>
+    <ClCompile Include="..\libs\domain\src\analysis_tree.cpp">
+      <Filter>libs\domain\src</Filter>
+    </ClCompile>
     <ClCompile Include="..\libs\domain\src\session_defaults.cpp">
       <Filter>libs\domain\src</Filter>
     </ClCompile>
@@ -187,6 +190,9 @@
       <Filter>libs\storage\src</Filter>
     </ClCompile>
     <ClCompile Include="..\libs\storage\src\session_basins.cpp">
+      <Filter>libs\storage\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\storage\src\session_tree.cpp">
       <Filter>libs\storage\src</Filter>
     </ClCompile>
     <ClCompile Include="..\libs\storage\src\session_custom.cpp">
@@ -297,6 +303,9 @@
     <ClCompile Include="..\libs\analysis\src\bifurcation_session.cpp">
       <Filter>libs\analysis\src</Filter>
     </ClCompile>
+    <ClCompile Include="..\libs\analysis\src\tree_session.cpp">
+      <Filter>libs\analysis\src</Filter>
+    </ClCompile>
     <ClCompile Include="..\libs\analysis\src\custom_session.cpp">
       <Filter>libs\analysis\src</Filter>
     </ClCompile>
@@ -396,6 +405,12 @@
     <ClCompile Include="..\libs\ui\src\bifurcation.cpp">
       <Filter>libs\ui\src</Filter>
     </ClCompile>
+    <ClCompile Include="..\libs\ui\src\tree_tab.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\libs\ui\src\tree_tab_windows.cpp">
+      <Filter>libs\ui\src</Filter>
+    </ClCompile>
     <ClCompile Include="..\libs\ui\src\custom.cpp">
       <Filter>libs\ui\src</Filter>
     </ClCompile>
@@ -482,6 +497,9 @@
       <Filter>libs\domain\include</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\domain\include\ucuda\domain\configCUDA.h">
+      <Filter>libs\domain\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\domain\include\ucuda\domain\analysis_tree.h">
       <Filter>libs\domain\include</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\domain\include\ucuda\domain\custom_session.h">
@@ -658,6 +676,9 @@
     <ClInclude Include="..\libs\analysis\include\ucuda\analysis\analysis_session.h">
       <Filter>libs\analysis\include</Filter>
     </ClInclude>
+    <ClInclude Include="..\libs\analysis\include\ucuda\analysis\tree_session.h">
+      <Filter>libs\analysis\include</Filter>
+    </ClInclude>
     <ClInclude Include="..\libs\analysis\include\ucuda\analysis\custom_session.h">
       <Filter>libs\analysis\include</Filter>
     </ClInclude>
@@ -759,6 +780,9 @@
       <Filter>libs\ui\src</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\ui\src\tab_basins.h">
+      <Filter>libs\ui\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\ui\src\tab_tree.h">
       <Filter>libs\ui\src</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\ui\src\tab_custom.h">

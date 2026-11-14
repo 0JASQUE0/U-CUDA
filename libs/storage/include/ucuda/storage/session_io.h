@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "ucuda/domain/analysis_session.h"
 #include "ucuda/domain/custom_session.h"
+#include "ucuda/domain/analysis_tree.h"
 #include "ucuda/domain/network_session.h"
 #include "ucuda/domain/neural_session.h"
 #include "ucuda/domain/order_session.h"
@@ -143,6 +144,11 @@ struct CustomSubStatesMut {
 };
 std::string custom_state_to_json(const CustomState& s, const CustomSubStates& sub);
 bool custom_state_from_json(const std::string& json, CustomState& s, CustomSubStatesMut& sub);
+
+// Вкладка Tree (`_last_tree.json`): узлы с полями контекстов; подсессии листов — готовым JSON
+// их писателей (обёртки в application/session_persistence.h), ключ — id листа.
+std::string tree_state_to_json(const AnalysisTree& t, const std::map<int, std::string>& leaf_json);
+bool tree_state_from_json(const std::string& json, AnalysisTree& t, std::map<int, std::string>& leaf_json);
 
 // Библиотека регуляторов шага (adaptive_ctrl_library() в adaptive_settings.h): файл
 // step_controllers.json в каталоге library. load — при старте, запоминает путь (нет

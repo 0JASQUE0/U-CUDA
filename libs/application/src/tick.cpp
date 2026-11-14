@@ -291,6 +291,17 @@ void AppModel::tick(SystemLibrary& lib) {
         if (model.custom_queue_.empty() && !model.custom_session.any_in_flight())
             model.custom_session.commit_pending_signatures();
     }
+    // Tree: подписи листов коммитятся в poll_all по завершении каждого листа.
+    bool tree_dirty = model.tree_session.poll_all();
+    const double tree_now =
+        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (model.tree_session.tick_basins_phase(tree_now)) tree_dirty = true;
+    if (model.tree_session.dirty) {
+        tree_dirty = true;
+        model.tree_session.dirty = false;
+    }
+    if (tree_dirty && !model.loaded_name.empty() && !model.tree_session.tree.nodes.empty())
+        lib.save_session(model.loaded_name, "_last_tree", session_to_json_tree(model.tree_session));
 
     // Tick parametric-очереди: если ни одна из BD/LLE/LS не in_flight и в
     // очереди есть элементы — берём следующий и стартуем. start_next сам
@@ -309,6 +320,7 @@ void AppModel::tick(SystemLibrary& lib) {
     model.start_next_in_neural_queue();
     // Custom tab has its own queue (2D → 1D → Phase/Basins pipeline).
     model.start_next_in_custom_queue();
+    model.start_next_in_tree_queue();
     // Фоновая компиляция под текущие настройки параметрики, чтобы первый Run не ждал NVRTC.
     model.poll_parametric_prewarm();
 

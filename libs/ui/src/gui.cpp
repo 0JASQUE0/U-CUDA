@@ -13,6 +13,7 @@
 #include "tab_order.h"
 #include "tab_parametric.h"
 #include "tab_phase.h"
+#include "tab_tree.h"
 #include "dock_layout.h"
 using namespace ucuda::ui_detail;
 
@@ -32,6 +33,7 @@ const char* controls_window_for(AppModel::AppMode m) {
     case AppModel::AppMode::Order:      return "Order Controls";
     case AppModel::AppMode::Network:    return "Network Controls";
     case AppModel::AppMode::Neural:     return "Neural Controls";
+    case AppModel::AppMode::Tree:       return "Tree Controls";
     default:                            return nullptr;
     }
 }
@@ -134,7 +136,7 @@ namespace ucuda::ui_detail {
 // почти одинаковых веток: каждая доставала из своей сессии одну и ту же четвёрку — подпись
 // запущенного конфига, время старта, cancel_token, progress_token. Ветки успели разойтись:
 // три подставляли запасное имя только при выходе индекса за границы, три — ещё и при пустом label.
-enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync, Custom, Order, Metrics, Neural };
+enum class BusyKind { None, Bif, LLE, LS, Dft1D, Basins, Phase, FastSync, Custom, Order, Metrics, Neural, Tree };
 
 
 struct BusyInfo {
@@ -336,6 +338,24 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                                                         cus.basins_session.running_config_index, "basins"));
         busy.kind = BusyKind::Custom;   // в том числе для phase-ветки выше
     }
+    else if (model.tree_session.any_in_flight()) {
+        // Дерево считает по одному листу; подпись — имя узла.
+        for (const auto& [id, rt] : model.tree_session.leaves) {
+            if (!rt.in_flight()) continue;
+            const TreeNode* n = model.tree_session.tree.find(id);
+            const std::string what = "Tree: " + (n ? n->name : std::string("leaf"));
+            if      (rt.bif)    busy = busy_from(*rt.bif, BusyKind::Tree, what);
+            else if (rt.lle)    busy = busy_from(*rt.lle, BusyKind::Tree, what);
+            else if (rt.ls)     busy = busy_from(*rt.ls, BusyKind::Tree, what);
+            else if (rt.basins) busy = busy_from(*rt.basins, BusyKind::Tree, what);
+            else if (rt.phase) {
+                busy.what  = what;
+                busy.start = rt.phase->compute_start_time;
+            }
+            busy.kind = BusyKind::Tree;
+            break;
+        }
+    }
     else {
         // Nothing in flight — pick the session whose last run finished most
         // recently (across the cancellable ones) and show persistent info.
@@ -345,7 +365,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // Метки у них свои ("Custom 2D", "Custom 1D X", ...), так что префикс
         // не нужен.
         struct DoneCand { BusyKind kind; std::chrono::steady_clock::time_point ts; const std::string* label; bool ok; double secs; };
-        DoneCand candidates[12] = {
+        std::vector<DoneCand> candidates = {
             { BusyKind::Bif,    model.bifurcation_session.last_run_completed_at,
               &model.bifurcation_session.last_run_label,
               model.bifurcation_session.last_run_succeeded,
@@ -395,6 +415,17 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
               cus.basins_session.last_run_succeeded,
               cus.basins_session.last_run_seconds },
         };
+        // Листья дерева: метка конфига — имя узла (ставит TreeSession::start_leaf).
+        for (const auto& [id, rt] : model.tree_session.leaves) {
+            auto add = [&](const auto& s) {
+                candidates.push_back({ BusyKind::Tree, s.last_run_completed_at, &s.last_run_label,
+                                       s.last_run_succeeded, s.last_run_seconds });
+            };
+            if      (rt.bif)    add(*rt.bif);
+            else if (rt.lle)    add(*rt.lle);
+            else if (rt.ls)     add(*rt.ls);
+            else if (rt.basins) add(*rt.basins);
+        }
         const DoneCand* best = nullptr;
         for (const auto& c : candidates) {
             if (c.label->empty()) continue;
@@ -510,6 +541,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             else if (busy.kind == BusyKind::FastSync) queue_n = model.fastsync_queue().size();
             else if (busy.kind == BusyKind::Dft1D)    queue_n = model.dft1d_queue().size();
             else if (busy.kind == BusyKind::Custom)   queue_n = model.custom_queue().size();
+            else if (busy.kind == BusyKind::Tree)     queue_n = model.tree_queue().size();
             else if (busy.kind == BusyKind::Order)    queue_n = model.order_queue().size();
             else if (busy.kind == BusyKind::Neural)   queue_n = model.neural_queue().size();
             else                                      queue_n = model.parametric_queue().size();
@@ -576,6 +608,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     case BusyKind::Order:    model.order_session.request_cancel();       break;
                     case BusyKind::Neural:   model.neural_session.request_cancel();      break;
                     case BusyKind::Custom:   model.custom_session.request_cancel_all();  break;
+                    case BusyKind::Tree:     model.tree_session.request_cancel_all();    break;
                     default: break;
                 }
                 // Drain all batch queues so remaining items don't auto-start.
@@ -702,8 +735,10 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                             model.app_mode != AppModel::AppMode::Network;
     bool entering_neural = (AppModel::AppMode)mode == AppModel::AppMode::Neural &&
                            model.app_mode != AppModel::AppMode::Neural;
+    bool entering_tree = (AppModel::AppMode)mode == AppModel::AppMode::Tree &&
+                         model.app_mode != AppModel::AppMode::Tree;
     if (entering_phase || entering_par || entering_dft1d || entering_basins || entering_fastsync
-        || entering_custom || entering_order || entering_network || entering_neural) {
+        || entering_custom || entering_order || entering_network || entering_neural || entering_tree) {
         // обновим known_vars/known_params из живого алфавита, чтобы сравнение
         // ниже было против актуального состояния
         model.refresh_symbols();
@@ -832,6 +867,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             apply_session_json(model, jc, model.custom_session, session_from_json_custom, "_last_custom");
         }
     }
+    const bool tree_need_init = model.tree_session.loaded_system_name != model.name
+                             || model.tree_session.tree.nodes.empty()
+                             || model.tree_session.vars   != model.known_vars
+                             || model.tree_session.params != model.known_params;
+    if (entering_tree && tree_need_init) load_tree_session(model, lib);
     // Persist AppMode change so the next launch restores this tab. Compare
     // BEFORE overwriting so we only write on real transitions (not on every
     // frame while sitting in the same tab).
@@ -869,6 +909,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                            controls_window_for(model.app_mode));
         g_prev_frame_mode = mode_i;
         dock_snap_dragged_split(dockspace_id);
+        if (model.app_mode == AppModel::AppMode::Tree) g_tree_dockspace_id = dockspace_id;
         ImGui::DockSpace(dockspace_id, ImVec2(0, 0), ImGuiDockNodeFlags_None);
         dock_keep_split_ratios(dockspace_id, controls_window_for(model.app_mode));
     }
@@ -1026,6 +1067,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                                        (std::max)(380.0f, vp->WorkSize.y - 110)), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Neural Results")) draw_neural_results(model);
         ImGui::End();
+    }
+    else if (model.app_mode == AppModel::AppMode::Tree) {
+        if (ImGui::Begin("Tree Controls", nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
+            draw_tree_controls(model, lib);
+        }
+        ImGui::End();
+        draw_tree_plot_windows(model, cb);
     }
     else if (model.app_mode == AppModel::AppMode::Custom) {
         // Custom mode: split-region layout (Controls | Workspace) drawn into

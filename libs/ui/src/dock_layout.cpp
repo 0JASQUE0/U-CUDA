@@ -93,6 +93,7 @@ const char* mode_dir(int mode) {
     case AppModel::AppMode::Order:      return "Order";
     case AppModel::AppMode::Network:    return "Network";
     case AppModel::AppMode::Neural:     return "Neural";
+    case AppModel::AppMode::Tree:       return "Tree";
     }
     return "Other";
 }
