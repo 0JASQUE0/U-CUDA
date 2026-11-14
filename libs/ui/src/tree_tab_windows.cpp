@@ -525,6 +525,7 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
             const bool focus = g_tree_focus_leaf == id;
             if (focus) g_tree_focus_leaf = 0;
             const int slot = tree_kind_dim_slot(n->kind);
+            const size_t n_before = rt.phase->projections.size();
             draw_projection_windows(*rt.phase, cb,
                 [focus](int idx, const std::string& title) {
                     ensure_docked(title);
@@ -535,11 +536,22 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
                     leaf_window_frame(ts, id, slot);
                 },
                 "_tree" + std::to_string(id) + sys_sfx, owner_id);
+            // Закрыли последнее окно ФП — узел выключается, а проекция возвращается, чтобы
+            // включение узла снова показало окно.
+            if (rt.phase->projections.empty() && n_before > 0) {
+                rt.phase->add_projection();
+                for (auto& pr : rt.phase->projections) pr.label = n->name + ": " + pr.label;
+                ts.toggle_enabled(id);
+            } else if (rt.phase->projections.size() != n_before) {
+                ts.dirty = true;
+            }
             continue;
         }
 
         const std::string title = n->name + "###tree_" + std::to_string(id) + sys_sfx;
-        if (begin_leaf_window(ts, *n, title, nullptr)) {
+        // Крестик основного окна выключает лист: включение в дереве вернёт окно.
+        bool main_open = true;
+        if (begin_leaf_window(ts, *n, title, &main_open)) {
             ImGui::PushID(id);
             LeafViews& v = views[id * kViewsPerLeaf];
             if (tree_kind_is_2d_leaf(n->kind))      draw_2d_leaf(model, ts, *n, rt, v, cb, owner_id, true, nullptr);
@@ -548,6 +560,10 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
             ImGui::PopID();
         }
         ImGui::End();
+        if (!main_open) {
+            ts.toggle_enabled(id);
+            continue;
+        }
 
         // Дополнительные окна того же результата; крестик окна убирает его.
         int close_k = -1;

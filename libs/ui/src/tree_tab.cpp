@@ -61,10 +61,14 @@ std::string node_meta(const TreeSession& ts, const TreeNode& n) {
     }
     case TreeNodeKind::Point: {
         const TreeNode* reg = ts.tree.find(ts.region_of(n.id));
-        if (!reg) return n.follow_cursor ? "cursor" : "pinned";
-        const auto& src = n.follow_cursor ? reg->cfg : c;
-        return "(" + fmt_short(src.fix_x_value) + ", " + fmt_short(src.fix_y_value) + ")"
-             + (n.follow_cursor ? "" : " pinned");
+        if (!reg) return "System values";
+        // Что именно точка закрепляет: имена осей региона и их значения.
+        const auto& r   = reg->cfg;
+        const auto& src = n.follow_cursor ? r : c;
+        return axis_name(ts, r.axis_x_over_var, r.axis_x_par_index, r.axis_x_var_index, r.axis_x_over_h)
+             + " = " + fmt_short(src.fix_x_value) + ", "
+             + axis_name(ts, r.axis_y_over_var, r.axis_y_par_index, r.axis_y_var_index, r.axis_y_over_h)
+             + " = " + fmt_short(src.fix_y_value) + (n.follow_cursor ? " (cursor)" : " (pinned)");
     }
     default:
         return {};
@@ -228,6 +232,9 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend) {
     else {
         const std::string meta = node_meta(ts, *n);
         if (!meta.empty()) ImGui::TextDisabled("%s", meta.c_str());
+        if (n->kind == TreeNodeKind::Point && ImGui::IsItemHovered())
+            ImGui::SetTooltip("Fixed parameters of this point: its leaves are computed at these values.\n"
+                              "(cursor) - follows the region crosshair; (pinned) - set in the node panel.");
     }
 
     // Кнопки — своей колонкой таблицы: строка узла их не перекрывает. Порядок слотов
