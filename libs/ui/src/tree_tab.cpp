@@ -105,7 +105,6 @@ void add_menu_items(const TreeNode& n, int child_level, Pending& pend) {
         item("LLE 2D", K::LLE2D, 0, false);
         item("Lyapunov Spectrum 2D", K::LS2D, 0, false);
         ImGui::Separator();
-        item("Region 2D", K::Region2D, 0, true);
         item("Slice 1D X", K::Slice1D, 0, true);
         item("Slice 1D Y", K::Slice1D, 1, true);
         item("Point", K::Point, 0, true);

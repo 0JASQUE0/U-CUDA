@@ -82,7 +82,9 @@ std::vector<TreeNodeKind> tree_addable_children(TreeNodeKind parent) {
     using K = TreeNodeKind;
     switch (parent) {
     case K::System:   return { K::Region2D, K::Slice1D, K::Point };
-    case K::Region2D: return { K::Bif2D, K::LLE2D, K::LS2D, K::Region2D, K::Slice1D, K::Point };
+    // Вложенный регион вернётся вместе с «New region from view»: без неё он не отличается
+    // от второго региона под System.
+    case K::Region2D: return { K::Bif2D, K::LLE2D, K::LS2D, K::Slice1D, K::Point };
     case K::Slice1D:  return { K::Bif1D, K::LLE1D, K::LS1D, K::Point };
     case K::Point:    return { K::Phase, K::Basins };
     default:          return {};

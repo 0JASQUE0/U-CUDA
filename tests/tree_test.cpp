@@ -159,6 +159,7 @@ void structure_and_queue() {
     const size_t nodes0 = ts.tree.nodes.size(), leaves0 = ts.leaves.size();
 
     require(ts.add_node(reg, TreeNodeKind::Phase) == 0, "a Phase leaf cannot hang under a region");
+    require(ts.add_node(reg, TreeNodeKind::Region2D) == 0, "no nested regions");
     const int copy = ts.duplicate_node(reg);
     require(copy != 0 && ts.tree.find(copy)->name == "Region 2D (2)", "duplicate name");
     const auto& kids = ts.tree.find(root)->children;
