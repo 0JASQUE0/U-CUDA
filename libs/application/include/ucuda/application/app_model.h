@@ -7,6 +7,7 @@
 #include "ucuda/domain/system_record.h"
 #include "ucuda/analysis/analysis_session.h"
 #include "ucuda/analysis/custom_session.h"
+#include "ucuda/analysis/tree_session.h"
 #include "ucuda/analysis/order_session.h"
 #include "ucuda/analysis/network_session.h"
 #include "ucuda/analysis/neural_session.h"
@@ -283,13 +284,13 @@ public:
     // Order добавлен В КОНЕЦ намеренно: last_app_mode сериализуется в app_config
     // целым числом, и вставка в середину сбросила бы всем сохранённую вкладку.
     // Порядок кнопок в UI задаётся отдельно (см. draw_gui).
-    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings, Order, Network, Neural };
+    enum class AppMode { Library, Analysis, Parametric, Dft1D, Basins, FastSync, Custom, Settings, Order, Network, Neural, Tree };
     AppMode app_mode = AppMode::Library;
 
     // Число элементов AppMode. Нужно для клампа last_app_mode из конфига:
     // литерал в app_main.cpp отставал от enum'а (стоял 8 при девяти режимах,
     // из-за чего Order не восстанавливался на старте).
-    static constexpr int kAppModeCount = 11;
+    static constexpr int kAppModeCount = 12;
 
     // Номер пересоздания сессий вкладки (++ в start_*_analysis). Сессия грузится с
     // data_generation = 0, а static-вью вкладки помнят поколение прошлой: по смене номера gui сбрасывает их.
@@ -333,6 +334,9 @@ public:
     // Phase/Basins sub-sessions (see CustomSession); never shares state with
     // parametric_/phase_/basins_session above.
     CustomSession              custom_session;
+
+    // Tree — дерево анализа на основе Custom (analysis/tree_session.h); с Custom не делит состояние.
+    TreeSession                tree_session;
 
     // 0=Bifurcation, 1=LLE, 2=LS, 3=Metrics. Активный sub-tab; используется для top-bar
     // indicator. По умолчанию — Bifurcation.
@@ -378,6 +382,11 @@ public:
     void enqueue_custom_level_1d_partial(bool x_slices, bool y_slices);
     void clear_neural_queue();
     void clear_custom_queue();
+    // Дерево: листья в очередь по id (повторы пропускаются), опустошение очереди.
+    void enqueue_tree(const std::vector<int>& leaf_ids);
+    void clear_tree_queue();
+    // Удалить узел с поддеревом; false, если что-то из него считается.
+    bool remove_tree_node(int id);
     void clear_all_queues();
 
     // Чтение очередей (размер для подписей, содержимое для тестов).
@@ -389,6 +398,7 @@ public:
     const std::deque<NetworkQueueItem>&    network_queue()    const { return network_queue_; }
     const std::deque<NeuralQueueItem>&     neural_queue()     const { return neural_queue_; }
     const std::deque<CustomQueueItem>&     custom_queue()     const { return custom_queue_; }
+    const std::deque<int>&                 tree_queue()       const { return tree_queue_; }
 
 private:
     // движок параметрики (NVRTC). Лениво создаётся при первом Run.
@@ -550,6 +560,12 @@ private:
 public:
     bool start_next_in_custom_queue();
 
+    // Очередь вкладки Tree: id листьев, по одному расчёту за раз на общем движке.
+private:
+    std::deque<int> tree_queue_;
+public:
+    bool start_next_in_tree_queue();
+
     // Удаление конфига + чистка очереди (убрать item с этим индексом, у
     // оставшихся того же kind сдвинуть index > i на -1). Используется GUI
     // вместо прямого session.remove_*, чтобы очередь не указывала на
@@ -582,6 +598,8 @@ public:
     // Initialise the Custom pipeline: seeds shared config from the record and
     // populates each sub-session with the fixed 3-slot layout (2D/1D-X/1D-Y).
     bool start_custom_analysis();
+    // Дерево по умолчанию из текущей системы.
+    bool start_tree_analysis();
 
     // Пробрасывает живое состояние модели (custom_schemes, sys, vars/params) во ВСЕ сессии без
     // сброса per-config настроек. Используется в Save / Save as copy: после правки тела

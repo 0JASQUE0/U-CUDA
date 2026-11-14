@@ -636,4 +636,34 @@ void AppModel::clear_all_queues() {
     network_queue_.clear();
     neural_queue_.clear();
     custom_queue_.clear();
+    tree_queue_.clear();
+}
+
+void AppModel::enqueue_tree(const std::vector<int>& leaf_ids) {
+    for (int id : leaf_ids)
+        if (std::find(tree_queue_.begin(), tree_queue_.end(), id) == tree_queue_.end())
+            tree_queue_.push_back(id);
+}
+
+void AppModel::clear_tree_queue() { tree_queue_.clear(); }
+
+bool AppModel::remove_tree_node(int id) {
+    if (!tree_session.remove_node(id)) return false;
+    // Из очереди уходят листья, которых больше нет.
+    tree_queue_.erase(std::remove_if(tree_queue_.begin(), tree_queue_.end(),
+                                     [&](int q) { return tree_session.tree.find(q) == nullptr; }),
+                      tree_queue_.end());
+    return true;
+}
+
+bool AppModel::start_next_in_tree_queue() {
+    if (tree_session.any_in_flight()) return false;
+    while (!tree_queue_.empty()) {
+        const int id = tree_queue_.front();
+        tree_queue_.pop_front();
+        // Узел удалён или выключен после постановки в очередь — пропуск.
+        if (!tree_session.tree.find(id) || !tree_session.tree.is_active(id)) continue;
+        if (tree_session.start_leaf(id, ensure_engine())) return true;
+    }
+    return false;
 }

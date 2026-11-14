@@ -174,6 +174,26 @@ bool AppModel::start_custom_analysis() {
     return true;
 }
 
+bool AppModel::start_tree_analysis() {
+    if (!refresh_symbols()) return false;
+    SystemRecord r = to_record();
+    tree_queue_.clear();
+    tree_session.load_from_record(r, known_vars, known_params);
+    tree_session.wrapper_schemes = enabled_wrapper_schemes();
+    try {
+        tree_session.sys = build_system();
+    }
+    catch (...) {
+        // Система неполна — ошибку покажет следующий Run.
+    }
+    tree_session.loaded_system_name = name;
+    tree_session.propagate_identity();
+    for (auto& [id, rt] : tree_session.leaves)
+        if (rt.phase) rt.phase->regenerate_krs();
+    ++session_epoch[(int)AppMode::Tree];
+    return true;
+}
+
 
 void AppModel::propagate_to_sessions() {
     // refresh_symbols может упасть, если в полях ещё что-то невалидное —
@@ -269,4 +289,13 @@ void AppModel::propagate_to_sessions() {
     // на ближайшем Run пересчитает его от свежего sys / custom_schemes.
     phase_session.krs_code.clear();
     phase_session.krs_error.clear();
+
+    // Дерево раздаёт идентичность своим листьям само.
+    tree_session.custom_schemes          = custom_schemes;
+    tree_session.wrapper_schemes         = wrappers_on;
+    tree_session.enabled_builtin_schemes = enabled_now;
+    try { tree_session.sys = build_system(); } catch (...) {}
+    tree_session.propagate_identity();
+    for (auto& [id, rt] : tree_session.leaves)
+        if (rt.phase) { rt.phase->krs_code.clear(); rt.phase->krs_error.clear(); }
 }

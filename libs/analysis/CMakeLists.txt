@@ -10,6 +10,7 @@ ucuda_library(analysis
     src/network_session.cpp
     src/neural_session.cpp
     src/order_session.cpp
+    src/tree_session.cpp
     src/phase_session.cpp
     src/session_helpers.cpp
 )
