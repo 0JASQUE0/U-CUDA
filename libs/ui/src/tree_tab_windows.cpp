@@ -73,9 +73,10 @@ void leaf_window_frame(TreeSession& ts, int id, int slot) {
     ImGui::GetWindowDrawList()->PopClipRect();
 }
 
-bool begin_leaf_window(TreeSession& ts, const TreeNode& n, const std::string& title, bool* p_open) {
+bool begin_leaf_window(TreeSession& ts, const TreeNode& n, const std::string& title, bool* p_open,
+                       int view_k = 0) {
     ensure_docked(title);
-    if (g_tree_focus_leaf == n.id) {
+    if (g_tree_focus_leaf == n.id && g_tree_focus_view == view_k) {
         focus_leaf_window(title);
         g_tree_focus_leaf = 0;
     }
@@ -488,6 +489,11 @@ void draw_basins_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeL
 
 } // namespace
 
+void tree_forget_views(int leaf_id, int from_view) {
+    auto& views = ui_resource<ViewMap, 7701>();
+    for (int k = std::max(1, from_view); k < kViewsPerLeaf; ++k) views.erase(leaf_id * kViewsPerLeaf + k);
+}
+
 void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
     auto& ts = model.tree_session;
     if (ts.tree.nodes.empty()) return;
@@ -572,7 +578,7 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
             const std::string vt = n->name + " [" + std::to_string(k + 1) + "]###tree_" + std::to_string(id)
                                  + "_v" + std::to_string(k) + sys_sfx;
             bool open = true;
-            if (begin_leaf_window(ts, *nm, vt, &open)) {
+            if (begin_leaf_window(ts, *nm, vt, &open, k)) {
                 ImGui::PushID(id * kViewsPerLeaf + k);
                 LeafViews& v = views[id * kViewsPerLeaf + k];
                 if (tree_kind_is_2d_leaf(nm->kind))

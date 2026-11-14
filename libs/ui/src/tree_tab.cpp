@@ -75,7 +75,7 @@ std::string node_meta(const TreeSession& ts, const TreeNode& n) {
     }
 }
 
-enum class Act { None, Add, Dup, Del, Toggle, Up, Down, RunNode, NewView };
+enum class Act { None, Add, Dup, Del, Toggle, Up, Down, RunNode, NewView, CloseView };
 struct Pending { Act act = Act::None; int id = 0; TreeNodeKind kind = TreeNodeKind::System; int dir = 0; };
 
 int  g_rename_id = 0;
@@ -183,20 +183,23 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend) {
     ImGui::TableSetColumnIndex(0);
     ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth
                           | ImGuiTreeNodeFlags_AllowOverlap;
-    if (!ctx) fl |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+    // Лист с доп. окнами раскрывается: под ним строки этих окон.
+    const bool has_views = !ctx && !n->extra_views.empty();
+    const bool branch    = ctx || has_views;
+    if (!branch) fl |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
     if (ts.tree.selected_id == id) fl |= ImGuiTreeNodeFlags_Selected;
-    if (ctx) ImGui::SetNextItemOpen(n->enabled && n->expanded, ImGuiCond_Always);
+    if (branch) ImGui::SetNextItemOpen(n->enabled && n->expanded, ImGuiCond_Always);
 
     ImGui::PushStyleColor(ImGuiCol_Text, col);
     const bool open = ImGui::TreeNodeEx("##node", fl, "%s", n->name.c_str());
     ImGui::PopStyleColor();
-    if (ctx && ImGui::IsItemToggledOpen()) {
+    if (branch && ImGui::IsItemToggledOpen()) {
         if (!n->enabled) flash("Node is disabled - enable it to expand");
         else { n->expanded = open; ts.dirty = true; }
     }
     if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen()) {
         ts.tree.selected_id = id;
-        if (!ctx) g_tree_focus_leaf = id;
+        if (!ctx) { g_tree_focus_leaf = id; g_tree_focus_view = 0; }
     }
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         g_rename_id = id;
@@ -285,6 +288,33 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend) {
         for (int c : std::vector<int>(n->children)) draw_node(model, ts, c, pend);
         ImGui::TreePop();
     }
+    if (has_views && open) {
+        // Доп. окна листа: клик выводит окно вперёд, x закрывает.
+        const bool ls2d = n->kind == TreeNodeKind::LS2D;
+        for (int k = 1; k <= (int)n->extra_views.size(); ++k) {
+            ImGui::PushID(1000 + k);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            char label[64];
+            const int ex = n->extra_views[k - 1];
+            if (ls2d && ex < 0)  std::snprintf(label, sizeof(label), "Window %d  (sum)", k + 1);
+            else if (ls2d)       std::snprintf(label, sizeof(label), "Window %d  (L%d)", k + 1, ex + 1);
+            else                 std::snprintf(label, sizeof(label), "Window %d", k + 1);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TreeNodeEx("##view", ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen
+                              | ImGuiTreeNodeFlags_SpanAvailWidth, "%s", label);
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                ts.tree.selected_id = id;
+                g_tree_focus_leaf = id;
+                g_tree_focus_view = k;
+            }
+            ImGui::TableSetColumnIndex(1);
+            if (small_icon_button("x", "Close this window")) pend = { Act::CloseView, id, n->kind, k };
+            ImGui::PopID();
+        }
+        ImGui::TreePop();
+    }
     ImGui::PopID();
 }
 
@@ -323,6 +353,13 @@ void apply_pending(AppModel& model, TreeSession& ts, const Pending& p) {
         ts.dirty = true;
         break;
     }
+    case Act::CloseView:
+        if (p.dir >= 1 && p.dir <= (int)n->extra_views.size()) {
+            n->extra_views.erase(n->extra_views.begin() + (p.dir - 1));
+            tree_forget_views(p.id, p.dir);
+            ts.dirty = true;
+        }
+        break;
     case Act::RunNode:
         if (tree_kind_is_context(n->kind)) model.enqueue_tree(ts.dirty_leaves(p.id));
         else if (ts.tree.is_active(p.id))  model.enqueue_tree({ p.id });
