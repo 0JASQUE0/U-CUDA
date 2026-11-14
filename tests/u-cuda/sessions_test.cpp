@@ -51,6 +51,7 @@ int main() {
             { "_last_network", rt(session_from_json_network, session_to_json_network) },
             { "_last_order", rt(session_from_json_order, session_to_json_order) },
             { "_last_custom", rt(session_from_json_custom, session_to_json_custom) },
+            { "_last_tree", rt(session_from_json_tree, session_to_json_tree) },
             { "_last_parametric_windows", rt(session_from_json_parametric_windows, session_to_json_parametric_windows) },
             { "_last_order_windows", rt(session_from_json_order_windows, session_to_json_order_windows) },
             { "_last_dft1d_windows", rt(session_from_json_dft1d_windows, session_to_json_dft1d_windows) },
