@@ -8,17 +8,39 @@
 #include <cstring>
 #include <limits>
 
+// Сторона 2D-текстуры ограничена GL_MAX_TEXTURE_SIZE (32768 у NVIDIA): glTexImage2D с большей
+// стороной отказывает, и карта пропадала целиком при разрешении > 32768 по любой оси. Сетку
+// больше лимита заливаем прореженной до лимита: текстура тянется на тот же диапазон
+// параметров (UV не меняется), каждый тексель берёт ближайший к своему центру узел —
+// то же, что GL_NEAREST делает на экране, где ячеек всё равно больше, чем пикселей.
+static int heatmap_max_tex_side() {
+    static GLint side = 0;
+    if (side <= 0) {
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &side);
+        if (side <= 0) side = 4096;   // гарантированный минимум GL 3.3 — 1024; 4096 есть везде
+    }
+    return (int)side;
+}
+
+// Узел исходной сетки (n_src), ближайший к центру текселя t текстуры из n_tex текселей.
+static int heatmap_src_index(int t, int n_src, int n_tex) {
+    if (n_tex >= n_src) return t;
+    return (int)(((long long)t * 2 + 1) * (long long)n_src / (2LL * (long long)n_tex));
+}
+
 HeatmapView::~HeatmapView() {
     if (data_tex_) glDeleteTextures(1, &data_tex_);
     if (overlay_tex_) glDeleteTextures(1, &overlay_tex_);
 }
 
 void HeatmapView::upload_overlay(int nx, int ny, const unsigned char* mask) {
+    const int tw = std::min(nx, heatmap_max_tex_side());
+    const int th = std::min(ny, heatmap_max_tex_side());
     if (overlay_tex_ == 0 || overlay_tex_w_ != nx || overlay_tex_h_ != ny) {
         if (overlay_tex_) { glDeleteTextures(1, &overlay_tex_); overlay_tex_ = 0; }
         glGenTextures(1, &overlay_tex_);
         glBindTexture(GL_TEXTURE_2D, overlay_tex_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, nx, ny, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -74,13 +96,27 @@ void HeatmapView::upload_overlay(int nx, int ny, const unsigned char* mask) {
         }
     // IM_COL32 кладёт R в младший байт, то есть в памяти little-endian байты
     // идут R, G, B, A — ровно GL_RGBA / GL_UNSIGNED_BYTE.
+    const unsigned* tex_src = overlay_buf_.data();
+    if (tw != nx || th != ny) {
+        overlay_tex_buf_.resize((size_t)tw * (size_t)th);
+        for (int ty = 0; ty < th; ++ty) {
+            const size_t row = (size_t)heatmap_src_index(ty, ny, th) * (size_t)nx;
+            for (int tx = 0; tx < tw; ++tx)
+                overlay_tex_buf_[(size_t)ty * (size_t)tw + (size_t)tx]
+                    = overlay_buf_[row + (size_t)heatmap_src_index(tx, nx, tw)];
+        }
+        tex_src = overlay_tex_buf_.data();
+    }
     glBindTexture(GL_TEXTURE_2D, overlay_tex_);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, nx, ny, GL_RGBA, GL_UNSIGNED_BYTE, overlay_buf_.data());
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, th, GL_RGBA, GL_UNSIGNED_BYTE, tex_src);
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
-void HeatmapView::ensure_tex(int w, int h) {
+void HeatmapView::ensure_tex(int src_w, int src_h) {
+    const int w = std::min(src_w, heatmap_max_tex_side());
+    const int h = std::min(src_h, heatmap_max_tex_side());
+    tex_src_w_ = src_w; tex_src_h_ = src_h;
     if (w == tex_w_ && h == tex_h_ && data_tex_) return;
     if (data_tex_) { glDeleteTextures(1, &data_tex_); data_tex_ = 0; }
     glGenTextures(1, &data_tex_);
@@ -99,27 +135,30 @@ void HeatmapView::ensure_tex(int w, int h) {
 void HeatmapView::upload_data(int nx, int ny, const double* values,
                               const std::function<bool(int, int)>& not_computed) {
     if (!data_tex_) return;
-    upload_buf_.resize((size_t)nx * (size_t)ny);
+    // Текстура tex_w_ × tex_h_ (ensure_tex) — сетка nx × ny, прореженная до GL_MAX_TEXTURE_SIZE.
+    const int tw = tex_w_, th = tex_h_;
+    upload_buf_.resize((size_t)tw * (size_t)th);
     // diverged/spec-значения engine помечает как ±999; заменяем на FLT_MAX,
     // шейдер увидит >=1e30 и нарисует тёмно-серым (а не верхним концом
     // colormap'а). Недосчитанные по Stop — -FLT_MAX: шейдер рисует их средне-серым.
     const double DIV_MARK = 999.0;
-    for (size_t k = 0; k < upload_buf_.size(); ++k) {
-        double v = values[k];
-        if (!std::isfinite(v) || v == DIV_MARK || v == -DIV_MARK) {
-            upload_buf_[k] = std::numeric_limits<float>::max();
-        } else {
-            upload_buf_[k] = (float)v;
+    for (int ty = 0; ty < th; ++ty) {
+        const int iy = heatmap_src_index(ty, ny, th);
+        for (int tx = 0; tx < tw; ++tx) {
+            const int ix = heatmap_src_index(tx, nx, tw);
+            const double v = values[(size_t)iy * (size_t)nx + (size_t)ix];
+            float& out = upload_buf_[(size_t)ty * (size_t)tw + (size_t)tx];
+            if (not_computed && not_computed(ix, iy))
+                out = -std::numeric_limits<float>::max();
+            else if (!std::isfinite(v) || v == DIV_MARK || v == -DIV_MARK)
+                out = std::numeric_limits<float>::max();
+            else
+                out = (float)v;
         }
     }
-    if (not_computed)
-        for (int iy = 0; iy < ny; ++iy)
-            for (int ix = 0; ix < nx; ++ix)
-                if (not_computed(ix, iy))
-                    upload_buf_[(size_t)iy * (size_t)nx + (size_t)ix] = -std::numeric_limits<float>::max();
     glBindTexture(GL_TEXTURE_2D, data_tex_);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, nx, ny, GL_RED, GL_FLOAT,
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, th, GL_RED, GL_FLOAT,
                     upload_buf_.data());
     glBindTexture(GL_TEXTURE_2D, 0);
 }
@@ -313,7 +352,7 @@ void HeatmapView::render(PlotRenderer& renderer,
 
     // 1. Текстура из снапшота (lazy upload по generation).
     const bool needs_upload = data_generation != data_gen_cached ||
-                              nx != tex_w_ || ny != tex_h_ || !data_tex_;
+                              nx != tex_src_w_ || ny != tex_src_h_ || !data_tex_;
     if (needs_upload) {
         ensure_tex(nx, ny);
         std::vector<double> swap_buf;
