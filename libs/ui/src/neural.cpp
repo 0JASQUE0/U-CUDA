@@ -494,7 +494,7 @@ static void draw_neural_classes(NeuralConfig& c) {
         const std::vector<int> labels = neural_class_labels(c);
         ImGui::TextDisabled("%zu trials = samples, %zu classes, every class in every part of the split.", labels.size(), t.classes.size());
     } catch (const std::exception& e) {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s", e.what());
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)), "%s", e.what());
     }
     ImGui::TextDisabled("A trial is one sample: the protocol is separate trials, the rest before the stimulus is the washout.\n"
                         "During the stimulus every class source carries the signal of the trial's class: link one of them.\n"
@@ -525,13 +525,13 @@ static void draw_neural_delayed(NeuralConfig& c) {
         ImGui::TextDisabled("Target d is the input d samples back, d = 1..largest delay; r^2 of each on the test, MC is their sum.\n"
                             "The classic protocol drives the network with white noise: MC <= number of feature nodes.");
         if (k != NeuralSourceKind::Noise && k != NeuralSourceKind::Bits)
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "A smooth input is predictable from its own past: MC then counts that too. Gaussian noise is the usual input.");
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)), "A smooth input is predictable from its own past: MC then counts that too. Gaussian noise is the usual input.");
     }
     else {
         ImGui::TextDisabled("Target d is the XOR of the signs of the input d and d + 1 samples back; accuracy by the threshold 0.5,\n"
                             "chance 0.5. A linear model on the delayed input cannot do XOR: it is shown as the control of nonlinearity.");
         if (k != NeuralSourceKind::Bits && k != NeuralSourceKind::Noise)
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Use Random bits as the input: the bit is the sign of the sample.");
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)), "Use Random bits as the input: the bit is the sign of the sample.");
     }
     ImGui::TextDisabled("One sample is the input sample time. The washout is raised to the largest delay + 1 when shorter.");
 }
@@ -548,7 +548,7 @@ static void draw_neural_forecast(NeuralConfig& c) {
         smooth = smooth && c.sources[(size_t)q].kind != NeuralSourceKind::Noise && c.sources[(size_t)q].kind != NeuralSourceKind::Bits;
     }
     ImGui::Text("forecast of %s", list.c_str());
-    if (!smooth) ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "A random input cannot be forecast: link a system or a periodic source.");
+    if (!smooth) ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)), "A random input cannot be forecast: link a system or a periodic source.");
     InputNumStr("forecast length, samples", t.forecast_length_text, kFieldW);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("After t max of Protocol the network runs on with its own readout as the input.");
     InputNumStr("error threshold", t.forecast_threshold_text, kFieldW);
@@ -776,7 +776,7 @@ static void draw_neural_lyapunov(NeuralConfig& c) {
                           "Memory and time double from the moment the copy starts.");
     if (!c.lyap_on) return;
     if (c.protocol == NeuralProtocol::Trials && c.reset_state) {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Does not work with a restart of each trial.");
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)), "Does not work with a restart of each trial.");
     }
     InputNumStr("perturbation per coordinate", c.lyap_eps_text, kFieldW);
     InputNumStr("renormalisation interval", c.lyap_interval_text, kFieldW);
@@ -903,7 +903,7 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
     if (c.arcs > 0 || c.last_run_ok) {
         ImGui::Separator();
         if (!c.last_run_ok && c.result.ok)
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "The last run failed (see the error at the top): the numbers below are from the run before.");
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.6f, 0.3f, 1.0f)), "The last run failed (see the error at the top): the numbers below are from the run before.");
         ImGui::Text("%d nodes, %lld arcs, in-degree %d..%d", c.result.n_nodes, c.arcs, c.degree_min, c.degree_max);
         ImGui::Text("graph %.2f s, run %.2f s, %.0f MB on the GPU", c.build_seconds, c.result.wall_ms / 1000.0,
                     (double)c.result.device_bytes / (1024.0 * 1024.0));
@@ -1007,11 +1007,11 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
             else ImGui::Text("%s: test NRMSE %.4f, validation %.4f, lambda %g", q.names[k].c_str(), q.test[k], q.val[k], q.lambda[k]);
             if (!q.applied && k < q.delay_test.size()) { ImGui::SameLine(); ImGui::TextDisabled("delays of the input (%d): %.4f", q.delay_length, q.delay_test[k]); }
         }
-        if (!q.note.empty()) ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Readout: %s", q.note.c_str());
+        if (!q.note.empty()) ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)), "Readout: %s", q.note.c_str());
         if (c.result.device_clips > 0)
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "The device state bound acted %lld times.", c.result.device_clips);
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)), "The device state bound acted %lld times.", c.result.device_clips);
         if (c.result.spikes_dropped > 0)
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "The spike log is cut: %lld events omitted. Total counts are still exact.", c.result.spikes_dropped);
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)), "The spike log is cut: %lld events omitted. Total counts are still exact.", c.result.spikes_dropped);
         const int nInst = (int)c.result.instance_stop.size();
         if (c.result.lyapunov.size() == 1)
             ImGui::Text("largest Lyapunov exponent %.6g, %d blocks", c.result.lyapunov[0], c.result.lyap_blocks);
@@ -1024,13 +1024,13 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
         if (c.result.diverged && nInst > 1) {
             int stopped = 0;
             for (long long v : c.result.instance_stop) stopped += v >= 0;
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "%d of %d networks diverged, the others ran on", stopped, nInst);
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.6f, 0.3f, 1.0f)), "%d of %d networks diverged, the others ran on", stopped, nInst);
         }
         else if (c.result.diverged)
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "%d node(s) diverged, the run stopped at step %lld", c.result.n_diverged, c.result.steps_done);
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.6f, 0.3f, 1.0f)), "%d node(s) diverged, the run stopped at step %lld", c.result.n_diverged, c.result.steps_done);
     }
     if (!c.model_text.empty() && !s.sys.rhs.empty() && c.model_text != neural_model_text(s.sys))
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "The system changed since this experiment was last run.");
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)), "The system changed since this experiment was last run.");
 }
 
 // Номер показываемого экземпляра и что с ним стало.
@@ -1049,7 +1049,7 @@ static void neural_instance_picker(const NeuralConfig& c, NeuralViewState& vs, c
     }
     if (vs.instance < (int)c.result.instance_stop.size() && c.result.instance_stop[(size_t)vs.instance] >= 0) {
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "diverged at t = %g",
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.6f, 0.3f, 1.0f)), "diverged at t = %g",
                            (double)c.result.instance_stop[(size_t)vs.instance] * c.result.h);
     }
 }
@@ -1177,8 +1177,8 @@ static void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, P
                 for (int k = 0; k < C; ++k) {
                     ImGui::TableNextColumn();
                     const double v = task.confusion[at + (size_t)i * C + k];
-                    if (i == k) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "%.0f", v);
-                    else if (v > 0.0) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "%.0f", v);
+                    if (i == k) ImGui::TextColored(readable_text(ImVec4(0.45f, 0.85f, 0.45f, 1.0f)), "%.0f", v);
+                    else if (v > 0.0) ImGui::TextColored(readable_text(ImVec4(1.0f, 0.6f, 0.3f, 1.0f)), "%.0f", v);
                     else ImGui::TextDisabled("0");
                 }
                 ImGui::TableNextColumn();
@@ -1819,10 +1819,10 @@ void draw_neural_results(AppModel& model) {
     if (available.empty()) { ImGui::TextDisabled("No results for this experiment. Press Run in Neural Controls."); return; }
     ImGui::TextUnformatted(ctx.label.c_str());
     if (ctx.settings_key != model.neural_result_settings_key(idx) || ctx.mixed_settings)
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Previous settings — showing the last successful result.");
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.3f, 1.0f)), "Previous settings — showing the last successful result.");
     if (ctx.partial_history) ImGui::TextDisabled("Continued from a checkpoint; the earlier recording is unavailable.");
     if (r.spikes_dropped > 0)
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Spike log incomplete: %lld events omitted. Raster and binned rates are partial.", r.spikes_dropped);
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.3f, 1.0f)), "Spike log incomplete: %lld events omitted. Raster and binned rates are partial.", r.spikes_dropped);
     neural_instance_picker(c, model.neural_view, "Network instance");
 
     auto& ui = ui_resource<NeuralResultsUI, 3020>();

@@ -118,10 +118,12 @@ struct AppSettings {
     bool contrast_theme = false;
     // Камуфляжные темы: приглушённый узор под окнами (resources/themes/*.ppm) и
     // палитра в его цветах. 0 — нет, 1 Multicam, 2 DPM, 3 DDPM, 4 Flora (ВСР-98), 5 Flecktarn,
-    // 6 Cyan HUD (вместо текстуры — анимированное сотовое поле, рисуется в app_main).
+    // 6 Cyan HUD (вместо текстуры — анимированное сотовое поле, рисуется в app_main),
+    // 7 Cyan HUD Light (то же поле в светлых тонах).
     // Пишется вместе с dark_theme = false, так что старая сборка откроет их как Light.
     enum CamoTheme { kCamoNone = 0, kCamoMulticam, kCamoDpm, kCamoDdpm, kCamoFlora, kCamoFlecktarn,
-                     kCamoHud, kCamoCount };
+                     kCamoHud, kCamoHudLight, kCamoCount };
+    static bool is_hud_theme(int camo) { return camo == kCamoHud || camo == kCamoHudLight; }
     int camo_theme = kCamoNone;
 
     // Пользовательские основные цвета темы (Settings -> Theme colors). Накладываются

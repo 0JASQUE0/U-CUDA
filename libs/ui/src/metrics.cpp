@@ -135,7 +135,7 @@ void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisSession&
         ImGui::SameLine();
         if (ImGui::SmallButton("None##met_none")) c.metric_mask = 0;
         if (c.metric_mask == 0)
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "Select at least one metric.");
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.6f, 0.3f, 1.0f)), "Select at least one metric.");
     }
 
     {
@@ -166,9 +166,9 @@ void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisSession&
     const SignalMetricsResult& r = c.mode_2d ? c.result_2d : c.result;
     if (ok) {
         if (c.mode_2d)
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK: %dx%d grid", r.n_pts, r.n_pts);
+            ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)), "OK: %dx%d grid", r.n_pts, r.n_pts);
         else
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK: n_pts=%d", r.n_pts);
+            ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)), "OK: n_pts=%d", r.n_pts);
         draw_regime_summary(r.flags, &c.regime_counts, c.mode_2d ? c.data_generation_2d : c.data_generation);
         draw_adaptive_stats(r.ad_stats);
     }

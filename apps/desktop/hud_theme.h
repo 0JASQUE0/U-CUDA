@@ -17,7 +17,12 @@ struct ImGuiStyle;
 namespace hud_theme {
 
 // Поправки стиля поверх палитры темы: нулевые скругления, рамки у полей.
-void apply_style(ImGuiStyle& st);
+// light — светлый вариант (Cyan HUD Light).
+void apply_style(ImGuiStyle& st, bool light);
+
+// Самый тёмный и самый светлый цвет поля под окнами (RGB 0..1) — для
+// проверки контраста текста над полупрозрачной вуалью окна.
+void backdrop_extremes(bool light, float out[2][3]);
 
 class Painter {
 public:
@@ -34,7 +39,7 @@ public:
     // анимация плавно замедляется (мелкие шаги между кадрами не дёргаются), а
     // на долгом расчёте останавливается совсем; после расчёта разгоняется.
     // show_note — выводить шутку про CUDAynamics (только на вкладке Settings).
-    void inject(ImDrawData* dd, float scale, double time, bool computing, bool show_note);
+    void inject(ImDrawData* dd, float scale, double time, bool computing, bool show_note, bool light);
     // До ImGui::DestroyContext (деструктор ImDrawList читает данные контекста).
     void release();
 

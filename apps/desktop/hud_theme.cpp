@@ -13,15 +13,28 @@ namespace {
 
 constexpr float kPi = 3.14159265358979f;
 
-// Цвета поля. Основа почти чёрная с синевой, подсветка — бирюзово-голубая.
-constexpr float kCyR = 0.0f, kCyG = 229.0f / 255.0f, kCyB = 1.0f;
-inline ImU32 cyan(float a) {
-    return ImGui::ColorConvertFloat4ToU32(ImVec4(kCyR, kCyG, kCyB, std::clamp(a, 0.0f, 1.0f)));
+// Цвета поля. Тёмный вариант: основа почти чёрная с синевой, подсветка
+// бирюзово-голубая, центры ядер почти белые. Светлый: ледяная основа,
+// линии и ядра глубокого бирюзового цвета.
+struct Look {
+    ImVec4 accent;   // соты, кольца, рамки
+    ImVec4 core;     // центры ядер и импульс в канале
+    ImVec4 base;     // сплошная основа под окном и срезы углов
+    ImU32  scan;     // строки развёртки
+};
+const Look kDarkLook  = { ImVec4(0.0f, 229.0f / 255.0f, 1.0f, 1), ImVec4(0.80f, 0.98f, 1.0f, 1),
+                          ImVec4(1 / 255.0f, 4 / 255.0f, 7 / 255.0f, 1), IM_COL32(0, 0, 0, 60) };
+const Look kLightLook = { ImVec4(0.0f, 0.50f, 0.64f, 1), ImVec4(0.0f, 0.36f, 0.48f, 1),
+                          ImVec4(0.91f, 0.965f, 0.98f, 1), 0 };   // светлая — без развёртки
+const Look* g_look = &kDarkLook;
+
+inline ImU32 with_alpha(ImVec4 c, float a) {
+    c.w = std::clamp(a, 0.0f, 1.0f);
+    return ImGui::ColorConvertFloat4ToU32(c);
 }
-inline ImU32 ice(float a) {   // почти белый голубой: центры ядер
-    return ImGui::ColorConvertFloat4ToU32(ImVec4(0.80f, 0.98f, 1.0f, std::clamp(a, 0.0f, 1.0f)));
-}
-const ImU32 kBase = IM_COL32(1, 4, 7, 255);
+inline ImU32 cyan(float a) { return with_alpha(g_look->accent, a); }
+inline ImU32 ice(float a)  { return with_alpha(g_look->core, a); }
+inline ImU32 base_col()    { return ImGui::ColorConvertFloat4ToU32(g_look->base); }
 
 // Шутка для коллег: видна, только если присмотреться.
 const char* kNote  = "up to 3x faster than CUDAynamics";
@@ -97,28 +110,43 @@ bool wants_backdrop(const ImGuiWindow* w) {
 
 } // namespace
 
-void apply_style(ImGuiStyle& st) {
+void apply_style(ImGuiStyle& st, bool light) {
     st.WindowRounding = st.ChildRounding = st.FrameRounding = st.PopupRounding = 0.0f;
     st.ScrollbarRounding = st.GrabRounding = st.TabRounding = 0.0f;
     st.WindowBorderSize = 1.0f;
     st.FrameBorderSize  = 1.0f;
     st.PopupBorderSize  = 1.0f;
+    const ImVec4 a = light ? kLightLook.accent : kDarkLook.accent;
+    auto acc = [&](float alpha) { return ImVec4(a.x, a.y, a.z, alpha); };
+    // Галочка и активный бегунок: на тёмном — почти белые, на светлом — темнее акцента.
+    const ImVec4 strong = light ? ImVec4(0.00f, 0.32f, 0.42f, 1.0f) : ImVec4(0.65f, 1.00f, 1.00f, 1.0f);
     ImVec4* c = st.Colors;
-    c[ImGuiCol_Border]           = ImVec4(kCyR, kCyG, kCyB, 0.35f);
+    c[ImGuiCol_Border]           = acc(light ? 0.45f : 0.35f);
     c[ImGuiCol_BorderShadow]     = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_Separator]        = ImVec4(kCyR, kCyG, kCyB, 0.30f);
-    c[ImGuiCol_SeparatorHovered] = ImVec4(kCyR, kCyG, kCyB, 0.75f);
-    c[ImGuiCol_SeparatorActive]  = ImVec4(kCyR, kCyG, kCyB, 1.00f);
-    c[ImGuiCol_CheckMark]        = ImVec4(0.65f, 1.00f, 1.00f, 1.00f);
-    c[ImGuiCol_SliderGrab]       = ImVec4(kCyR, kCyG, kCyB, 0.85f);
-    c[ImGuiCol_SliderGrabActive] = ImVec4(0.65f, 1.00f, 1.00f, 1.00f);
-    c[ImGuiCol_TabSelectedOverline] = ImVec4(kCyR, kCyG, kCyB, 1.00f);
-    c[ImGuiCol_TitleBgActive]    = ImVec4(0.00f, 0.20f, 0.26f, 1.00f);
-    c[ImGuiCol_PlotLines]        = ImVec4(kCyR, kCyG, kCyB, 1.00f);
-    c[ImGuiCol_PlotHistogram]    = ImVec4(kCyR, kCyG, kCyB, 0.85f);
-    c[ImGuiCol_TextSelectedBg]   = ImVec4(kCyR, kCyG, kCyB, 0.30f);
-    c[ImGuiCol_DockingPreview]   = ImVec4(kCyR, kCyG, kCyB, 0.55f);
-    c[ImGuiCol_NavCursor]        = ImVec4(kCyR, kCyG, kCyB, 1.00f);
+    c[ImGuiCol_Separator]        = acc(light ? 0.40f : 0.30f);
+    c[ImGuiCol_SeparatorHovered] = acc(0.75f);
+    c[ImGuiCol_SeparatorActive]  = acc(1.00f);
+    c[ImGuiCol_CheckMark]        = strong;
+    c[ImGuiCol_SliderGrab]       = acc(0.85f);
+    c[ImGuiCol_SliderGrabActive] = strong;
+    c[ImGuiCol_TabSelectedOverline] = acc(1.00f);
+    c[ImGuiCol_TitleBgActive]    = light ? ImVec4(0.66f, 0.87f, 0.92f, 1.00f) : ImVec4(0.00f, 0.20f, 0.26f, 1.00f);
+    c[ImGuiCol_PlotLines]        = acc(1.00f);
+    c[ImGuiCol_PlotHistogram]    = acc(0.85f);
+    c[ImGuiCol_TextSelectedBg]   = acc(light ? 0.25f : 0.30f);
+    c[ImGuiCol_DockingPreview]   = acc(light ? 0.45f : 0.55f);
+    c[ImGuiCol_NavCursor]        = acc(1.00f);
+}
+
+void backdrop_extremes(bool light, float out[2][3]) {
+    // Самое тёмное и самое светлое место поля под вуалью окна: основа и
+    // яркая сота у ядра (линия с заливкой ~35 % цвета подсветки).
+    const Look& l = light ? kLightLook : kDarkLook;
+    for (int k = 0; k < 3; ++k) {
+        const float b = (&l.base.x)[k], a = (&l.accent.x)[k];
+        out[0][k] = b;
+        out[1][k] = b + (a - b) * 0.35f;
+    }
 }
 
 void Painter::prepare_frame(float scale) {
@@ -145,7 +173,8 @@ ImDrawList* Painter::next_list(ImDrawData* dd) {
     return dl;
 }
 
-void Painter::inject(ImDrawData* dd, float sc, double time, bool computing, bool show_note) {
+void Painter::inject(ImDrawData* dd, float sc, double time, bool computing, bool show_note, bool light) {
+    g_look = light ? &kLightLook : &kDarkLook;
     // Часы анимации. Скорость: 1 без расчёта, 0.3 в первые секунды расчёта,
     // 0 дальше; к цели подтягивается экспоненциально (~0.6 с), без скачков.
     {
@@ -235,7 +264,7 @@ void Painter::inject(ImDrawData* dd, float sc, double time, bool computing, bool
     auto paint_under = [&](ImDrawList* dl, const ImGuiWindow* w) {
         const ImVec2 a = w->Pos, b(w->Pos.x + w->Size.x, w->Pos.y + w->Size.y);
         dl->PushClipRect(a, b, true);
-        dl->AddRectFilled(a, b, kBase);
+        dl->AddRectFilled(a, b, base_col());
 
         for (const Core& k : cores) {
             const float r = 240.0f * sc * k.s;
@@ -305,8 +334,8 @@ void Painter::inject(ImDrawData* dd, float sc, double time, bool computing, bool
         // Строки развёртки ЭЛТ — только по фону, под содержимым окна: поверх
         // графиков, текста и полей ввода они мешали.
         const float step = std::max(3.0f, std::round(3.0f * sc));
-        for (float y = std::floor(a.y / step) * step; y < b.y; y += step)
-            dl->AddRectFilled(ImVec2(a.x, y), ImVec2(b.x, y + 1.0f), IM_COL32(0, 0, 0, 60));
+        for (float y = std::floor(a.y / step) * step; g_look->scan != 0 && y < b.y; y += step)
+            dl->AddRectFilled(ImVec2(a.x, y), ImVec2(b.x, y + 1.0f), g_look->scan);
         dl->PopClipRect();
     };
 
@@ -330,11 +359,11 @@ void Painter::inject(ImDrawData* dd, float sc, double time, bool computing, bool
         // уголка изменения размера (пристыкованное окно или NoResize).
         const float ch = 7.0f * sc;
         const ImU32 edge = cyan(focused ? 0.95f : 0.45f);
-        dl->AddTriangleFilled(a, ImVec2(a.x + ch, a.y), ImVec2(a.x, a.y + ch), kBase);
+        dl->AddTriangleFilled(a, ImVec2(a.x + ch, a.y), ImVec2(a.x, a.y + ch), base_col());
         dl->AddLine(ImVec2(a.x + ch, a.y + 0.5f), ImVec2(a.x + 0.5f, a.y + ch), edge, th);
         const bool cut_br = w->DockIsActive || (w->Flags & ImGuiWindowFlags_NoResize);
         if (cut_br) {
-            dl->AddTriangleFilled(b, ImVec2(b.x - ch, b.y), ImVec2(b.x, b.y - ch), kBase);
+            dl->AddTriangleFilled(b, ImVec2(b.x - ch, b.y), ImVec2(b.x, b.y - ch), base_col());
             dl->AddLine(ImVec2(b.x - ch, b.y - 0.5f), ImVec2(b.x - 0.5f, b.y - ch), edge, th);
         }
 

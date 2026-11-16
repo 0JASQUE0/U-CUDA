@@ -71,20 +71,37 @@ static constexpr float  kFieldW = 120.0f;
 
 static constexpr float  kComboW = 160.0f;
 
-// Цвет текста, полученный поворотом оттенка (уровни Custom и Tree): на тёмном
-// фоне синие и фиолетовые оттенки при той же HSV-яркости тусклы (у синего
-// малая светлота), поэтому разбавляем их белым до читаемой светлоты, оттенок
-// сохраняется. На светлом фоне цвет не меняется.
-inline ImVec4 readable_on_dark_bg(ImVec4 col) {
-    auto luma = [](const ImVec4& c) { return 0.299f * c.x + 0.587f * c.y + 0.114f * c.z; };
-    const float target = 0.62f, l = luma(col);
-    if (luma(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)) < 0.5f && l < target) {
-        const float k = (target - l) / (1.0f - l);
-        col.x += (1.0f - col.x) * k;
-        col.y += (1.0f - col.y) * k;
-        col.z += (1.0f - col.z) * k;
+// Цветной текст (статусы, предупреждения, уровни Custom и Tree), читаемый в
+// любой теме: если контраст с фоном окна ниже WCAG 4.5, цвет сдвигается к
+// белому на тёмном фоне или к чёрному на светлом, оттенок сохраняется.
+// Жёлтый и салатовый, подобранные под тёмную тему, на светлой становятся
+// оливковым и зелёным, синий на чёрном — голубым.
+// bg — фон под текстом (непрозрачный RGB); по умолчанию фон окна.
+inline ImVec4 readable_text(ImVec4 col, ImVec4 bg) {
+    auto lin = [](float v) { return v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f); };
+    auto lum = [&](const ImVec4& c) { return 0.2126f * lin(c.x) + 0.7152f * lin(c.y) + 0.0722f * lin(c.z); };
+    const float lb = lum(bg);
+    const bool dark_bg = lb < 0.18f;
+    const float t = dark_bg ? 1.0f : 0.0f;
+    for (int it = 0; it < 40; ++it) {
+        const float lc = lum(col);
+        const float r = (std::max(lc, lb) + 0.05f) / (std::min(lc, lb) + 0.05f);
+        if (r >= 4.5f) break;
+        col.x += (t - col.x) * 0.06f;
+        col.y += (t - col.y) * 0.06f;
+        col.z += (t - col.z) * 0.06f;
     }
     return col;
+}
+inline ImVec4 readable_text(ImVec4 col) {
+    return readable_text(col, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+}
+// Цветная подпись на кнопке: фон — цвет кнопки поверх фона окна.
+inline ImVec4 readable_button_text(ImVec4 col) {
+    const ImVec4 w = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+    const ImVec4 b = ImGui::GetStyleColorVec4(ImGuiCol_Button);
+    const ImVec4 bg(b.x * b.w + w.x * (1 - b.w), b.y * b.w + w.y * (1 - b.w), b.z * b.w + w.z * (1 - b.w), 1.0f);
+    return readable_text(col, bg);
 }
 
 struct ModeTab {

@@ -173,7 +173,7 @@ void draw_rhs_preview(const SystemEditor& model) {
         return;
     const AppModel::RhsPreview& pv = model.rhs_preview();
     if (pv.text.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Parse error: %s", pv.error.c_str());
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.45f, 0.35f, 1.0f)), "Parse error: %s", pv.error.c_str());
         return;
     }
     // Длинная правая часть переносится, а не уезжает за край, поэтому высоту
@@ -347,7 +347,7 @@ bool InputNumStr(const char* label, std::string& str, float width,
     // Default из engine'а (0) всё равно применится, но пользователю
     // явно сигналим, что введённое значение игнорируется.
     if (!(allow_empty && str.empty()) && !is_numeric_string(str)) {
-        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.55f, 0.3f, 1.0f)),
             "  invalid number, using default");
     }
     return changed;
@@ -411,7 +411,7 @@ bool InputNumStrCommit(const char* label, std::string& text, double& value,
     const bool committed = ImGui::IsItemDeactivatedAfterEdit();
     const bool valid     = !text.empty() && is_numeric_string(text);
     if (!valid)
-        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.55f, 0.3f, 1.0f)),
             "  invalid number, keeping previous value");
 
     if (committed && valid) {

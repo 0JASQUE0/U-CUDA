@@ -488,7 +488,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                                                           : "no result for these settings - press Recompute");
                 }
                 else if (!rq->ok) {
-                    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", rq->error.c_str());
+                    ImGui::TextColored(readable_text(ImVec4(1.0f, 0.4f, 0.4f, 1.0f)), "%s", rq->error.c_str());
                 }
                 else {
                     // n и dt печатаются всегда: ряд прорежен до n точек, и длины линий ниже —
@@ -1104,7 +1104,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         std::string why;
         if (!cpu_compiler_available(&why)) {
             if (!draw_integration) ImGui::SameLine();
-            ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(custom requires GPU: %s)",
+            ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0.3f, 1)), "(custom requires GPU: %s)",
                                why.c_str());
             s.use_gpu = true;
         }
@@ -1699,7 +1699,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
     }
 
     if (!s.result.error.empty())
-        ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "%s", s.result.error.c_str());
+        ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0, 1)), "%s", s.result.error.c_str());
     if (!s.result.note.empty())
         ImGui::TextWrapped("%s", s.result.note.c_str());
 }

@@ -151,7 +151,14 @@ void draw_status_dot(AppModel& model, const TreeSession& ts, int id) {
         tip = "Up to date";
     }
     const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
-    ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f), r, col);
+    const ImVec2 c((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddCircleFilled(c, r, col);
+    // На светлом фоне (Light, светлые камуфляжи, Cyan HUD Light) светлые
+    // кружки теряются — обводим тёмной рамкой; на тёмном она не нужна.
+    const ImVec4 bg = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+    if (0.299f * bg.x + 0.587f * bg.y + 0.114f * bg.z > 0.5f)
+        dl->AddCircle(c, r + 0.5f, IM_COL32(20, 20, 20, 200), 0, 1.0f);
     if (ImGui::IsItemHovered()) {
         if (tip) ImGui::SetTooltip("%s", tip);
         else {
@@ -167,7 +174,7 @@ float tree_button_width(const char* label) {
 
 bool small_icon_button(const char* label, const char* tip, ImVec4 col = ImVec4(0, 0, 0, 0),
                        float width = 0.0f) {
-    if (col.w > 0.0f) ImGui::PushStyleColor(ImGuiCol_Text, col);
+    if (col.w > 0.0f) ImGui::PushStyleColor(ImGuiCol_Text, readable_button_text(col));
     bool r;
     if (width > 0.0f) {
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 0.0f));
@@ -669,7 +676,7 @@ bool draw_leaf_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
         ImGui::TextDisabled("Clustering radius in (Feature 1, Feature 2) space.");
         if (ImGui::CollapsingHeader("Phase portraits")) draw_basins_phase_controls(model, b, 0);
         if (bc.last_run_ok)
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK: %dx%d, %d clusters (+ %d FP clusters)",
+            ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)), "OK: %dx%d, %d clusters (+ %d FP clusters)",
                                bc.result.n_pts, bc.result.n_pts, bc.result.n_clusters, -bc.result.min_cluster_idx);
         break;
     }
@@ -679,7 +686,7 @@ bool draw_leaf_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
     if (!rt.phase) ch |= draw_leaf_integration(model, ts, n);
     if (!rt.in_flight() && !rt.committed.empty() && !rt.committed_ok) {
         const std::string err = rt.last_error();
-        if (!err.empty()) ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "%s", err.c_str());
+        if (!err.empty()) ImGui::TextColored(readable_text(ImVec4(1.0f, 0.5f, 0.0f, 1.0f)), "%s", err.c_str());
     }
     return ch;
 }
@@ -723,7 +730,7 @@ ImVec4 tree_dim_color(int slot, bool active) {
     nh -= std::floor(nh);
     ImVec4 col(0, 0, 0, 1.0f);
     ImGui::ColorConvertHSVtoRGB(nh, std::max(0.75f, s), std::max(0.85f, v), col.x, col.y, col.z);
-    return readable_on_dark_bg(col);
+    return readable_text(col);
 }
 
 void load_tree_session(AppModel& model, SystemLibrary& lib) {
@@ -769,7 +776,7 @@ void draw_tree_controls(AppModel& model, SystemLibrary& lib) {
     ImGui::SameLine();
     ImGui::TextDisabled("(%zu queued)", model.tree_queue().size());
     if (ImGui::GetTime() - g_msg_time < 3.0)
-        ImGui::TextColored(ImVec4(0.96f, 0.53f, 0.44f, 1.0f), "%s", g_msg.c_str());
+        ImGui::TextColored(readable_text(ImVec4(0.96f, 0.53f, 0.44f, 1.0f)), "%s", g_msg.c_str());
 
     // Дерево сверху, параметры снизу, между ними сплиттер.
     static float tree_fraction = 0.5f;

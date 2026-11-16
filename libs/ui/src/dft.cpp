@@ -421,7 +421,7 @@ void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s, int i
 
     // Run-кнопка живёт в draw_dft1d_controls, как у Bifurcation/Basins.
     if (c.last_run_ok) {
-        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)),
             "OK: n_pts=%d, n_freq=%d", c.result.n_pts, c.result.n_freq);
         draw_regime_summary(c.result.flags);
     } else if (!c.last_error.empty()) {

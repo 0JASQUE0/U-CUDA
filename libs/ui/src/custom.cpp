@@ -766,7 +766,7 @@ void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
         const float nv = std::max(0.85f, v);
         ImVec4 col(0, 0, 0, 1.0f);
         ImGui::ColorConvertHSVtoRGB(nh, ns, nv, col.x, col.y, col.z);
-        return readable_on_dark_bg(col);
+        return readable_text(col);
     };
 
     auto level_header = [&](int level_idx,

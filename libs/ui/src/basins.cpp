@@ -138,7 +138,7 @@ void draw_basins_phase_controls(AppModel& model, BasinsAnalysisSession& s, int c
     if (scheme_needs_compiled_body(c.scheme, s.custom_schemes) && !c.pp_use_gpu) {
         std::string why;
         if (!cpu_compiler_available(&why)) {
-            ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(custom scheme requires GPU: %s)", why.c_str());
+            ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0.3f, 1)), "(custom scheme requires GPU: %s)", why.c_str());
             c.pp_use_gpu = true;
         }
     }
@@ -175,7 +175,7 @@ void draw_basins_phase_controls(AppModel& model, BasinsAnalysisSession& s, int c
             if (limit < 1) limit = 1;
             if (n_basins > limit) {
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "(limited to %d)", limit);
+                ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.3f, 1.0f)), "(limited to %d)", limit);
             }
             // Оценка объёма: движок держит траектории целиком (децимация
             // применяется уже после расчёта), поэтому память считаем по
@@ -194,7 +194,7 @@ void draw_basins_phase_controls(AppModel& model, BasinsAnalysisSession& s, int c
     // Статус актуальности
     const std::string sig = build_basins_phase_signature(c);
     if (!no_data && sig != sl.run_signature && !phase_busy) {
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.3f, 1.0f)),
                            c.pp_autorun ? "Rebuilding..." : "Stale - press Run portraits");
     }
     // compute_phase_portrait кладёт в error тайминг успешного прогона
@@ -202,7 +202,7 @@ void draw_basins_phase_controls(AppModel& model, BasinsAnalysisSession& s, int c
     if (!sl.phase.result.error.empty()) {
         const bool is_timing = sl.phase.result.error.rfind("recompute:", 0) == 0;
         if (is_timing) ImGui::TextDisabled("%s", sl.phase.result.error.c_str());
-        else ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "%s", sl.phase.result.error.c_str());
+        else ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0, 1)), "%s", sl.phase.result.error.c_str());
     }
 
     // Окна (проекции)
@@ -465,7 +465,7 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
                           "Writes 4 files: <path>, _1.csv (Feature 1), _2.csv (Feature 2), _3.csv (states).");
 
     if (c.last_run_ok) {
-        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)),
             "OK: %dx%d, %d clusters (+ %d FP clusters)",
             c.result.n_pts, c.result.n_pts,
             c.result.n_clusters, -c.result.min_cluster_idx);

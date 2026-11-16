@@ -41,6 +41,7 @@
 #include <future>
 #include <filesystem>
 #include <algorithm>
+#include <cstring>
 
 #pragma comment(lib, "opengl32.lib")
 
@@ -52,7 +53,8 @@ static const char* OCR_SCRIPT_NAME = "ocr_server.py";
 // плитками в inject_window_backdrops, не режимом GL_REPEAT). Формат выбран ради
 // загрузчика в десяток строк: декодера PNG/JPEG в проекте нет. 0 — файла нет
 // или он битый; тема тогда остаётся без узора.
-static GLuint load_ppm_texture(const std::string& path) {
+// pixels_out (если задан) получает пиксели RGB — для оценки контраста над узором.
+static GLuint load_ppm_texture(const std::string& path, std::vector<unsigned char>* pixels_out = nullptr) {
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) return 0;
     int w = 0, h = 0, maxval = 0;
@@ -74,6 +76,7 @@ static GLuint load_ppm_texture(const std::string& path) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glBindTexture(GL_TEXTURE_2D, 0);
+    if (pixels_out) *pixels_out = std::move(px);
     return tex;
 }
 
@@ -129,7 +132,106 @@ static const CamoPalette kCamoPalettes[AppSettings::kCamoCount] = {
       {0.004f, 0.020f, 0.030f, 0.40f}, {0.012f, 0.045f, 0.065f}, {0.80f, 0.96f, 1.00f},
       {0.020f, 0.090f, 0.120f}, {0.00f, 0.58f, 0.70f}, {0.00f, 0.34f, 0.44f},
       {0.010f, 0.050f, 0.070f}, {0.004f, 0.016f, 0.024f} },
+    // Cyan HUD Light: ледяная основа, тёмно-синий текст, светло-бирюзовые
+    // кнопки (тёмный текст на них читается), поле линиями глубокого бирюзового.
+    { nullptr, true,
+      {0.93f, 0.975f, 0.985f, 0.45f}, {0.95f, 0.985f, 0.995f}, {0.02f, 0.13f, 0.19f},
+      {0.88f, 0.95f, 0.97f}, {0.36f, 0.80f, 0.88f}, {0.22f, 0.66f, 0.76f},
+      {0.80f, 0.92f, 0.95f}, {0.97f, 0.99f, 1.00f} },
 };
+
+// Самый тёмный и самый светлый цвет узора камуфляжа (2-й и 98-й перцентили
+// яркости): по ним проверяется контраст текста над полупрозрачной вуалью.
+struct BackdropExtremes { float c[2][3]; bool valid = false; };
+
+static float rel_lum(const float* c) {
+    auto lin = [](float v) { return v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f); };
+    return 0.2126f * lin(c[0]) + 0.7152f * lin(c[1]) + 0.0722f * lin(c[2]);
+}
+
+static BackdropExtremes ppm_extremes(const std::vector<unsigned char>& px) {
+    BackdropExtremes e;
+    const size_t n = px.size() / 3;
+    if (n == 0) return e;
+    std::vector<std::pair<float, size_t>> lum;
+    lum.reserve(n / 16 + 1);
+    for (size_t i = 0; i < n; i += 16) {
+        const float c[3] = { px[3 * i] / 255.0f, px[3 * i + 1] / 255.0f, px[3 * i + 2] / 255.0f };
+        lum.emplace_back(rel_lum(c), i);
+    }
+    std::sort(lum.begin(), lum.end());
+    const size_t pick[2] = { lum[lum.size() / 50].second, lum[lum.size() * 49 / 50].second };
+    for (int k = 0; k < 2; ++k)
+        for (int j = 0; j < 3; ++j) e.c[k][j] = px[3 * pick[k] + j] / 255.0f;
+    e.valid = true;
+    return e;
+}
+
+// Подтягивает фоны до читаемого контраста с текстом (WCAG: 4.5 для текста,
+// 3 для приглушённого текста и галочки). Проверка идёт по самому тёмному и
+// самому светлому месту подложки под вуалью окна; фон сдвигается от цвета
+// текста (к чёрному при светлом тексте, к белому при тёмном), приглушённый
+// текст, ссылки и галочка — к цвету текста. Цвета, которые и так читаются,
+// не меняются, поэтому стандартные темы почти не затронуты.
+static void enforce_text_contrast(ImVec4* c, const float backs[][3], int nb) {
+    auto over = [](const ImVec4& top, const float* under, float* out) {
+        for (int k = 0; k < 3; ++k) out[k] = (&top.x)[k] * top.w + under[k] * (1.0f - top.w);
+    };
+    auto ratio = [](const float* a, const float* b) {
+        const float la = rel_lum(a), lb = rel_lum(b);
+        return (std::max(la, lb) + 0.05f) / (std::min(la, lb) + 0.05f);
+    };
+    auto toward = [](ImVec4& v, const ImVec4& t, float k) {
+        v.x += (t.x - v.x) * k; v.y += (t.y - v.y) * k; v.z += (t.z - v.z) * k;
+    };
+    const float clear[3] = { 0.1f, 0.1f, 0.12f };   // glClearColor под окнами
+    const ImVec4 text = c[ImGuiCol_Text];
+    const float text_rgb[3] = { text.x, text.y, text.z };
+    const bool light_text = rel_lum(text_rgb) > 0.18f;
+    const ImVec4 away = light_text ? ImVec4(0, 0, 0, 1) : ImVec4(1, 1, 1, 1);
+
+    // Худший контраст цвета fg над слотом bg, лежащим на каждой из подложек.
+    auto worst = [&](const ImVec4& fg, ImGuiCol bg, int layer) {
+        float r = 1e9f;
+        for (int i = 0; i < nb; ++i) {
+            float win[3], base[3], b[3], f[3];
+            over(c[ImGuiCol_WindowBg], backs[i], win);
+            if (layer == 0)      { for (int k = 0; k < 3; ++k) base[k] = win[k]; }
+            else if (layer == 1) over(c[ImGuiCol_TitleBg], clear, base);
+            else                 { for (int k = 0; k < 3; ++k) base[k] = clear[k]; }
+            if (bg == ImGuiCol_WindowBg) { for (int k = 0; k < 3; ++k) b[k] = base[k]; }
+            else over(c[bg], base, b);
+            over(fg, b, f);
+            r = std::min(r, ratio(f, b));
+        }
+        return r;
+    };
+    // Фон окна: при пёстром узоре вуаль плотнеет.
+    for (int it = 0; it < 30 && worst(text, ImGuiCol_WindowBg, 0) < 4.5f; ++it)
+        c[ImGuiCol_WindowBg].w = std::min(1.0f, c[ImGuiCol_WindowBg].w + 0.03f);
+    // layer: 0 — над окном, 1 — над заголовком (вкладки док-узлов), 2 — над фоном приложения.
+    static const struct { ImGuiCol col; int layer; } kBg[] = {
+        { ImGuiCol_FrameBg, 0 }, { ImGuiCol_FrameBgHovered, 0 }, { ImGuiCol_FrameBgActive, 0 },
+        { ImGuiCol_Button, 0 }, { ImGuiCol_ButtonHovered, 0 }, { ImGuiCol_ButtonActive, 0 },
+        { ImGuiCol_Header, 0 }, { ImGuiCol_HeaderHovered, 0 }, { ImGuiCol_HeaderActive, 0 },
+        { ImGuiCol_MenuBarBg, 0 }, { ImGuiCol_TableHeaderBg, 0 },
+        { ImGuiCol_TitleBg, 2 }, { ImGuiCol_TitleBgActive, 2 }, { ImGuiCol_TitleBgCollapsed, 2 },
+        { ImGuiCol_PopupBg, 2 },
+        { ImGuiCol_Tab, 1 }, { ImGuiCol_TabHovered, 1 }, { ImGuiCol_TabSelected, 1 },
+        { ImGuiCol_TabDimmed, 1 }, { ImGuiCol_TabDimmedSelected, 1 },
+    };
+    for (const auto& s : kBg)
+        for (int it = 0; it < 40 && worst(text, s.col, s.layer) < 4.5f; ++it)
+            toward(c[s.col], away, 0.05f);
+    // Приглушённый текст и ссылки — к цвету текста.
+    for (int it = 0; it < 40 && std::min(worst(c[ImGuiCol_TextDisabled], ImGuiCol_WindowBg, 0),
+                                         worst(c[ImGuiCol_TextDisabled], ImGuiCol_PopupBg, 2)) < 3.0f; ++it)
+        toward(c[ImGuiCol_TextDisabled], text, 0.05f);
+    for (int it = 0; it < 40 && worst(c[ImGuiCol_TextLink], ImGuiCol_WindowBg, 0) < 4.5f; ++it)
+        toward(c[ImGuiCol_TextLink], text, 0.05f);
+    for (int it = 0; it < 40 && worst(c[ImGuiCol_CheckMark], ImGuiCol_CheckboxSelectedBg, 0) < 3.0f; ++it)
+        toward(c[ImGuiCol_CheckMark], text, 0.05f);
+}
 
 static void apply_camo_palette(ImVec4* c, const CamoPalette& p, bool has_texture) {
     auto v = [](const float* x, float a) { return ImVec4(x[0], x[1], x[2], a); };
@@ -716,6 +818,7 @@ int main() {
     // подкладки переиспользуются от кадра к кадру (inject_window_backdrops).
     GLuint camo_tex[AppSettings::kCamoCount]   = {};
     bool   camo_tried[AppSettings::kCamoCount] = {};
+    BackdropExtremes camo_ext[AppSettings::kCamoCount];
     std::vector<std::unique_ptr<ImDrawList>> camo_lists;
     hud_theme::Painter hud_painter;
     AppSettings::ThemeColors applied_theme_colors = model.theme_colors;
@@ -740,12 +843,16 @@ int main() {
         if (pal) {
             if (!camo_tried[camo]) {
                 camo_tried[camo] = true;
-                if (pal->texture)
-                    camo_tex[camo] = load_ppm_texture(dir + "themes/" + pal->texture);
+                if (pal->texture) {
+                    std::vector<unsigned char> px;
+                    camo_tex[camo] = load_ppm_texture(dir + "themes/" + pal->texture, &px);
+                    camo_ext[camo] = ppm_extremes(px);
+                }
             }
             // Без файла текстуры — процедурный фон (Cyan HUD), вуаль та же.
             apply_camo_palette(c, *pal, camo_tex[camo] != 0 || !pal->texture);
-            if (camo == AppSettings::kCamoHud) hud_theme::apply_style(st);
+            if (AppSettings::is_hud_theme(camo))
+                hud_theme::apply_style(st, camo == AppSettings::kCamoHudLight);
         }
         if (contrast) {
             // High Contrast: фон окон чисто чёрный, текст белый, рамки у всех
@@ -837,6 +944,16 @@ int main() {
             const float t = (pal && !pal->light) ? 0.45f : 0.25f;
             c[ImGuiCol_CheckboxSelectedBg] = ImVec4(f.x + (a.x - f.x) * t, f.y + (a.y - f.y) * t,
                                                     f.z + (a.z - f.z) * t, 1.0f);
+        }
+        // Подложка под вуалью окна: крайние цвета узора камуфляжа или поля
+        // HUD; без узора — цвет очистки кадра.
+        {
+            float backs[2][3] = { { 0.1f, 0.1f, 0.12f }, { 0.1f, 0.1f, 0.12f } };
+            if (pal && AppSettings::is_hud_theme(camo))
+                hud_theme::backdrop_extremes(camo == AppSettings::kCamoHudLight, backs);
+            else if (pal && camo_tex[camo] != 0 && camo_ext[camo].valid)
+                std::memcpy(backs, camo_ext[camo].c, sizeof(backs));
+            enforce_text_contrast(c, backs, 2);
         }
         st.ScaleAllSizes(scale);
 
@@ -981,7 +1098,7 @@ int main() {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         tree_state::apply();
-        const bool hud_on = !model.dark_theme && model.camo_theme == AppSettings::kCamoHud;
+        const bool hud_on = !model.dark_theme && AppSettings::is_hud_theme(model.camo_theme);
         if (hud_on) hud_painter.prepare_frame(applied_ui_scale);
 
         // Once the async OCR ctor finishes, peek at the result so we can show
@@ -1009,7 +1126,8 @@ int main() {
         ImGui::Render();
         if (hud_on)
             hud_painter.inject(ImGui::GetDrawData(), applied_ui_scale, ImGui::GetTime(), compute_in_flight,
-                               model.app_mode == AppModel::AppMode::Settings);
+                               model.app_mode == AppModel::AppMode::Settings,
+                               model.camo_theme == AppSettings::kCamoHudLight);
         else if (!model.dark_theme && model.camo_theme > AppSettings::kCamoNone &&
             model.camo_theme < AppSettings::kCamoCount && camo_tex[model.camo_theme] != 0)
             inject_window_backdrops(ImGui::GetDrawData(), camo_tex[model.camo_theme],
