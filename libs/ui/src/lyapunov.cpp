@@ -329,7 +329,7 @@ void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSession& s,
 
     if (c.mode_2d) {
         if (c.last_run_2d_ok) {
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)),
                 "OK: %dx%d heatmap, %d exponents",
                 c.result_2d.n_pts, c.result_2d.n_pts, c.result_2d.n_exponents);
             draw_regime_summary(c.result_2d.flags, &c.regime_counts_2d, c.data_generation_2d);
@@ -340,7 +340,7 @@ void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSession& s,
         }
     } else {
         if (c.last_run_ok) {
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)),
                 "OK: n_pts=%d, n_exponents=%d", c.result.n_pts, c.result.n_exponents);
             draw_regime_summary(c.result.flags);
             draw_adaptive_stats(c.result.ad_stats);
@@ -715,7 +715,7 @@ void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int idx) {
 
     if (c.mode_2d) {
         if (c.last_run_2d_ok) {
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)),
                 "OK: %dx%d heatmap, lambda(min..max) = %.4g..%.4g",
                 c.result_2d.n_pts, c.result_2d.n_pts,
                 c.result_2d.min_val, c.result_2d.max_val);
@@ -727,7 +727,7 @@ void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int idx) {
         }
     } else {
         if (c.last_run_ok) {
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)),
                 "OK: n_pts=%d, lambda-curve computed", c.result.n_pts);
             draw_regime_summary(c.result.flags);
             draw_adaptive_stats(c.result.ad_stats);

@@ -62,7 +62,7 @@ void draw_network_topology_block(AppModel& model, NetworkSession& s, NetworkConf
 
     ImGui::Text("%d nodes, %d edges", (int)c.nodes.size(), (int)c.edges.size());
     if ((int)c.nodes.size() > kMaxNetworkNodes)
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.4f, 0.4f, 1.0f)),
                            "over the %d-node cap: the run will be refused", kMaxNetworkNodes);
 }
 }
@@ -145,7 +145,7 @@ void draw_network_coupling_block(AppModel& model, NetworkSession& s, NetworkConf
 
     const std::string lerr = net_validate_laws(s, c);
     if (!lerr.empty())
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", lerr.c_str());
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.4f, 0.4f, 1.0f)), "%s", lerr.c_str());
 
     // Предел устойчивости расщепления: вклад связи добавляется явным шагом
     // h * sum(w), поэтому при h * sum|w| > 1 узел с наибольшей степенью
@@ -164,11 +164,11 @@ void draw_network_coupling_block(AppModel& model, NetworkSession& s, NetworkConf
         }
         const double hK = parse_num(c.h_text, 0.01) * worst;
         if (hK > 1.0)
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.4f, 0.4f, 1.0f)),
                                "h * coupling = %.2f at node %d: the split coupling step "
                                "overshoots (needs < 1)", hK, worst_node);
         else if (hK > 0.3)
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.35f, 1.0f)),
                                "h * coupling = %.2f at node %d - close to the split step's limit",
                                hK, worst_node);
     }
@@ -486,7 +486,7 @@ void draw_network_controls(AppModel& model, SystemLibrary& lib) {
         if (c.result.pre_scaller != parse_num_int(c.pre_scaller_text, 1))
             ImGui::TextDisabled("decimator raised to %d to fit max points", c.result.pre_scaller);
         if (c.result.n_diverged > 0)
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.6f, 0.3f, 1.0f)),
                                "%d node(s) diverged, the run stopped there", c.result.n_diverged);
     }
     if (!c.last_error.empty()) {
@@ -788,7 +788,7 @@ void draw_network_graph_window(AppModel& model) {
     }
 
     if (vs.drag_from >= 0)
-        ImGui::TextColored(ImVec4(1.0f, 0.86f, 0.47f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.86f, 0.47f, 1.0f)),
                            "edge from node %d: click the other node (Esc cancels)", vs.drag_from);
     else
         ImGui::TextDisabled("double click node = start edge, double click empty = new node, "

@@ -20,7 +20,7 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
                                 const GuiCallbacks& cb) {
     SystemEditor& buf = *model.library_edit_buffer;
     const bool add_new = (model.library_edit_mode == AppModel::LibraryEditMode::AddNew);
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+    ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.2f, 1.0f)),
                        add_new ? "New system" : "Editing");
     if (!add_new) {
         ImGui::SameLine();
@@ -36,7 +36,7 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
     InputTextMultilineStr("##editor_note", buf.note, ImVec2(-1, 60));
 
     if (!model.edit_error.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.35f, 0.35f, 1.0f)),
                            "%s", model.edit_error.c_str());
     }
 
@@ -172,7 +172,7 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
                                   "voltages zero). Newton starts from the current initial values.");
             if (!cst.circuit_error.empty() || !cst.circuit_report.empty()) {
                 if (!cst.circuit_error.empty())
-                    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", cst.circuit_error.c_str());
+                    ImGui::TextColored(readable_text(ImVec4(1.0f, 0.35f, 0.35f, 1.0f)), "%s", cst.circuit_error.c_str());
                 if (!cst.circuit_report.empty() && ImGui::TreeNode("Report##dae_circuit")) {
                     ImGui::TextWrapped("%s", cst.circuit_report.c_str());
                     ImGui::TreePop();
@@ -340,8 +340,8 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
                 st.latex_lines = 0;
             }
         }
-        if (st.ok) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "%s", st.message.c_str());
-        else       ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", st.message.c_str());
+        if (st.ok) ImGui::TextColored(readable_text(ImVec4(0.45f, 0.85f, 0.45f, 1.0f)), "%s", st.message.c_str());
+        else       ImGui::TextColored(readable_text(ImVec4(1.0f, 0.35f, 0.35f, 1.0f)), "%s", st.message.c_str());
         if (st.ok && st.latex_lines > 0) {
             ImGui::TextDisabled("Equations (LaTeX preview):");
             const float row = std::floor(ImGui::GetFontSize() * 1.3f + 0.5f) * 1.9f;
@@ -377,7 +377,7 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
                                       "but makes the ODE stiffer (explicit schemes need h*alpha small).");
             }
             if (buf.dae_as_ode && !st.reducible)
-                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "cannot solve as ODE: untick");
+                ImGui::TextColored(readable_text(ImVec4(1.0f, 0.35f, 0.35f, 1.0f)), "cannot solve as ODE: untick");
         }
 
         // Начальные условия всех переменных (z тоже: согласовать их — дело

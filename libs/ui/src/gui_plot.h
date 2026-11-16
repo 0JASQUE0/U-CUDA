@@ -234,7 +234,7 @@ static void draw_continuation_device_block(Cfg& c, const char* id, bool blocked,
         std::string why;
         if (!cpu_compiler_available(&why)) {
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(no compiler: %s)", why.c_str());
+            ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0.3f, 1)), "(no compiler: %s)", why.c_str());
         }
     }
 }

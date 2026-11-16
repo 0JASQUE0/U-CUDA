@@ -286,7 +286,7 @@ void draw_library_list(AppModel& model, SystemLibrary& lib, LibTab tab) {
             }
             if (cs_counts[row] > 0) {
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f),
+                ImGui::TextColored(readable_text(ImVec4(0.6f, 0.85f, 1.0f, 1.0f)),
                     " [%d custom]", cs_counts[row]);
             }
 
@@ -381,7 +381,7 @@ void draw_library_list(AppModel& model, SystemLibrary& lib, LibTab tab) {
 
     ImGui::Text("Selected: %s", model.library_selected_name.c_str());
     if (!g_library_cache.sel_ok) {
-        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "(cannot read system.json)");
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.35f, 0.35f, 1.0f)), "(cannot read system.json)");
         return;
     }
 

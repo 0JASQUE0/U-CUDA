@@ -12,7 +12,7 @@ void draw_generated_code_block(SystemEditor& model, const GuiCallbacks& cb) {
     if (ImGui::Button("Generate")) model.generate();
     if (!model.error_message.empty()) {
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1, 0, 0, 1), "Error: %s", model.error_message.c_str());
+        ImGui::TextColored(readable_text(ImVec4(1, 0, 0, 1)), "Error: %s", model.error_message.c_str());
     }
 
     if (!model.generated_code.empty()) {
@@ -232,7 +232,7 @@ void draw_extrapolation_builder(SystemEditor& model) {
 
     ImGui::Separator();
     if (!problem.empty()) {
-        ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "  %s", problem.c_str());
+        ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0.3f, 1)), "  %s", problem.c_str());
     }
     else {
         // Стоимость, порядок и сами веса печатает отчёт ниже; здесь остаётся
@@ -251,19 +251,19 @@ void draw_extrapolation_builder(SystemEditor& model) {
         // Для double и разумных наборов это ничто, но "1,2,3,100" пользователь
         // вбить может, и там сокращение уже съедает разряды.
         if (amax > 20.0)
-            ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1),
+            ImGui::TextColored(readable_text(ImVec4(1, 0.8f, 0.3f, 1)),
                 "  max|weight| = %.0f: heavy cancellation, ~%.1f decimal digits lost.",
                 amax, std::log10(amax));
 
         if (extr_base_needs_half_s(model.extr_builder_base)) {
             const double s_now = parse_num(model.symmetry_s, 0.5);
             if (s_now != 0.5)
-                ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0.3f, 1)),
                     "  '%s' is order %d only at s = 0.5, and s is currently %g:\n"
                     "  the base drops to order 1 and the wrapper gains nothing.",
                     model.extr_builder_base.c_str(), base_p, s_now);
             else
-                ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1),
+                ImGui::TextColored(readable_text(ImVec4(1, 0.8f, 0.3f, 1)),
                     "  '%s' holds order %d only while s (a[0]) stays 0.5 - do not sweep it.",
                     model.extr_builder_base.c_str(), base_p);
         }
@@ -509,7 +509,7 @@ void draw_composition_builder(SystemEditor& model, const GuiCallbacks& cb) {
 
     ImGui::Separator();
     if (!problem.empty()) {
-        ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "  %s", problem.c_str());
+        ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0.3f, 1)), "  %s", problem.c_str());
     }
     else {
         // Имя, коэффициенты, их значения при текущих параметрах и обе суммы —
@@ -517,7 +517,7 @@ void draw_composition_builder(SystemEditor& model, const GuiCallbacks& cb) {
         draw_wrapper_coefficients(new_name, model.custom_schemes, model.param_values,
                                   "comp_preview");
         if (!base_sym)
-            ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1),
+            ImGui::TextColored(readable_text(ImVec4(1, 0.8f, 0.3f, 1)),
                 "  base is not self-adjoint: the p+2 conditions above do not apply to it,\n"
                 "  and the published coefficients were derived assuming they do.");
 
@@ -525,22 +525,22 @@ void draw_composition_builder(SystemEditor& model, const GuiCallbacks& cb) {
         double gsum = 0.0, gcube = 0.0;
         if (composition_sums(spec, &gsum, &gcube)) {
             if (std::fabs(gsum - 1.0) >= 1e-12)
-                ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1),
+                ImGui::TextColored(readable_text(ImVec4(1, 0.8f, 0.3f, 1)),
                     "  sum != 1: this integrates the field scaled by %.6g, i.e. a different\n"
                     "  problem. The measured order stays valid, the solution does not.", gsum);
             else if (base_sym && std::fabs(gcube) < 1e-12)
-                ImGui::TextColored(ImVec4(0.5f, 1, 0.5f, 1), "  -> expected order %d", base_p + 2);
+                ImGui::TextColored(readable_text(ImVec4(0.5f, 1, 0.5f, 1)), "  -> expected order %d", base_p + 2);
         }
 
         if (extr_base_needs_half_s(model.comp_builder_base)) {
             const double s_now = parse_num(model.symmetry_s, 0.5);
             if (s_now != 0.5)
-                ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0.3f, 1)),
                     "  '%s' is symmetric only at s = 0.5, and s is currently %g:\n"
                     "  the composition conditions no longer hold.",
                     model.comp_builder_base.c_str(), s_now);
             else
-                ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1),
+                ImGui::TextColored(readable_text(ImVec4(1, 0.8f, 0.3f, 1)),
                     "  '%s' stays symmetric only while s (a[0]) is 0.5 - do not sweep it.",
                     model.comp_builder_base.c_str());
         }
@@ -661,7 +661,7 @@ void draw_wrapper_list(SystemEditor& model) {
                 for (const auto& cs : model.custom_schemes)
                     if (cs.name == base) { ok = true; break; }
             if (!ok)
-                ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0.3f, 1)),
                     "  base '%s' no longer exists.", base.c_str());
         }
         ImGui::PopID();
@@ -716,9 +716,9 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
             model.start_ocr(std::make_unique<ClipboardImageSource>());
         ImGui::SameLine();
         switch (model.ocr_state()) {
-        case OcrState::Running: ImGui::TextColored(ImVec4(1, 1, 0, 1), "Recognizing..."); break;
-        case OcrState::Done:    ImGui::TextColored(ImVec4(0, 1, 0, 1), "Recognized"); break;
-        case OcrState::Failed:  ImGui::TextColored(ImVec4(1, 0, 0, 1), "OCR failed: %s", model.ocr_error().c_str()); break;
+        case OcrState::Running: ImGui::TextColored(readable_text(ImVec4(1, 1, 0, 1)), "Recognizing..."); break;
+        case OcrState::Done:    ImGui::TextColored(readable_text(ImVec4(0, 1, 0, 1)), "Recognized"); break;
+        case OcrState::Failed:  ImGui::TextColored(readable_text(ImVec4(1, 0, 0, 1)), "OCR failed: %s", model.ocr_error().c_str()); break;
         default: ImGui::TextDisabled("(no image)"); break;
         }
         ImGui::TextDisabled("Tip: Win+Shift+S to snip, then Ctrl+V or 'Paste from clipboard'.");
@@ -950,7 +950,7 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
                                        (int)model.known_vars.size(),
                                        (int)model.known_params.size() + 1);
                 for (const auto& d : diags)
-                    ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "  line %d: %s",
+                    ImGui::TextColored(readable_text(ImVec4(1, 0.4f, 0.4f, 1)), "  line %d: %s",
                                        d.line, d.message.c_str());
             }
             ImGui::Spacing();
@@ -979,13 +979,13 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
         // подсветка конфликтов
         for (const auto& cs : model.custom_schemes) {
             if (cs.name == kMapSchemeName) {
-                ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0.3f, 1)),
                     "  '%s' is reserved for discrete maps; rename it.", kMapSchemeName);
                 continue;
             }
             for (const auto& b : kBuiltinSchemes) {
                 if (cs.name == b.name) {
-                    ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                    ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0.3f, 1)),
                         "  '%s' conflicts with a built-in scheme name; rename it.",
                         cs.name.c_str());
                     break;
@@ -997,7 +997,7 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
             for (size_t j = i + 1; j < model.custom_schemes.size(); ++j) {
                 if (!model.custom_schemes[i].name.empty() &&
                     model.custom_schemes[i].name == model.custom_schemes[j].name) {
-                    ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                    ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0.3f, 1)),
                         "  duplicate custom name '%s'.",
                         model.custom_schemes[i].name.c_str());
                 }
@@ -1007,7 +1007,7 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
         // режет строку, так что база с ними стала бы неразрешимой.
         for (const auto& cs : model.custom_schemes) {
             if (cs.name.find_first_of("|()") != std::string::npos) {
-                ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1),
+                ImGui::TextColored(readable_text(ImVec4(1, 0.5f, 0.3f, 1)),
                     "  '%s' contains | ( or ) - those are reserved by Extr(...) names.",
                     cs.name.c_str());
             }
@@ -1031,7 +1031,7 @@ void draw_parameters_tab(SystemEditor& model) {
     }
     if (!model.error_message.empty()) {
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1, 0, 0, 1), "%s", model.error_message.c_str());
+        ImGui::TextColored(readable_text(ImVec4(1, 0, 0, 1)), "%s", model.error_message.c_str());
     }
     ImGui::Separator();
 
