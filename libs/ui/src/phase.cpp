@@ -1,4 +1,4 @@
-﻿#include "gui_common.h"
+#include "gui_common.h"
 #include "gui_inputs.h"
 #include "gui_integration.h"
 #include "gui_fields.h"
@@ -8,13 +8,19 @@ using namespace ucuda::ui_detail;
 
 
 namespace ucuda::ui_detail {
+std::string projection_window_title(const PhaseAnalysisSession& s, int index, const std::string& suffix) {
+    return s.projections[index].label + "##proj" + std::to_string(index)
+         + "_g" + std::to_string(s.layout_generation) + suffix;
+}
+
 void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                                     const ProjHookFn& before_begin,
                                     const ProjHookFn& after_begin,
                                     const std::string& title_suffix,
                                     int owner_id_delta,
                                     const PhaseStyleFn& style_fn,
-                                    const FeatureClusterParams& clust) {
+                                    const FeatureClusterParams& clust,
+                                    const ProjVisibilityFn& visible) {
     const AnalysisResult& res = s.result;
     // Lambda installed on every projection view that has data — right-click "Export data..."
     // writes the full double-precision trajectory set (all coords for all ICs) + a _config.csv
@@ -65,13 +71,14 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
     // Ctrl+Shift+клик по галкам стиля — на все проекции этой вкладки (draw_proj_style_controls).
     const ProjStyleGroupScope style_group(&s.projections);
     for (int i = 0; i < (int)s.projections.size(); ++i) {
+        const std::string title = projection_window_title(s, i, title_suffix);
+        if (visible && !visible(title)) continue;
         Projection& pr = s.projections[i];
         PlotRenderer& renderer = *renderers[i]; // рендерер этой проекции
         // ε-окружность включает ТОЛЬКО ветка FeatureDiagram ниже. Гасим её здесь каждый кадр:
         // view2d переживает смену типа проекции (объект переиспользуется, см. `if (!projection_views(pr).view2d)`),
         // и без сброса кружок остался бы висеть на фазовом портрете после переключения комбо.
         if (projection_views(pr).view2d) projection_views(pr).view2d->hover_circle_r = std::numeric_limits<double>::quiet_NaN();
-        std::string title = pr.label + "##proj" + std::to_string(i) + "_g" + std::to_string(s.layout_generation) + title_suffix;
         bool open = true; // крестик закрытия
         // Начальные позиция и размер (только при первом появлении).
         // Каскад слева-сверху: каждое следующее окно чуть смещено.
@@ -1040,7 +1047,8 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                                 AppModel* bc,
                                 const GuiCallbacks* cbp,
                                 const std::function<void()>& on_recompute,
-                                bool handle_ctrl_r) {
+                                bool handle_ctrl_r,
+                                const std::function<bool()>& draw_integration) {
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
     // В Custom эту же панель рисует уровень 3, и источником там остаётся
     // Custom: его Shared config и есть то, что уйдёт в расчёт.
@@ -1058,52 +1066,55 @@ void draw_phase_controls(PhaseAnalysisSession& s,
     if (on_reset_defaults)
         ImGui::TextDisabled("Changes here are NOT saved to the library (sandbox).");
 
-    // метод моделирования + пользовательские схемы из системы
-    ImGui::Text("Method:"); ImGui::SameLine();
-    changed |= draw_scheme_combo("##method", s.scheme, s.custom_schemes,
-                                 [&s](const std::string&) { s.regenerate_krs(); },
-                                 &s.enabled_builtin_schemes, bc, s.sys.is_map, &s.wrapper_schemes);
+    if (!draw_integration) {
+        // метод моделирования + пользовательские схемы из системы
+        ImGui::Text("Method:"); ImGui::SameLine();
+        changed |= draw_scheme_combo("##method", s.scheme, s.custom_schemes,
+                                     [&s](const std::string&) { s.regenerate_krs(); },
+                                     &s.enabled_builtin_schemes, bc, s.sys.is_map, &s.wrapper_schemes);
+        // Time, step, decimation; for a map h = 1 and "time" is the iteration index.
+        if (!s.sys.is_map) {
+            ImGui::Text("Step h:"); ImGui::SameLine();
+            changed |= InputNumStr("##sh", s.step_h, 80); ImGui::SameLine();
+        }
+        ImGui::Text(s.sys.is_map ? "Iterations:" : "Time(s):"); ImGui::SameLine();
+        changed |= InputNumStr("##st", s.sim_time, 70); ImGui::SameLine();
+        ImGui::Text(s.sys.is_map ? "Skip:" : "Skip(s):"); ImGui::SameLine();
+        changed |= InputNumStr("##ssk", s.skip_time, 70);
+        // Symmetry a[0] is also available to custom KRS bodies (same slot as CD);
+        // only show the field if the body actually references a[0].
+        if (scheme_uses_symmetry(s.scheme, s.custom_schemes)) {
+            ImGui::Text("Symmetry s:"); ImGui::SameLine();
+            changed |= InputNumStr("##sym", s.symmetry_s, 70);
+        }
+        if (scheme_uses_cd_fp_iters(s.scheme)) {
+            ImGui::Text("FP iterations n:"); ImGui::SameLine();
+            changed |= InputNumStr("##cdfpn", s.cd_fp_iters, 70);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
+        }
+        if (scheme_uses_newton(s.scheme))
+            changed |= draw_newton_fields(s.newton, 70, "phase_newton");
+        ImGui::Text("Decimation (every Nth point):"); ImGui::SameLine();
+        changed |= InputNumStr("##dec", s.decimation, 70);
+    }
     // Custom КРС теперь считаются и на CPU — тело компилируется в нативный шаг
     // (см. krs_cpu.h). Принудительный GPU оставляем ровно для случая, когда
     // компилятор на машине не найден.
     if (scheme_needs_compiled_body(s.scheme, s.custom_schemes) && !s.use_gpu) {
         std::string why;
         if (!cpu_compiler_available(&why)) {
-            ImGui::SameLine();
+            if (!draw_integration) ImGui::SameLine();
             ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "(custom requires GPU: %s)",
                                why.c_str());
             s.use_gpu = true;
         }
     }
 
-    // Time, step, decimation; for a map h = 1 and "time" is the iteration index.
-    if (!s.sys.is_map) {
-        ImGui::Text("Step h:"); ImGui::SameLine();
-        changed |= InputNumStr("##sh", s.step_h, 80); ImGui::SameLine();
-    }
-    ImGui::Text(s.sys.is_map ? "Iterations:" : "Time(s):"); ImGui::SameLine();
-    changed |= InputNumStr("##st", s.sim_time, 70); ImGui::SameLine();
-    ImGui::Text(s.sys.is_map ? "Skip:" : "Skip(s):"); ImGui::SameLine();
-    changed |= InputNumStr("##ssk", s.skip_time, 70);
-    // Symmetry a[0] is also available to custom KRS bodies (same slot as CD);
-    // only show the field if the body actually references a[0].
-    if (scheme_uses_symmetry(s.scheme, s.custom_schemes)) {
-        ImGui::Text("Symmetry s:"); ImGui::SameLine();
-        changed |= InputNumStr("##sym", s.symmetry_s, 70);
-    }
-    if (scheme_uses_cd_fp_iters(s.scheme)) {
-        ImGui::Text("FP iterations n:"); ImGui::SameLine();
-        changed |= InputNumStr("##cdfpn", s.cd_fp_iters, 70);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
-    }
-    if (scheme_uses_newton(s.scheme))
-        changed |= draw_newton_fields(s.newton, 70, "phase_newton");
-    // ДАУ: начальные z согласуются по связи перед счётом (dae_consistent_z) — что вышло.
     if (!s.result.dae_status.empty())
         ImGui::TextDisabled("%s", s.result.dae_status.c_str());
-    ImGui::Text("Decimation (every Nth point):"); ImGui::SameLine();
-    changed |= InputNumStr("##dec", s.decimation, 70);
-    if (!s.sys.is_map && ImGui::CollapsingHeader("Step size##phase_ad", ImGuiTreeNodeFlags_DefaultOpen)) {
+    const char* step_header = draw_integration ? "Adaptive step statistics##phase_ad" : "Step size##phase_ad";
+    if (!s.sys.is_map && (!draw_integration || s.result.adaptive) &&
+        ImGui::CollapsingHeader(step_header, ImGuiTreeNodeFlags_DefaultOpen)) {
         // В Custom настройки шага живут в общем конфиге (Integration вкладки) и
         // раздаются всем уровням; здесь они только показываются.
         if (on_reset_defaults) {
@@ -1113,10 +1124,10 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                 s.prewarm_gpu();   // включили адаптивный шаг / сменили регулятор — ядро собирается заранее
             }
         }
-        else
+        else if (!draw_integration)
             ImGui::TextDisabled(s.adaptive.enabled ? "Adaptive step (set in Custom -> Integration)."
                                                    : "Fixed step (set in Custom -> Integration).");
-        if (s.adaptive.enabled && !s.adaptive.raw_nodes)
+        if (!draw_integration && s.adaptive.enabled && !s.adaptive.raw_nodes)
             ImGui::TextDisabled("h above is the output step of the uniform grid.");
         // Статистика последнего прогона: по строке на НУ.
         if (s.result.adaptive) {
@@ -1244,7 +1255,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
     ImGui::Separator();
 
     // параметры (общие на все проекции)
-    if (!s.params.empty()) {
+    if (!draw_integration && !s.params.empty()) {
         ImGui::SeparatorText("Parameters");
         if (ImGui::BeginTable("aparams", 2, ImGuiTableFlags_SizingFixedFit)) {
             draw_param_tree(bc ? &bc->param_groups : nullptr, s.params, [&](const std::string& p) {
@@ -1606,6 +1617,10 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         }
     }
 
+    if (draw_integration && draw_integration()) {
+        changed = true;
+        s.fit_request = true;
+    }
     ImGui::Separator();
     // Recompute по кнопке или Ctrl+R, дисейблится во время async-расчёта.
     // Авто-сохранение _last делается в draw_gui::poll(), когда результат готов.

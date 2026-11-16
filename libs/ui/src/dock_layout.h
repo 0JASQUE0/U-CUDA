@@ -39,6 +39,9 @@ struct DockWindowFactory {
     // поменялось, — тогда раскладка ставится через пару кадров, когда окна появятся.
     std::function<std::string()> save_state;
     std::function<bool(const std::string&)> load_state;
+    // Tree: окна существующих узлов, включая выключенные предыдущей раскладкой.
+    std::function<std::vector<std::string>()> available_windows;
+    std::function<void(const std::vector<std::string>&)> apply_unmatched;
 };
 
 // В точке, где вкладка подаёт свой dockspace (до ImGui::DockSpace): выполнить запрос вкладки
