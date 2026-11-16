@@ -15,6 +15,28 @@ struct BasinsPlotViews {
     bool standalone = false;
     bool select_saved_tab = true;
     std::vector<double> heatmap_values;
+    const int* heatmap_source = nullptr;
+    int heatmap_generation = -1;
+    bool heatmap_states = false;
+    const int* range_flags = nullptr;
+    int range_generation = -1;
+    bool has_diverged = false;
+
+    const double* heatmap_data(const int* source, size_t total, int generation, bool states) {
+        if (source != heatmap_source || total != heatmap_values.size() ||
+            generation != heatmap_generation || states != heatmap_states) {
+            heatmap_values.resize(total);
+            if (states) {
+                std::transform(source, source + total, heatmap_values.begin(), regime_code);
+            } else {
+                std::copy_n(source, total, heatmap_values.begin());
+            }
+            heatmap_source = source;
+            heatmap_generation = generation;
+            heatmap_states = states;
+        }
+        return heatmap_values.data();
+    }
 
     struct ScatterClusterCache {
         bool valid = false;
@@ -44,6 +66,27 @@ struct BasinsPlotViews {
 
 auto& basins_plot_views() {
     return ui_resource<std::map<unsigned, BasinsPlotViews>, 1000>();
+}
+
+std::pair<double, double> basins_plot_color_range(const BasinsConfig& c, unsigned owner_id) {
+    const int max_id = c.renumber_spiral ? c.n_clusters_spiral : c.result.n_clusters;
+    const int min_id = c.renumber_spiral ? c.min_cluster_idx_spiral : c.result.min_cluster_idx;
+    if (min_id < 0) return {min_id, std::max(min_id, max_id)};
+
+    const auto& flags = c.result.helpful_array;
+    const auto view = basins_plot_views().find(owner_id);
+    if (view == basins_plot_views().end()) {
+        const double lo = std::any_of(flags.begin(), flags.end(), regime_is_unbound) ? 0.0 : 1.0;
+        return {lo, std::max(lo, (double)max_id)};
+    }
+    auto& cache = view->second;
+    if (cache.range_flags != flags.data() || cache.range_generation != c.data_generation) {
+        cache.has_diverged = std::any_of(flags.begin(), flags.end(), regime_is_unbound);
+        cache.range_flags = flags.data();
+        cache.range_generation = c.data_generation;
+    }
+    const double lo = cache.has_diverged ? 0.0 : 1.0;
+    return {lo, std::max(lo, (double)max_id)};
 }
 } // namespace
 
@@ -94,9 +137,9 @@ static ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
 namespace ucuda::ui_detail {
 ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
                               int config_index, int display_id) {
-    double vmin = 0.0, vmax = 0.0;
-    basins_colorbar_range(c, vmin, vmax);
-    return basins_id_color(c, model, basins_base_oid(config_index), display_id, vmin, vmax);
+    const unsigned owner_id = basins_base_oid(config_index);
+    const auto [vmin, vmax] = basins_plot_color_range(c, owner_id);
+    return basins_id_color(c, model, owner_id, display_id, vmin, vmax);
 }
 
 void forget_basins_plot(unsigned owner_id) {
@@ -493,6 +536,8 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
             if (!views.standalone) continue;
             views.clusters.valid = false;
             views.select_saved_tab = true;
+            views.heatmap_source = nullptr;
+            views.range_generation = -1;
             for (auto& view : views.heatmaps) invalidate_view(view);
             invalidate_view(views.scatter);
         }
@@ -688,13 +733,7 @@ void draw_basins_plot(AppModel& model, BasinsAnalysisSession& s, int ci,
         const int* src_idx = c.renumber_spiral
                                  ? c.basin_idx_spiral.data()
                                  : c.result.basin_idx.data();
-        auto& buf = views.heatmap_values;
-        buf.resize(total);
-        for (size_t k = 0; k < total; ++k) buf[k] = (double)src_idx[k];
-        // Диапазон colorbar'а — общий хелпер (шарится с цветом траекторий в
-        // фазовых портретах по бассейнам), см. basins_colorbar_range.
-        double vmin = 0.0, vmax = 0.0;
-        basins_colorbar_range(c, vmin, vmax);
+        const auto [vmin, vmax] = basins_plot_color_range(c, base_oid);
         // colormap уже засинхронен из model.basins_colormap перед тулбаром.
         hm_basins_v.x_axis.name = ax_x;
         hm_basins_v.y_axis.name = ax_y;
@@ -702,13 +741,14 @@ void draw_basins_plot(AppModel& model, BasinsAnalysisSession& s, int ci,
         // не инвалидируется при toggle галки и пиксели остаются от прошлой версии.
         // Сам swap_axes уже отлавливается через HeatmapView::swap_axes_cached_.
         int hm_basins_gen = c.data_generation * 2 + (c.renumber_spiral ? 1 : 0);
+        const double* values = views.heatmap_data(src_idx, total, hm_basins_gen, false);
         // id бассейна: <= -1 — кластер равновесий, 0 — unbound, >= 1 — колебательный.
         hm_basins_v.cell_regime = regime_cell_label(c.result.helpful_array, n);
         hm_basins_v.value_name = "basin";
         hm_basins_v.value_is_regime_code = true;
         hm_basins_v.render(*renderer, origin, avail,
                           /*owner_id*/ base_oid + 0u, hm_basins_gen,
-                          n, n, buf.data(),
+                          n, n, values,
                           xlo, xhi, ylo, yhi,
                           vmin, vmax, fit);
         handle_view_range_keys(vrt, hm_basins_v.x_axis, hm_basins_v.y_axis, plot_window_active(),
@@ -748,17 +788,14 @@ void draw_basins_plot(AppModel& model, BasinsAnalysisSession& s, int ci,
         // (-1 = FP, 0 = Unbound, 1 = Oscillation). Раньше здесь была
         // перенумерация в 0/1/2, из-за которой подпись под плотом, легенда и
         // коды в экспортируемом _3.csv означали разные вещи.
-        auto& buf = views.heatmap_values;
-        buf.resize(total);
-        for (size_t k = 0; k < total; ++k)
-            buf[k] = (double)regime_code(c.result.helpful_array[k]);
+        const double* values = views.heatmap_data(c.result.helpful_array.data(), total, c.data_generation, true);
         hm_states_v.x_axis.name = ax_x;
         hm_states_v.y_axis.name = ax_y;
         hm_states_v.cell_regime = regime_cell_label(c.result.helpful_array, n, /*with_oscillation*/ true);
         hm_states_v.value_is_regime_code = true;
         hm_states_v.render(*renderer, origin, avail,
                           /*owner_id*/ base_oid + 3u, c.data_generation,
-                          n, n, buf.data(),
+                          n, n, values,
                           xlo, xhi, ylo, yhi,
                           -1.0, 1.0, fit);
         handle_view_range_keys(vrt, hm_states_v.x_axis, hm_states_v.y_axis, plot_window_active(),
@@ -811,7 +848,9 @@ void draw_basins_plot(AppModel& model, BasinsAnalysisSession& s, int ci,
             sc.valid_pts = valid_pts;
             // Диапазон colorbar'а карты зависит только от данных и Renumber —
             // кэшируем вместе с раскладкой (он сканирует всю helpful_array).
-            basins_colorbar_range(c, sc.vmin, sc.vmax);
+            const auto [vmin, vmax] = basins_plot_color_range(c, base_oid);
+            sc.vmin = vmin;
+            sc.vmax = vmax;
             sc.gen       = c.data_generation;
             sc.renumber  = c.renumber_spiral;
             sc.total     = total;
@@ -910,15 +949,14 @@ void draw_basins_phase_windows(AppModel& model, BasinsAnalysisSession& s, int ci
     const int* ids = basins_display_ids(c);
     const size_t n_cells = c.result.basin_idx.size();
     const unsigned basins_owner = plot_owner_id.value_or(basins_base_oid(ci));
-    double vmin = 0.0, vmax = 0.0;
-    basins_colorbar_range(c, vmin, vmax);
-    PhaseStyleFn style_fn = [&c, &sl, &model, basins_owner, ids, n_cells, vmin, vmax]
+    const auto range = basins_plot_color_range(c, basins_owner);
+    PhaseStyleFn style_fn = [&c, &sl, &model, basins_owner, ids, n_cells, range]
                             (int k, PhaseSeriesStyle& out) -> bool {
         if (!ids || k < 0 || k >= (int)sl.cells.size()) return false;
         const int cell = sl.cells[(size_t)k];
         if (cell < 0 || (size_t)cell >= n_cells) return false;
         const int id = ids[(size_t)cell];
-        out.color      = basins_id_color(c, model, basins_owner, id, vmin, vmax);
+        out.color      = basins_id_color(c, model, basins_owner, id, range.first, range.second);
         out.as_point   = (id < 0);         // FP-бассейн — одна точка
         out.point_size = c.pp_marker_size;
         out.marker     = (int)PointMarker::Circle;
@@ -972,21 +1010,5 @@ void basins_phase_tick(AppModel& model) {
         if (now - sl.pending_since < kBasinsPhaseDebounceSec) continue;   // ещё печатают
         s.request_phase_run(i);
     }
-}
-}
-
-
-namespace ucuda::ui_detail {
-void basins_colorbar_range(const BasinsConfig& c, double& vmin, double& vmax) {
-    const int n_clusters     = c.renumber_spiral ? c.n_clusters_spiral      : c.result.n_clusters;
-    const int min_cluster_id = c.renumber_spiral ? c.min_cluster_idx_spiral : c.result.min_cluster_idx;
-    bool has_diverged = false;
-    for (int f : c.result.helpful_array)
-        if (regime_is_unbound(f)) { has_diverged = true; break; }
-    if (min_cluster_id < 0)  vmin = (double)min_cluster_id;
-    else if (has_diverged)   vmin = 0.0;
-    else                     vmin = 1.0;
-    vmax = (double)n_clusters;
-    if (vmax < vmin) vmax = vmin;
 }
 }
