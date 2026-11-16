@@ -1368,7 +1368,7 @@ void draw_csv_output_block(const char* header, const char* checkbox_label,
 namespace ucuda::ui_detail {
 void draw_error_box(const char* id, const std::string& err,
                            int lines) {
-    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Error (selectable, Ctrl+C):");
+    ImGui::TextColored(readable_text(ImVec4(1.0f, 0.4f, 0.4f, 1.0f)), "Error (selectable, Ctrl+C):");
     const ImVec2 sz(-1.0f, ImGui::GetTextLineHeight() * (float)lines);
     ImGui::InputTextMultiline(id, const_cast<char*>(err.c_str()), err.size() + 1,
                               sz, ImGuiInputTextFlags_ReadOnly);
@@ -1493,7 +1493,7 @@ void draw_regime_summary(const std::vector<int>& flags, RegimeCounts* cache, int
         fp = cache->fp; unb = cache->unb; osc = cache->osc; stopped = cache->stopped;
     }
     if (stopped > 0)
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.3f, 1.0f)),
                            "Stopped: %d of %d points computed, the rest are grey / blank",
                            (int)flags.size() - stopped, (int)flags.size());
     if (fp == 0 && unb == 0) return;

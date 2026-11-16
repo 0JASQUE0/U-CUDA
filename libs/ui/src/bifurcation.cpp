@@ -109,7 +109,7 @@ void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s, int i
     // Адаптивный шаг пишет только пики (ядра адаптивного шага сырых отсчётов не выдают).
     if (bd.plot_all_iterates && bd.adaptive.enabled && !model.is_map) {
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "(not with the adaptive step: peaks only)");
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.55f, 0.3f, 1.0f)), "(not with the adaptive step: peaks only)");
     }
     // Inter-peak times are not filled in the all-iterates path (pushRaw writes
     // zeros), so a stale toggle would plot a flat line at 0.
@@ -166,7 +166,7 @@ void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s, int i
 
     if (bd.mode_2d) {
         if (bd.last_run_2d_ok) {
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)),
                 "OK: %dx%d heatmap, period(min..max) = %.0f..%.0f",
                 bd.result_2d.n_pts, bd.result_2d.n_pts,
                 bd.result_2d.min_val, bd.result_2d.max_val);
@@ -185,7 +185,7 @@ void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s, int i
                     total_peaks += f;
                     if (f > max_peaks) max_peaks = f;
                 }
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)),
                 "OK: n_pts=%d, peaks total=%d (max per param=%d)",
                 bd.result.n_pts, total_peaks, max_peaks);
             draw_regime_summary(bd.result.flags);

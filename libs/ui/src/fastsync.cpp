@@ -603,7 +603,7 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
                                 "Without it the start-basis bias only washes out as O(1/m),\n"
                                 "which is why convergence took ~100 cycles. 0 = old behaviour.");
             if (c.type_of_synch != 0)
-                ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+                ImGui::TextColored(readable_text(ImVec4(1.0f, 0.55f, 0.3f, 1.0f)),
                                    "Estimator 7 needs Unidirectional synchro; every cell comes out as diverged.");
         }
         InputNumStr("FS error trs.", c.fs_error_trs_text, kFieldW);
@@ -718,18 +718,18 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
 
     if (c.last_run_ok) {
         if (c.mode == 0)
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)),
                 "OK: traj %d pts, sync_err [%.4g, %.4g]",
                 c.result.n_pts_traj, c.result.min_val, c.result.max_val);
         else {
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)),
                 "OK: grid %dx%d, sync_err [%.4g, %.4g]",
                 c.result.n_pts_grid, c.result.n_pts_grid,
                 c.result.min_val, c.result.max_val);
             // Разлетевшиеся ячейки несут NaN и рисуются тёмно-серым; без счётчика
             // сплошь серая карта неотличима от "расчёт не пошёл".
             if (c.result.diverged_cells > 0)
-                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.3f, 1.0f)),
                     "diverged: %d of %d cells (maxValue / nan-inf)",
                     c.result.diverged_cells, c.result.total_cells);
         }

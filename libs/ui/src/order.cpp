@@ -14,7 +14,7 @@ bool order_member_fits(const OrderConfig& c, OrderPlotWindow::Kind k);
 namespace ucuda::ui_detail {
 void order_float_build_warning() {
     if (sizeof(numb) >= sizeof(double)) return;
-    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
+    ImGui::TextColored(readable_text(ImVec4(1.0f, 0.5f, 0.3f, 1.0f)),
                        "Warning: this build uses numb = float - dd/qd results may be incorrect");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(
@@ -114,9 +114,9 @@ namespace ucuda::ui_detail {
 void draw_order_status_line(const char* label, int n_ok, int n_div, int n_floor, int n_noc) {
     ImGui::TextDisabled("%s:", label);
     ImGui::SameLine(); ImGui::Text("ok %d", n_ok);
-    ImGui::SameLine(); ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "| diverged %d", n_div);
-    ImGui::SameLine(); ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1.0f), "| floor %d", n_floor);
-    ImGui::SameLine(); ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f), "| p<=0 %d", n_noc);
+    ImGui::SameLine(); ImGui::TextColored(readable_text(ImVec4(0.6f, 0.6f, 0.6f, 1.0f)), "| diverged %d", n_div);
+    ImGui::SameLine(); ImGui::TextColored(readable_text(ImVec4(0.55f, 0.75f, 1.0f, 1.0f)), "| floor %d", n_floor);
+    ImGui::SameLine(); ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.4f, 1.0f)), "| p<=0 %d", n_noc);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(
             "floor    - E2 sank into the machine precision of the solution: the right\n"
@@ -360,7 +360,7 @@ void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
                 c.label.c_str(), r.n_stable, n_pref, pref_tol, n_cells);
     if (r.n_bad > 0) {
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "(%d not computed)", r.n_bad);
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.55f, 0.3f, 1.0f)), "(%d not computed)", r.n_bad);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Cells where the test matrix could not be built or the step\n"
                               "returned nan/inf.");
@@ -930,7 +930,7 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                     ImGui::TextDisabled("| reference: %s x%s",
                                         c.perf_ref_scheme.c_str(), c.perf_ref_substeps_text.c_str());
                 else
-                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
+                    ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.4f, 1.0f)),
                                        r.adaptive ? "| an adaptive tab has only E(T)"
                                                   : "| no reference in this result: set reference substeps > 0 and run again");
             } else if (win.error_source == 3) {
@@ -944,12 +944,12 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                     ImGui::TextDisabled("| E(T) = Eref at t_max: %s x%s",
                                         c.perf_ref_scheme.c_str(), c.perf_ref_substeps_text.c_str());
                 else
-                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
+                    ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.4f, 1.0f)),
                                        r.adaptive ? "| no y*(T) in this result: run again"
                                                   : "| no E(T): set \"reference y*(T)\" (or \"endpoint only\") with \"fit h to t_max\" and run again");
             } else if (r.adaptive) {
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f), "| an adaptive tab has only E(T)");
+                ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.4f, 1.0f)), "| an adaptive tab has only E(T)");
             }
             if (r.adaptive) {
                 double rej = 0, acc = 0;
@@ -1285,7 +1285,7 @@ void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSession& s) 
     }
 
     if (n_zero > 0)
-        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.45f, 0.45f, 1.0f)),
                            "%d nodes with h <= 0 - they will go to diverged", n_zero);
     if (n_min > 0) {
         // Полная работа: 7 вызовов КРС на грубый шаг (1 + 2 + 4).
@@ -1312,11 +1312,11 @@ void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSession& s) 
 
     if (n_bad > 0) {
         if (c.snap_steps) {
-            ImGui::TextColored(ImVec4(0.65f, 0.85f, 0.65f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(0.65f, 0.85f, 0.65f, 1.0f)),
                 "t_max/h non-integer in %d of %d nodes - h snapped to t_max/N (shift up to %.2g%%)",
                 n_bad, (int)hs.size(), worst_rel * 100.0);
         } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.55f, 0.3f, 1.0f)),
                 "t_max/h non-integer in %d of %d nodes: the final time drifts, "
                 "an O(h) contribution is mixed into the error", n_bad, (int)hs.size());
         }
@@ -1339,7 +1339,7 @@ void draw_order_stability_block(AppModel& model, const OrderAnalysisSession& s,
     if (!ImGui::CollapsingHeader("Stability region", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
     if ((int)s.vars.size() != 2) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.4f, 0.4f, 1.0f)),
             "This computation needs the linear two-dimensional test system: %d state "
             "variables are loaded.", (int)s.vars.size());
         ImGui::TextDisabled("Library -> Dahlquist 2D. Run will be refused until then.");
@@ -1374,10 +1374,10 @@ void draw_order_stability_block(AppModel& model, const OrderAnalysisSession& s,
     const double k_val = parse_num(c.stab_k_text, 1.0);
     const double r_val = parse_num(c.stab_r_text, -1.0);
     if (k_val == -1.0)
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.4f, 0.4f, 1.0f)),
                            "k = -1: d = 2*sigma/(1+k) is undefined, the run will be refused.");
     if (!(r_val < 0.0))
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.4f, 0.4f, 1.0f)),
                            "r must be negative: with r >= 0 the matrix has no real form.");
 
     ImGui::Separator();
@@ -1412,7 +1412,7 @@ void draw_order_stability_block(AppModel& model, const OrderAnalysisSession& s,
             "follows at once, no rerun needed.");
     const double tol_val = parse_num(c.stab_pref_tol_text, 1.0);
     if (!(tol_val > 0.0))
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.4f, 1.0f)),
                            "tolerance <= 0: the preference region is empty by definition.");
 
     // Селекторы индексов a[]. Подписи те же, что у селектора оси свипа, минус
@@ -1693,7 +1693,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     if (!c.use_gpu) {
         std::string why;
         if (!cpu_compiler_available(&why))
-            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.5f, 0.3f, 1.0f)),
                                "CPU backend unavailable: %s", why.c_str());
 
         // Подмена допуска Ньютона обязана быть видимой: это чужая настройка,
@@ -1721,7 +1721,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     // диаграммы вкладки меряют, как ошибка убывает с h, и на карте x_{n+1} =
     // f(x_n) обе разности тождественно нулевые.
     if (s.sys.is_map)
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.4f, 1.0f)),
                            "Discrete map: there is no step to refine, the accuracy order is undefined.");
     ImGui::Separator();
 
@@ -1891,7 +1891,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         ImGui::TextDisabled("%d nodes x %d launches = %lld; plus the order pass for the errors",
                             n_nodes, reps + wu, launches);
         if (launches > 20000)
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.4f, 1.0f)),
                                "a great many launches: the measurement will take %d times longer "
                                "than a plain run",
                                reps + wu);
@@ -1901,7 +1901,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         // глобальная, поэтому кривые, снятые при разном её положении, сравнивать
         // между собой нельзя.
         if (model.nvrtc_rdc)
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.4f, 1.0f)),
                                "Split compilation is on (Settings): the step is not inlined into "
                                "the kernel,\nso the measured time is several times larger than "
                                "with it off.");
@@ -1938,9 +1938,9 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                               c.axis_y_log, nullptr, c.two_d);
 
         if (c.axis_x_target == kOrderTargetH && c.two_d && c.axis_y_target == kOrderTargetH)
-            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "both axes sweep h");
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.45f, 0.45f, 1.0f)), "both axes sweep h");
         else if (c.two_d && c.axis_x_target == c.axis_y_target)
-            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "both axes sweep the same thing");
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.45f, 0.45f, 1.0f)), "both axes sweep the same thing");
         if (perf_ad) ImGui::EndDisabled();
     }
 

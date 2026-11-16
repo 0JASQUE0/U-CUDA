@@ -606,7 +606,7 @@ void draw_ctrl_library_window(AppModel& m) {
                 if (checked) {
                     ImGui::SameLine();
                     if (checking)                 ImGui::TextDisabled("checking...");
-                    else if (m.ctrl_lib_check_ok) ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "compiles");
+                    else if (m.ctrl_lib_check_ok) ImGui::TextColored(readable_text(ImVec4(0.4f, 0.9f, 0.4f, 1.0f)), "compiles");
                     else                          ImGui::TextColored(warn, "does not compile:");
                 }
                 edited |= InputTextMultilineStr("##body", u.body, ImVec2(-1.0f, m.ctrl_lib_body_h));
@@ -644,7 +644,7 @@ void draw_ctrl_library_window(AppModel& m) {
         m.ctrl_lib_dirty = false;
     }
     if (!m.ctrl_lib_status.empty())
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", m.ctrl_lib_status.c_str());
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.4f, 0.4f, 1.0f)), "%s", m.ctrl_lib_status.c_str());
     ImGui::End();
 }
 }
@@ -674,7 +674,7 @@ bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::string&
 
     if (a.enabled) {
         if (!ok)
-            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.55f, 0.3f, 1.0f)),
                                "The scheme has no error estimate: choose RK45, DOPRI78, DOP853, GBS 2-4 ...\n"
                                "or Extr(...) with at least two stages.");
         if (opts & kAdUiRaw) {
@@ -741,7 +741,7 @@ bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::string&
         AdaptiveCtrlResolved cur;
         std::string cur_err;
         if (!adaptive_resolve_ctrl(a.ctrl, adaptive_scheme_q(scheme), cur, cur_err)) {
-            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "%s", cur_err.c_str());
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.55f, 0.3f, 1.0f)), "%s", cur_err.c_str());
         } else {
             const int npar = (int)cur.par.size();
             const std::vector<double>& def = cur.def;

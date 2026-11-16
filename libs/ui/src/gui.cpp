@@ -289,7 +289,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // вообще — результат разбора игнорировался во всех точках вызова.
     if (!model.session_load_warning.empty()) {
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "%s",
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.55f, 0.3f, 1.0f)), "%s",
                            model.session_load_warning.c_str());
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("The saved session file could not be parsed and was ignored.\n"
@@ -1326,6 +1326,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::SameLine();
             if (ImGui::RadioButton("Flecktarn", &theme_idx, 2 + AppSettings::kCamoFlecktarn)) theme_changed = true;
             if (ImGui::RadioButton("Cyan HUD", &theme_idx, 2 + AppSettings::kCamoHud)) theme_changed = true;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Cyan HUD Light", &theme_idx, 2 + AppSettings::kCamoHudLight)) theme_changed = true;
             if (theme_changed) {
                 model.dark_theme     = (theme_idx == 0 || theme_idx == 2);
                 model.contrast_theme = (theme_idx == 2);
@@ -1646,7 +1648,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                                 kPeakCountMin, kPeakCountMax);
             ImGui::TextDisabled("and interval buffers allocated for every sweep point.");
             if (pk.max_amount_of_peaks > 5000)
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)),
                     "Large values raise GPU memory use for 2D bifurcation / basins.");
 
             if (ImGui::Button("Reset to configCUDA.h defaults")) {
@@ -1691,11 +1693,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 ImGui::TextDisabled("Off: multiply and add round separately. Closer to the CPU");
                 ImGui::TextDisabled("fallback and to external references (MATLAB), slightly slower.");
             }
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)),
                 "Results computed with different settings are not bit-comparable;");
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)),
                 "on fractal basin boundaries they may differ visibly. The value in");
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)),
                 "effect at Run time is written into every exported _config.csv.");
 
             ImGui::Separator();
@@ -1711,15 +1713,15 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 ImGui::TextDisabled("On: the NonLinAnal library compiles once and is reused, only");
                 ImGui::TextDisabled("the step is rebuilt when the scheme changes. Measured on a 1D");
                 ImGui::TextDisabled("bifurcation: 62 ms per scheme switch instead of 1700 ms.");
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)),
                     "The step is called instead of being inlined, so FMA contraction");
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)),
                     "across that boundary is gone. Measured on Lorenz: 13 of 14 schemes");
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)),
                     "bit-identical, Complex Implicit Euler differs by up to 3e-10 (with");
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)),
                     "FMA off both agree exactly). Maps and phase portraits may therefore");
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                ImGui::TextColored(readable_text(ImVec4(1.0f, 0.8f, 0.3f, 1.0f)),
                     "disagree in the last digits on such schemes.");
             } else {
                 ImGui::TextDisabled("Off: every kernel is built as one translation unit with only");
