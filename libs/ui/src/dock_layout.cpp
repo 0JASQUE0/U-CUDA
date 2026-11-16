@@ -270,6 +270,7 @@ std::string id_of(const std::string& name) {
 
 struct Matcher {
     std::vector<std::string> avail;   // ещё не размещённые окна вкладки
+    bool tree_windows = false;
     std::string take(const std::string& saved) {
         auto pick = [&](auto pred) -> std::string {
             for (size_t i = 0; i < avail.size(); ++i)
@@ -279,13 +280,19 @@ struct Matcher {
         std::string r = pick([&](const std::string& w) { return w == saved; });
         if (r.empty() && !id_of(saved).empty())
             r = pick([&](const std::string& w) { return id_of(w) == id_of(saved); });
+        if (r.empty() && tree_windows) {
+            const auto tree_key = [](const std::string& name) {
+                return name.substr(0, name.rfind("_sys_"));
+            };
+            r = pick([&](const std::string& w) { return tree_key(w) == tree_key(saved); });
+        }
         if (r.empty())
             r = pick([&](const std::string& w) { return label_of(w) == label_of(saved); });
         // Окно с тем же именем есть, но не на этом месте (другая вкладка рабочей области Custom,
         // плавающее) — тоже переезжает в раскладку.
         // Только живое окно: ImGui держит объект окна и после удаления проекции, и без
         // проверки удалённое окно считалось открытым — и не создавалось заново.
-        if (r.empty())
+        if (r.empty() && !tree_windows)
             if (const ImGuiWindow* w = ImGui::FindWindowByName(saved.c_str()))
                 if (w->LastFrameActive >= ImGui::GetFrameCount() - 1) r = saved;
         return r;
@@ -854,15 +861,32 @@ void dock_layout_process(int mode, ImGuiID dock_id, ImVec2 size, const char* sid
             }
         }
         Matcher m;
+        m.tree_windows = factory && factory->available_windows;
         if (side_window) m.avail.push_back(side_window);
-        for (ImGuiWindow* w : wins) m.avail.push_back(w->Name);
+        if (m.tree_windows) {
+            auto names = factory->available_windows();
+            m.avail.insert(m.avail.end(), names.begin(), names.end());
+        } else {
+            for (ImGuiWindow* w : wins) m.avail.push_back(w->Name);
+        }
         ImGui::DockBuilderRemoveNode(dock_id);
         ImGui::DockBuilderAddNode(dock_id, ImGuiDockNodeFlags_DockSpace);
         ImGui::DockBuilderSetNodeSize(dock_id, size);
         BuildCtx c{ m, factory };
         build(dock_id, size, *tree, c);
-        // Окна вкладки, которых в раскладке нет, — вкладками в первую ячейку.
-        for (const std::string& w : m.avail) ImGui::DockBuilderDockWindow(w.c_str(), c.first_leaf ? c.first_leaf : dock_id);
+        if (factory && factory->apply_unmatched) {
+            auto side = std::find_if(m.avail.begin(), m.avail.end(), [side_window](const std::string& w) {
+                return side_window && w == side_window;
+            });
+            if (side != m.avail.end()) {
+                ImGui::DockBuilderDockWindow(side->c_str(), c.first_leaf ? c.first_leaf : dock_id);
+                m.avail.erase(side);
+            }
+            factory->apply_unmatched(m.avail);
+        } else {
+            for (const std::string& w : m.avail)
+                ImGui::DockBuilderDockWindow(w.c_str(), c.first_leaf ? c.first_leaf : dock_id);
+        }
         ImGui::DockBuilderFinish(dock_id);
         g_status = "Applied \"" + r.name + "\".";
         if (c.created > 0)
@@ -870,7 +894,8 @@ void dock_layout_process(int mode, ImGuiID dock_id, ImVec2 size, const char* sid
         if (c.missing > 0)
             g_status += " " + std::to_string(c.missing) + " window(s) of the layout could not be opened.";
         if (!m.avail.empty())
-            g_status += " " + std::to_string(m.avail.size()) + " extra window(s) went to the first cell.";
+            g_status += " " + std::to_string(m.avail.size()) +
+                        (m.tree_windows ? " extra window(s) excluded." : " extra window(s) went to the first cell.");
         break;
     }
 

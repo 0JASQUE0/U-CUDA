@@ -33,9 +33,46 @@ const char* controls_window_for(AppModel::AppMode m) {
     case AppModel::AppMode::Order:      return "Order Controls";
     case AppModel::AppMode::Network:    return "Network Controls";
     case AppModel::AppMode::Neural:     return "Neural Controls";
-    case AppModel::AppMode::Tree:       return "Tree Controls";
     default:                            return nullptr;
     }
+}
+
+bool migrate_tree_layout(ImGuiID old_id, ImGuiID new_id, const std::string& system,
+                         const std::string& controls) {
+    const auto* old_root = ImGui::DockBuilderGetNode(old_id);
+    if (!old_root) return false;
+    const auto* old_controls = ImGui::FindWindowSettingsByID(ImHashStr("Tree Controls"));
+    const ImGuiID controls_dock = old_controls ? old_controls->DockId : 0;
+
+    const std::string suffix = system.empty() ? std::string{} : "_sys_" + system;
+    std::vector<std::pair<std::string, ImGuiID>> plots;
+    auto& settings = GImGui->SettingsWindows;
+    for (auto* w = settings.begin(); w; w = settings.next_chunk(w)) {
+        const std::string name = w->GetName();
+        if (name.rfind("tree_", 0) != 0 && name.find("_tree") == std::string::npos) continue;
+        if (suffix.empty() ? name.find("_sys_") != std::string::npos
+                           : name.size() < suffix.size()
+                             || name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+        auto* node = ImGui::DockBuilderGetNode(w->DockId);
+        if (node && ImGui::DockNodeGetRootNode(node) == old_root) plots.emplace_back(name, node->ID);
+    }
+    if (std::none_of(plots.begin(), plots.end(), [controls_dock](const auto& plot) {
+        return plot.second != controls_dock;
+    })) return false;
+
+    ImVector<ImGuiID> dock_ids;
+    ImGui::DockBuilderCopyNode(old_id, new_id, &dock_ids);
+    const auto dock_copy = [&dock_ids](const char* name, ImGuiID old_dock) {
+        for (int i = 0; i + 1 < dock_ids.Size; i += 2) {
+            if (dock_ids[i] != old_dock) continue;
+            ImGui::DockBuilderDockWindow(name, dock_ids[i + 1]);
+            break;
+        }
+    };
+    for (const auto& [name, dock] : plots) dock_copy(name.c_str(), dock);
+    dock_copy(controls.c_str(), controls_dock);
+    ImGui::DockBuilderFinish(new_id);
+    return true;
 }
 
 // Окна-объекты вкладок Parametric / DFT1D / Order: заголовок "<label>###<tag><id>_g<gen>".
@@ -100,6 +137,12 @@ bool layout_factory_for(AppModel& model, DockWindowFactory& f) {
         f = window_list_factory(model.order_plot_windows, model.next_order_plot_window_id,
                                 model.order_plot_windows_dirty, model.order_layout_generation, "orderwin",
                                 session_to_json_order_windows, session_from_json_order_windows);
+        return true;
+    case AppModel::AppMode::Tree:
+        f.available_windows = [&model]() { return tree_layout_windows(model); };
+        f.apply_unmatched = [&model](const std::vector<std::string>& windows) {
+            apply_tree_layout_windows(model, windows);
+        };
         return true;
     default:
         return false;
@@ -690,6 +733,11 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                       "columns, rows, grid, or a layout you saved.");
             if (ImGui::BeginPopup("##layout_presets")) {
                 dock_layout_menu((int)model.app_mode);
+                if (model.app_mode == AppModel::AppMode::Tree && tree_has_hidden_windows(model.loaded_name)) {
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Show hidden views of enabled nodes"))
+                        tree_hide_layout_windows(model.loaded_name, {});
+                }
                 ImGui::EndPopup();
             }
         }
@@ -884,6 +932,19 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     model.app_mode = (AppModel::AppMode)mode;
     ImGui::Separator();
 
+    const bool tree_mode = model.app_mode == AppModel::AppMode::Tree;
+    const std::string tree_controls = tree_mode ? tree_controls_title(model.loaded_name) : std::string{};
+    const std::string tree_dock_name = "MainDockspace_" + std::to_string((int)AppModel::AppMode::Tree);
+    const ImGuiID tree_dock = tree_mode ? ImGui::GetID((tree_dock_name + "_sys_" + model.loaded_name).c_str()) : 0;
+    const ImGuiID old_tree_dock = ImGui::GetID(tree_dock_name.c_str());
+    auto& tree_dockspaces = ui_resource<std::unordered_set<ImGuiID>, 7702>();
+    if (tree_mode) tree_dockspaces.insert(tree_dock);
+    if (ImGui::DockBuilderGetNode(old_tree_dock)) tree_dockspaces.insert(old_tree_dock);
+    for (ImGuiID id : tree_dockspaces) {
+        if (id != tree_dock && ImGui::DockBuilderGetNode(id))
+            ImGui::DockSpace(id, ImVec2(0, 0), ImGuiDockNodeFlags_KeepAliveOnly);
+    }
+
     // Custom mode has its own two-pane layout (Controls | Workspace, split by
     // a draggable splitter) instead of the shared MainDockspace. Capture the
     // region below the AppMode radios so that layout can occupy exactly it.
@@ -898,22 +959,23 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // и перестройка на одной вкладке перекладывала окна другой.
         const int mode_i = (int)model.app_mode;
         const std::string ds_name = "MainDockspace_" + std::to_string(mode_i);
-        const ImGuiID dockspace_id = ImGui::GetID(ds_name.c_str());
-        // Вкладка без сохранённой раскладки (первый запуск или переход со старого общего
-        // dockspace) — раскладывается вкладками сама.
+        const ImGuiID dockspace_id = tree_mode ? tree_dock : ImGui::GetID(ds_name.c_str());
+        const char* controls = tree_mode ? tree_controls.c_str() : controls_window_for(model.app_mode);
+        if (tree_mode && !ImGui::DockBuilderGetNode(dockspace_id))
+            migrate_tree_layout(old_tree_dock, dockspace_id, model.loaded_name, tree_controls);
+        // Для новой системы Tree начинаем с сетки; у остальных режимов — вкладки.
         if (!ImGui::DockBuilderGetNode(dockspace_id) && !dock_layout_has_request(mode_i))
-            dock_layout_request(mode_i, kDockTabs);
+            dock_layout_request(mode_i, tree_mode ? kDockGrid : kDockTabs);
         // Применяем со второго кадра на вкладке: список окон берётся из прошлого кадра.
-        if (g_prev_frame_mode == mode_i)
-            process_layout(model, mode_i, dockspace_id, ImGui::GetContentRegionAvail(),
-                           controls_window_for(model.app_mode));
+        if (g_prev_frame_mode == mode_i && (!tree_mode || g_tree_dockspace_id == dockspace_id))
+            process_layout(model, mode_i, dockspace_id, ImGui::GetContentRegionAvail(), controls);
         g_prev_frame_mode = mode_i;
         dock_install_window_menu();
         dock_unhide_all_on_modifier(dockspace_id);
         dock_snap_dragged_split(dockspace_id);
-        if (model.app_mode == AppModel::AppMode::Tree) g_tree_dockspace_id = dockspace_id;
+        if (tree_mode) g_tree_dockspace_id = dockspace_id;
         ImGui::DockSpace(dockspace_id, ImVec2(0, 0), ImGuiDockNodeFlags_None);
-        dock_keep_split_ratios(dockspace_id, controls_window_for(model.app_mode));
+        dock_keep_split_ratios(dockspace_id, controls);
     }
 
     ImGui::End(); // MainHost
@@ -1071,7 +1133,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         ImGui::End();
     }
     else if (model.app_mode == AppModel::AppMode::Tree) {
-        if (ImGui::Begin("Tree Controls", nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
+        if (ImGui::Begin(tree_controls.c_str(), nullptr, ImGuiWindowFlags_HorizontalScrollbar)) {
             draw_tree_controls(model, lib);
         }
         ImGui::End();

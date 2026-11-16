@@ -16,10 +16,13 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                                 AppModel* bc = nullptr,
                                 const GuiCallbacks* cbp = nullptr,
                                 const std::function<void()>& on_recompute = {},
-                                bool handle_ctrl_r = true);
+                                bool handle_ctrl_r = true,
+                                const std::function<bool()>& draw_integration = {});
 
 
 using ProjHookFn = std::function<void(int proj_index, const std::string& title)>;
+using ProjVisibilityFn = std::function<bool(const std::string& title)>;
+std::string projection_window_title(const PhaseAnalysisSession& s, int index, const std::string& suffix);
 
 
 struct PhaseSeriesStyle {
@@ -47,5 +50,6 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                                     const std::string& title_suffix = {},
                                     int owner_id_delta = 0,
                                     const PhaseStyleFn& style_fn = {},
-                                    const FeatureClusterParams& clust = {});
+                                    const FeatureClusterParams& clust = {},
+                                    const ProjVisibilityFn& visible = {});
 }

@@ -1,4 +1,4 @@
-﻿#include "tab_tree.h"
+#include "tab_tree.h"
 #include "gui_fields.h"
 #include "gui_inputs.h"
 #include "gui_integration.h"
@@ -161,15 +161,29 @@ void draw_status_dot(AppModel& model, const TreeSession& ts, int id) {
     }
 }
 
-bool small_icon_button(const char* label, const char* tip, ImVec4 col = ImVec4(0, 0, 0, 0)) {
+float tree_button_width(const char* label) {
+    return ImGui::CalcTextSize(label).x + 2.0f * ImGui::GetStyle().FramePadding.x;
+}
+
+bool small_icon_button(const char* label, const char* tip, ImVec4 col = ImVec4(0, 0, 0, 0),
+                       float width = 0.0f) {
     if (col.w > 0.0f) ImGui::PushStyleColor(ImGuiCol_Text, col);
-    const bool r = ImGui::SmallButton(label);
+    bool r;
+    if (width > 0.0f) {
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 0.0f));
+        r = ImGui::Button(label, ImVec2(width, 0.0f));
+        ImGui::PopStyleVar();
+    } else {
+        r = ImGui::SmallButton(label);
+    }
     if (col.w > 0.0f) ImGui::PopStyleColor();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
     return r;
 }
 
-void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend) {
+enum TreeColumn { NodeColumn, AddColumn, DuplicateColumn, PowerColumn, CloseColumn, LevelColumn, TreeColumnCount };
+
+void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend, float power_width) {
     TreeNode* n = ts.tree.find(id);
     if (!n) return;
     const bool ctx    = tree_kind_is_context(n->kind);
@@ -179,7 +193,7 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend) {
 
     ImGui::PushID(id);
     ImGui::TableNextRow();
-    ImGui::TableSetColumnIndex(0);
+    ImGui::TableSetColumnIndex(NodeColumn);
     ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth
                           | ImGuiTreeNodeFlags_AllowOverlap;
     // Лист с доп. окнами раскрывается: под ним строки этих окон.
@@ -239,52 +253,37 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend) {
                               "(cursor) - follows the region crosshair; (pinned) - set in the node panel.");
     }
 
-    // Кнопки — своей колонкой таблицы: строка узла их не перекрывает. Порядок слотов
-    // постоянный (+ dup on/off x Lx), пустой слот — пробел, чтобы колонки не плясали.
-    ImGui::TableSetColumnIndex(1);
-    const ImGuiStyle& st = ImGui::GetStyle();
     const bool can_add = !tree_addable_children(n->kind).empty();
     const char* power = n->enabled ? "on" : "off";
-    char badge[8];
-    std::snprintf(badge, sizeof(badge), "L%d", level);
-    auto bw = [&](const char* s) { return ImGui::CalcTextSize(s).x + st.FramePadding.x * 2.0f; };
-    auto gap = [&](const char* s) { ImGui::Dummy(ImVec2(bw(s), 1.0f)); ImGui::SameLine(); };
-    if (!can_add) gap("+");
+    ImGui::TableSetColumnIndex(AddColumn);
     if (can_add) {
         if (small_icon_button("+", "Add child", ImVec4(0.30f, 0.79f, 0.55f, 1.0f))) {
             if (!n->enabled) flash("Node is disabled - enable it first");
             else ImGui::OpenPopup("##add");
         }
-        ImGui::SameLine();
     }
-    if (n->parent != 0) {
-        if (small_icon_button("dup", "Duplicate (with subtree)")) pend = { Act::Dup, id };
-        ImGui::SameLine();
-    } else {
-        gap("dup");
-    }
-    if (small_icon_button(power, n->enabled ? "Disable node" : "Enable node",
-                          n->enabled ? ImVec4(0.30f, 0.79f, 0.69f, 1.0f) : ImVec4(0.96f, 0.53f, 0.44f, 1.0f)))
-        pend = { Act::Toggle, id };
-    ImGui::SameLine();
-    if (n->enabled) {   // «on» короче «off»: добиваем, чтобы x и Lx стояли ровно
-        ImGui::Dummy(ImVec2(bw("off") - bw("on"), 1.0f));
-        ImGui::SameLine();
-    }
-    if (n->parent != 0) {
-        if (small_icon_button("x", "Delete (with subtree)")) pend = { Act::Del, id };
-        ImGui::SameLine();
-    } else {
-        gap("x");
-    }
-    ImGui::TextColored(col, "%s", badge);
     if (ImGui::BeginPopup("##add")) {
         add_menu_items(*n, level + 1, pend);
         ImGui::EndPopup();
     }
+    ImGui::TableSetColumnIndex(DuplicateColumn);
+    if (n->parent != 0) {
+        if (small_icon_button("dup", "Duplicate (with subtree)")) pend = { Act::Dup, id };
+    }
+    ImGui::TableSetColumnIndex(PowerColumn);
+    if (small_icon_button(power, n->enabled ? "Disable node" : "Enable node",
+                          n->enabled ? ImVec4(0.30f, 0.79f, 0.69f, 1.0f) : ImVec4(0.96f, 0.53f, 0.44f, 1.0f),
+                          power_width))
+        pend = { Act::Toggle, id };
+    ImGui::TableSetColumnIndex(CloseColumn);
+    if (n->parent != 0) {
+        if (small_icon_button("x", "Delete (with subtree)")) pend = { Act::Del, id };
+    }
+    ImGui::TableSetColumnIndex(LevelColumn);
+    ImGui::TextColored(col, "L%d", level);
 
     if (ctx && open) {
-        for (int c : std::vector<int>(n->children)) draw_node(model, ts, c, pend);
+        for (int c : std::vector<int>(n->children)) draw_node(model, ts, c, pend, power_width);
         ImGui::TreePop();
     }
     if (has_views && open) {
@@ -293,7 +292,7 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend) {
         for (int k = 1; k <= (int)n->extra_views.size(); ++k) {
             ImGui::PushID(1000 + k);
             ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
+            ImGui::TableSetColumnIndex(NodeColumn);
             char label[64];
             const int ex = n->extra_views[k - 1];
             if (ls2d && ex < 0)  std::snprintf(label, sizeof(label), "Window %d  (sum)", k + 1);
@@ -308,7 +307,7 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend) {
                 g_tree_focus_leaf = id;
                 g_tree_focus_view = k;
             }
-            ImGui::TableSetColumnIndex(1);
+            ImGui::TableSetColumnIndex(CloseColumn);
             if (small_icon_button("x", "Close this window")) pend = { Act::CloseView, id, n->kind, k };
             ImGui::PopID();
         }
@@ -537,6 +536,40 @@ bool draw_point_panel(TreeSession& ts, TreeNode& n) {
     return ch;
 }
 
+bool draw_leaf_integration(AppModel& model, TreeSession& ts, TreeNode& n,
+                           PhaseAnalysisSession* phase = nullptr) {
+    bool ch = false;
+    ImGui::SeparatorText("Integration");
+    bool own = n.own_integration;
+    if (ImGui::Checkbox(phase ? "Own integration" : "Own integration and initial conditions", &own)) {
+        if (own) ts.enable_own_integration(n.id);
+        else     n.own_integration = false;
+        ch = true;
+    }
+    if (n.own_integration) {
+        auto& c = n.cfg;
+        if (!model.is_map) ch |= InputNumStr("h##own", c.h_text, kFieldW);
+        ch |= InputNumStr(model.is_map ? "transient iterations##own" : "transient time##own", c.transient_text, kFieldW);
+        ch |= InputNumStr(model.is_map ? "iterations##own" : "computing time##own", c.t_max_text, kFieldW);
+        if (!phase) {
+            ch |= InputNumStr("decimator##own", c.pre_scaller_text, kFieldW);
+            const auto ic0 = c.initial_conditions;
+            draw_named_num_fields("Initial conditions##own_ic", ts.vars, c.initial_conditions,
+                                  n.kind == TreeNodeKind::Basins ? "Values for non-axis variables." : nullptr);
+            ch |= ic0 != c.initial_conditions;
+        }
+    } else {
+        const CustomTabSharedConfig s = ts.effective_shared(n.id);
+        const bool is1d = tree_kind_is_1d_leaf(n.kind);
+        ImGui::TextDisabled("Inherited: h %s, transient %s, time %s",
+                            (is1d ? s.l1d_h_text : s.h_text).c_str(),
+                            (is1d ? s.l1d_transient_text : s.transient_text).c_str(),
+                            (is1d ? s.l1d_t_max_text : s.t_max_text).c_str());
+    }
+    if (phase) ch |= InputNumStr("Decimation (every Nth point)##own", phase->decimation, kFieldW);
+    return ch;
+}
+
 bool draw_leaf_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
     bool ch = false;
     auto it = ts.leaves.find(n.id);
@@ -574,7 +607,12 @@ bool draw_leaf_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
         // Recompute и Auto recompute — через очередь дерева: прямой расчёт взял бы поля панели
         // без контекста узла.
         draw_phase_controls(*rt.phase, nullptr, &model, nullptr,
-                            [&model, id]() { model.enqueue_tree({ id }); }, false);
+                            [&model, id]() { model.enqueue_tree({ id }); }, false,
+                            [&]() {
+                                const bool edited = draw_leaf_integration(model, ts, n, rt.phase.get());
+                                ch |= edited;
+                                return edited;
+                            });
         break;
     }
     case TreeNodeKind::Basins: {
@@ -638,31 +676,7 @@ bool draw_leaf_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
     default: break;
     }
 
-    ImGui::SeparatorText("Integration");
-    bool own = n.own_integration;
-    if (ImGui::Checkbox("Own integration and initial conditions", &own)) {
-        if (own) ts.enable_own_integration(n.id);
-        else     n.own_integration = false;
-        ch = true;
-    }
-    if (n.own_integration) {
-        auto& c = n.cfg;
-        if (!model.is_map) ch |= InputNumStr("h##own", c.h_text, kFieldW);
-        ch |= InputNumStr(model.is_map ? "transient iterations##own" : "transient time##own", c.transient_text, kFieldW);
-        ch |= InputNumStr(model.is_map ? "iterations##own" : "computing time##own", c.t_max_text, kFieldW);
-        ch |= InputNumStr("decimator##own", c.pre_scaller_text, kFieldW);
-        const auto ic0 = c.initial_conditions;
-        draw_named_num_fields("Initial conditions##own_ic", ts.vars, c.initial_conditions,
-                              n.kind == TreeNodeKind::Basins ? "Values for non-axis variables." : nullptr);
-        ch |= ic0 != c.initial_conditions;
-    } else {
-        const CustomTabSharedConfig s = ts.effective_shared(n.id);
-        const bool is1d = tree_kind_is_1d_leaf(n.kind);
-        ImGui::TextDisabled("Inherited: h %s, transient %s, time %s",
-                            (is1d ? s.l1d_h_text : s.h_text).c_str(),
-                            (is1d ? s.l1d_transient_text : s.transient_text).c_str(),
-                            (is1d ? s.l1d_t_max_text : s.t_max_text).c_str());
-    }
+    if (!rt.phase) ch |= draw_leaf_integration(model, ts, n);
     if (!rt.in_flight() && !rt.committed.empty() && !rt.committed_ok) {
         const std::string err = rt.last_error();
         if (!err.empty()) ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "%s", err.c_str());
@@ -758,29 +772,35 @@ void draw_tree_controls(AppModel& model, SystemLibrary& lib) {
         ImGui::TextColored(ImVec4(0.96f, 0.53f, 0.44f, 1.0f), "%s", g_msg.c_str());
 
     // Дерево сверху, параметры снизу, между ними сплиттер.
-    static float params_h = 320.0f;
-    const float avail_h = ImGui::GetContentRegionAvail().y;
-    params_h = std::clamp(params_h, 90.0f, std::max(90.0f, avail_h - 150.0f));
-    const float tree_h = std::max(110.0f, avail_h - params_h - 6.0f);
+    static float tree_fraction = 0.5f;
+    constexpr float splitter_h = 6.0f;
+    const float panes_h = std::max(8.0f, ImGui::GetContentRegionAvail().y
+                                  - splitter_h - 2.0f * ImGui::GetStyle().ItemSpacing.y);
+    const float min_pane_h = std::min(90.0f, panes_h * 0.5f);
+    const float tree_h = std::clamp(panes_h * tree_fraction, min_pane_h, panes_h - min_pane_h);
 
     Pending pend;
     if (ImGui::BeginChild("##tree_nodes", ImVec2(0, tree_h), ImGuiChildFlags_Borders)) {
-        const ImGuiStyle& st = ImGui::GetStyle();
-        auto bw = [&](const char* s) { return ImGui::CalcTextSize(s).x + st.FramePadding.x * 2.0f; };
-        const float btn_w = bw("+") + bw("dup") + bw("off") + bw("x") + ImGui::CalcTextSize("L10").x
-                          + st.ItemSpacing.x * 4.0f;
-        if (ImGui::BeginTable("##tree_tbl", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_NoPadOuterX)) {
+        const float power_width = std::max(tree_button_width("on"), tree_button_width("off"));
+        if (ImGui::BeginTable("##tree_tbl", TreeColumnCount, ImGuiTableFlags_RowBg | ImGuiTableFlags_NoPadOuterX)) {
             ImGui::TableSetupColumn("node", ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn("actions", ImGuiTableColumnFlags_WidthFixed, btn_w);
-            draw_node(model, ts, ts.tree.nodes.front().id, pend);
+            ImGui::TableSetupColumn("add", ImGuiTableColumnFlags_WidthFixed, tree_button_width("+"));
+            ImGui::TableSetupColumn("duplicate", ImGuiTableColumnFlags_WidthFixed, tree_button_width("dup"));
+            ImGui::TableSetupColumn("power", ImGuiTableColumnFlags_WidthFixed, power_width);
+            ImGui::TableSetupColumn("close", ImGuiTableColumnFlags_WidthFixed, tree_button_width("x"));
+            ImGui::TableSetupColumn("level", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("L10").x);
+            draw_node(model, ts, ts.tree.nodes.front().id, pend, power_width);
             ImGui::EndTable();
         }
     }
     ImGui::EndChild();
     if (pend.act != Act::None) apply_pending(model, ts, pend);
 
-    ImGui::InvisibleButton("##tree_split", ImVec2(-1, 6.0f));
-    if (ImGui::IsItemActive()) params_h -= ImGui::GetIO().MouseDelta.y;
+    ImGui::InvisibleButton("##tree_split", ImVec2(-1, splitter_h));
+    if (ImGui::IsItemActive()) {
+        const float new_h = tree_h + ImGui::GetIO().MouseDelta.y;
+        tree_fraction = std::clamp(new_h, min_pane_h, panes_h - min_pane_h) / panes_h;
+    }
     if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
     {
         const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();

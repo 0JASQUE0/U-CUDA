@@ -7,6 +7,11 @@ namespace ucuda::ui_detail {
 void load_tree_session(AppModel& model, SystemLibrary& lib);
 void draw_tree_controls(AppModel& model, SystemLibrary& lib);
 void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb);
+std::string tree_controls_title(const std::string& system);
+std::vector<std::string> tree_layout_windows(const AppModel& model);
+void apply_tree_layout_windows(AppModel& model, const std::vector<std::string>& unmatched);
+void tree_hide_layout_windows(const std::string& system, const std::vector<std::string>& windows);
+bool tree_has_hidden_windows(const std::string& system);
 // Курсор владельца (регион или срез под System) сдвинут: автопересчёт после паузы.
 void tree_cursor_moved(int owner_id);
 // Цвет слота размерности: 0 System, 1 — 2D, 2 — 1D, 3 — 0D; выключенный — приглушённый.

@@ -1,4 +1,4 @@
-﻿#include "gui_common.h"
+#include "gui_common.h"
 #include "gui_inputs.h"
 #include "gui_integration.h"
 #include "gui_fields.h"
@@ -7,6 +7,46 @@
 #include "tab_phase.h"
 using namespace ucuda::ui_detail;
 
+namespace {
+struct BasinsPlotViews {
+    std::array<HeatmapView, 4> heatmaps;
+    Plot2DView scatter;
+    std::unique_ptr<PlotRenderer> renderer;
+    bool standalone = false;
+    bool select_saved_tab = true;
+    std::vector<double> heatmap_values;
+
+    struct ScatterClusterCache {
+        bool valid = false;
+        int gen = 0;
+        bool renumber = false;
+        size_t total = 0;
+        int valid_pts = 0;
+        double vmin = 0.0, vmax = 0.0;
+        const int* src_idx = nullptr;
+        const double* src_x = nullptr;
+        std::vector<int> ids;
+        std::vector<std::vector<double>> bufs;
+        std::vector<std::string> labels;
+    } clusters;
+
+    BasinsPlotViews() {
+        heatmaps[0].discrete_default = true;
+        heatmaps[0].discrete = true;
+        scatter.points_mode = true;
+        scatter.show_legend = false;
+        scatter.point_size_px = 3.0f;
+        scatter.pad_x = scatter.pad_y = true;
+        scatter.pad_frac = 0.025;
+        scatter.pad_degenerate_rel = true;
+    }
+};
+
+auto& basins_plot_views() {
+    return ui_resource<std::map<unsigned, BasinsPlotViews>, 1000>();
+}
+} // namespace
+
 namespace ucuda::ui_detail {
 [[nodiscard]] unsigned basins_base_oid(int config_index) {
     return 0x1BA50000u + (unsigned)config_index * 5u;
@@ -14,8 +54,8 @@ namespace ucuda::ui_detail {
 }
 
 namespace ucuda::ui_detail {
-ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
-                              int config_index, int display_id,
+static ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
+                              unsigned owner_id, int display_id,
                               double vmin, double vmax) {
     int  cm     = (c.colormap_idx[0] >= 0) ? c.colormap_idx[0] : model.basins_colormap;
     bool reverse = false;
@@ -23,10 +63,9 @@ ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
     // разу не рисовалась) — дискретный, по одной полосе на целый id.
     int  n_disc  = std::max(1, (int)std::lround(vmax - vmin) + 1);
 
-    auto it = basins_heatmaps().find(basins_base_oid(config_index) + 0u);
-    if (it != basins_heatmaps().end() && it->second) {
-        const HeatmapView& hv = *it->second;
-        cm      = (int)hv.colormap;
+    auto it = basins_plot_views().find(owner_id);
+    if (it != basins_plot_views().end()) {
+        const HeatmapView& hv = it->second.heatmaps[0];
         reverse = hv.reverse_colormap;
         n_disc  = hv.discrete ? (hv.discrete_levels > 0 ? hv.discrete_levels : n_disc) : 0;
     }
@@ -57,7 +96,11 @@ ImVec4 basins_id_color(const BasinsConfig& c, const AppModel& model,
                               int config_index, int display_id) {
     double vmin = 0.0, vmax = 0.0;
     basins_colorbar_range(c, vmin, vmax);
-    return basins_id_color(c, model, config_index, display_id, vmin, vmax);
+    return basins_id_color(c, model, basins_base_oid(config_index), display_id, vmin, vmax);
+}
+
+void forget_basins_plot(unsigned owner_id) {
+    basins_plot_views().erase(owner_id);
 }
 }
 
@@ -443,88 +486,55 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
     }
     if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
         s.active_config_index = 0;
-    BasinsConfig& c = s.configs[s.active_config_index];
-    // Owner IDs зависят от индекса config — каждый basin имеет независимый
-    // zoom/pan per inner tab. Схема: 0x1BA50000 + cfg*5 + tab (max 50 configs).
-    const unsigned base_oid = basins_base_oid(s.active_config_index);
-    auto& renderer = ui_resource<std::unique_ptr<PlotRenderer>, 3000>();
-    // hm_basins — на уровне файла (basins_heatmaps()), см. комментарий у объявления.
-    auto& hm_avgpk = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 3001>();
-    auto& hm_avgint = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 3002>();
-    auto& hm_states = ui_resource<std::map<unsigned, std::unique_ptr<HeatmapView>>, 3003>();
-    auto& scatter_views = ui_resource<std::map<unsigned, std::unique_ptr<Plot2DView>>, 3004>();
-    // Точки Scatter, разложенные по кластерам (см. вкладку 4 ниже). Кэш
-    // отрисовки, не состояние UI: восстанавливается из c.result в любой момент.
-    struct ScatterClusterCache {
-        bool   valid = false;
-        int    gen = 0;
-        bool   renumber = false;
-        size_t total = 0;
-        int    valid_pts = 0;
-        double vmin = 0.0, vmax = 0.0;   // basins_colorbar_range
-        const int*  src_idx = nullptr;
-        const void* src_x   = nullptr;
-        std::vector<int>                 ids;
-        std::vector<std::vector<double>> bufs;
-        std::vector<std::string>         labels;
-    };
-    auto& scatter_cache = ui_resource<std::map<unsigned, ScatterClusterCache>, 3005>();
-    if (!renderer) renderer = std::make_unique<PlotRenderer>();
     static int seen_epoch = 0;
     if (session_reloaded(model, AppModel::AppMode::Basins, seen_epoch)) {
-        scatter_cache.clear();
-        invalidate_views(basins_heatmaps());
-        invalidate_views(hm_avgpk);
-        invalidate_views(hm_avgint);
-        invalidate_views(hm_states);
-        invalidate_views(scatter_views);
+        for (auto& entry : basins_plot_views()) {
+            auto& views = entry.second;
+            if (!views.standalone) continue;
+            views.clusters.valid = false;
+            views.select_saved_tab = true;
+            for (auto& view : views.heatmaps) invalidate_view(view);
+            invalidate_view(views.scatter);
+        }
     }
-    auto get_hm = [](std::map<unsigned, std::unique_ptr<HeatmapView>>& m, unsigned oid,
-                     bool discrete_default) -> HeatmapView& {
-        auto& slot = m[oid];
-        if (!slot) {
-            slot = std::make_unique<HeatmapView>();
-        }
-        // Флаг discrete_default читается в render() на первом кадре с данными
-        // и один раз применяется (см. heatmap_view.cpp). Ставим каждый кадр
-        // сам параметр — легко и дёшево; apply идёт ровно один раз.
-        slot->discrete_default = discrete_default;
-        return *slot;
-    };
-    auto get_scatter = [&scatter_views](unsigned oid) -> Plot2DView& {
-        auto& slot = scatter_views[oid];
-        if (!slot) {
-            slot = std::make_unique<Plot2DView>();
-            slot->points_mode = true;
-            slot->show_legend = false;
-            slot->point_size_px = 3.0f;
-            // Запас 2.5% размаха с каждой стороны по обеим осям: без него крайние
-            // кластеры ложились на рамку и маркеры обрезались ею наполовину.
-            slot->pad_x = true;
-            slot->pad_y = true;
-            slot->pad_frac = 0.025;
-            slot->pad_degenerate_rel = true;
-        }
-        return *slot;
-    };
-    HeatmapView& hm_basins_v = get_hm(basins_heatmaps(), base_oid + 0u, /*discrete*/ true);
-    HeatmapView& hm_avgpk_v  = get_hm(hm_avgpk,  base_oid + 1u, false);
-    HeatmapView& hm_avgint_v = get_hm(hm_avgint, base_oid + 2u, false);
-    HeatmapView& hm_states_v = get_hm(hm_states, base_oid + 3u, false);
-    Plot2DView&  scatter_v   = get_scatter(base_oid + 4u);
+    const int ci = s.active_config_index;
+    const unsigned owner_id = basins_base_oid(ci);
+    basins_plot_views()[owner_id].standalone = true;
+    draw_basins_plot(model, s, ci, cb, owner_id, [&]() {
+        if (!model.loaded_name.empty())
+            lib.save_session(model.loaded_name, "_last_basins", session_to_json_basins(s));
+    });
+}
 
-    if (!c.last_run_ok || c.result.basin_idx.empty()) {
+void draw_basins_plot(AppModel& model, BasinsAnalysisSession& s, int ci,
+                      const GuiCallbacks& cb, unsigned base_oid,
+                      const std::function<void()>& save_colormap) {
+    if (ci < 0 || ci >= (int)s.configs.size()) {
         ImGui::TextDisabled("No data yet. Press Run.");
         return;
     }
+    BasinsConfig& c = s.configs[ci];
+    const bool basins_busy = s.in_flight && ci == s.running_config_index;
+    const int n = c.result.n_pts;
+    const size_t total = n > 0 ? (size_t)n * (size_t)n : 0;
+    if (!c.last_run_ok || total == 0 || c.result.basin_idx.size() != total ||
+        c.result.avg_peaks.size() != total || c.result.avg_intervals.size() != total ||
+        c.result.helpful_array.size() != total) {
+        ImGui::TextDisabled(basins_busy ? "Computing basins..." : "No data yet. Press Run.");
+        return;
+    }
+    auto& views = basins_plot_views()[base_oid];
+    auto& [hm_basins_v, hm_avgpk_v, hm_avgint_v, hm_states_v] = views.heatmaps;
+    Plot2DView& scatter_v = views.scatter;
+    auto& renderer = views.standalone ? ui_resource<std::unique_ptr<PlotRenderer>, 3000>()
+                                      : views.renderer;
+    if (!renderer) renderer = std::make_unique<PlotRenderer>();
 
     // Right-click "Export data..." — exports the full 4-file Basins set (basin_idx, avg_peaks,
     // avg_intervals, helpful_array) at the chosen path. All four heatmap views share the same
     // source result, so one lambda works for any tab; scatter (tab 4) uses Plot2DView and gets
     // the same hook. Если включён Renumber (spiral), basin_idx уйдёт в файл перенумерованным —
     // чтобы экспорт совпадал с тем, что пользователь видит на экране.
-    const bool basins_busy = s.in_flight &&
-                             s.active_config_index == s.running_config_index;
     auto basins_export_extras = [&c, &cb, basins_busy]() {
         draw_export_menu_item(basins_busy, cb, [&c](const std::string& path) {
             if (c.renumber_spiral) {
@@ -542,7 +552,7 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
     // Ctrl+T: у четырёх карт обе оси — сетка начальных условий, то есть прямо
     // поля расчёта. Scatter живёт в пространстве фич (avgPeak, avgInterval) и
     // диапазонов расчёта по своим осям не имеет — ему только экспорт.
-    const std::vector<ViewRangeTarget> vrt = { vr_target(s.configs, s.active_config_index,
+    const std::vector<ViewRangeTarget> vrt = { vr_target(s.configs, ci,
         &BasinsConfig::axis_x_lo_text, &BasinsConfig::axis_x_hi_text,
         &BasinsConfig::axis_y_lo_text, &BasinsConfig::axis_y_hi_text) };
     auto grid_extras = [&](HeatmapView& hv) {
@@ -561,20 +571,35 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
     // Имена 2-го и 3-го табов нейтральные — они показывают выбранную фичу
     // (Feature 1/2 из BasinsConfig), которая может быть не "avg peaks/interval".
     const char* tab_names[5] = { "Basins", "Feature 1", "Feature 2", "States", "Scatter" };
+    c.active_plot_tab = std::clamp(c.active_plot_tab, 0, 4);
+    ImGui::PushID(static_cast<int>(base_oid));
     if (ImGui::BeginTabBar("##basins_inner")) {
         for (int t = 0; t < 5; ++t) {
-            if (ImGui::BeginTabItem(tab_names[t])) {
-                c.active_plot_tab = t;
+            const ImGuiTabItemFlags flags = views.select_saved_tab && c.active_plot_tab == t
+                                          ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
+            if (ImGui::BeginTabItem(tab_names[t], nullptr, flags)) {
+                if (!views.select_saved_tab && c.active_plot_tab != t) {
+                    c.active_plot_tab = t;
+                    s.phase_settings_dirty = true;
+                }
                 ImGui::EndTabItem();
             }
         }
         ImGui::EndTabBar();
+        views.select_saved_tab = false;
     }
+    ImGui::PopID();
 
-    // Combo выбора colormap — свой для каждого heatmap-таба (Basins/AvgPk/AvgInt/States).
-    // Каждый выбор пишется в своё поле AppModel и персистится в _app_config.json. Эти поля
-    // независимы от model.heatmap_colormap (тот шарится Bif/LLE/LS) — смена здесь их не
-    // затрагивает и наоборот. Scatter-таб использует Plot2DView, без colormap.
+    // Renumber (spiral) — общий для Basins и Scatter.
+    const auto draw_renumber = [&c, &s](bool same_line) {
+        if (c.active_plot_tab != 0 && c.active_plot_tab != 4) return;
+        if (same_line) ImGui::SameLine();
+        if (ImGui::Checkbox("Renumber (spiral)", &c.renumber_spiral)) {
+            c.basin_idx_spiral_gen = -1;
+            s.phase_settings_dirty = true;
+        }
+    };
+
     {
         // Per-tab colormap: приоритет — выбор, сохранённый в ЭТОМ config'е
         // (уходит в _last_basins.json); -1 = не задан → app-дефолт из Settings.
@@ -590,17 +615,6 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
             case 3: cfg_field = &c.colormap_idx[3]; app_default = model.basins_states_colormap; active_hm = &hm_states_v; break;
             default: break;  // Scatter (4) — Plot2DView, без colormap
         }
-        // Renumber (spiral) — общий для табов 0 (Basins) и 4 (Scatter).
-        // На остальных табах не показываем — там cluster id'ы не отрисовываются.
-        auto draw_renumber = [&](bool same_line) {
-            if (c.active_plot_tab != 0 && c.active_plot_tab != 4) return;
-            if (same_line) ImGui::SameLine();
-            if (ImGui::Checkbox("Renumber (spiral)", &c.renumber_spiral)) {
-                // Заставляем cache пересчитаться при следующем доступе,
-                // даже если data_generation тот же (после toggle off→on).
-                c.basin_idx_spiral_gen = -1;
-            }
-        };
 
         if (cfg_field && active_hm) {
             // Синхронизируем выбор в сам view ДО тулбара: тулбар читает
@@ -610,13 +624,11 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
             active_hm->colormap = (HeatmapColormap)cm;
 
             HeatmapToolbarOpts topts;
-            topts.persist_colormap = [&](int picked) {
+            topts.persist_colormap = [cfg_field, &save_colormap](int picked) {
                 *cfg_field = picked;   // per-config, уходит в сессию
-                if (!model.loaded_name.empty())
-                    lib.save_session(model.loaded_name, "_last_basins",
-                                     session_to_json_basins(model.basins_session));
+                save_colormap();
             };
-            topts.extras = [&]() { draw_renumber(/*same_line*/ true); };
+            topts.extras = [draw_renumber]() { draw_renumber(/*same_line*/ true); };
             draw_heatmap_toolbar(*active_hm, topts);
         } else toolbar_row([&]() {
             // Scatter-таб: Renumber и стиль точек (форма, размер, α — per-config,
@@ -646,8 +658,6 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
     }
     if (c.renumber_spiral) ensure_basins_spiral_cache(c);
 
-    int n = c.result.n_pts;
-    size_t total = (size_t)n * (size_t)n;
     double xlo = c.result.axis_x_lo, xhi = c.result.axis_x_hi;
     double ylo = c.result.axis_y_lo, yhi = c.result.axis_y_hi;
     // Шкала осей — свойство посчитанной сетки (результата), а не текущих галок конфига.
@@ -678,7 +688,7 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
         const int* src_idx = c.renumber_spiral
                                  ? c.basin_idx_spiral.data()
                                  : c.result.basin_idx.data();
-        static std::vector<double> buf;
+        auto& buf = views.heatmap_values;
         buf.resize(total);
         for (size_t k = 0; k < total; ++k) buf[k] = (double)src_idx[k];
         // Диапазон colorbar'а — общий хелпер (шарится с цветом траекторий в
@@ -738,7 +748,7 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
         // (-1 = FP, 0 = Unbound, 1 = Oscillation). Раньше здесь была
         // перенумерация в 0/1/2, из-за которой подпись под плотом, легенда и
         // коды в экспортируемом _3.csv означали разные вещи.
-        static std::vector<double> buf;
+        auto& buf = views.heatmap_values;
         buf.resize(total);
         for (size_t k = 0; k < total; ++k)
             buf[k] = (double)regime_code(c.result.helpful_array[k]);
@@ -773,7 +783,7 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
         // вовсе. Ключ кэша повторяет gen-токен scatter'а (data_generation +
         // renumber_spiral) плюс размер сетки. Прореживания нет: рисуются все точки,
         // редкие выбросы не теряются.
-        ScatterClusterCache& sc = scatter_cache[base_oid + 4u];
+        auto& sc = views.clusters;
         // Указатели на буферы результата — страховка на случай, когда тот же oid
         // достаётся другому config'у (удаление вкладки) с совпавшим data_generation.
         if (!sc.valid || sc.gen != c.data_generation || sc.renumber != c.renumber_spiral ||
@@ -826,7 +836,7 @@ void draw_basins_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& c
             PlotSeriesInput si;
             si.points   = sc.bufs[j].empty() ? nullptr : sc.bufs[j].data();
             si.n_points = (int)(sc.bufs[j].size() / 2);
-            si.color    = basins_id_color(c, model, s.active_config_index, id, sc.vmin, sc.vmax);
+            si.color    = basins_id_color(c, model, base_oid, id, sc.vmin, sc.vmax);
             si.label    = sc.labels[j];
             series_in.push_back(si);
             init_vis.push_back(true);
@@ -883,7 +893,9 @@ void draw_basins_phase_windows(AppModel& model, const GuiCallbacks& cb) {
 
 void draw_basins_phase_windows(AppModel& model, BasinsAnalysisSession& s, int ci, const GuiCallbacks& cb,
                                const std::string& title_suffix, int owner_id_delta,
-                               const ProjHookFn& before_begin, const ProjHookFn& after_begin) {
+                               const ProjHookFn& before_begin, const ProjHookFn& after_begin,
+                               std::optional<unsigned> plot_owner_id,
+                               const ProjVisibilityFn& visible) {
     s.ensure_phase_slots();
     if (ci < 0 || ci >= (int)s.configs.size()) return;
     BasinsConfig&    c  = s.configs[(size_t)ci];
@@ -897,13 +909,16 @@ void draw_basins_phase_windows(AppModel& model, BasinsAnalysisSession& s, int ci
     // display-id ячейки → цвет бассейна + признак «равновесие» (id < 0).
     const int* ids = basins_display_ids(c);
     const size_t n_cells = c.result.basin_idx.size();
-    PhaseStyleFn style_fn = [&c, &sl, &model, ci, ids, n_cells]
+    const unsigned basins_owner = plot_owner_id.value_or(basins_base_oid(ci));
+    double vmin = 0.0, vmax = 0.0;
+    basins_colorbar_range(c, vmin, vmax);
+    PhaseStyleFn style_fn = [&c, &sl, &model, basins_owner, ids, n_cells, vmin, vmax]
                             (int k, PhaseSeriesStyle& out) -> bool {
         if (!ids || k < 0 || k >= (int)sl.cells.size()) return false;
         const int cell = sl.cells[(size_t)k];
         if (cell < 0 || (size_t)cell >= n_cells) return false;
         const int id = ids[(size_t)cell];
-        out.color      = basins_id_color(c, model, ci, id);
+        out.color      = basins_id_color(c, model, basins_owner, id, vmin, vmax);
         out.as_point   = (id < 0);         // FP-бассейн — одна точка
         out.point_size = c.pp_marker_size;
         out.marker     = (int)PointMarker::Circle;
@@ -931,7 +946,7 @@ void draw_basins_phase_windows(AppModel& model, BasinsAnalysisSession& s, int ci
 
     const size_t n_before = sl.phase.projections.size();
     draw_projection_windows(sl.phase, cb, before_begin, after_begin, title_suffix, owner_id_delta,
-                            style_fn, clust);
+                            style_fn, clust, visible);
     // Окно могли закрыть крестиком — список окон изменился, надо сохранить.
     if (sl.phase.projections.size() != n_before) s.phase_settings_dirty = true;
 }

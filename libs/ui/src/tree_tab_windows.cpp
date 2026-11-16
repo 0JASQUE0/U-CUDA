@@ -1,4 +1,4 @@
-﻿#include "tab_tree.h"
+#include "tab_tree.h"
 #include "gui_inputs.h"
 #include "gui_plot.h"
 #include "tab_phase.h"
@@ -14,15 +14,33 @@ struct LeafViews {
     std::unique_ptr<Plot2DView>   pv;
     std::unique_ptr<PlotRenderer> rnd;
     std::vector<std::vector<double>> bufs;
-    std::vector<double> basin_values;
+    std::optional<unsigned> basins_owner;
     int cmap_seen = -2;
     int exp_seen  = -999;
     int swap_seen = -1;
     int gen_fit   = -1;   // поколение данных, под которое окно уже подогнано
+    bool custom_line_style = false;
+    float line_width = 1.5f;
+    float line_alpha = 1.0f;
 };
 // Ключ — id листа * 16 + номер окна (0 — основное, 1..15 — дополнительные).
 using ViewMap = std::map<int, LeafViews>;
 constexpr int kViewsPerLeaf = 16;
+
+auto& hidden_windows() {
+    return ui_resource<std::map<std::string, std::unordered_set<std::string>>, 7703>();
+}
+
+std::string leaf_window_title(const TreeNode& node, const std::string& suffix, int view = 0) {
+    const std::string id = std::to_string(node.id);
+    if (view == 0) return node.name + "###tree_" + id + suffix;
+    return node.name + " [" + std::to_string(view + 1) + "]###tree_" + id
+         + "_v" + std::to_string(view) + suffix;
+}
+
+std::string tree_system_suffix(const std::string& system) {
+    return system.empty() ? std::string{} : "_sys_" + system;
+}
 
 std::string axis_label(const TreeSession& ts, const EffectiveSweep& e) {
     if (e.over_h) return "h";
@@ -34,28 +52,34 @@ std::string axis_label(const TreeSession& ts, const EffectiveSweep& e) {
 // Док-узел, где уже стоят окна листьев (обновляется каждый кадр).
 ImGuiID g_leaf_dock = 0;
 
-// Новое окно — к другим окнам листьев, если ни ImGui, ни imgui.ini не помнят его док. В корень
-// dockspace нельзя: после раскладки он разделён, а окно в узле-разделителе отстыковывается.
+// Новое окно — к другим окнам листьев текущей системы.
 void ensure_docked(const std::string& title) {
     if (!g_tree_dockspace_id || ImGui::GetIO().MouseDown[0]) return;
     ImGuiID persisted = 0;
     if (ImGuiWindow* w = ImGui::FindWindowByName(title.c_str())) persisted = w->DockId;
     else if (ImGuiWindowSettings* s = ImGui::FindWindowSettingsByID(ImHashStr(title.c_str())))
         persisted = s->DockId;
-    if (persisted != 0) return;
+    const auto belongs_to_tree = [](ImGuiDockNode* node) {
+        return node && node->IsLeafNode()
+            && ImGui::DockNodeGetRootNode(node)->ID == g_tree_dockspace_id;
+    };
+    if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(persisted)) {
+        if (belongs_to_tree(node) || !ImGui::DockNodeGetRootNode(node)->IsDockSpace()) return;
+    }
     ImGuiID target = 0;
-    if (g_leaf_dock && ImGui::DockBuilderGetNode(g_leaf_dock)) target = g_leaf_dock;
-    else if (ImGuiDockNode* c = ImGui::DockBuilderGetCentralNode(g_tree_dockspace_id)) target = c->ID;
-    else if (ImGuiDockNode* r = ImGui::DockBuilderGetNode(g_tree_dockspace_id); r && r->IsLeafNode())
-        target = r->ID;
+    if (belongs_to_tree(ImGui::DockBuilderGetNode(g_leaf_dock))) target = g_leaf_dock;
+    else if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(g_tree_dockspace_id)) {
+        while (node->ChildNodes[0]) node = node->ChildNodes[0];
+        target = node->ID;
+    }
     if (target) ImGui::DockBuilderDockWindow(title.c_str(), target);
 }
 
 // Вывести окно листа вперёд, но не в ущерб панели дерева: если окно делит с ней вкладки
 // одного узла, фокус на нём спрятал бы дерево.
-void focus_leaf_window(const std::string& title) {
+void focus_leaf_window(const std::string& title, const std::string& controls) {
     ImGuiWindow* w   = ImGui::FindWindowByName(title.c_str());
-    ImGuiWindow* ctl = ImGui::FindWindowByName("Tree Controls");
+    ImGuiWindow* ctl = ImGui::FindWindowByName(controls.c_str());
     if (w && ctl && w->DockNode && w->DockNode == ctl->DockNode) return;
     ImGui::SetNextWindowFocus();
 }
@@ -74,10 +98,10 @@ void leaf_window_frame(TreeSession& ts, int id, int slot) {
 }
 
 bool begin_leaf_window(TreeSession& ts, const TreeNode& n, const std::string& title, bool* p_open,
-                       int view_k = 0) {
+                       const std::string& controls, int view_k = 0) {
     ensure_docked(title);
     if (g_tree_focus_leaf == n.id && g_tree_focus_view == view_k) {
-        focus_leaf_window(title);
+        focus_leaf_window(title, controls);
         g_tree_focus_leaf = 0;
     }
     const bool vis = ImGui::Begin(title.c_str(), p_open);
@@ -225,7 +249,6 @@ void draw_2d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
 void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafRuntime& rt,
                   LeafViews& v, const GuiCallbacks& cb, int owner_id, bool primary) {
     if (!v.pv)  v.pv  = std::make_unique<Plot2DView>();
-    if (!v.rnd) v.rnd = std::make_unique<PlotRenderer>();
     Plot2DView& view = *v.pv;
     const ParamPlotKind pkind = n.kind == TreeNodeKind::Bif1D ? ParamPlotKind::Bifurcation
                               : n.kind == TreeNodeKind::LLE1D ? ParamPlotKind::LLE : ParamPlotKind::LS;
@@ -262,6 +285,16 @@ void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
         ok = c.last_run_ok; data_gen = c.data_generation; busy = rt.ls->in_flight;
         lo = parse_ratio_or(c.param_lo_text, 0.0); hi = parse_ratio_or(c.param_hi_text, 1.0);
         log = c.log_scale; cont = c.continuation; n_text = c.n_pts_text; fit = &c.fit_request;
+    }
+    if (pkind != ParamPlotKind::Bifurcation) {
+        draw_style_toolbar("Custom line style", "tree_lyapunov", v.custom_line_style, [&v]() {
+            ImGui::SetNextItemWidth(150.0f);
+            bool changed = slider_float_typed("Line width##tree_lyapunov", &v.line_width, 0.5f, 8.0f, "%.1f");
+            ImGui::SetNextItemWidth(150.0f);
+            changed |= slider_float_typed("Alpha##tree_lyapunov", &v.line_alpha, 0.05f, 1.0f, "%.2f");
+            return changed;
+        });
+        if (v.custom_line_style) view.line_thickness_px = v.line_width;
     }
     if (!ok) {
         ImGui::TextDisabled(busy ? "Computing..." : "No data yet. Press Run.");
@@ -410,6 +443,9 @@ void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
             series_gen = data_gen * 64 + ne;
         }
     }
+    if (pkind != ParamPlotKind::Bifurcation && v.custom_line_style) {
+        for (auto& curve : series) curve.color.w = v.line_alpha;
+    }
     std::vector<bool> init_vis(series.size(), true), glob_vis(series.size(), true);
     if (swap) {
         // Пары (параметр, значение) -> (значение, параметр), подписи осей — следом.
@@ -443,51 +479,95 @@ void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
     const bool take_fit = (primary && *fit) || v.gen_fit != data_gen;
     if (primary) *fit = false;
     v.gen_fit = data_gen;
+    if (!v.rnd) v.rnd = std::make_unique<PlotRenderer>();
     const ImVec2 avail = ImGui::GetContentRegionAvail(), origin = ImGui::GetCursorScreenPos();
     view.render(*v.rnd, origin, avail, owner_id, series_gen, series, init_vis, glob_vis, take_fit);
     (void)model;
 }
 
-void draw_basins_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafRuntime& rt,
-                      LeafViews& v, int owner_id) {
-    if (!v.hv)  v.hv  = std::make_unique<HeatmapView>();
-    if (!v.rnd) v.rnd = std::make_unique<PlotRenderer>();
-    HeatmapView& hv = *v.hv;
-    auto& b = *rt.basins;
-    if (b.in_flight) { ImGui::TextDisabled("Computing basins..."); return; }
-    if (b.configs.empty() || !b.configs[0].last_run_ok) { ImGui::TextDisabled("No data yet. Press Run."); return; }
-    auto& bc = b.configs[0];
-    const auto& r = bc.result;
-    if (r.n_pts <= 0 || r.basin_idx.empty()) { ImGui::TextDisabled("Basins result empty."); return; }
-    v.basin_values.resize(r.basin_idx.size());
-    double vmin = std::numeric_limits<double>::infinity(), vmax = -vmin;
-    for (size_t k = 0; k < r.basin_idx.size(); ++k) {
-        const double x = (double)r.basin_idx[k];
-        v.basin_values[k] = x;
-        vmin = std::min(vmin, x); vmax = std::max(vmax, x);
-    }
-    if (!std::isfinite(vmin)) { vmin = 0.0; vmax = 1.0; }
-    if (v.cmap_seen != bc.colormap_idx[0]) {
-        v.cmap_seen = bc.colormap_idx[0];
-        hv.colormap = (HeatmapColormap)colormap_id_or(bc.colormap_idx[0], model.basins_colormap);
-    }
-    HeatmapToolbarOpts topts;
-    topts.persist_colormap = [&](int cm) { bc.colormap_idx[0] = cm; v.cmap_seen = cm; ts.dirty = true; };
-    draw_heatmap_toolbar(hv, topts);
-    hv.x_axis.name = (bc.axis_x_var >= 0 && bc.axis_x_var < (int)ts.vars.size()) ? ts.vars[bc.axis_x_var] : "x";
-    hv.y_axis.name = (bc.axis_y_var >= 0 && bc.axis_y_var < (int)ts.vars.size()) ? ts.vars[bc.axis_y_var] : "y";
-    hv.cell_regime = regime_cell_label(r.helpful_array, r.n_pts);
-    hv.value_name = "basin";
-    hv.value_is_regime_code = true;
-    const bool take_fit = bc.fit_request;
-    bc.fit_request = false;
-    const ImVec2 avail = ImGui::GetContentRegionAvail(), origin = ImGui::GetCursorScreenPos();
-    hv.render(*v.rnd, origin, avail, owner_id, bc.data_generation, r.n_pts, r.n_pts,
-              v.basin_values.data(), r.axis_x_lo, r.axis_x_hi, r.axis_y_lo, r.axis_y_hi, vmin, vmax, take_fit);
-    (void)n;
+} // namespace
+
+std::string tree_controls_title(const std::string& system) {
+    return "Tree Controls###tree_controls_sys_" + system;
 }
 
-} // namespace
+static std::vector<std::pair<int, std::string>> tree_layout_entries(const AppModel& model) {
+    const auto& ts = model.tree_session;
+    const std::string suffix = tree_system_suffix(model.loaded_name);
+    std::vector<std::pair<int, std::string>> windows;
+    const auto append_projections = [&windows](int id, const PhaseAnalysisSession& phase, const std::string& tail) {
+        for (int i = 0; i < (int)phase.projections.size(); ++i)
+            windows.emplace_back(id, projection_window_title(phase, i, tail));
+    };
+    for (int id : ts.tree.preorder()) {
+        const auto* node = ts.tree.find(id);
+        if (!node || tree_kind_is_context(node->kind)) continue;
+        const auto it = ts.leaves.find(id);
+        if (it == ts.leaves.end()) continue;
+        const auto& rt = it->second;
+        if (node->kind == TreeNodeKind::Phase) {
+            if (rt.phase) append_projections(id, *rt.phase, "_tree" + std::to_string(id) + suffix);
+            continue;
+        }
+        windows.emplace_back(id, leaf_window_title(*node, suffix));
+        for (int k = 1; k <= (int)node->extra_views.size() && k < kViewsPerLeaf; ++k)
+            windows.emplace_back(id, leaf_window_title(*node, suffix, k));
+        if (node->kind == TreeNodeKind::Basins && rt.basins && !rt.basins->phase_slots.empty()) {
+            const auto& slot = rt.basins->phase_slots[0];
+            if (slot && (slot->has_result || slot->phase.in_flight))
+                append_projections(id, slot->phase, "_treebpp" + std::to_string(id) + suffix);
+        }
+    }
+    return windows;
+}
+
+std::vector<std::string> tree_layout_windows(const AppModel& model) {
+    std::vector<std::string> names;
+    for (auto& entry : tree_layout_entries(model)) names.push_back(std::move(entry.second));
+    return names;
+}
+
+void apply_tree_layout_windows(AppModel& model, const std::vector<std::string>& unmatched) {
+    auto& ts = model.tree_session;
+    const auto entries = tree_layout_entries(model);
+    const std::unordered_set<std::string> excluded(unmatched.begin(), unmatched.end());
+    std::unordered_set<int> enabled;
+    for (const auto& [id, name] : entries) {
+        if (excluded.count(name)) continue;
+        for (const auto* node = ts.tree.find(id); node && enabled.insert(node->id).second;
+             node = ts.tree.find(node->parent)) {}
+    }
+
+    for (const auto& node : ts.tree.nodes) {
+        const bool in_layout = enabled.count(node.id) != 0;
+        if (!in_layout && tree_kind_is_context(node.kind)) continue;
+        if (node.enabled != in_layout) ts.toggle_enabled(node.id);
+        if (!in_layout) {
+            const auto it = ts.leaves.find(node.id);
+            if (it != ts.leaves.end() && it->second.in_flight()) it->second.request_cancel();
+        }
+    }
+
+    // Дополнительные представления одного расчёта не имеют собственного ON/OFF.
+    std::vector<std::string> hidden_views;
+    for (const auto& [id, name] : entries) {
+        if (enabled.count(id) && excluded.count(name)) hidden_views.push_back(name);
+    }
+    tree_hide_layout_windows(model.loaded_name, hidden_views);
+    g_tree_focus_leaf = 0;
+    g_tree_focus_view = 0;
+}
+
+void tree_hide_layout_windows(const std::string& system, const std::vector<std::string>& windows) {
+    if (windows.empty()) hidden_windows().erase(system);
+    else hidden_windows()[system] = std::unordered_set<std::string>(windows.begin(), windows.end());
+}
+
+bool tree_has_hidden_windows(const std::string& system) {
+    const auto& systems = hidden_windows();
+    const auto it = systems.find(system);
+    return it != systems.end() && !it->second.empty();
+}
 
 void tree_forget_views(int leaf_id, int from_view) {
     auto& views = ui_resource<ViewMap, 7701>();
@@ -506,16 +586,32 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
             v.bufs.clear();
             v.cmap_seen = -2;
             v.exp_seen = -999;
+            if (v.basins_owner) {
+                forget_basins_plot(*v.basins_owner);
+                v.basins_owner.reset();
+            }
         }
     }
     for (auto it = views.begin(); it != views.end();) {
         const TreeNode* vn = ts.tree.find(it->first / kViewsPerLeaf);
         const int k = it->first % kViewsPerLeaf;
-        if (!vn || k > (int)vn->extra_views.size()) it = views.erase(it); else ++it;
+        if (!vn || k > (int)vn->extra_views.size() ||
+            (it->second.basins_owner && vn->kind != TreeNodeKind::Basins)) {
+            if (it->second.basins_owner) forget_basins_plot(*it->second.basins_owner);
+            it = views.erase(it);
+        } else {
+            ++it;
+        }
     }
 
     const std::string& sys = model.loaded_name;
-    const std::string sys_sfx = sys.empty() ? std::string{} : "_sys_" + sys;
+    const std::string sys_sfx = tree_system_suffix(sys);
+    const std::string controls = tree_controls_title(sys);
+    const auto hidden_it = hidden_windows().find(sys);
+    auto* hidden = hidden_it == hidden_windows().end() ? nullptr : &hidden_it->second;
+    const auto visible = [hidden](const std::string& title) {
+        return !hidden || hidden->count(title) == 0;
+    };
     const int sys_delta = sys.empty() ? 0 : (int)(ImHashStr(sys.c_str()) & 0x00FFFFFF);
 
     for (int id : ts.tree.preorder()) {
@@ -529,19 +625,22 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
         if (n->kind == TreeNodeKind::Phase) {
             if (!rt.phase) continue;
             const bool focus = g_tree_focus_leaf == id;
+            const std::string suffix = "_tree" + std::to_string(id) + sys_sfx;
+            if (focus && hidden && !rt.phase->projections.empty())
+                hidden->erase(projection_window_title(*rt.phase, 0, suffix));
             if (focus) g_tree_focus_leaf = 0;
             const int slot = tree_kind_dim_slot(n->kind);
             const size_t n_before = rt.phase->projections.size();
             draw_projection_windows(*rt.phase, cb,
-                [focus](int idx, const std::string& title) {
+                [focus, &controls](int idx, const std::string& title) {
                     ensure_docked(title);
-                    if (focus && idx == 0) focus_leaf_window(title);
+                    if (focus && idx == 0) focus_leaf_window(title, controls);
                 },
                 [&ts, id, slot](int, const std::string&) {
                     if (ImGui::GetWindowDockID() != 0) g_leaf_dock = ImGui::GetWindowDockID();
                     leaf_window_frame(ts, id, slot);
                 },
-                "_tree" + std::to_string(id) + sys_sfx, owner_id);
+                suffix, owner_id, {}, {}, visible);
             // Закрыли последнее окно ФП — узел выключается, а проекция возвращается, чтобы
             // включение узла снова показало окно.
             if (rt.phase->projections.empty() && n_before > 0) {
@@ -554,18 +653,27 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
             continue;
         }
 
-        const std::string title = n->name + "###tree_" + std::to_string(id) + sys_sfx;
+        const std::string title = leaf_window_title(*n, sys_sfx);
+        if (hidden && g_tree_focus_leaf == id && g_tree_focus_view == 0) hidden->erase(title);
         // Крестик основного окна выключает лист: включение в дереве вернёт окно.
         bool main_open = true;
-        if (begin_leaf_window(ts, *n, title, &main_open)) {
-            ImGui::PushID(id);
-            LeafViews& v = views[id * kViewsPerLeaf];
-            if (tree_kind_is_2d_leaf(n->kind))      draw_2d_leaf(model, ts, *n, rt, v, cb, owner_id, true, nullptr);
-            else if (tree_kind_is_1d_leaf(n->kind)) draw_1d_leaf(model, ts, *n, rt, v, cb, owner_id, true);
-            else if (n->kind == TreeNodeKind::Basins) draw_basins_leaf(model, ts, *n, rt, v, owner_id);
-            ImGui::PopID();
+        if (visible(title)) {
+            if (begin_leaf_window(ts, *n, title, &main_open, controls)) {
+                ImGui::PushID(id);
+                LeafViews& v = views[id * kViewsPerLeaf];
+                if (tree_kind_is_2d_leaf(n->kind))      draw_2d_leaf(model, ts, *n, rt, v, cb, owner_id, true, nullptr);
+                else if (tree_kind_is_1d_leaf(n->kind)) draw_1d_leaf(model, ts, *n, rt, v, cb, owner_id, true);
+                else if (n->kind == TreeNodeKind::Basins && rt.basins) {
+                    const auto basins_owner = static_cast<unsigned>(owner_id);
+                    if (v.basins_owner && *v.basins_owner != basins_owner)
+                        forget_basins_plot(*v.basins_owner);
+                    v.basins_owner = basins_owner;
+                    draw_basins_plot(model, *rt.basins, 0, cb, basins_owner, [&ts] { ts.dirty = true; });
+                }
+                ImGui::PopID();
+            }
+            ImGui::End();
         }
-        ImGui::End();
         if (!main_open) {
             ts.toggle_enabled(id);
             continue;
@@ -575,10 +683,11 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
         int close_k = -1;
         TreeNode* nm = ts.tree.find(id);
         for (int k = 1; nm && k <= (int)nm->extra_views.size() && k < kViewsPerLeaf; ++k) {
-            const std::string vt = n->name + " [" + std::to_string(k + 1) + "]###tree_" + std::to_string(id)
-                                 + "_v" + std::to_string(k) + sys_sfx;
+            const std::string vt = leaf_window_title(*nm, sys_sfx, k);
+            if (hidden && g_tree_focus_leaf == id && g_tree_focus_view == k) hidden->erase(vt);
+            if (!visible(vt)) continue;
             bool open = true;
-            if (begin_leaf_window(ts, *nm, vt, &open, k)) {
+            if (begin_leaf_window(ts, *nm, vt, &open, controls, k)) {
                 ImGui::PushID(id * kViewsPerLeaf + k);
                 LeafViews& v = views[id * kViewsPerLeaf + k];
                 if (tree_kind_is_2d_leaf(nm->kind))
@@ -609,7 +718,7 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
                 [&ts, id, slot](int, const std::string&) {
                     if (ImGui::GetWindowDockID() != 0) g_leaf_dock = ImGui::GetWindowDockID();
                     leaf_window_frame(ts, id, slot);
-                });
+                }, static_cast<unsigned>(owner_id), visible);
         }
     }
 }
