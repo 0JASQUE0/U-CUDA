@@ -858,27 +858,35 @@ void draw_network_series_window(AppModel& model, PlotRenderer& renderer, Plot2DV
     }
 
     // Буферы живут между кадрами: вид держит указатели на время render().
-    static std::vector<std::vector<double>> bufs;
     int first = vs.first_series_node;
     if (first >= r.n_nodes) first = r.n_nodes - 1;
     int count = vs.series_count;
     if (first + count > r.n_nodes) count = r.n_nodes - first;
     if (count < 1) count = 1;
-    if ((int)bufs.size() != count) bufs.assign((size_t)count, {});
+    const int epoch = model.session_epoch[(int)AppModel::AppMode::Network];
+    auto key = std::make_tuple(epoch, s.active_config_index, c.data_generation,
+                               r.n_points, first, count, vs.series_var);
+    static PlotDataCache<decltype(key), std::vector<std::vector<double>>> cache;
+    if (cache.update(key, [&](auto& bufs) {
+        bufs.resize(count);
+        for (int k = 0; k < count; ++k) {
+            auto& buf = bufs[k];
+            buf.clear();
+            buf.reserve((size_t)r.n_points * 2);
+            for (int p = 0; p < r.n_points; ++p) {
+                const double value = net_value_at(r, p, first + k, vs.series_var);
+                if (!std::isfinite(value)) continue;
+                buf.push_back(r.t0 + r.dt * (double)p);
+                buf.push_back(value);
+            }
+        }
+    })) view.series_generation = -1;
 
     std::vector<PlotSeriesInput> series;
     std::vector<bool> vis((size_t)count, true);
     for (int k = 0; k < count; ++k) {
         const int node = first + k;
-        std::vector<double>& b = bufs[(size_t)k];
-        b.clear();
-        b.reserve((size_t)r.n_points * 2);
-        for (int p = 0; p < r.n_points; ++p) {
-            const double v = net_value_at(r, p, node, vs.series_var);
-            if (!std::isfinite(v)) continue;     // хвост после разлёта не рисуем
-            b.push_back(r.t0 + r.dt * (double)p);
-            b.push_back(v);
-        }
+        const auto& b = cache.data[k];
         PlotSeriesInput si;
         si.points   = b.data();
         si.n_points = (int)(b.size() / 2);

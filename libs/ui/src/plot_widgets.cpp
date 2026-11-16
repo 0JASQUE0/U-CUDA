@@ -999,12 +999,18 @@ bool session_reloaded(const AppModel& model, AppModel::AppMode mode, int& seen) 
 
 
 namespace ucuda::ui_detail {
-std::vector<std::vector<double>>& window_point_bufs(int window_id, size_t n_series) {
-    auto& cache = ui_resource<std::map<int, std::vector<std::vector<double>>>, 3024>();
-    auto& bufs = cache[window_id];
-    if (bufs.size() != n_series) bufs.assign(n_series, {});
+static auto& sweep_curve_windows() {
+    return ui_resource<std::map<int, std::vector<SweepCurveCache>>, 3024>();
+}
+
+std::vector<SweepCurveCache>& sweep_curve_caches(int window_id, size_t n_series) {
+    auto& bufs = sweep_curve_windows()[window_id];
+    bufs.resize(n_series);
     return bufs;
 }
+
+void clear_sweep_curve_caches() { sweep_curve_windows().clear(); }
+void forget_sweep_curve_caches(int window_id) { sweep_curve_windows().erase(window_id); }
 
 bool BifurcationPointCache::update(const BifurcationDiagramConfig& cfg,
                                    const BifurcationPointGrid& grid, bool finite_only) {

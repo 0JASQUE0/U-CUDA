@@ -243,7 +243,8 @@ void Plot2DView::render(PlotRenderer& renderer,
     const auto is_bar = [](const PlotSeriesInput& s) { return s.bar_width > 0 && std::isfinite(s.bar_width); };
     const bool has_bars = std::any_of(series_in.begin(), series_in.end(), is_bar);
     const bool upload_series = data_generation != series_generation ||
-                               series_xlog_cached != upload_xlog || series_ylog_cached != upload_ylog;
+                               series_xlog_cached != upload_xlog || series_ylog_cached != upload_ylog ||
+                               visible.size() != series_in.size();
     if (upload_series) {
         bool count_changed = ((int)visible.size() != (int)series_in.size());
         series_cache_.clear();

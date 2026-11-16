@@ -162,6 +162,7 @@ void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, const Gui
         invalidate_views(views);
         for (auto& kv : heatmaps) invalidate_views(kv.second);
         bifurcation_points.clear();
+        clear_sweep_curve_caches();
     }
 
     int to_remove = -1;
@@ -242,6 +243,7 @@ void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, const Gui
         views.erase(id);
         heatmaps.erase(id);
         bifurcation_points.erase(id);
+        forget_sweep_curve_caches(id);
         view_configured_for.erase(id);
         model.remove_parametric_plot_window(to_remove);
     }

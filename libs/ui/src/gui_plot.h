@@ -3,6 +3,7 @@
 // тепловые карты и палитры, буферы окон.
 #include "gui_common.h"
 #include "gui_inputs.h"
+#include <optional>
 #include <tuple>
 
 namespace ucuda::ui_detail {
@@ -349,7 +350,29 @@ static void invalidate_views(std::map<K, std::unique_ptr<V>>& m) {
 bool session_reloaded(const AppModel& model, AppModel::AppMode mode, int& seen);
 
 
-std::vector<std::vector<double>>& window_point_bufs(int window_id, size_t n_series);
+template<class Key, class Data>
+struct PlotDataCache {
+    std::optional<Key> key;
+    Data data;
+
+    template<class Build>
+    bool update(const Key& next, Build build) {
+        if (key == next) return false;
+        build(data);
+        key = next;
+        return true;
+    }
+};
+
+// A series on a sweep grid: result identity/generation, component, bounds
+// and coordinate options. Rebuild the VBO whenever the prepared data change.
+using SweepCurveCache = PlotDataCache<
+    std::tuple<const void*, int, int, int, double, double, bool, bool, bool, bool>,
+    std::vector<double>>;
+
+std::vector<SweepCurveCache>& sweep_curve_caches(int window_id, size_t n_series);
+void clear_sweep_curve_caches();
+void forget_sweep_curve_caches(int window_id);
 
 struct BifurcationPointGrid {
     int nodes;

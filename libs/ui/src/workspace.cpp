@@ -1,4 +1,4 @@
-﻿#include "gui_common.h"
+#include "gui_common.h"
 #include "gui_inputs.h"
 #include "gui_plot.h"
 #include "tab_custom.h"
@@ -485,11 +485,12 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
     static int                                          ls_init_exp_seen  = -999;
     auto& l1_views = ui_resource<std::array<std::unique_ptr<Plot2DView>,  6>, 18>();
     auto& l1_renderers = ui_resource<std::array<std::unique_ptr<PlotRenderer>, 6>, 19>();
-    static std::array<std::vector<std::vector<double>>, 6> l1_bufs;
+    static std::array<std::vector<SweepCurveCache>, 6> l1_bufs;
     auto& l1_bif_points = ui_resource<std::array<BifurcationPointCache, 2>, 22>();
     static int bif_epoch = 0;
     if (session_reloaded(model, AppModel::AppMode::Custom, bif_epoch)) {
         l1_bif_points = {};
+        for (auto& b : l1_bufs) b.clear();
         for (auto& v : l1_views) if (v) v->series_generation = -1;
     }
     // Custom Basins (Level-3 kind=1) HeatmapView + renderer — hoisted so the
@@ -1063,7 +1064,6 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
         std::vector<PlotSeriesInput> series_in;
         std::vector<bool> init_vis, glob_vis;
         auto& bufs = l1_bufs[i];
-        bufs.clear();
 
         int series_gen = data_gen;
         if (lslots[i].kind == L1Kind::Bif) {
@@ -1087,26 +1087,29 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
             auto& c = cs.lle_session.curves[lslots[i].cfg_idx];
             const auto& r = c.result;
             int n = (int)r.lyapunov.size();
-            bufs.emplace_back();
-            auto& buf = bufs.back();
-            buf.reserve(n * 2);
-            int total_pts = 0;
-            for (int p = 0; p < n; ++p) {
-                // Diverged / NaN пропускаем — как в Parametric. Раньше здесь
-                // проверок не было, поэтому sentinel-значения расхождения
-                // рисовались как выброс.
-                if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
-                double y = r.lyapunov[p];
-                if (!std::isfinite(y)) continue;
-                double px = sweep_value_at(p, n, param_lo, param_hi, slice_log,
-                                           /*reverse*/ false, c.continuation);
-                buf.push_back((double)px);
-                buf.push_back((double)y);
-                ++total_pts;
-            }
+            bufs.resize(1);
+            auto& cache = bufs[0];
+            if (cache.update({&r, data_gen, n, 0, param_lo, param_hi, slice_log, false, c.continuation, swap},
+                             [&](std::vector<double>& buf) {
+                buf.clear();
+                for (int p = 0; p < n; ++p) {
+                    // Diverged / NaN пропускаем — как в Parametric. Раньше здесь
+                    // проверок не было, поэтому sentinel-значения расхождения
+                    // рисовались как выброс.
+                    if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
+                    double y = r.lyapunov[p];
+                    if (!std::isfinite(y)) continue;
+                    double px = sweep_value_at(p, n, param_lo, param_hi, slice_log,
+                                               /*reverse*/ false, c.continuation);
+                    buf.push_back((double)px);
+                    buf.push_back((double)y);
+                }
+                if (swap)
+                    for (size_t k = 0; k + 1 < buf.size(); k += 2) std::swap(buf[k], buf[k + 1]);
+            })) view.series_generation = -1;
             PlotSeriesInput si;
-            si.points = buf.empty() ? nullptr : buf.data();
-            si.n_points = total_pts;
+            si.points = cache.data.data();
+            si.n_points = (int)(cache.data.size() / 2);
             si.color = ic_base_color(0);
             si.label = c.label.empty() ? "LLE" : c.label;
             series_in.push_back(si);
@@ -1116,28 +1119,30 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
             int n = r.n_pts;
             int N = r.n_exponents;
             if (N > 0 && n > 0 && (int)r.spectrum.size() == n) {
-                bufs.reserve(N);
+                bufs.resize(N);
                 for (int j = 0; j < N; ++j) {
-                    bufs.emplace_back();
-                    auto& buf = bufs.back();
-                    buf.reserve(n * 2);
-                    int total_pts = 0;
-                    for (int p = 0; p < n; ++p) {
-                        if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
-                        if (p >= (int)r.spectrum.size()) continue;
-                        const auto& row = r.spectrum[p];
-                        if (j >= (int)row.size()) continue;
-                        double px = sweep_value_at(p, n, param_lo, param_hi, slice_log,
-                                                   /*reverse*/ false, c.continuation);
-                        double y = row[j];
-                        if (!std::isfinite(y)) continue;
-                        buf.push_back((double)px);
-                        buf.push_back((double)y);
-                        ++total_pts;
-                    }
+                    auto& cache = bufs[j];
+                    if (cache.update({&r, data_gen, n, j, param_lo, param_hi, slice_log, false, c.continuation, swap},
+                                     [&](std::vector<double>& buf) {
+                        buf.clear();
+                        for (int p = 0; p < n; ++p) {
+                            if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
+                            if (p >= (int)r.spectrum.size()) continue;
+                            const auto& row = r.spectrum[p];
+                            if (j >= (int)row.size()) continue;
+                            double px = sweep_value_at(p, n, param_lo, param_hi, slice_log,
+                                                       /*reverse*/ false, c.continuation);
+                            double y = row[j];
+                            if (!std::isfinite(y)) continue;
+                            buf.push_back((double)px);
+                            buf.push_back((double)y);
+                        }
+                        if (swap)
+                            for (size_t k = 0; k + 1 < buf.size(); k += 2) std::swap(buf[k], buf[k + 1]);
+                    })) view.series_generation = -1;
                     PlotSeriesInput si;
-                    si.points = buf.empty() ? nullptr : buf.data();
-                    si.n_points = total_pts;
+                    si.points = cache.data.data();
+                    si.n_points = (int)(cache.data.size() / 2);
                     si.color = ic_base_color(j);
                     // Как в Parametric: "<label> Lj" при N>1, иначе <label>.
                     const std::string base = c.label.empty() ? "LS" : c.label;
@@ -1150,9 +1155,7 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
         init_vis.assign(series_in.size(), true);
         glob_vis.assign(series_in.size(), true);
         if (swap) {
-            // Пары (параметр, значение) -> (значение, параметр); подписи осей — следом.
-            for (auto& buf : bufs)
-                for (size_t k = 0; k + 1 < buf.size(); k += 2) std::swap(buf[k], buf[k + 1]);
+
             std::swap(view.x_axis.name, view.y_axis.name);
             view.show_zero_x = view.show_zero_y;
             view.show_zero_y = false;
@@ -1293,18 +1296,19 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                     if (r.n_pts <= 0 || r.basin_idx.empty()) {
                         ImGui::TextDisabled("Basins result empty.");
                     } else {
-                        // Convert int cluster ids to double for HeatmapView.
-                        static std::vector<double> bsn_values;
-                        bsn_values.resize(r.basin_idx.size());
-                        double vmin =  std::numeric_limits<double>::infinity();
-                        double vmax = -std::numeric_limits<double>::infinity();
-                        for (size_t k = 0; k < r.basin_idx.size(); ++k) {
-                            double v = (double)r.basin_idx[k];
-                            bsn_values[k] = v;
-                            if (v < vmin) vmin = v;
-                            if (v > vmax) vmax = v;
-                        }
-                        if (!std::isfinite(vmin)) { vmin = 0.0; vmax = 1.0; }
+                        struct BasinsGrid {
+                            std::vector<double> values;
+                            double min = 0.0, max = 1.0;
+                        };
+                        auto key = std::make_tuple(bif_epoch, sys, bc.data_generation,
+                                                   r.basin_idx.data(), r.basin_idx.size());
+                        static PlotDataCache<decltype(key), BasinsGrid> grid;
+                        if (grid.update(key, [&](BasinsGrid& data) {
+                            data.values.assign(r.basin_idx.begin(), r.basin_idx.end());
+                            const auto [lo, hi] = std::minmax_element(r.basin_idx.begin(), r.basin_idx.end());
+                            data.min = *lo;
+                            data.max = *hi;
+                        })) bsn_hv.data_gen_cached = -1;
                         // Тот же тулбар, что и у остальных хитмап: раньше здесь был только combo
                         // Colormap, без autoscale/vmin/vmax и Swap axes, хотя диаграмма ровно такая
                         // же. Выбор colormap'а теперь персистится в config (слот 0 = таб "Basins") —
@@ -1335,10 +1339,10 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
                                       /*owner_id*/ 0xCBA51E5 ^ sys_owner_delta,
                                       bc.data_generation,
                                       r.n_pts, r.n_pts,
-                                      bsn_values.data(),
+                                      grid.data.values.data(),
                                       r.axis_x_lo, r.axis_x_hi,
                                       r.axis_y_lo, r.axis_y_hi,
-                                      vmin, vmax,
+                                      grid.data.min, grid.data.max,
                                       take_fit_basins());
                     }
                 }
