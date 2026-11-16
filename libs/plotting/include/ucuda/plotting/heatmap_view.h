@@ -241,7 +241,8 @@ public:
 
 private:
     GLuint data_tex_ = 0;
-    int    tex_w_ = 0, tex_h_ = 0;
+    int    tex_w_ = 0, tex_h_ = 0;          // размер текстуры (не больше GL_MAX_TEXTURE_SIZE)
+    int    tex_src_w_ = 0, tex_src_h_ = 0;  // размер сетки, из которой она залита
     std::vector<float> upload_buf_;  // переиспользуется между кадрами
 
     // Rect-zoom через drag ПКМ. mode: 0 = неактивен, 1 = в плоте (XY),
@@ -277,12 +278,13 @@ private:
     // Слой-маска (см. overlay_mask): RGBA8, GL_NEAREST — ячейки совпадают с
     // ячейками основной текстуры.
     GLuint overlay_tex_ = 0;
-    int    overlay_tex_w_ = 0, overlay_tex_h_ = 0;
+    int    overlay_tex_w_ = 0, overlay_tex_h_ = 0;   // размер сетки маски (текстура может быть меньше)
     int    overlay_gen_cached_ = -1;
     unsigned overlay_fill_cached_ = 0, overlay_edge_cached_ = 0;   // запечённые в текстуру
     int      overlay_edge_width_cached_ = -1;
     std::vector<int> overlay_dist_;   // шагов до ближайшей внешней ячейки (upload_overlay)
     std::vector<unsigned> overlay_buf_;
+    std::vector<unsigned> overlay_tex_buf_;   // overlay_buf_, прореженный до размера текстуры
 
     void ensure_tex(int w, int h);
     // not_computed — в координатах ЗАЛИВАЕМОЙ (пост-swap) сетки; пустой — таких ячеек нет.
