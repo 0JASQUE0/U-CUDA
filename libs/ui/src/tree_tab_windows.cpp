@@ -3,6 +3,7 @@
 #include "gui_plot.h"
 #include "tab_phase.h"
 #include "tab_basins.h"
+#include <tuple>
 
 namespace ucuda::ui_detail {
 
@@ -14,6 +15,10 @@ struct LeafViews {
     std::unique_ptr<Plot2DView>   pv;
     std::unique_ptr<PlotRenderer> rnd;
     std::vector<std::vector<double>> bufs;
+    std::vector<double> bif_points;
+    std::optional<std::tuple<int, bool, bool, double, double, bool, bool>> bif_points_key;
+    int bif_points_generation = 0;
+    bool bif_points_sorted_x = false;
     std::optional<unsigned> basins_owner;
     int cmap_seen = -2;
     int exp_seen  = -999;
@@ -380,24 +385,42 @@ void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
         const auto& r = d.result;
         const auto& src = d.plot_inter_peaks ? r.peak_times : r.bifurcation_points;
         const int np = r.n_pts > 0 ? r.n_pts : 1;
-        v.bufs.emplace_back();
-        auto& buf = v.bufs.back();
-        for (int p = 0; p < (int)src.size(); ++p) {
-            if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
-            const double px = sweep_value_at(p, np, lo, hi, log, false, d.continuation);
-            for (double y : src[p]) {
-                if (!std::isfinite(y)) continue;
-                buf.push_back(px); buf.push_back(y);
+        const auto key = std::make_tuple(data_gen, d.plot_inter_peaks, swap, lo, hi, log, d.continuation);
+        if (v.bif_points_key != key) {
+            auto& points = v.bif_points;
+            points.clear();
+            bool ascending = true, descending = true, finite_x = true;
+            double previous_x = 0.0;
+            for (int p = 0; p < (int)src.size(); ++p) {
+                if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
+                const double px = sweep_value_at(p, np, lo, hi, log, false, d.continuation);
+                const size_t before = points.size();
+                for (double y : src[p]) {
+                    if (!std::isfinite(y)) continue;
+                    points.push_back(swap ? y : px);
+                    points.push_back(swap ? px : y);
+                }
+                if (points.size() == before) continue;
+                finite_x &= std::isfinite(px);
+                if (before != 0) {
+                    ascending &= px >= previous_x;
+                    descending &= px <= previous_x;
+                }
+                previous_x = px;
             }
+            v.bif_points_sorted_x = !swap && finite_x && (ascending || descending);
+            v.bif_points_key = key;
+            ++v.bif_points_generation;
         }
         PlotSeriesInput si;
-        si.points = buf.empty() ? nullptr : buf.data();
-        si.n_points = (int)(buf.size() / 2);
+        si.points = v.bif_points.data();
+        si.n_points = (int)(v.bif_points.size() / 2);
+        si.sorted_x = v.bif_points_sorted_x;
         si.color = ic_base_color(0);
         if (d.custom_point_style) si.color.w = d.point_alpha;
         si.label = n.name;
         series.push_back(si);
-        series_gen = data_gen * 2 + (d.plot_inter_peaks ? 1 : 0);
+        series_gen = v.bif_points_generation;
     } else if (n.kind == TreeNodeKind::LLE1D) {
         auto& c = rt.lle->curves[0];
         const auto& r = c.result;
@@ -584,6 +607,7 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
             if (v.hv) invalidate_view(*v.hv);
             if (v.pv) invalidate_view(*v.pv);
             v.bufs.clear();
+            v.bif_points_key.reset();
             v.cmap_seen = -2;
             v.exp_seen = -999;
             if (v.basins_owner) {
