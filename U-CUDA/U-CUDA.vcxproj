@@ -228,6 +228,7 @@ if not exist "%UC_CMAKE%" set "UC_CMAKE=cmake"
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\apps\desktop\app_main.cpp" />
+    <ClCompile Include="..\apps\desktop\hud_theme.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\libs\domain\include\ucuda\domain\adaptive_settings.h" />

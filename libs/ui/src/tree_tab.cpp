@@ -709,7 +709,7 @@ ImVec4 tree_dim_color(int slot, bool active) {
     nh -= std::floor(nh);
     ImVec4 col(0, 0, 0, 1.0f);
     ImGui::ColorConvertHSVtoRGB(nh, std::max(0.75f, s), std::max(0.85f, v), col.x, col.y, col.z);
-    return col;
+    return readable_on_dark_bg(col);
 }
 
 void load_tree_session(AppModel& model, SystemLibrary& lib) {
