@@ -1,4 +1,4 @@
-﻿#include "gui_common.h"
+#include "gui_common.h"
 #include "gui_inputs.h"
 #include "gui_integration.h"
 #include "gui_fields.h"
@@ -163,24 +163,28 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
             }
 
             const int n_in = c.result.n_pts_traj;
-            static std::vector<float> xyz_buf;
-            static std::vector<float> val_buf;
-            xyz_buf.resize((size_t)n_in * 3);
-            val_buf.resize((size_t)n_in);
-            for (int i = 0; i < n_in; ++i) {
-                const double* row = &c.result.traj_full[(size_t)i * nX];
-                xyz_buf[3*i + 0] = (float)row[vx];
-                xyz_buf[3*i + 1] = (float)row[vy];
-                xyz_buf[3*i + 2] = (float)row[vz];
-                val_buf[i] = (float)c.result.sync_error[i];
-            }
+            auto key = std::make_tuple(seen_epoch, base_oid, c.data_generation, c.result.traj_full.data(),
+                                       n_in, nX, vx, vy, vz);
+            struct Trajectory3D { std::vector<float> xyz, values; };
+            static PlotDataCache<decltype(key), Trajectory3D> cache;
+            if (cache.update(key, [&](Trajectory3D& data) {
+                data.xyz.resize((size_t)n_in * 3);
+                data.values.resize((size_t)n_in);
+                for (int i = 0; i < n_in; ++i) {
+                    const double* row = &c.result.traj_full[(size_t)i * nX];
+                    data.xyz[3*i + 0] = (float)row[vx];
+                    data.xyz[3*i + 1] = (float)row[vy];
+                    data.xyz[3*i + 2] = (float)row[vz];
+                    data.values[i] = (float)c.result.sync_error[i];
+                }
+            })) v3.series_generation = -1;
 
             std::vector<PlotSeriesInput3D> s3(1);
-            s3[0].points       = xyz_buf.data();
+            s3[0].points       = cache.data.xyz.data();
             s3[0].n_points     = n_in;
             s3[0].color        = ImVec4(1, 1, 1, c.alpha);
             s3[0].label        = "trajectory";
-            s3[0].values       = val_buf.data();
+            s3[0].values       = cache.data.values.data();
             s3[0].colormap     = (int)cmap;
             s3[0].cmin         = (float)cmin;
             s3[0].cmax         = (float)cmax;
@@ -235,60 +239,55 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
             last_axes[base_oid] = { vx, vy };
         }
 
-        // Пересобираем XY/values из полного буфера (без decimator'а — рисуем
-        // все точки, ImDrawList сегмент-за-сегментом справляется).
-        int n_in = c.result.n_pts_traj;
-        static std::vector<double> xy_buf;
-        static std::vector<float> err_buf;
-        xy_buf.resize((size_t)n_in * 2);
-        err_buf.resize((size_t)n_in);
-        for (int i = 0; i < n_in; ++i) {
-            xy_buf[2*i + 0] = (float)c.result.traj_full[(size_t)i * nX + (size_t)vx];
-            xy_buf[2*i + 1] = (float)c.result.traj_full[(size_t)i * nX + (size_t)vy];
-            // invert_cmap: reflect v across the sorted [cmin, cmax] midpoint.
-            // Renderer computes t = (v - cmin)/(cmax - cmin); the reflection
-            // maps it to 1 - t → cmap_sample sees the colors in reverse order.
-            double v_err = c.result.sync_error[i];
-            err_buf[i] = (float)(invert_cmap ? (cmin + cmax - v_err) : v_err);
-        }
-
-        // Painter's algorithm: сортируем сегменты по средней координате оси Z (первая var,
-        // не равная vx/vy) — дальние рисуются первыми, ближние поверх. Без сортировки
-        // последний по времени сегмент перекрывает более ранние независимо от их Z.
+        const int n_in = c.result.n_pts_traj;
         int vz = -1;
         for (int k = 0; k < nX; ++k) if (k != vx && k != vy) { vz = k; break; }
-        static std::vector<int>   seg_order;
-        static std::vector<float> seg_z;
-        const int n_seg = n_in - 1;
-        seg_order.clear();
-        if (vz >= 0 && n_seg > 0) {
-            seg_order.resize(n_seg);
-            seg_z.resize(n_seg);
-            for (int k = 0; k < n_seg; ++k) {
-                seg_order[k] = k;
-                float za = (float)c.result.traj_full[(size_t)k       * nX + (size_t)vz];
-                float zb = (float)c.result.traj_full[(size_t)(k + 1) * nX + (size_t)vz];
-                seg_z[k] = 0.5f * (za + zb);
+        auto key = std::make_tuple(seen_epoch, base_oid, c.data_generation, c.result.traj_full.data(), n_in, nX, vx, vy,
+                                   invert_cmap, invert_cmap ? cmin + cmax : 0.0, c.invert_depth);
+        struct Trajectory2D {
+            std::vector<double> xy;
+            std::vector<float> values;
+            std::vector<int> order;
+        };
+        static PlotDataCache<decltype(key), Trajectory2D> cache;
+        if (cache.update(key, [&](Trajectory2D& data) {
+            data.xy.resize((size_t)n_in * 2);
+            data.values.resize((size_t)n_in);
+            for (int i = 0; i < n_in; ++i) {
+                data.xy[2*i + 0] = (float)c.result.traj_full[(size_t)i * nX + (size_t)vx];
+                data.xy[2*i + 1] = (float)c.result.traj_full[(size_t)i * nX + (size_t)vy];
+                const double error = c.result.sync_error[i];
+                data.values[i] = (float)(invert_cmap ? (cmin + cmax - error) : error);
             }
-            if (c.invert_depth) {
-                std::sort(seg_order.begin(), seg_order.end(),
-                          [&](int a, int b) { return seg_z[a] > seg_z[b]; });
-            } else {
-                std::sort(seg_order.begin(), seg_order.end(),
-                          [&](int a, int b) { return seg_z[a] < seg_z[b]; });
+
+            // Draw segments far-to-near along the first axis outside the projection.
+            data.order.clear();
+            const int n_seg = n_in - 1;
+            if (vz >= 0 && n_seg > 0) {
+                data.order.resize(n_seg);
+                std::vector<float> depth(n_seg);
+                for (int k = 0; k < n_seg; ++k) {
+                    data.order[k] = k;
+                    float za = (float)c.result.traj_full[(size_t)k       * nX + (size_t)vz];
+                    float zb = (float)c.result.traj_full[(size_t)(k + 1) * nX + (size_t)vz];
+                    depth[k] = 0.5f * (za + zb);
+                }
+                std::sort(data.order.begin(), data.order.end(), [&](int a, int b) {
+                    return c.invert_depth ? depth[a] > depth[b] : depth[a] < depth[b];
+                });
             }
-        }
+        })) v.series_generation = -1;
 
         std::vector<PlotSeriesInput> series_in(1);
-        series_in[0].points   = xy_buf.data();
+        series_in[0].points   = cache.data.xy.data();
         series_in[0].n_points = n_in;
         series_in[0].color    = ImVec4(1, 1, 1, c.alpha);  // .w → alpha-multiplier на cmap_sample()
         series_in[0].label    = "trajectory";
-        series_in[0].values   = err_buf.data();
+        series_in[0].values   = cache.data.values.data();
         series_in[0].colormap = cmap;
         series_in[0].cmin     = (float)cmin;
         series_in[0].cmax     = (float)cmax;
-        series_in[0].segment_order = seg_order.empty() ? nullptr : seg_order.data();
+        series_in[0].segment_order = cache.data.order.empty() ? nullptr : cache.data.order.data();
         std::vector<bool> vis(1, true);
         // Synthetic generation token: меняется при смене (data_generation, vx, vy),
         // чтобы Plot2DView::series_cache_ перезалил GPU-буфер → bbox()/autofit

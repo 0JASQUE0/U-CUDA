@@ -1,4 +1,4 @@
-﻿#include "gui_common.h"
+#include "gui_common.h"
 #include "gui_inputs.h"
 #include "gui_integration.h"
 #include "gui_fields.h"
@@ -126,7 +126,7 @@ void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
     configure_sweep_x_axis_from(view, win.members, s.curves, s.params, s.vars);
     view.y_axis.name = "lambda";
 
-    auto& bufs = window_point_bufs(win.id, win.members.size());
+    auto& bufs = sweep_curve_caches(win.id, win.members.size());
     // Узлы сетки перезаполняются каждый кадр: данные могли пересчитаться.
     view.snap_x_nodes      = nullptr;
     view.snap_x_node_count = 0;
@@ -144,9 +144,7 @@ void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
         int idx = win.members[mi];
         if (idx < 0 || idx >= (int)s.curves.size()) continue;
         LLECurveConfig& c = s.curves[idx];
-        auto& buf = bufs[mi];
-        buf.clear();
-        int total_pts = 0;
+        auto& cache = bufs[mi];
 
         if (c.last_run_ok && !c.result.lyapunov.empty()) {
             // X считаются по тому диапазону, с которым реально шёл Run, а не
@@ -160,21 +158,27 @@ void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
             const bool rev = c.result.continuation_reverse;
             if (view.snap_x_node_count == 0)
                 set_snap_nodes(view, win.id, npts, lo, hi, c.log_scale, rev, c.continuation);
-            for (int k = 0; k < npts; ++k) {
-                if (k < (int)c.result.flags.size() &&
-                    !regime_is_oscillation(c.result.flags[k])) continue;
-                double x = sweep_value_at(k, npts, lo, hi, c.log_scale, rev, c.continuation);
-                double y = c.result.lyapunov[k];
-                if (!std::isfinite(y)) continue;
-                buf.push_back((double)x);
-                buf.push_back((double)y);
-                ++total_pts;
-            }
+            if (cache.update({c.result.lyapunov.data(), c.data_generation, npts, 0, lo, hi,
+                              c.log_scale, rev, c.continuation, false}, [&](std::vector<double>& buf) {
+                buf.clear();
+                for (int k = 0; k < npts; ++k) {
+                    if (k < (int)c.result.flags.size() &&
+                        !regime_is_oscillation(c.result.flags[k])) continue;
+                    double x = sweep_value_at(k, npts, lo, hi, c.log_scale, rev, c.continuation);
+                    double y = c.result.lyapunov[k];
+                    if (!std::isfinite(y)) continue;
+                    buf.push_back((double)x);
+                    buf.push_back((double)y);
+                }
+            })) view.series_generation = -1;
+        } else if (!cache.data.empty()) {
+            cache = {};
+            view.series_generation = -1;
         }
 
         PlotSeriesInput si;
-        si.points   = buf.empty() ? nullptr : buf.data();
-        si.n_points = total_pts;
+        si.points   = cache.data.data();
+        si.n_points = (int)(cache.data.size() / 2);
         si.color    = ic_base_color((int)mi);
         si.label    = c.label;
         series_in.push_back(si);
@@ -499,7 +503,7 @@ void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
         total_series += (size_t)N;
     }
 
-    auto& bufs = window_point_bufs(win.id, total_series);
+    auto& bufs = sweep_curve_caches(win.id, total_series);
     // Узлы сетки перезаполняются каждый кадр: данные могли пересчитаться.
     view.snap_x_nodes      = nullptr;
     view.snap_x_node_count = 0;
@@ -532,29 +536,33 @@ void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
             set_snap_nodes(view, win.id, npts, lo, hi, c.log_scale, rev, c.continuation);
 
         for (int j = 0; j < N; ++j) {
-            auto& buf = bufs[buf_cursor++];
-            buf.clear();
-            int total_pts = 0;
+            auto& cache = bufs[buf_cursor++];
 
             if (have) {
-                for (int k = 0; k < npts; ++k) {
-                    if (k < (int)c.result.flags.size() &&
-                        !regime_is_oscillation(c.result.flags[k])) continue;
-                    if (k >= (int)c.result.spectrum.size()) continue;
-                    const auto& row = c.result.spectrum[k];
-                    if (j >= (int)row.size()) continue;
-                    double x = sweep_value_at(k, npts, lo, hi, c.log_scale, rev, c.continuation);
-                    double y = row[j];
-                    if (!std::isfinite(y)) continue;
-                    buf.push_back((double)x);
-                    buf.push_back((double)y);
-                    ++total_pts;
-                }
+                if (cache.update({c.result.spectrum.data(), c.data_generation, npts, j, lo, hi,
+                                  c.log_scale, rev, c.continuation, false}, [&](std::vector<double>& buf) {
+                    buf.clear();
+                    for (int k = 0; k < npts; ++k) {
+                        if (k < (int)c.result.flags.size() &&
+                            !regime_is_oscillation(c.result.flags[k])) continue;
+                        if (k >= (int)c.result.spectrum.size()) continue;
+                        const auto& row = c.result.spectrum[k];
+                        if (j >= (int)row.size()) continue;
+                        double x = sweep_value_at(k, npts, lo, hi, c.log_scale, rev, c.continuation);
+                        double y = row[j];
+                        if (!std::isfinite(y)) continue;
+                        buf.push_back((double)x);
+                        buf.push_back((double)y);
+                    }
+                })) view.series_generation = -1;
+            } else if (!cache.data.empty()) {
+                cache = {};
+                view.series_generation = -1;
             }
 
             PlotSeriesInput si;
-            si.points   = buf.empty() ? nullptr : buf.data();
-            si.n_points = total_pts;
+            si.points   = cache.data.data();
+            si.n_points = (int)(cache.data.size() / 2);
             si.color    = ic_base_color(series_idx++);
             // label: "<spectrum> Lj" если N>1, иначе просто <spectrum>.
             std::string lab = (N > 1) ? (c.label + " L" + std::to_string(j + 1)) : c.label;

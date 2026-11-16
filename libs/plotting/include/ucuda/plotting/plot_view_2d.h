@@ -88,6 +88,8 @@ struct PlotSeriesInput {
 
     // Positive width draws filled bars from zero. Each point is (bin center, height).
     double bar_width = 0.0;
+    // Finite X coordinates in monotonic order (ascending or descending).
+    bool sorted_x = false;
 };
 
 // Optional labelled interval on the X axis, in world coordinates.

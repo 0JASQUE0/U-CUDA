@@ -40,8 +40,12 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
     // общим вектором переключение между ними пересоздавало бы FBO каждый кадр; Analysis передаёт 0.
     // Давно не рисовавшиеся владельцы вытесняются: каждый держит по FBO на проекцию (мегабайты
     // видеопамяти), а число систем/config'ов не ограничено.
+    using PhasePoints = PlotDataCache<
+        std::tuple<std::uint64_t, int, ProjType, const void*, int, int, double, double, bool>,
+        std::vector<double>>;
     struct RendererBucket {
         std::vector<std::unique_ptr<PlotRenderer>> v;
+        std::vector<std::vector<PhasePoints>> points;
         int last_frame = 0;
     };
     auto& renderers_by_owner = ui_resource<std::map<int, RendererBucket>, 1>();
@@ -58,6 +62,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
     std::vector<std::unique_ptr<PlotRenderer>>& renderers = bucket.v;
     if ((int)renderers.size() != (int)s.projections.size()) {
         renderers.clear();
+        bucket.points.resize(s.projections.size());
         for (size_t k = 0; k < s.projections.size(); ++k)
             renderers.push_back(std::make_unique<PlotRenderer>());
     }
@@ -74,6 +79,9 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
         const std::string title = projection_window_title(s, i, title_suffix);
         if (visible && !visible(title)) continue;
         Projection& pr = s.projections[i];
+        auto& points = bucket.points[i];
+        if (pr.type != ProjType::Phase2D && pr.type != ProjType::FeatureDiagram && pr.type != ProjType::TimeDomain)
+            points.clear();
         PlotRenderer& renderer = *renderers[i]; // рендерер этой проекции
         // ε-окружность включает ТОЛЬКО ветка FeatureDiagram ниже. Гасим её здесь каждый кадр:
         // view2d переживает смену типа проекции (объект переиспользуется, см. `if (!projection_views(pr).view2d)`),
@@ -121,12 +129,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         "not joined by a continuous path, so the connecting\n"
                         "segments are an artefact.");
 
-                    // Серии: для каждой траектории берём координаты по (ax, ay). Буфер
-                    // локальный — render() ниже забирает точки синхронно. static тут был
-                    // бесполезен (clear()+resize() всё равно убивает capacity) и опасен:
-                    // три вызова draw_projection_windows делили бы один буфер.
-                    std::vector<std::vector<double>> series_data(res.trajectories.size());
-
+                    points.resize(res.trajectories.size());
                     std::vector<PlotSeriesInput> series_in;
                     series_in.reserve(res.trajectories.size());
 
@@ -136,7 +139,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
 
                     for (size_t k = 0; k < res.trajectories.size(); ++k) {
                         const auto& traj = res.trajectories[k];
-                        auto& buf = series_data[k];
+                        auto& cache = points[k];
 
                         // Per-IC стиль (Basins → фазовые портреты). as_point:
                         // траектория бассейна-равновесия после транзиента стоит
@@ -146,19 +149,24 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         const bool has_style = style_fn && style_fn((int)k, st);
                         const bool as_point  = has_style && st.as_point;
 
-                        if (as_point) {
-                            if (!traj.empty()) {
-                                const auto& pt = traj.back();
-                                buf.push_back((double)pt[ax < (int)pt.size() ? ax : 0]);
-                                buf.push_back((double)pt[ay < (int)pt.size() ? ay : 0]);
+                        if (cache.update({pr.runtime_id, s.data_generation, pr.type, traj.data(), ax, ay, 0.0, 0.0, as_point},
+                                         [&](std::vector<double>& buf) {
+                            buf.clear();
+                            if (as_point) {
+                                if (!traj.empty()) {
+                                    const auto& pt = traj.back();
+                                    buf.push_back((double)pt[ax < (int)pt.size() ? ax : 0]);
+                                    buf.push_back((double)pt[ay < (int)pt.size() ? ay : 0]);
+                                }
+                            } else {
+                                buf.reserve(traj.size() * 2);
+                                for (const auto& pt : traj) {
+                                    buf.push_back((double)pt[ax < (int)pt.size() ? ax : 0]);
+                                    buf.push_back((double)pt[ay < (int)pt.size() ? ay : 0]);
+                                }
                             }
-                        } else {
-                            buf.reserve(traj.size() * 2);
-                            for (const auto& pt : traj) {
-                                buf.push_back((double)pt[ax < (int)pt.size() ? ax : 0]);
-                                buf.push_back((double)pt[ay < (int)pt.size() ? ay : 0]);
-                            }
-                        }
+                        })) projection_views(pr).view2d->series_generation = -1;
+                        const auto& buf = cache.data;
                         std::string lab = (k < res.labels.size()) ? res.labels[k] : ("IC " + std::to_string(k + 1));
                         if (s.legend_show_ic) lab = ic_legend_text(res, k);
 
@@ -249,8 +257,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     // соединять нечем — это облако признаков, а не траектория.
                     projection_views(pr).view2d->imdraw_lines = false;
 
-                    // Локальный буфер — см. series_data в ветке Phase2D выше.
-                    std::vector<std::vector<double>> feat_data(res.features.size());
+                    points.resize(res.features.size());
                     std::vector<PlotSeriesInput> series_in;
                     series_in.reserve(res.features.size());
                     std::vector<bool> init_vis(res.features.size(), true);
@@ -258,23 +265,28 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
 
                     size_t total_pts = 0;
                     for (size_t k = 0; k < res.features.size(); ++k) {
-                        auto& buf = feat_data[k];
+                        auto& cache = points[k];
                         const auto& per_var = res.features[k];
-                        if (av >= 0 && av < (int)per_var.size()) {
-                            const FeaturePoints& fp = per_var[(size_t)av];
-                            size_t n = fp.peaks.size() < fp.intervals.size()
-                                     ? fp.peaks.size() : fp.intervals.size();
-                            // Как у ядра бифуркации: не больше max peaks (features хранятся полными).
-                            if (res.features_cap > 0) n = (std::min)(n, (size_t)res.features_cap);
-                            buf.reserve(n * 2);
-                            for (size_t p = 0; p < n; ++p) {
-                                if (!std::isfinite(fp.peaks[p]) || !std::isfinite(fp.intervals[p]))
-                                    continue;
-                                buf.push_back((double)(fp.peaks[p]     * mp));
-                                buf.push_back((double)(fp.intervals[p] * mi));
+                        if (cache.update({pr.runtime_id, s.data_generation, pr.type, per_var.data(), av, res.features_cap, mp, mi, false},
+                                         [&](std::vector<double>& buf) {
+                            buf.clear();
+                            if (av >= 0 && av < (int)per_var.size()) {
+                                const FeaturePoints& fp = per_var[(size_t)av];
+                                size_t n = fp.peaks.size() < fp.intervals.size()
+                                         ? fp.peaks.size() : fp.intervals.size();
+                                // Как у ядра бифуркации: не больше max peaks (features хранятся полными).
+                                if (res.features_cap > 0) n = (std::min)(n, (size_t)res.features_cap);
+                                buf.reserve(n * 2);
+                                for (size_t p = 0; p < n; ++p) {
+                                    if (!std::isfinite(fp.peaks[p]) || !std::isfinite(fp.intervals[p]))
+                                        continue;
+                                    buf.push_back((double)(fp.peaks[p]     * mp));
+                                    buf.push_back((double)(fp.intervals[p] * mi));
+                                }
                             }
-                            total_pts += buf.size() / 2;
-                        }
+                        })) projection_views(pr).view2d->series_generation = -1;
+                        const auto& buf = cache.data;
+                        total_pts += buf.size() / 2;
 
                         std::string lab = (k < res.labels.size()) ? res.labels[k]
                                                                   : ("IC " + std::to_string(k + 1));
@@ -364,10 +376,6 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     projection_views(pr).view2d->pad_x = false;
                     projection_views(pr).view2d->show_zero_x = false;
 
-                    // серии: одна на (траектория k, видимая переменная vi).
-                    // Локальный буфер — см. ветку Phase2D выше.
-                    std::vector<std::vector<double>> series_data;
-
                     std::vector<PlotSeriesInput> series_in;
                     std::vector<bool> init_vis;
                     std::vector<bool> glob_vis;
@@ -392,19 +400,23 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                             if (is_combo && nvars < 2) continue;
                             if (vi < (int)pr.show_var.size() && !pr.show_var[vi]) continue;
 
-                            series_data.emplace_back();
-                            auto& buf = series_data.back();
-                            buf.reserve(n * 2);
-                            // Узлы адаптивного шага идут неравномерно: время — из
-                            // результата, а не t * dt.
-                            const std::vector<double>* tk =
-                                (res.raw_nodes && k < res.times.size()) ? &res.times[k] : nullptr;
-                            for (int t = 0; t < n; ++t) {
-                                buf.push_back(tk && t < (int)tk->size() ? (*tk)[(size_t)t] : (double)(t * dt));
-                                buf.push_back((double)(is_combo
-                                    ? combo_var_value(traj[t], nvars)
-                                    : traj[t][vi < (int)traj[t].size() ? vi : 0]));
-                            }
+                            const size_t index = series_in.size();
+                            if (points.size() <= index) points.emplace_back();
+                            auto& cache = points[index];
+                            if (cache.update({pr.runtime_id, s.data_generation, pr.type, traj.data(), vi, nvars, dt, 0.0, res.raw_nodes},
+                                             [&](std::vector<double>& buf) {
+                                buf.clear();
+                                buf.reserve((size_t)n * 2);
+                                const std::vector<double>* tk =
+                                    (res.raw_nodes && k < res.times.size()) ? &res.times[k] : nullptr;
+                                for (int t = 0; t < n; ++t) {
+                                    buf.push_back(tk && t < (int)tk->size() ? (*tk)[(size_t)t] : (double)(t * dt));
+                                    buf.push_back((double)(is_combo
+                                        ? combo_var_value(traj[t], nvars)
+                                        : traj[t][vi < (int)traj[t].size() ? vi : 0]));
+                                }
+                            })) projection_views(pr).view2d->series_generation = -1;
+                            const auto& buf = cache.data;
 
                             std::string base = (k < res.labels.size()) ? res.labels[k] : ("IC" + std::to_string(k + 1));
                             std::string who = s.legend_show_ic ? ic_legend_text(res, k) : base;
@@ -430,6 +442,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         }
                     }
 
+                    points.resize(series_in.size());
                     int data_gen = s.data_generation * 1000 + (int)series_in.size();
 
                     ImVec2 avail = ImGui::GetContentRegionAvail();

@@ -1635,19 +1635,32 @@ static void draw_neural_map_window(AppModel& model, PlotRenderer& renderer, std:
                             : lyap ? "Turn on the Lyapunov exponent in Neural Controls and press Run." : "No data yet - press Run on the Neural tab.");
         return;
     }
-    // Вид читает значения каждый кадр ради шкалы цвета, поэтому буфер живёт между кадрами.
-    static std::vector<double> cells;
-    cells.assign((size_t)nInst, kSentinelNoData);
-    double vmin = std::numeric_limits<double>::infinity(), vmax = -vmin;
-    for (int i1 = 0; i1 < n1; ++i1)
-        for (int i2 = 0; i2 < n2; ++i2) {
-            double v = d[(size_t)(i1 * n2 + i2) * perNet + pop];
-            if (log10_spread) v = v > 0.0 ? std::log10(v) : std::numeric_limits<double>::quiet_NaN();
-            if (!std::isfinite(v)) continue;
-            cells[(size_t)i2 * n1 + i1] = v;
-            vmin = (std::min)(vmin, v);
-            vmax = (std::max)(vmax, v);
-        }
+    struct SweepMap {
+        std::vector<double> cells;
+        double min = 0.0, max = 1.0;
+        int generation = 0;
+    };
+    const int epoch = model.session_epoch[(int)AppModel::AppMode::Neural];
+    auto key = std::make_tuple(epoch, c.data_generation, d.data(), n1, n2, perNet, pop, log10_spread);
+    static PlotDataCache<decltype(key), SweepMap> cache;
+    const bool fit = !cache.key || std::get<0>(*cache.key) != epoch ||
+                                   std::get<1>(*cache.key) != c.data_generation;
+    cache.update(key, [&](SweepMap& data) {
+        data.cells.assign((size_t)nInst, kSentinelNoData);
+        data.min = std::numeric_limits<double>::infinity();
+        data.max = -data.min;
+        for (int i1 = 0; i1 < n1; ++i1)
+            for (int i2 = 0; i2 < n2; ++i2) {
+                double v = d[(size_t)(i1 * n2 + i2) * perNet + pop];
+                if (log10_spread) v = v > 0.0 ? std::log10(v) : std::numeric_limits<double>::quiet_NaN();
+                if (!std::isfinite(v)) continue;
+                data.cells[(size_t)i2 * n1 + i1] = v;
+                data.min = (std::min)(data.min, v);
+                data.max = (std::max)(data.max, v);
+            }
+        ++data.generation;
+    });
+    double vmin = cache.data.min, vmax = cache.data.max;
     if (!std::isfinite(vmin)) { ImGui::TextDisabled(readout ? "No network gave a readout: see the note in Neural Controls." : "No finite values."); return; }
     if (!lyap && !spread && !spikes && !readout) { vmin = 0.0; vmax = 1.0; }
 
@@ -1665,15 +1678,10 @@ static void draw_neural_map_window(AppModel& model, PlotRenderer& renderer, std:
     double x0 = c.sweep_values.front(), x1 = c.sweep_values.back(), y0 = c.sweep2_values.front(), y1 = c.sweep2_values.back();
     if (x1 <= x0) x1 = x0 + 1.0;
     if (y1 <= y0) y1 = y0 + 1.0;
-    const int epoch = model.session_epoch[(int)AppModel::AppMode::Neural];
-    static std::tuple<int, int, int, int, bool> previous;
-    static int generation = 0;
-    const auto key = std::make_tuple(epoch, c.data_generation, vs.map_kind, pop, log10_spread);
-    const bool fit = std::get<0>(previous) != epoch || std::get<1>(previous) != c.data_generation;
-    if (previous != key) { previous = key; ++generation; }
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const ImVec2 origin = ImGui::GetCursorScreenPos();
-    hv.render(renderer, origin, avail, 0xBE71A000 + idx, generation, n1, n2, cells.data(), x0, x1, y0, y1, vmin, vmax, fit);
+    hv.render(renderer, origin, avail, 0xBE71A000 + idx, cache.data.generation, n1, n2,
+              cache.data.cells.data(), x0, x1, y0, y1, vmin, vmax, fit);
 }
 
 namespace {

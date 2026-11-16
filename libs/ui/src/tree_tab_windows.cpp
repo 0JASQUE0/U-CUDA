@@ -13,7 +13,8 @@ struct LeafViews {
     std::unique_ptr<HeatmapView>  hv;
     std::unique_ptr<Plot2DView>   pv;
     std::unique_ptr<PlotRenderer> rnd;
-    std::vector<std::vector<double>> bufs;
+    std::vector<SweepCurveCache> bufs;
+    BifurcationPointCache bif_points;
     std::optional<unsigned> basins_owner;
     int cmap_seen = -2;
     int exp_seen  = -999;
@@ -373,47 +374,46 @@ void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
     }
 
     std::vector<PlotSeriesInput> series;
-    v.bufs.clear();
+    auto& bufs = v.bufs;
     int series_gen = data_gen;
     if (n.kind == TreeNodeKind::Bif1D) {
         auto& d = rt.bif->diagrams[0];
         const auto& r = d.result;
         const auto& src = d.plot_inter_peaks ? r.peak_times : r.bifurcation_points;
         const int np = r.n_pts > 0 ? r.n_pts : 1;
-        v.bufs.emplace_back();
-        auto& buf = v.bufs.back();
-        for (int p = 0; p < (int)src.size(); ++p) {
-            if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
-            const double px = sweep_value_at(p, np, lo, hi, log, false, d.continuation);
-            for (double y : src[p]) {
-                if (!std::isfinite(y)) continue;
-                buf.push_back(px); buf.push_back(y);
-            }
-        }
+        auto& cache = v.bif_points;
+        cache.update(d, {np, (int)src.size(), lo, hi, log, false, swap}, /*finite_only*/ true);
         PlotSeriesInput si;
-        si.points = buf.empty() ? nullptr : buf.data();
-        si.n_points = (int)(buf.size() / 2);
+        si.points = cache.points.data();
+        si.n_points = (int)(cache.points.size() / 2);
+        si.sorted_x = cache.sorted_x;
         si.color = ic_base_color(0);
         if (d.custom_point_style) si.color.w = d.point_alpha;
         si.label = n.name;
         series.push_back(si);
-        series_gen = data_gen * 2 + (d.plot_inter_peaks ? 1 : 0);
+        series_gen = cache.generation;
     } else if (n.kind == TreeNodeKind::LLE1D) {
         auto& c = rt.lle->curves[0];
         const auto& r = c.result;
         const int np = (int)r.lyapunov.size();
-        v.bufs.emplace_back();
-        auto& buf = v.bufs.back();
-        for (int p = 0; p < np; ++p) {
-            if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
-            const double y = r.lyapunov[p];
-            if (!std::isfinite(y)) continue;
-            buf.push_back(sweep_value_at(p, np, lo, hi, log, false, c.continuation));
-            buf.push_back(y);
-        }
+        bufs.resize(1);
+        auto& cache = bufs[0];
+        if (cache.update({&r, data_gen, np, 0, lo, hi, log, false, c.continuation, swap},
+                         [&](std::vector<double>& buf) {
+            buf.clear();
+            for (int p = 0; p < np; ++p) {
+                if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
+                const double y = r.lyapunov[p];
+                if (!std::isfinite(y)) continue;
+                buf.push_back(sweep_value_at(p, np, lo, hi, log, false, c.continuation));
+                buf.push_back(y);
+            }
+            if (swap)
+                for (size_t k = 0; k + 1 < buf.size(); k += 2) std::swap(buf[k], buf[k + 1]);
+        })) view.series_generation = -1;
         PlotSeriesInput si;
-        si.points = buf.empty() ? nullptr : buf.data();
-        si.n_points = (int)(buf.size() / 2);
+        si.points = cache.data.data();
+        si.n_points = (int)(cache.data.size() / 2);
         si.color = ic_base_color(0);
         si.label = n.name;
         series.push_back(si);
@@ -422,20 +422,25 @@ void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
         const auto& r = c.result;
         const int np = r.n_pts, ne = r.n_exponents;
         if (ne > 0 && np > 0 && (int)r.spectrum.size() == np) {
-            v.bufs.reserve(ne);
+            bufs.resize(ne);
             for (int j = 0; j < ne; ++j) {
-                v.bufs.emplace_back();
-                auto& buf = v.bufs.back();
-                for (int p = 0; p < np; ++p) {
-                    if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
-                    const auto& row = r.spectrum[p];
-                    if (j >= (int)row.size() || !std::isfinite(row[j])) continue;
-                    buf.push_back(sweep_value_at(p, np, lo, hi, log, false, c.continuation));
-                    buf.push_back(row[j]);
-                }
+                auto& cache = bufs[j];
+                if (cache.update({&r, data_gen, np, j, lo, hi, log, false, c.continuation, swap},
+                                 [&](std::vector<double>& buf) {
+                    buf.clear();
+                    for (int p = 0; p < np; ++p) {
+                        if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
+                        const auto& row = r.spectrum[p];
+                        if (j >= (int)row.size() || !std::isfinite(row[j])) continue;
+                        buf.push_back(sweep_value_at(p, np, lo, hi, log, false, c.continuation));
+                        buf.push_back(row[j]);
+                    }
+                    if (swap)
+                        for (size_t k = 0; k + 1 < buf.size(); k += 2) std::swap(buf[k], buf[k + 1]);
+                })) view.series_generation = -1;
                 PlotSeriesInput si;
-                si.points = buf.empty() ? nullptr : buf.data();
-                si.n_points = (int)(buf.size() / 2);
+                si.points = cache.data.data();
+                si.n_points = (int)(cache.data.size() / 2);
                 si.color = ic_base_color(j);
                 si.label = ne > 1 ? n.name + " L" + std::to_string(j + 1) : n.name;
                 series.push_back(si);
@@ -448,9 +453,7 @@ void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
     }
     std::vector<bool> init_vis(series.size(), true), glob_vis(series.size(), true);
     if (swap) {
-        // Пары (параметр, значение) -> (значение, параметр), подписи осей — следом.
-        for (auto& buf : v.bufs)
-            for (size_t k = 0; k + 1 < buf.size(); k += 2) std::swap(buf[k], buf[k + 1]);
+
         std::swap(view.x_axis.name, view.y_axis.name);
         view.show_zero_x = view.show_zero_y;
         view.show_zero_y = false;
@@ -584,6 +587,7 @@ void draw_tree_plot_windows(AppModel& model, const GuiCallbacks& cb) {
             if (v.hv) invalidate_view(*v.hv);
             if (v.pv) invalidate_view(*v.pv);
             v.bufs.clear();
+            v.bif_points = {};
             v.cmap_seen = -2;
             v.exp_seen = -999;
             if (v.basins_owner) {

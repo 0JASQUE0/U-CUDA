@@ -1,4 +1,4 @@
-﻿#include "gui_common.h"
+#include "gui_common.h"
 #include "gui_inputs.h"
 #include "gui_integration.h"
 #include "gui_fields.h"
@@ -340,7 +340,7 @@ void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& 
     configure_sweep_x_axis_from(view, win.members, s.configs, s.params, s.vars);
     view.y_axis.name = signal_metric_axis_label(m);
 
-    auto& bufs = window_point_bufs(win.id, win.members.size());
+    auto& bufs = sweep_curve_caches(win.id, win.members.size());
     view.snap_x_nodes      = nullptr;
     view.snap_x_node_count = 0;
 
@@ -357,9 +357,7 @@ void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& 
         const int idx = win.members[mi];
         if (idx < 0 || idx >= (int)s.configs.size()) continue;
         SignalMetricsConfig& c = s.configs[idx];
-        auto& buf = bufs[mi];
-        buf.clear();
-        int total_pts = 0;
+        auto& cache = bufs[mi];
 
         const std::vector<double>& ys = c.result.values[m];
         if (c.last_run_ok && !ys.empty()) {
@@ -371,18 +369,24 @@ void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& 
             const bool cont = c.result.continuation;
             if (view.snap_x_node_count == 0)
                 set_snap_nodes(view, win.id, npts, lo, hi, c.result.log_scale, rev, cont);
-            for (int k = 0; k < npts && k < (int)ys.size(); ++k) {
-                const double y = ys[k];
-                if (!std::isfinite(y)) continue;
-                buf.push_back(sweep_value_at(k, npts, lo, hi, c.result.log_scale, rev, cont));
-                buf.push_back(y);
-                ++total_pts;
-            }
+            if (cache.update({ys.data(), c.data_generation, npts, m, lo, hi, c.result.log_scale,
+                              rev, cont, false}, [&](std::vector<double>& buf) {
+                buf.clear();
+                for (int k = 0; k < npts && k < (int)ys.size(); ++k) {
+                    const double y = ys[k];
+                    if (!std::isfinite(y)) continue;
+                    buf.push_back(sweep_value_at(k, npts, lo, hi, c.result.log_scale, rev, cont));
+                    buf.push_back(y);
+                }
+            })) view.series_generation = -1;
+        } else if (!cache.data.empty()) {
+            cache = {};
+            view.series_generation = -1;
         }
 
         PlotSeriesInput si;
-        si.points   = buf.empty() ? nullptr : buf.data();
-        si.n_points = total_pts;
+        si.points   = cache.data.data();
+        si.n_points = (int)(cache.data.size() / 2);
         si.color    = ic_base_color((int)mi);
         si.label    = c.label;
         series_in.push_back(si);

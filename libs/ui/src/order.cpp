@@ -1,4 +1,4 @@
-﻿#include "gui_common.h"
+#include "gui_common.h"
 #include "gui_inputs.h"
 #include "gui_integration.h"
 #include "gui_fields.h"
@@ -570,6 +570,22 @@ void draw_order_map_window(AppModel& model, OrderPlotWindow& win,
 }
 
 namespace ucuda::ui_detail {
+using OrderCurveMember = std::tuple<int, int, const double*, bool, std::string, std::string>;
+using OrderCurveKey = std::tuple<int, int, bool, bool, bool, bool, bool, bool, bool, bool,
+                                 int, int, int, int, int, bool, std::vector<OrderCurveMember>>;
+struct OrderCurveData {
+    std::vector<std::vector<double>> bufs, tags;
+    std::vector<std::string> labels;
+    std::vector<ImVec4> colors;
+    std::vector<int> markers;
+    double xlo = 0.0, xhi = 0.0;
+    bool got_x = false;
+};
+
+auto& order_curve_caches() {
+    return ui_resource<std::map<int, PlotDataCache<OrderCurveKey, OrderCurveData>>, 3015>();
+}
+
 void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                                     const GuiCallbacks& cb,
                                     PlotRenderer& renderer, Plot2DView& view) {
@@ -723,174 +739,178 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     const bool   ylog       = win.y_log && !is_p;
     const double time_scale = (is_perf && win.time_unit == 1) ? 1.0e-3 : 1.0;
 
-    // ---- Сбор кривых ----
-    // Буферы локальные: render() заливает VBO прямо в вызове, держать их между
-    // кадрами не нужно (и нельзя — членов у окна произвольное число).
-    std::vector<std::vector<double>> bufs;
-    // Величина «за точкой» для подсказки при наведении, по буферу на кривую и
-    // в том же порядке. Пусто — у этой кривой подсказки нет (у диаграммы
-    // порядка h лежит прямо на оси X, спрашивать нечего). Выравнивание с bufs
-    // держится resize'ом ниже, а не парным push_back: точек добавления кривых
-    // пять, и забыть одну было бы легко.
-    std::vector<std::vector<double>> tags;
-    std::vector<std::string>         labels;
-    std::vector<ImVec4>              colors;
-    // Форма маркера узла на кривую; выравнивание с bufs держится так же, как у
-    // colors — push_back в каждой точке добавления кривой.
-    std::vector<int>                 markers;
-    std::vector<ViewRangeTarget>     vrt;
-    bool   any_data = false, fit = false;
-    double xlo = 0.0, xhi = 0.0;
-    bool   got_x = false;
-    int    sig = (int)win.kind * 1000003;
-
-    auto note_x = [&](double x) {
-        if (!got_x) { xlo = xhi = x; got_x = true; }
-        else { if (x < xlo) xlo = x; if (x > xhi) xhi = x; }
-    };
-
-    for (size_t j = 0; j < win.members.size(); ++j) {
-        const int mi = win.members[j];
+    std::vector<ViewRangeTarget> vrt;
+    std::vector<OrderCurveMember> members;
+    bool any_data = false, fit = false;
+    int sig = (int)win.kind * 1000003;
+    for (int mi : win.members) {
         if (mi < 0 || mi >= (int)s.configs.size()) continue;
-        OrderConfig& c = s.configs[(size_t)mi];
-        const ImVec4 base = order_base_color((int)j, win.palette);
+        auto& c = s.configs[(size_t)mi];
+        const int generation = is_perf ? c.perf_data_generation : c.data_generation;
+        const bool have = is_perf ? c.perf_last_run_ok && c.perf_result.n_pts > 0
+                                  : c.last_run_ok && !c.result.p.empty() && c.result.n_pts_y <= 1;
+        const double* axis = is_perf ? c.perf_result.axis_vals.data() : c.result.axis_x_vals.data();
+        members.emplace_back(mi, generation, axis, have, c.label, c.scheme);
+        sig = sig * 131 + mi * 17 + generation;
+        if (!have) continue;
+        any_data = true;
+        bool& fit_request = is_perf ? c.perf_fit_request : c.fit_request;
+        fit |= fit_request;
+        fit_request = false;
+        if (!is_perf)
+            vrt.push_back(vr_target(s.configs, mi,
+                                    &OrderConfig::axis_x_lo_text, &OrderConfig::axis_x_hi_text));
+    }
 
-        if (is_perf) {
-            const PerfResult& r = c.perf_result;
-            sig = sig * 131 + mi * 17 + c.perf_data_generation;
-            if (!c.perf_last_run_ok || r.n_pts <= 0) continue;
-            if (c.perf_fit_request) { fit = true; c.perf_fit_request = false; }
-            any_data = true;
+    const OrderCurveKey key{model.session_epoch[(int)AppModel::AppMode::Order], (int)win.kind,
+                            win.x_log, ylog, win.show_e2, win.show_nominal, win.show_min, win.show_avg,
+                            win.show_max, any_ad, win.error_source, win.time_unit, win.perf_cost,
+                            win.palette, series_palette(), win.vary_markers, std::move(members)};
+    auto& cache = order_curve_caches()[win.id];
+    if (cache.update(key, [&](OrderCurveData& data) {
+        data = {};
+        auto& bufs = data.bufs;
+        auto& tags = data.tags;
+        auto& labels = data.labels;
+        auto& colors = data.colors;
+        auto& markers = data.markers;
 
-            // Точка существует, только когда есть ОБЕ координаты: ошибка узла
-            // и его затраты. Сортировка по X обязательна — ось X здесь не сетка
-            // узлов, а посчитанная величина, и монотонность её не гарантирована.
-            const double qn = std::numeric_limits<double>::quiet_NaN();
-            auto at = [qn](const std::vector<double>& v, int i) { return (size_t)i < v.size() ? v[(size_t)i] : qn; };
-            // tsrc — время, которое попадает в подсказку: у кривых времени своё (min / avg /
-            // max), как было до осей f и шагов; у них — среднее.
-            auto add_cost_series = [&](const std::function<double(int)>& cost, const std::vector<double>& tsrc,
-                                       const std::string& suffix, float shade_k, int marker_slot) {
-                // Теги — h (или tol у адаптивного), ошибка, время, шаги, f, отказы. Они
-                // обязаны ехать вместе с точкой через сортировку по X: после неё позиция
-                // в массиве уже ничего не говорит о том, какому узлу точка принадлежала.
-                struct Pt { double x, y, tg[6]; };
-                std::vector<Pt> pts;
-                pts.reserve((size_t)r.n_pts);
-                for (int i = 0; i < r.n_pts; ++i) {
-                    // Eref / E(T) есть не в каждом результате: эталон можно было и не
-                    // просить, а старые прогоны про него вовсе не знают.
-                    const double e = (win.error_source == 3) ? at(r.e_end, i)
-                                   : (win.error_source == 2) ? at(r.e_ref, i)
-                                   : (win.error_source == 1) ? at(r.e2, i) : at(r.e1, i);
-                    const double cv = cost(i);
-                    if (!std::isfinite(e) || !std::isfinite(cv)) continue;
-                    if (win.x_log && !(e > 0.0)) continue;
-                    if (ylog && !(cv > 0.0)) continue;
-                    const double ns = ((size_t)i < r.n_steps.size()) ? (double)r.n_steps[(size_t)i] : qn;
-                    // e и cv кладём в теги ОТДЕЛЬНО от координат: в лог-режиме в
-                    // координатах лежат log10. В подсказке хочется исходные числа.
-                    Pt pt{ win.x_log ? std::log10(e) : e, ylog ? std::log10(cv) : cv,
-                           { r.adaptive ? at(r.axis_vals, i) : at(r.h_eff, i), e,
-                             at(tsrc, i) * time_scale, ns, at(r.n_rhs, i), at(r.n_rej, i) } };
-                    pts.push_back(pt);
+        auto note_x = [&data](double x) {
+            if (!data.got_x) {
+                data.xlo = data.xhi = x;
+                data.got_x = true;
+            } else {
+                data.xlo = std::min(data.xlo, x);
+                data.xhi = std::max(data.xhi, x);
+            }
+        };
+        for (size_t j = 0; j < win.members.size(); ++j) {
+            const int mi = win.members[j];
+            if (mi < 0 || mi >= (int)s.configs.size()) continue;
+            OrderConfig& c = s.configs[(size_t)mi];
+            const ImVec4 base = order_base_color((int)j, win.palette);
+            if (is_perf) {
+                const PerfResult& r = c.perf_result;
+                if (!c.perf_last_run_ok || r.n_pts <= 0) continue;
+                // Точка существует, только когда есть ОБЕ координаты: ошибка узла
+                // и его затраты. Сортировка по X обязательна — ось X здесь не сетка
+                // узлов, а посчитанная величина, и монотонность её не гарантирована.
+                const double qn = std::numeric_limits<double>::quiet_NaN();
+                auto at = [qn](const std::vector<double>& v, int i) { return (size_t)i < v.size() ? v[(size_t)i] : qn; };
+                // tsrc — время, которое попадает в подсказку: у кривых времени своё (min / avg /
+                // max), как было до осей f и шагов; у них — среднее.
+                auto add_cost_series = [&](const std::function<double(int)>& cost, const std::vector<double>& tsrc,
+                                           const std::string& suffix, float shade_k, int marker_slot) {
+                    // Теги — h (или tol у адаптивного), ошибка, время, шаги, f, отказы. Они
+                    // обязаны ехать вместе с точкой через сортировку по X: после неё позиция
+                    // в массиве уже ничего не говорит о том, какому узлу точка принадлежала.
+                    struct Pt { double x, y, tg[6]; };
+                    std::vector<Pt> pts;
+                    pts.reserve((size_t)r.n_pts);
+                    for (int i = 0; i < r.n_pts; ++i) {
+                        // Eref / E(T) есть не в каждом результате: эталон можно было и не
+                        // просить, а старые прогоны про него вовсе не знают.
+                        const double e = (win.error_source == 3) ? at(r.e_end, i)
+                                       : (win.error_source == 2) ? at(r.e_ref, i)
+                                       : (win.error_source == 1) ? at(r.e2, i) : at(r.e1, i);
+                        const double cv = cost(i);
+                        if (!std::isfinite(e) || !std::isfinite(cv)) continue;
+                        if (win.x_log && !(e > 0.0)) continue;
+                        if (ylog && !(cv > 0.0)) continue;
+                        const double ns = ((size_t)i < r.n_steps.size()) ? (double)r.n_steps[(size_t)i] : qn;
+                        // e и cv кладём в теги ОТДЕЛЬНО от координат: в лог-режиме в
+                        // координатах лежат log10. В подсказке хочется исходные числа.
+                        Pt pt{ win.x_log ? std::log10(e) : e, ylog ? std::log10(cv) : cv,
+                               { r.adaptive ? at(r.axis_vals, i) : at(r.h_eff, i), e,
+                                 at(tsrc, i) * time_scale, ns, at(r.n_rhs, i), at(r.n_rej, i) } };
+                        pts.push_back(pt);
+                    }
+                    if (pts.empty()) return;
+                    std::sort(pts.begin(), pts.end(),
+                              [](const Pt& a, const Pt& b) { return a.x < b.x; });
+                    std::vector<double> xy, tg;
+                    xy.reserve(pts.size() * 2);
+                    tg.reserve(pts.size() * (any_ad ? 6 : 4));
+                    for (const auto& pr : pts) {
+                        xy.push_back(pr.x); xy.push_back(pr.y);
+                        for (int q = 0; q < (any_ad ? 6 : 4); ++q) tg.push_back(pr.tg[q]);   // Fixed: h, E, t, steps
+                        note_x(pr.x);
+                    }
+                    bufs.push_back(std::move(xy));
+                    tags.resize(bufs.size());
+                    tags.back() = std::move(tg);
+                    labels.push_back(c.label + (suffix.empty() ? std::string() : " " + suffix));
+                    colors.push_back(order_shade(base, shade_k));
+                    markers.push_back(win.vary_markers ? order_marker_for(marker_slot) : -1);
+                };
+                const std::string kind_tag = r.adaptive ? std::string("(adaptive)") : std::string();
+                if (win.perf_cost == 1) {
+                    add_cost_series([&](int i) { return at(r.n_rhs, i); }, r.t_avg, kind_tag, 1.0f, 1);
+                } else if (win.perf_cost == 2) {
+                    add_cost_series([&](int i) {
+                        return (size_t)i < r.n_steps.size() && r.n_steps[(size_t)i] > 0 ? (double)r.n_steps[(size_t)i] : qn;
+                    }, r.t_avg, kind_tag, 1.0f, 1);
+                } else {
+                    const std::string sp = kind_tag.empty() ? std::string() : kind_tag + " ";
+                    if (win.show_min) add_cost_series([&](int i) { return at(r.t_min, i) * time_scale; }, r.t_min, sp + "min", 0.55f, 0);
+                    if (win.show_avg) add_cost_series([&](int i) { return at(r.t_avg, i) * time_scale; }, r.t_avg, sp + "avg", 1.0f,  1);
+                    if (win.show_max) add_cost_series([&](int i) { return at(r.t_max, i) * time_scale; }, r.t_max, sp + "max", 1.5f,  2);
                 }
-                if (pts.empty()) return;
-                std::sort(pts.begin(), pts.end(),
-                          [](const Pt& a, const Pt& b) { return a.x < b.x; });
-                std::vector<double> xy, tg;
-                xy.reserve(pts.size() * 2);
-                tg.reserve(pts.size() * (any_ad ? 6 : 4));
-                for (const auto& pr : pts) {
-                    xy.push_back(pr.x); xy.push_back(pr.y);
-                    for (int q = 0; q < (any_ad ? 6 : 4); ++q) tg.push_back(pr.tg[q]);   // Fixed: h, E, t, steps
-                    note_x(pr.x);
+                continue;
+            }
+            const OrderResult& r = c.result;
+            if (!c.last_run_ok || r.p.empty() || r.n_pts_y > 1) continue;
+            const int n = std::min((int)r.axis_x_vals.size(), (int)r.p.size());
+            auto add_node_series = [&](int which, const std::string& suffix,
+                                       float shade_k, int marker_slot) {
+                std::vector<double> xy;
+                xy.reserve((size_t)n * 2);
+                for (int i = 0; i < n; ++i) {
+                    const double x = r.axis_x_vals[(size_t)i];
+                    if (win.x_log && !(x > 0.0)) continue;
+                    double y;
+                    if (which == 0) {
+                        // Ячейки floor / p<=0 НЕ выбрасываем: их провал и есть ответ
+                        // на вопрос, где метод ещё держит свой порядок. Прячем
+                        // только diverged — там ничего не посчитано.
+                        y = r.p[(size_t)i];
+                        if (!std::isfinite(y)) continue;
+                    } else {
+                        const double e = (which == 1) ? r.e1[(size_t)i] : r.e2[(size_t)i];
+                        if (!std::isfinite(e) || (ylog && !(e > 0.0))) continue;
+                        y = ylog ? std::log10(e) : e;
+                    }
+                    xy.push_back(x); xy.push_back(y); note_x(x);
                 }
+                if (xy.empty()) return;
                 bufs.push_back(std::move(xy));
-                tags.resize(bufs.size());
-                tags.back() = std::move(tg);
-                labels.push_back(c.label + (suffix.empty() ? std::string() : " " + suffix));
+                labels.push_back(suffix.empty() ? c.label : (c.label + " " + suffix));
                 colors.push_back(order_shade(base, shade_k));
                 markers.push_back(win.vary_markers ? order_marker_for(marker_slot) : -1);
             };
-            const std::string kind_tag = r.adaptive ? std::string("(adaptive)") : std::string();
-            if (win.perf_cost == 1) {
-                add_cost_series([&](int i) { return at(r.n_rhs, i); }, r.t_avg, kind_tag, 1.0f, 1);
-            } else if (win.perf_cost == 2) {
-                add_cost_series([&](int i) {
-                    return (size_t)i < r.n_steps.size() && r.n_steps[(size_t)i] > 0 ? (double)r.n_steps[(size_t)i] : qn;
-                }, r.t_avg, kind_tag, 1.0f, 1);
+            if (is_error) {
+                add_node_series(1, "E1", 1.0f,  0);   // circle
+                if (win.show_e2) add_node_series(2, "E2", 0.55f, 1);   // triangle down
             } else {
-                const std::string sp = kind_tag.empty() ? std::string() : kind_tag + " ";
-                if (win.show_min) add_cost_series([&](int i) { return at(r.t_min, i) * time_scale; }, r.t_min, sp + "min", 0.55f, 0);
-                if (win.show_avg) add_cost_series([&](int i) { return at(r.t_avg, i) * time_scale; }, r.t_avg, sp + "avg", 1.0f,  1);
-                if (win.show_max) add_cost_series([&](int i) { return at(r.t_max, i) * time_scale; }, r.t_max, sp + "max", 1.5f,  2);
-            }
-            continue;
-        }
-
-        const OrderResult& r = c.result;
-        sig = sig * 131 + mi * 17 + c.data_generation;
-        if (!c.last_run_ok || r.p.empty() || r.n_pts_y > 1) continue;
-        if (c.fit_request) { fit = true; c.fit_request = false; }
-        any_data = true;
-
-        // Ctrl+T: по X идёт свип, и его границы — поля конфига. По Y входа
-        // в расчёте нет (p и E — результат), поэтому цель односторонняя.
-        vrt.push_back(vr_target(s.configs, mi,
-                                &OrderConfig::axis_x_lo_text, &OrderConfig::axis_x_hi_text));
-
-        const int n = std::min((int)r.axis_x_vals.size(), (int)r.p.size());
-        auto add_node_series = [&](int which, const std::string& suffix,
-                                   float shade_k, int marker_slot) {
-            std::vector<double> xy;
-            xy.reserve((size_t)n * 2);
-            for (int i = 0; i < n; ++i) {
-                const double x = r.axis_x_vals[(size_t)i];
-                if (win.x_log && !(x > 0.0)) continue;
-                double y;
-                if (which == 0) {
-                    // Ячейки floor / p<=0 НЕ выбрасываем: их провал и есть ответ
-                    // на вопрос, где метод ещё держит свой порядок. Прячем
-                    // только diverged — там ничего не посчитано.
-                    y = r.p[(size_t)i];
-                    if (!std::isfinite(y)) continue;
-                } else {
-                    const double e = (which == 1) ? r.e1[(size_t)i] : r.e2[(size_t)i];
-                    if (!std::isfinite(e) || (ylog && !(e > 0.0))) continue;
-                    y = ylog ? std::log10(e) : e;
-                }
-                xy.push_back(x); xy.push_back(y); note_x(x);
-            }
-            if (xy.empty()) return;
-            bufs.push_back(std::move(xy));
-            labels.push_back(suffix.empty() ? c.label : (c.label + " " + suffix));
-            colors.push_back(order_shade(base, shade_k));
-            markers.push_back(win.vary_markers ? order_marker_for(marker_slot) : -1);
-        };
-
-        if (is_error) {
-            add_node_series(1, "E1", 1.0f,  0);   // circle
-            if (win.show_e2) add_node_series(2, "E2", 0.55f, 1);   // triangle down
-        } else {
-            add_node_series(0, "", 1.0f, 0);
-            if (win.show_nominal) {
-                const int nom = builtin_scheme_order(c.scheme);
-                if (nom > 0 && !r.axis_x_vals.empty()) {
-                    double a = r.axis_x_vals.front(), b = r.axis_x_vals.back();
-                    if (b < a) std::swap(a, b);
-                    if (!win.x_log || (a > 0.0 && b > 0.0)) {
-                        std::vector<double> xy = { a, (double)nom, b, (double)nom };
-                        bufs.push_back(std::move(xy));
-                        labels.push_back(c.label + " nominal " + std::to_string(nom));
-                        colors.push_back(ImVec4(0.6f, 0.6f, 0.6f, 0.9f));
-                        markers.push_back(-1);   // горизонталь, узлов у неё нет
+                add_node_series(0, "", 1.0f, 0);
+                if (win.show_nominal) {
+                    const int nom = builtin_scheme_order(c.scheme);
+                    if (nom > 0 && !r.axis_x_vals.empty()) {
+                        double a = r.axis_x_vals.front(), b = r.axis_x_vals.back();
+                        if (b < a) std::swap(a, b);
+                        if (!win.x_log || (a > 0.0 && b > 0.0)) {
+                            std::vector<double> xy = { a, (double)nom, b, (double)nom };
+                            bufs.push_back(std::move(xy));
+                            labels.push_back(c.label + " nominal " + std::to_string(nom));
+                            colors.push_back(ImVec4(0.6f, 0.6f, 0.6f, 0.9f));
+                            markers.push_back(-1);   // горизонталь, узлов у неё нет
+                        }
                     }
                 }
             }
         }
-    }
-
+    })) view.series_generation = -1;
+    auto& [bufs, tags, labels, colors, markers, xlo, xhi, got_x] = cache.data;
     // Сводка по статусам — по строке на член окна. Часть тулбара: скрытый прячет и её.
     for (size_t j = 0; bar && j < win.members.size(); ++j) {
         const int mi = win.members[j];
@@ -1091,6 +1111,7 @@ void draw_order_plot_windows(AppModel& model, const GuiCallbacks& cb) {
     if (session_reloaded(model, AppModel::AppMode::Order, seen_epoch)) {
         invalidate_views(heatmaps);
         invalidate_views(curves);
+        order_curve_caches().clear();
     }
 
     int to_remove = -1;
@@ -1113,6 +1134,7 @@ void draw_order_plot_windows(AppModel& model, const GuiCallbacks& cb) {
         if (ImGui::Begin(title.c_str(), &open)) {
             ImGui::PushID(win.id);
             if (win.kind == OrderPlotWindow::Kind::Map) {
+                order_curve_caches().erase(win.id);
                 auto& hv = heatmaps[win.id];
                 if (!hv) {
                     hv = std::make_unique<HeatmapView>();
@@ -1134,6 +1156,7 @@ void draw_order_plot_windows(AppModel& model, const GuiCallbacks& cb) {
         renderers.erase(id);
         heatmaps.erase(id);
         curves.erase(id);
+        order_curve_caches().erase(id);
         model.remove_order_plot_window(to_remove);
     }
 }

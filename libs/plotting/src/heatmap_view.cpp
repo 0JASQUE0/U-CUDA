@@ -137,7 +137,7 @@ void HeatmapView::do_autofit(double lo_x, double hi_x, double lo_y, double hi_y)
 
 // Общий colorbar (см. heatmap_view.h). Вынесен из HeatmapView::render, чтобы
 // FastSync mode-0 рисовал ровно ту же шкалу, а не свою копию.
-std::vector<ColorbarTick> colorbar_ticks(float vmin, float vmax, int n_discrete) {
+static std::vector<ColorbarTick> colorbar_ticks(float vmin, float vmax, int n_discrete, int max_discrete_ticks) {
     std::vector<ColorbarTick> out;
     const double range = (double)vmax - (double)vmin;
     if (n_discrete > 0) {
@@ -145,16 +145,15 @@ std::vector<ColorbarTick> colorbar_ticks(float vmin, float vmax, int n_discrete)
         const double rvmax = std::round((double)vmax);
         const bool integer_like = std::abs(rvmin - (double)vmin) < 1e-6
                                && std::abs(rvmax - (double)vmax) < 1e-6
-                               && (int)std::lround(rvmax - rvmin) == n_discrete - 1;
-        if (integer_like) {
-            for (int k = 0; k < n_discrete; ++k)
-                out.push_back({ (double)vmin + (double)k,
-                                ((float)k + 0.5f) / (float)n_discrete });
-        } else if (range > 0.0) {
-            const double bs = range / (double)n_discrete;
-            for (int k = 0; k < n_discrete; ++k)
-                out.push_back({ (double)vmin + ((double)k + 0.5) * bs,
-                                ((float)k + 0.5f) / (float)n_discrete });
+                               && rvmax - rvmin == n_discrete - 1;
+        if (integer_like || range > 0.0) {
+            const int count = std::min(n_discrete, std::max(2, max_discrete_ticks));
+            out.reserve(count);
+            for (int i = 0; i < count; ++i) {
+                const int k = count == 1 ? 0 : (int)((long long)i * (n_discrete - 1) / (count - 1));
+                const double frac = ((double)k + 0.5) / n_discrete;
+                out.push_back({ integer_like ? (double)vmin + k : vmin + frac * range, (float)frac });
+            }
         }
     } else if (range > 0.0) {
         const double step = nice_step(range, 5);
@@ -166,6 +165,10 @@ std::vector<ColorbarTick> colorbar_ticks(float vmin, float vmax, int n_discrete)
     }
     if (out.empty()) out.push_back({ (double)vmin, 0.5f });
     return out;
+}
+
+std::vector<ColorbarTick> colorbar_ticks(float vmin, float vmax, int n_discrete) {
+    return colorbar_ticks(vmin, vmax, n_discrete, n_discrete);
 }
 
 float colorbar_total_width(const std::vector<ColorbarTick>& ticks) {
@@ -188,10 +191,9 @@ void draw_colorbar(ImDrawList* dl, ImVec2 top_left, float height,
     const ImU32 col_text = plot_col_text();
     const float font_h   = plot_text_line_height();
 
-    // Градиент: непрерывный режим — 256 полос (визуально не отличимо от LUT),
-    // discrete — по одной полосе на диапазон, чтобы совпадало с квантованием
-    // на самой картинке.
-    const int n_strips = (n_discrete > 0) ? n_discrete : 256;
+    // При субпиксельных полосах берём цвет уровня в центре каждого экранного
+    // отрезка. Квантование самой карты остаётся по всем n_discrete уровням.
+    const int n_strips = n_discrete > 0 ? std::min(n_discrete, (int)std::ceil(cb_h)) : 256;
     for (int i = 0; i < n_strips; ++i) {
         const float t0 = (float)i       / (float)n_strips;
         const float t1 = (float)(i + 1) / (float)n_strips;
@@ -201,9 +203,11 @@ void draw_colorbar(ImDrawList* dl, ImVec2 top_left, float height,
         // В discrete-режиме сэмплим так же, как шейдер (edge-aligned
         // k/(N-1)), чтобы крайние полосы точно совпали с непрерывными
         // концами. В непрерывном — центр полосы.
-        float t_samp;
-        if (n_discrete > 0) t_samp = (n_discrete > 1) ? (float)i / (float)(n_discrete - 1) : 0.5f;
-        else                t_samp = (t0 + t1) * 0.5f;
+        float t_samp = (t0 + t1) * 0.5f;
+        if (n_discrete > 0) {
+            const int band = (int)(((2ll * i + 1) * n_discrete) / (2ll * n_strips));
+            t_samp = n_discrete > 1 ? (float)band / (float)(n_discrete - 1) : 0.5f;
+        }
         const ImU32 col = cmap_sample(reverse ? (1.0f - t_samp) : t_samp, cmap);
         dl->AddRectFilled(ImVec2(cb_x, y0), ImVec2(cb_x + kColorbarWidth, y1), col);
     }
@@ -211,10 +215,7 @@ void draw_colorbar(ImDrawList* dl, ImVec2 top_left, float height,
                 plot_col_border());
 
     const double range = (double)vmax - (double)vmin;
-    // Подписи прореживаем по фактическому месту: шаг тиков шкала берёт от
-    // диапазона значений, а не от своей высоты, и на низком блоке (или при
-    // десятках дискретных полос) подписи наезжали друг на друга. Штрихи
-    // рисуются все — прячется только текст.
+    // Не накладываем подписи, если после округления до пикселя места не хватило.
     const float label_gap_min = font_h * 1.4f;
     float last_label_y = -1e30f;
     for (const auto& t : ticks) {
@@ -311,7 +312,9 @@ void HeatmapView::render(PlotRenderer& renderer,
     const int vis_log_y = swap_axes ? axis_kind(x_axis) : axis_kind(y_axis);
 
     // 1. Текстура из снапшота (lazy upload по generation).
-    if (data_generation != data_gen_cached) {
+    const bool needs_upload = data_generation != data_gen_cached ||
+                              nx != tex_w_ || ny != tex_h_ || !data_tex_;
+    if (needs_upload) {
         ensure_tex(nx, ny);
         std::vector<double> swap_buf;
         const double* eff_values = values;
@@ -395,8 +398,9 @@ void HeatmapView::render(PlotRenderer& renderer,
         if (discrete_levels > 0) n_disc = discrete_levels;
         else {
             // Именно raw: см. комментарий у vmin_raw/vmax_raw выше.
-            int span = (int)std::lround((double)vmax_raw - (double)vmin_raw) + 1;
-            n_disc = std::max(1, span);
+            const double span = std::round((double)vmax_raw - (double)vmin_raw) + 1.0;
+            const int max_levels = std::numeric_limits<int>::max();
+            n_disc = span >= max_levels ? max_levels : span > 1.0 ? (int)span : 1;
         }
     }
 
@@ -404,12 +408,14 @@ void HeatmapView::render(PlotRenderer& renderer,
     // n_disc: colorbar_ticks считает подписи «целочисленными», только если span совпадает с числом
     // полос, а с раздвинутым диапазоном единственная полоса не проходила эту проверку, уходила в
     // непрерывную ветку и подписывалась серединой — 1.5 вместо 1.
-    const std::vector<ColorbarTick> tick_vals = colorbar_ticks(vmin_raw, vmax_raw, n_disc);
+    const int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));
+    const int max_ticks = (int)(0.95f * plot_h / std::max(1.0f, 1.4f * plot_text_line_height()));
+    const auto tick_vals = show_colorbar ? colorbar_ticks(vmin_raw, vmax_raw, n_disc, max_ticks)
+                                         : std::vector<ColorbarTick>{};
     const float margin_right = show_colorbar ? colorbar_total_width(tick_vals)
                              : (!fit || x_shown) ? 20.0f : compact;
 
     int plot_w = std::max(64, (int)(avail_size.x - margin_left - margin_right));
-    int plot_h = std::max(64, (int)(avail_size.y - margin_top - margin_bottom));
 
     ImGui::Dummy(avail_size);
     // На целом пикселе — см. Plot2DView: дробный origin размывает картинку
@@ -549,21 +555,38 @@ void HeatmapView::render(PlotRenderer& renderer,
     float uv_off_y   = (float)((evis_y0 - vis_param_lo_y) / vis_data_ry);
     float uv_scale_y = (float)((evis_y1 - evis_y0) / vis_data_ry);
 
-    // 5. FBO render. (n_disc was resolved up-front in section 3.)
-    {
-        float br, bg, bb, ba;
-        plot_bg_color(br, bg, bb, ba);
-        renderer.begin_frame(plot_w, plot_h, br, bg, bb, ba);
-    }
-    // Палитра этого кадра: подмена caller'а (colormap_override) важнее выбора пользователя.
+    // FBO хранит только картинку. Оси, курсор и подсказки остаются в ImDrawList.
     const HeatmapColormap cmap_eff = colormap_override ? (HeatmapColormap)colormap_override : colormap;
-    renderer.draw_heatmap(data_tex_, vmin, vmax, (int)cmap_eff,
-                          uv_off_x, uv_off_y, uv_scale_x, uv_scale_y,
-                          n_disc, reverse_colormap, nodata_color,
-                          oor_custom ? oor_below : nullptr,
-                          oor_custom ? oor_above : nullptr,
-                          wp.smooth);
-    renderer.end_frame();
+    float br, bg, bb, ba;
+    plot_bg_color(br, bg, bb, ba);
+    unsigned long long key = 1469598103934665603ull;
+    const auto mix = [&key](const auto& value) {
+        const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
+        for (size_t i = 0; i < sizeof(value); ++i) {
+            key ^= bytes[i];
+            key *= 1099511628211ull;
+        }
+    };
+    mix(this); mix(owner_id); mix(data_tex_); mix(data_generation);
+    mix(br); mix(bg); mix(bb); mix(ba);
+    mix(uv_off_x); mix(uv_off_y); mix(uv_scale_x); mix(uv_scale_y);
+    mix(vmin); mix(vmax); mix(cmap_eff); mix(n_disc);
+    mix(reverse_colormap); mix(nodata_color); mix(wp.smooth);
+    mix(oor_custom);
+    if (oor_custom) { mix(oor_below); mix(oor_above); }
+    if (key == 0) key = 1;
+
+    if (needs_upload || renderer.content_key() != key ||
+        renderer.width() != plot_w || renderer.height() != plot_h) {
+        renderer.begin_frame(plot_w, plot_h, br, bg, bb, ba);
+        renderer.draw_heatmap(data_tex_, vmin, vmax, (int)cmap_eff,
+                              uv_off_x, uv_off_y, uv_scale_x, uv_scale_y,
+                              n_disc, reverse_colormap, nodata_color,
+                              oor_custom ? oor_below : nullptr,
+                              oor_custom ? oor_above : nullptr, wp.smooth);
+        renderer.end_frame();
+        renderer.set_content_key(key);
+    }
 
     // 6. Вставка FBO-картинки. AddImage(uv_min, uv_max) — uv_min маппится в
     //    p_min (верхний-левый угол на экране). Чтобы row 0 текстуры (iy=0 =

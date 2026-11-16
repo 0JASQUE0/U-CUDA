@@ -242,8 +242,10 @@ void Plot2DView::render(PlotRenderer& renderer,
     const bool upload_ylog = y_axis.display_log;
     const auto is_bar = [](const PlotSeriesInput& s) { return s.bar_width > 0 && std::isfinite(s.bar_width); };
     const bool has_bars = std::any_of(series_in.begin(), series_in.end(), is_bar);
-    if (data_generation != series_generation || series_xlog_cached != upload_xlog
-        || series_ylog_cached != upload_ylog) {
+    const bool upload_series = data_generation != series_generation ||
+                               series_xlog_cached != upload_xlog || series_ylog_cached != upload_ylog ||
+                               visible.size() != series_in.size();
+    if (upload_series) {
         bool count_changed = ((int)visible.size() != (int)series_in.size());
         series_cache_.clear();
         // Неположительная координата на лог-оси невыразима: уводим точку далеко за край (-300 в
@@ -545,11 +547,8 @@ void Plot2DView::render(PlotRenderer& renderer,
     };
 
     // 4. FBO render
-    {
-        float br, bg, bb, ba;
-        plot_bg_color(br, bg, bb, ba);
-        renderer.begin_frame(plot_w, plot_h, br, bg, bb, ba);
-    }
+    float br, bg, bb, ba;
+    plot_bg_color(br, bg, bb, ba);
     float mvp[16];
     // Границы — в экранной координате: VBO залит тем же преобразованием.
     // В ТОМ ЖЕ начале координат, в котором залит VBO (см. series_origin_x_):
@@ -557,48 +556,81 @@ void Plot2DView::render(PlotRenderer& renderer,
     // и float-матрицы хватает с запасом даже на окне шириной 5e-7 около 0.15.
     make_ortho_mvp(sx0 - series_origin_x_, sx1 - series_origin_x_,
                    sy0 - series_origin_y_, sy1 - series_origin_y_, mvp);
-    for (int k = (int)series_cache_.size() - 1; k >= 0; --k) {
-        if (!eff_visible(k)) continue;
-        const GpuLineSeries& g = series_cache_.get(k);
-        if (!g.valid()) continue;
-        const PlotSeriesInput* si = (k < (int)series_in.size()) ? &series_in[k] : nullptr;
-        if (si && is_bar(*si)) continue;
-        ImVec4 c = si ? series_color(*si) : ImVec4(1, 1, 1, 1);
-        float color[4] = { c.x, c.y, c.z, c.w };
-        // Per-series override (см. PlotSeriesInput::points_override) имеет
-        // приоритет над флагом вью. Точечные серии рисуются здесь ВСЕГДА,
-        // даже при imdraw_lines — ImDrawList-проход ниже их пропускает.
-        bool  as_points = points_mode;
-        int   marker    = point_marker;
-        float psize     = point_size_px;
-        if (si && si->points_override >= 0) {
-            as_points = (si->points_override == 1);
-            marker    = si->point_marker;
-            if (si->point_size_px > 0.0f) psize = si->point_size_px;
-        }
-        if (as_points) {
-            // Points + линия: линия первой, точки поверх (обе в FBO).
-            if (points_with_lines && !(si && si->points_override == 1)) {
-                if (imdraw_lines) renderer.draw_line_thick_2d(g.vbo, g.point_count, mvp, color, line_thickness_px);
-                else              renderer.draw_line(g.vbo, g.point_count, mvp, color, line_thickness_px);
-                // Точки поверх — со смешиванием (шейдерный квадрат, PointMarker 1): старый сплошной
-                // GL-пойнт пишет α цвета прямо в текстуру плота, и плотные точки закрашивали
-                // траекторию ровным бледным тоном вместо накопления полупрозрачных витков.
-                if (marker < 0) marker = 1;
+    // Cache ordinary bifurcation point clouds without per-series
+    // geometry overrides. The axes and cursor are drawn separately below.
+    unsigned long long frame_key = 0;
+    if (points_mode && !points_with_lines && !series_in.empty() && !has_bars &&
+        std::all_of(series_in.begin(), series_in.end(), [](const PlotSeriesInput& s) {
+            return s.points_override < 0;
+        })) {
+        frame_key = 1469598103934665603ull;
+        const auto mix = [&frame_key](const auto& value) {
+            const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
+            for (size_t i = 0; i < sizeof(value); ++i) {
+                frame_key ^= bytes[i];
+                frame_key *= 1099511628211ull;
             }
-            float pcolor[4] = { color[0], color[1], color[2], color[3] };
-            if (point_alpha >= 0.0f && !(si && si->points_override >= 0)) {
-                pcolor[3] = point_alpha;
-                if (marker < 0) marker = 1;   // альфа — только со смешиванием (см. выше)
-            }
-            renderer.draw_points(g.vbo, g.point_count, mvp, pcolor, psize, marker);
+        };
+        mix(this); mix(owner_id); mix(data_generation); mix(series_in.size());
+        mix(mvp); mix(br); mix(bg); mix(bb); mix(ba);
+        for (size_t k = 0; k < series_in.size(); ++k) {
+            const bool visible = eff_visible((int)k);
+            mix(visible);
+            if (!visible) continue;
+            const ImVec4 color = series_color(series_in[k]);
+            mix(color.x); mix(color.y); mix(color.z); mix(color.w);
         }
-        else if (!imdraw_lines)  // линии нарисуем через ImDrawList после осей
-            renderer.draw_line(g.vbo, g.point_count, mvp, color, line_thickness_px);
-        else if (gpu_thick_line_series(si))
-            renderer.draw_line_thick_2d(g.vbo, g.point_count, mvp, color, line_thickness_px);
+        mix(point_alpha); mix(point_size_px); mix(point_marker);
+        if (frame_key == 0) frame_key = 1;
     }
-    renderer.end_frame();
+    const bool frame_cached = frame_key != 0 && !upload_series && renderer.content_key() == frame_key &&
+                              renderer.width() == plot_w && renderer.height() == plot_h;
+    if (!frame_cached) {
+        renderer.begin_frame(plot_w, plot_h, br, bg, bb, ba);
+        for (int k = (int)series_cache_.size() - 1; k >= 0; --k) {
+            if (!eff_visible(k)) continue;
+            const GpuLineSeries& g = series_cache_.get(k);
+            if (!g.valid()) continue;
+            const PlotSeriesInput* si = (k < (int)series_in.size()) ? &series_in[k] : nullptr;
+            if (si && is_bar(*si)) continue;
+            ImVec4 c = si ? series_color(*si) : ImVec4(1, 1, 1, 1);
+            float color[4] = { c.x, c.y, c.z, c.w };
+            // Per-series override (см. PlotSeriesInput::points_override) имеет
+            // приоритет над флагом вью. Точечные серии рисуются здесь ВСЕГДА,
+            // даже при imdraw_lines — ImDrawList-проход ниже их пропускает.
+            bool  as_points = points_mode;
+            int   marker    = point_marker;
+            float psize     = point_size_px;
+            if (si && si->points_override >= 0) {
+                as_points = (si->points_override == 1);
+                marker    = si->point_marker;
+                if (si->point_size_px > 0.0f) psize = si->point_size_px;
+            }
+            if (as_points) {
+                // Points + линия: линия первой, точки поверх (обе в FBO).
+                if (points_with_lines && !(si && si->points_override == 1)) {
+                    if (imdraw_lines) renderer.draw_line_thick_2d(g.vbo, g.point_count, mvp, color, line_thickness_px);
+                    else              renderer.draw_line(g.vbo, g.point_count, mvp, color, line_thickness_px);
+                    // Точки поверх — со смешиванием (шейдерный квадрат, PointMarker 1): старый сплошной
+                    // GL-пойнт пишет α цвета прямо в текстуру плота, и плотные точки закрашивали
+                    // траекторию ровным бледным тоном вместо накопления полупрозрачных витков.
+                    if (marker < 0) marker = 1;
+                }
+                float pcolor[4] = { color[0], color[1], color[2], color[3] };
+                if (point_alpha >= 0.0f && !(si && si->points_override >= 0)) {
+                    pcolor[3] = point_alpha;
+                    if (marker < 0) marker = 1;   // альфа — только со смешиванием (см. выше)
+                }
+                renderer.draw_points(g.vbo, g.point_count, mvp, pcolor, psize, marker);
+            }
+            else if (!imdraw_lines)  // линии нарисуем через ImDrawList после осей
+                renderer.draw_line(g.vbo, g.point_count, mvp, color, line_thickness_px);
+            else if (gpu_thick_line_series(si))
+                renderer.draw_line_thick_2d(g.vbo, g.point_count, mvp, color, line_thickness_px);
+        }
+        renderer.end_frame();
+        renderer.set_content_key(frame_key);
+    }
 
     // 5. Вывод FBO
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1029,14 +1061,30 @@ void Plot2DView::render(PlotRenderer& renderer,
             auto to_px = [&](double w) {
                 return (XS(w) - sx0) / span_s * (double)plot_w;
             };
+            const auto x_at = [](const PlotSeriesInput& s, int i) { return s.points[(size_t)i * 2]; };
+            const auto first_at_x = [&x_at](const PlotSeriesInput& s, double target) {
+                const bool ascending = x_at(s, 0) <= x_at(s, s.n_points - 1);
+                int first = 0, last = s.n_points;
+                while (first < last) {
+                    const int mid = first + (last - first) / 2;
+                    const double x = x_at(s, mid);
+                    if (ascending ? x < target : x > target) first = mid + 1;
+                    else                                     last = mid;
+                }
+                return first;
+            };
             // Ближайший X — в ЭКРАННОЙ метрике: на лог-оси «ближайший» должен
             // означать ближайший глазу, а не по разности значений.
             double best_px = 0.0;
+            const double cursor_x = dx;
+            const auto consider = [&](double x) {
+                const double d = std::abs(to_px(x) - cursor_px);
+                if (!x_on_node || d < best_px) { best_px = d; dx = x; x_on_node = true; }
+            };
             if (snap_x_nodes && snap_x_node_count > 0) {
                 // Узлы свипа, включая те, что не дали точек.
                 for (int k = 0; k < snap_x_node_count; ++k) {
-                    const double d = std::abs(to_px(snap_x_nodes[k]) - cursor_px);
-                    if (!x_on_node || d < best_px) { best_px = d; dx = snap_x_nodes[k]; x_on_node = true; }
+                    consider(snap_x_nodes[k]);
                 }
             } else if (total_pts > 0 && total_pts <= 4000000) {
                 // Узлов не дали — снапимся по самим точкам. Верхняя граница на
@@ -1046,10 +1094,12 @@ void Plot2DView::render(PlotRenderer& renderer,
                     if (si < visible.size() && !visible[si]) continue;
                     const PlotSeriesInput& s = series_in[si];
                     if (!s.points || s.n_points <= 0) continue;
-                    for (int i = 0; i < s.n_points; ++i) {
-                        const double xv = s.points[(size_t)i * 2 + 0];
-                        const double d = std::abs(to_px(xv) - cursor_px);
-                        if (!x_on_node || d < best_px) { best_px = d; dx = xv; x_on_node = true; }
+                    if (s.sorted_x && (!xlog || std::min(x_at(s, 0), x_at(s, s.n_points - 1)) > 0.0)) {
+                        const int next = first_at_x(s, cursor_x);
+                        if (next > 0) consider(x_at(s, next - 1));
+                        if (next < s.n_points) consider(x_at(s, next));
+                    } else {
+                        for (int i = 0; i < s.n_points; ++i) consider(x_at(s, i));
                     }
                 }
             }
@@ -1061,8 +1111,12 @@ void Plot2DView::render(PlotRenderer& renderer,
                     if (si < visible.size() && !visible[si]) continue;
                     const PlotSeriesInput& s = series_in[si];
                     if (!s.points || s.n_points <= 0) continue;
-                    for (int i = 0; i < s.n_points; ++i) {
-                        if (s.points[(size_t)i * 2 + 0] != dx) continue;
+                    const int first = s.sorted_x ? first_at_x(s, dx) : 0;
+                    for (int i = first; i < s.n_points; ++i) {
+                        if (x_at(s, i) != dx) {
+                            if (s.sorted_x) break;
+                            continue;
+                        }
                         const double yv = s.points[(size_t)i * 2 + 1];
                         // В экранной метрике: на лог-Y «ближе» — ближе глазу.
                         const double d = std::abs(YS(yv) - YS(dy));

@@ -27,9 +27,6 @@ void draw_basins_phase_windows(AppModel& model, BasinsAnalysisSession& s, int ci
 void basins_phase_tick(AppModel& model);
 
 
-void basins_colorbar_range(const BasinsConfig& c, double& vmin, double& vmax) ;
-
-
 [[nodiscard]] unsigned basins_base_oid(int config_index) ;
 
 
