@@ -3,6 +3,7 @@
 // тепловые карты и палитры, буферы окон.
 #include "gui_common.h"
 #include "gui_inputs.h"
+#include <tuple>
 
 namespace ucuda::ui_detail {
 void draw_csv_output_block(const char* header, const char* checkbox_label,
@@ -349,6 +350,23 @@ bool session_reloaded(const AppModel& model, AppModel::AppMode mode, int& seen);
 
 
 std::vector<std::vector<double>>& window_point_bufs(int window_id, size_t n_series);
+
+struct BifurcationPointGrid {
+    int nodes;
+    int columns;
+    double lo, hi;
+    bool log, reverse, swap_axes;
+};
+
+struct BifurcationPointCache {
+    std::vector<double> points;
+    bool sorted_x = false;
+    int generation = 0;
+    bool update(const BifurcationDiagramConfig& cfg, const BifurcationPointGrid& grid, bool finite_only);
+
+private:
+    std::tuple<const void*, int, int, int, double, double, bool, bool, bool, bool, bool, bool> key{};
+};
 
 
 void set_snap_nodes(Plot2DView& view, int window_id,

@@ -242,7 +242,8 @@ namespace ucuda::ui_detail {
 void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
                                    ParametricPlotWindow& win,
                                    PlotRenderer& renderer, Plot2DView& view,
-                                   std::map<int, std::unique_ptr<HeatmapView>>& heatmap_map) {
+                                   std::map<int, std::unique_ptr<HeatmapView>>& heatmap_map,
+                                   std::vector<BifurcationPointCache>& point_cache) {
     BifurcationAnalysisSession& s = model.bifurcation_session;
     // Per-diagram HeatmapView, keyed by diagram index within THIS window's own map (map is
     // already per-window, so no cross-window bleed). Per-diagram persisted choice takes
@@ -601,9 +602,10 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
         view.y_axis.name = "X";
     }
 
-    // Буферы точек (по одному на серию), свои у каждого окна — см.
-    // window_point_bufs: между кадрами они держат capacity.
-    auto& bufs = window_point_bufs(win.id, win.members.size());
+    if (point_cache.size() != win.members.size()) {
+        point_cache.resize(win.members.size());
+        view.series_generation = -1;
+    }
     // Узлы сетки перезаполняются каждый кадр: данные могли пересчитаться.
     view.snap_x_nodes      = nullptr;
     view.snap_x_node_count = 0;
@@ -625,15 +627,15 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
 
     for (size_t mi = 0; mi < win.members.size(); ++mi) {
         int idx = win.members[mi];
-        if (idx < 0 || idx >= (int)s.diagrams.size()) continue;
+        auto& cache = point_cache[mi];
+        if (idx < 0 || idx >= (int)s.diagrams.size()) {
+            if (!cache.points.empty()) view.series_generation = -1;
+            cache = {};
+            continue;
+        }
         BifurcationDiagramConfig& bd = s.diagrams[idx];
-        auto& buf = bufs[mi];
-        buf.clear();
-        int total_pts = 0;
 
         if (bd.last_run_ok && !bd.result.bifurcation_points.empty()) {
-            const auto& source = bd.plot_inter_peaks ? bd.result.peak_times
-                                                     : bd.result.bifurcation_points;
             // Диапазон прогона (run_bifurcation_1d), не текстовые поля: их правка до Run
             // не должна переносить посчитанные точки на другую сетку.
             const double lo = bd.result.param_lo, hi = bd.result.param_hi;
@@ -647,22 +649,17 @@ void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbac
                 snap_lo_focus = lo; snap_hi_focus = hi; snap_n_focus = npts;
                 set_snap_nodes(view, win.id, npts, lo, hi, bd.log_scale, rev, bd.continuation);
             }
-            for (int k = 0; k < npts; ++k) {
-                if (k < (int)bd.result.flags.size() &&
-                    !regime_is_oscillation(bd.result.flags[k])) continue;
-                double x = sweep_value_at(k, npts, lo, hi, bd.log_scale, rev, bd.continuation);
-                if (k >= (int)source.size()) continue;
-                for (double y : source[k]) {
-                    buf.push_back((double)x);
-                    buf.push_back((double)y);
-                    ++total_pts;
-                }
-            }
+            if (cache.update(bd, {npts, npts, lo, hi, bd.log_scale, rev, false}, /*finite_only*/ false))
+                view.series_generation = -1;
+        } else if (!cache.points.empty()) {
+            cache = {};
+            view.series_generation = -1;
         }
 
         PlotSeriesInput si;
-        si.points   = buf.empty() ? nullptr : buf.data();
-        si.n_points = total_pts;
+        si.points   = cache.points.data();
+        si.n_points = (int)(cache.points.size() / 2);
+        si.sorted_x = cache.sorted_x;
         si.color    = ic_base_color((int)mi);
         // α в custom-режиме — через альфу цвета серии (GL-путь её блендит),
         // как в Custom line style у Phase2D/TimeDomain.

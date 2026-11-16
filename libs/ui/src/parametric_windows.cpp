@@ -152,6 +152,7 @@ void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, const Gui
     auto& renderers = ui_resource<std::map<int, std::unique_ptr<PlotRenderer>>, 3019>();
     auto& views = ui_resource<std::map<int, std::unique_ptr<Plot2DView>>, 3020>();
     auto& heatmaps = ui_resource<std::map<int, std::map<int, std::unique_ptr<HeatmapView>>>, 3021>();
+    auto& bifurcation_points = ui_resource<std::map<int, std::vector<BifurcationPointCache>>, 3026>();
     // Tracks the kind the Plot2DView was last configured for; when a
     // window's kind changes (Type combo), re-run configure_plot_view so
     // e.g. LLE doesn't inherit Bifurcation's points_mode=true.
@@ -160,6 +161,7 @@ void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, const Gui
     if (session_reloaded(model, AppModel::AppMode::Parametric, seen_epoch)) {
         invalidate_views(views);
         for (auto& kv : heatmaps) invalidate_views(kv.second);
+        bifurcation_points.clear();
     }
 
     int to_remove = -1;
@@ -210,9 +212,11 @@ void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, const Gui
                 }
             }
             set_heatmap_toolbar_head(head);
+            if (win.kind != ParametricPlotWindow::Kind::Bifurcation || win.mode_2d || win.colored_1d)
+                bifurcation_points.erase(win.id);
             switch (win.kind) {
             case ParametricPlotWindow::Kind::Bifurcation:
-                draw_bifurcation_plot(model, lib, cb, win, *renderer, *view, hm_map);
+                draw_bifurcation_plot(model, lib, cb, win, *renderer, *view, hm_map, bifurcation_points[win.id]);
                 break;
             case ParametricPlotWindow::Kind::LLE:
                 draw_lle_plot(model, lib, cb, win, *renderer, *view, hm_map);
@@ -237,6 +241,7 @@ void draw_parametric_plot_windows(AppModel& model, SystemLibrary& lib, const Gui
         renderers.erase(id);
         views.erase(id);
         heatmaps.erase(id);
+        bifurcation_points.erase(id);
         view_configured_for.erase(id);
         model.remove_parametric_plot_window(to_remove);
     }

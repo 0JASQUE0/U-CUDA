@@ -1005,6 +1005,43 @@ std::vector<std::vector<double>>& window_point_bufs(int window_id, size_t n_seri
     if (bufs.size() != n_series) bufs.assign(n_series, {});
     return bufs;
 }
+
+bool BifurcationPointCache::update(const BifurcationDiagramConfig& cfg,
+                                   const BifurcationPointGrid& grid, bool finite_only) {
+    const auto& result = cfg.result;
+    const auto& source = cfg.plot_inter_peaks ? result.peak_times : result.bifurcation_points;
+    const int columns = std::min(grid.columns, (int)source.size());
+    const auto next = std::make_tuple(static_cast<const void*>(source.data()), cfg.data_generation,
+        grid.nodes, columns, grid.lo, grid.hi, grid.log, grid.reverse, grid.swap_axes,
+        cfg.continuation, cfg.plot_inter_peaks, finite_only);
+    if (key == next) return false;
+
+    points.clear();
+    bool ascending = true, descending = true, finite_x = true;
+    double previous_x = 0.0;
+    for (int p = 0; p < columns; ++p) {
+        if (p < (int)result.flags.size() && !regime_is_oscillation(result.flags[p])) continue;
+        const double x = sweep_value_at(p, grid.nodes, grid.lo, grid.hi,
+                                        grid.log, grid.reverse, cfg.continuation);
+        const size_t before = points.size();
+        for (double y : source[p]) {
+            if (finite_only && !std::isfinite(y)) continue;
+            points.push_back(grid.swap_axes ? y : x);
+            points.push_back(grid.swap_axes ? x : y);
+        }
+        if (points.size() == before) continue;
+        finite_x &= std::isfinite(x);
+        if (before != 0) {
+            ascending &= x >= previous_x;
+            descending &= x <= previous_x;
+        }
+        previous_x = x;
+    }
+    sorted_x = !grid.swap_axes && finite_x && (ascending || descending);
+    key = next;
+    ++generation;
+    return true;
+}
 }
 
 

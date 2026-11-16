@@ -555,11 +555,13 @@ void Plot2DView::render(PlotRenderer& renderer,
     // и float-матрицы хватает с запасом даже на окне шириной 5e-7 около 0.15.
     make_ortho_mvp(sx0 - series_origin_x_, sx1 - series_origin_x_,
                    sy0 - series_origin_y_, sy1 - series_origin_y_, mvp);
-    // Cache the common bifurcation case: one point cloud and no per-series
+    // Cache ordinary bifurcation point clouds without per-series
     // geometry overrides. The axes and cursor are drawn separately below.
     unsigned long long frame_key = 0;
-    if (points_mode && !points_with_lines && series_in.size() == 1 &&
-        series_in.front().points_override < 0 && !has_bars) {
+    if (points_mode && !points_with_lines && !series_in.empty() && !has_bars &&
+        std::all_of(series_in.begin(), series_in.end(), [](const PlotSeriesInput& s) {
+            return s.points_override < 0;
+        })) {
         frame_key = 1469598103934665603ull;
         const auto mix = [&frame_key](const auto& value) {
             const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
@@ -568,10 +570,15 @@ void Plot2DView::render(PlotRenderer& renderer,
                 frame_key *= 1099511628211ull;
             }
         };
-        const ImVec4 color = series_color(series_in.front());
-        mix(this); mix(owner_id); mix(data_generation); mix(eff_visible(0));
+        mix(this); mix(owner_id); mix(data_generation); mix(series_in.size());
         mix(mvp); mix(br); mix(bg); mix(bb); mix(ba);
-        mix(color.x); mix(color.y); mix(color.z); mix(color.w);
+        for (size_t k = 0; k < series_in.size(); ++k) {
+            const bool visible = eff_visible((int)k);
+            mix(visible);
+            if (!visible) continue;
+            const ImVec4 color = series_color(series_in[k]);
+            mix(color.x); mix(color.y); mix(color.z); mix(color.w);
+        }
         mix(point_alpha); mix(point_size_px); mix(point_marker);
         if (frame_key == 0) frame_key = 1;
     }

@@ -25,7 +25,8 @@ void configure_plot_view(Plot2DView& view, ParametricPlotWindow::Kind kind) ;
 void draw_bifurcation_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
                                    ParametricPlotWindow& win,
                                    PlotRenderer& renderer, Plot2DView& view,
-                                   std::map<int, std::unique_ptr<HeatmapView>>& heatmap_map) ;
+                                   std::map<int, std::unique_ptr<HeatmapView>>& heatmap_map,
+                                   std::vector<BifurcationPointCache>& point_cache);
 
 
 void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int idx) ;

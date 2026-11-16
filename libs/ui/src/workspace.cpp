@@ -486,6 +486,12 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
     auto& l1_views = ui_resource<std::array<std::unique_ptr<Plot2DView>,  6>, 18>();
     auto& l1_renderers = ui_resource<std::array<std::unique_ptr<PlotRenderer>, 6>, 19>();
     static std::array<std::vector<std::vector<double>>, 6> l1_bufs;
+    auto& l1_bif_points = ui_resource<std::array<BifurcationPointCache, 2>, 22>();
+    static int bif_epoch = 0;
+    if (session_reloaded(model, AppModel::AppMode::Custom, bif_epoch)) {
+        l1_bif_points = {};
+        for (auto& v : l1_views) if (v) v->series_generation = -1;
+    }
     // Custom Basins (Level-3 kind=1) HeatmapView + renderer — hoisted so the
     // system-change block below can reset them alongside the other statics.
     auto& bsn_hv = ui_resource<HeatmapView, 20>();
@@ -511,6 +517,7 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
         for (auto& hv : heatmaps) { hv.view_valid = false; hv.data_gen_cached = -1; }
         for (auto& v  : l1_views) if (v) { v->view_valid = false; v->series_generation = -1; }
         for (auto& b  : l1_bufs)  b.clear();
+        l1_bif_points = {};
         bsn_hv.view_valid = false; bsn_hv.data_gen_cached = -1;
         hm_init_cmap_seen = { -2, -2, -2 };
         ls_init_exp_seen  = -999;
@@ -1062,34 +1069,20 @@ void draw_custom_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCall
         if (lslots[i].kind == L1Kind::Bif) {
             auto& d = cs.bif_session.diagrams[lslots[i].cfg_idx];
             const auto& r = d.result;
-            // Как в Parametric: источник — peak_times при plot_inter_peaks,
-            // иначе сами точки бифуркации. Раньше Custom всегда брал
-            // bifurcation_points, из-за чего тоггл «inter-peaks» на него не влиял.
             const auto& source = d.plot_inter_peaks ? r.peak_times
                                                     : r.bifurcation_points;
-            int n = r.n_pts > 0 ? r.n_pts : 1;
-            bufs.emplace_back();
-            auto& buf = bufs.back();
-            for (int p = 0; p < (int)source.size(); ++p) {
-                // Diverged-точки пропускаем (в Parametric так и было; здесь
-                // проверки не было, и разошедшиеся точки попадали на график).
-                if (p < (int)r.flags.size() && !regime_is_oscillation(r.flags[p])) continue;
-                double px = sweep_value_at(p, n, param_lo, param_hi, slice_log,
-                                           /*reverse*/ false, d.continuation);
-                for (double y : source[p]) {
-                    if (!std::isfinite(y)) continue;
-                    buf.push_back((double)px);
-                    buf.push_back((double)y);
-                }
-            }
+            auto& cache = l1_bif_points[i];
+            cache.update(d, {std::max(1, r.n_pts), (int)source.size(), param_lo, param_hi,
+                             slice_log, false, swap}, /*finite_only*/ true);
             PlotSeriesInput si;
-            si.points = buf.empty() ? nullptr : buf.data();
-            si.n_points = (int)(buf.size() / 2);
+            si.points = cache.points.data();
+            si.n_points = (int)(cache.points.size() / 2);
+            si.sorted_x = cache.sorted_x;
             si.color = ic_base_color(0);
             if (d.custom_point_style) si.color.w = d.point_alpha;
             si.label = d.label.empty() ? "bd" : d.label;
             series_in.push_back(si);
-            series_gen = data_gen * 2 + (d.plot_inter_peaks ? 1 : 0);
+            series_gen = cache.generation;
         } else if (lslots[i].kind == L1Kind::LLE) {
             auto& c = cs.lle_session.curves[lslots[i].cfg_idx];
             const auto& r = c.result;
