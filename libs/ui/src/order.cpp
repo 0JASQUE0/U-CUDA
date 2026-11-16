@@ -570,9 +570,9 @@ void draw_order_map_window(AppModel& model, OrderPlotWindow& win,
 }
 
 namespace ucuda::ui_detail {
-using OrderCurveMember = std::tuple<int, int, bool, std::string, std::string>;
+using OrderCurveMember = std::tuple<int, int, const double*, bool, std::string, std::string>;
 using OrderCurveKey = std::tuple<int, int, bool, bool, bool, bool, bool, bool, bool, bool,
-                                 int, int, int, int, bool, std::vector<OrderCurveMember>>;
+                                 int, int, int, int, int, bool, std::vector<OrderCurveMember>>;
 struct OrderCurveData {
     std::vector<std::vector<double>> bufs, tags;
     std::vector<std::string> labels;
@@ -749,7 +749,8 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         const int generation = is_perf ? c.perf_data_generation : c.data_generation;
         const bool have = is_perf ? c.perf_last_run_ok && c.perf_result.n_pts > 0
                                   : c.last_run_ok && !c.result.p.empty() && c.result.n_pts_y <= 1;
-        members.emplace_back(mi, generation, have, c.label, c.scheme);
+        const double* axis = is_perf ? c.perf_result.axis_vals.data() : c.result.axis_x_vals.data();
+        members.emplace_back(mi, generation, axis, have, c.label, c.scheme);
         sig = sig * 131 + mi * 17 + generation;
         if (!have) continue;
         any_data = true;
@@ -764,7 +765,7 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     const OrderCurveKey key{model.session_epoch[(int)AppModel::AppMode::Order], (int)win.kind,
                             win.x_log, ylog, win.show_e2, win.show_nominal, win.show_min, win.show_avg,
                             win.show_max, any_ad, win.error_source, win.time_unit, win.perf_cost,
-                            win.palette, win.vary_markers, std::move(members)};
+                            win.palette, series_palette(), win.vary_markers, std::move(members)};
     auto& cache = order_curve_caches()[win.id];
     if (cache.update(key, [&](OrderCurveData& data) {
         data = {};

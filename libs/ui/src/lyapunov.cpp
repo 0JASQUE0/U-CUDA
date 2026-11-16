@@ -158,7 +158,8 @@ void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
             const bool rev = c.result.continuation_reverse;
             if (view.snap_x_node_count == 0)
                 set_snap_nodes(view, win.id, npts, lo, hi, c.log_scale, rev, c.continuation);
-            if (cache.update({&c.result, c.data_generation, npts, 0, lo, hi, c.log_scale, rev, c.continuation, false}, [&](std::vector<double>& buf) {
+            if (cache.update({c.result.lyapunov.data(), c.data_generation, npts, 0, lo, hi,
+                              c.log_scale, rev, c.continuation, false}, [&](std::vector<double>& buf) {
                 buf.clear();
                 for (int k = 0; k < npts; ++k) {
                     if (k < (int)c.result.flags.size() &&
@@ -538,7 +539,8 @@ void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
             auto& cache = bufs[buf_cursor++];
 
             if (have) {
-                if (cache.update({&c.result, c.data_generation, npts, j, lo, hi, c.log_scale, rev, c.continuation, false}, [&](std::vector<double>& buf) {
+                if (cache.update({c.result.spectrum.data(), c.data_generation, npts, j, lo, hi,
+                                  c.log_scale, rev, c.continuation, false}, [&](std::vector<double>& buf) {
                     buf.clear();
                     for (int k = 0; k < npts; ++k) {
                         if (k < (int)c.result.flags.size() &&

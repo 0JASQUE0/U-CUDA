@@ -864,7 +864,7 @@ void draw_network_series_window(AppModel& model, PlotRenderer& renderer, Plot2DV
     if (first + count > r.n_nodes) count = r.n_nodes - first;
     if (count < 1) count = 1;
     const int epoch = model.session_epoch[(int)AppModel::AppMode::Network];
-    auto key = std::make_tuple(epoch, s.active_config_index, c.data_generation,
+    auto key = std::make_tuple(epoch, s.active_config_index, c.data_generation, r.data.data(),
                                r.n_points, first, count, vs.series_var);
     static PlotDataCache<decltype(key), std::vector<std::vector<double>>> cache;
     if (cache.update(key, [&](auto& bufs) {

@@ -369,7 +369,8 @@ void draw_metrics_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& 
             const bool cont = c.result.continuation;
             if (view.snap_x_node_count == 0)
                 set_snap_nodes(view, win.id, npts, lo, hi, c.result.log_scale, rev, cont);
-            if (cache.update({&c.result, c.data_generation, npts, m, lo, hi, c.result.log_scale, rev, cont, false}, [&](std::vector<double>& buf) {
+            if (cache.update({ys.data(), c.data_generation, npts, m, lo, hi, c.result.log_scale,
+                              rev, cont, false}, [&](std::vector<double>& buf) {
                 buf.clear();
                 for (int k = 0; k < npts && k < (int)ys.size(); ++k) {
                     const double y = ys[k];
