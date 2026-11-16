@@ -71,6 +71,22 @@ static constexpr float  kFieldW = 120.0f;
 
 static constexpr float  kComboW = 160.0f;
 
+// Цвет текста, полученный поворотом оттенка (уровни Custom и Tree): на тёмном
+// фоне синие и фиолетовые оттенки при той же HSV-яркости тусклы (у синего
+// малая светлота), поэтому разбавляем их белым до читаемой светлоты, оттенок
+// сохраняется. На светлом фоне цвет не меняется.
+inline ImVec4 readable_on_dark_bg(ImVec4 col) {
+    auto luma = [](const ImVec4& c) { return 0.299f * c.x + 0.587f * c.y + 0.114f * c.z; };
+    const float target = 0.62f, l = luma(col);
+    if (luma(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)) < 0.5f && l < target) {
+        const float k = (target - l) / (1.0f - l);
+        col.x += (1.0f - col.x) * k;
+        col.y += (1.0f - col.y) * k;
+        col.z += (1.0f - col.z) * k;
+    }
+    return col;
+}
+
 struct ModeTab {
     const char*       id;
     const char*       label;

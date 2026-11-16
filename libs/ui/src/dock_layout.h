@@ -63,4 +63,14 @@ void dock_keep_split_ratios(ImGuiID dock_id, const char* fixed_window = nullptr)
 // в радиусе ~0.6 высоты шрифта. Видно во время перетаскивания: ImGui сам ставит границу и окна.
 void dock_snap_dragged_split(ImGuiID dock_id);
 
+// Ставит своё меню треугольника у вкладки окна (ImGuiContext::DockNodeWindowMenuHandler):
+// «Hide tab bar» с зажатыми Ctrl+Shift скрывает (или показывает) полосы вкладок у всех
+// окон этой док-области, остальное как в стандартном меню. Звать каждый кадр дёшево.
+void dock_install_window_menu();
+
+// Щелчок с Ctrl+Shift на треугольник в углу окна со скрытой полосой вкладок
+// показывает полосы у всех окон док-области. Щелчок ImGui ловит в Begin окна и
+// применяет в DockNodeUpdate следующего кадра, поэтому звать перед DockSpace.
+void dock_unhide_all_on_modifier(ImGuiID dock_id);
+
 }  // namespace ucuda::ui_detail

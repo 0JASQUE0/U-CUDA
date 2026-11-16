@@ -22,6 +22,7 @@
 #include "ucuda/application/session_persistence.h"
 #include "ucuda/plotting/plot_axis.h"
 #include "ucuda/plotting/plot_legend.h"
+#include "hud_theme.h"
 #include "ucuda/ui/gui.h"
 #include "ucuda/ui/gui_tree_state.h"
 #include "ucuda/storage/system_library.h"
@@ -121,6 +122,13 @@ static const CamoPalette kCamoPalettes[AppSettings::kCamoCount] = {
       {0.09f, 0.11f, 0.08f, 0.52f}, {0.14f, 0.16f, 0.12f}, {0.91f, 0.92f, 0.82f},
       {0.20f, 0.23f, 0.16f}, {0.52f, 0.58f, 0.32f}, {0.50f, 0.29f, 0.16f},
       {0.24f, 0.28f, 0.19f}, {0.08f, 0.09f, 0.07f} },
+    // Cyan HUD: текстуры нет, под окнами анимированное сотовое поле (hud_theme.cpp).
+    // Вуаль прозрачнее, чем у камуфляжей, чтобы поле было видно; акцент
+    // приглушён, иначе светлый текст на кнопках не читается.
+    { nullptr, false,
+      {0.004f, 0.020f, 0.030f, 0.40f}, {0.012f, 0.045f, 0.065f}, {0.80f, 0.96f, 1.00f},
+      {0.020f, 0.090f, 0.120f}, {0.00f, 0.58f, 0.70f}, {0.00f, 0.34f, 0.44f},
+      {0.010f, 0.050f, 0.070f}, {0.004f, 0.016f, 0.024f} },
 };
 
 static void apply_camo_palette(ImVec4* c, const CamoPalette& p, bool has_texture) {
@@ -709,6 +717,7 @@ int main() {
     GLuint camo_tex[AppSettings::kCamoCount]   = {};
     bool   camo_tried[AppSettings::kCamoCount] = {};
     std::vector<std::unique_ptr<ImDrawList>> camo_lists;
+    hud_theme::Painter hud_painter;
     AppSettings::ThemeColors applied_theme_colors = model.theme_colors;
     const MathFontPaths math_fonts = resolve_math_font_paths(dir);
 
@@ -731,9 +740,12 @@ int main() {
         if (pal) {
             if (!camo_tried[camo]) {
                 camo_tried[camo] = true;
-                camo_tex[camo] = load_ppm_texture(dir + "themes/" + pal->texture);
+                if (pal->texture)
+                    camo_tex[camo] = load_ppm_texture(dir + "themes/" + pal->texture);
             }
-            apply_camo_palette(c, *pal, camo_tex[camo] != 0);
+            // Без файла текстуры — процедурный фон (Cyan HUD), вуаль та же.
+            apply_camo_palette(c, *pal, camo_tex[camo] != 0 || !pal->texture);
+            if (camo == AppSettings::kCamoHud) hud_theme::apply_style(st);
         }
         if (contrast) {
             // High Contrast: фон окон чисто чёрный, текст белый, рамки у всех
@@ -969,6 +981,8 @@ int main() {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         tree_state::apply();
+        const bool hud_on = !model.dark_theme && model.camo_theme == AppSettings::kCamoHud;
+        if (hud_on) hud_painter.prepare_frame(applied_ui_scale);
 
         // Once the async OCR ctor finishes, peek at the result so we can show
         // a warning banner if it failed. .get() is safe to call repeatedly on
@@ -993,7 +1007,10 @@ int main() {
         draw_gui(model, library, cb);
 
         ImGui::Render();
-        if (!model.dark_theme && model.camo_theme > AppSettings::kCamoNone &&
+        if (hud_on)
+            hud_painter.inject(ImGui::GetDrawData(), applied_ui_scale, ImGui::GetTime(), compute_in_flight,
+                               model.app_mode == AppModel::AppMode::Settings);
+        else if (!model.dark_theme && model.camo_theme > AppSettings::kCamoNone &&
             model.camo_theme < AppSettings::kCamoCount && camo_tex[model.camo_theme] != 0)
             inject_window_backdrops(ImGui::GetDrawData(), camo_tex[model.camo_theme],
                                     512.0f * applied_ui_scale, camo_lists);
@@ -1032,6 +1049,7 @@ int main() {
     // деструктор ImDrawList обращается к общим данным контекста (_Data), и
     // после его уничтожения выход из программы падал на чтении памяти.
     camo_lists.clear();
+    hud_painter.release();
     for (GLuint& t : camo_tex)
         if (t) { glDeleteTextures(1, &t); t = 0; }
     ImGui_ImplOpenGL3_Shutdown();

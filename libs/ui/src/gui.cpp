@@ -908,6 +908,8 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             process_layout(model, mode_i, dockspace_id, ImGui::GetContentRegionAvail(),
                            controls_window_for(model.app_mode));
         g_prev_frame_mode = mode_i;
+        dock_install_window_menu();
+        dock_unhide_all_on_modifier(dockspace_id);
         dock_snap_dragged_split(dockspace_id);
         if (model.app_mode == AppModel::AppMode::Tree) g_tree_dockspace_id = dockspace_id;
         ImGui::DockSpace(dockspace_id, ImVec2(0, 0), ImGuiDockNodeFlags_None);
@@ -1261,6 +1263,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             if (ImGui::RadioButton("Flora", &theme_idx, 2 + AppSettings::kCamoFlora)) theme_changed = true;
             ImGui::SameLine();
             if (ImGui::RadioButton("Flecktarn", &theme_idx, 2 + AppSettings::kCamoFlecktarn)) theme_changed = true;
+            if (ImGui::RadioButton("Cyan HUD", &theme_idx, 2 + AppSettings::kCamoHud)) theme_changed = true;
             if (theme_changed) {
                 model.dark_theme     = (theme_idx == 0 || theme_idx == 2);
                 model.contrast_theme = (theme_idx == 2);

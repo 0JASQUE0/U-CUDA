@@ -635,6 +635,57 @@ ImGuiDockNode* find_active_split(ImGuiDockNode* n, const ImGuiWindow* host, ImGu
 }
 }  // namespace
 
+namespace {
+
+// Узлы с одним окном (только у них полосу можно скрыть) приводятся к hide.
+// Переключение — через WantHiddenTabBarToggle, как у стандартного пункта:
+// ImGui применит его в DockNodeUpdate следующего кадра.
+void set_tab_bars_hidden(ImGuiDockNode* n, bool hide) {
+    if (!n) return;
+    if (n->IsLeafNode()) {
+        if (n->Windows.Size == 1 && !n->IsNoTabBar() && n->IsHiddenTabBar() != hide)
+            n->WantHiddenTabBarToggle = true;
+        return;
+    }
+    set_tab_bars_hidden(n->ChildNodes[0], hide);
+    set_tab_bars_hidden(n->ChildNodes[1], hide);
+}
+
+void window_menu(ImGuiContext* ctx, ImGuiDockNode* node, ImGuiTabBar* tab_bar) {
+    if (tab_bar->Tabs.Size != 1) {
+        ImGui::DockNodeWindowMenuHandler_Default(ctx, node, tab_bar);
+        return;
+    }
+    if (ImGui::MenuItem("Hide tab bar", "Ctrl+Shift: all", node->IsHiddenTabBar())) {
+        const ImGuiIO& io = ImGui::GetIO();
+        if (io.KeyCtrl && io.KeyShift)
+            set_tab_bars_hidden(ImGui::DockNodeGetRootNode(node), !node->IsHiddenTabBar());
+        else
+            node->WantHiddenTabBarToggle = true;
+    }
+}
+
+// Есть ли узел, который по щелчку на треугольник в углу собирается показать
+// свою скрытую полосу вкладок.
+bool unhide_requested(const ImGuiDockNode* n) {
+    if (!n) return false;
+    if (n->IsLeafNode()) return n->WantHiddenTabBarToggle && n->IsHiddenTabBar();
+    return unhide_requested(n->ChildNodes[0]) || unhide_requested(n->ChildNodes[1]);
+}
+
+}  // namespace
+
+void dock_install_window_menu() {
+    GImGui->DockNodeWindowMenuHandler = &window_menu;
+}
+
+void dock_unhide_all_on_modifier(ImGuiID dock_id) {
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!(io.KeyCtrl && io.KeyShift)) return;
+    ImGuiDockNode* root = ImGui::DockBuilderGetNode(dock_id);
+    if (unhide_requested(root)) set_tab_bars_hidden(root, false);
+}
+
 void dock_snap_dragged_split(ImGuiID dock_id) {
     ImGuiContext& g = *GImGui;
     // Смещение захвата, которое ImGui поставил при нажатии: от него считается «естественное»

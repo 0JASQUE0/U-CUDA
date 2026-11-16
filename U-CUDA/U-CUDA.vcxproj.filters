@@ -481,6 +481,9 @@
     <ClCompile Include="..\apps\desktop\app_main.cpp">
       <Filter>apps\desktop</Filter>
     </ClCompile>
+    <ClCompile Include="..\apps\desktop\hud_theme.cpp">
+      <Filter>apps\desktop</Filter>
+    </ClCompile>
     <ClInclude Include="..\libs\domain\include\ucuda\domain\adaptive_settings.h">
       <Filter>libs\domain\include</Filter>
     </ClInclude>
