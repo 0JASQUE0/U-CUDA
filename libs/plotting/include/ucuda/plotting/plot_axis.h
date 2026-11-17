@@ -76,6 +76,11 @@ struct AxisInfo {
     // стоит log_scale (только X) или display_log. Точки с координатой <= 0 на лог-оси не
     // видны и в автоподгонку не входят.
     bool   display_log = false;
+    // Допуск крайних подписей линейной оси X, мировые единицы (0 — только шум округления).
+    // Регулярный тик, выпавший за край вида не дальше чем на него, всё равно рисуется (у края):
+    // временной ряд кончается в 499.99 при шаге 0.01, ряд ошибки начинается в t = h, а ось
+    // должна быть подписана от 0 до 500. Ставит Plot2DView каждый кадр — 2 шага данных по X.
+    double edge_tick_tol = 0.0;
 };
 
 // Эффективные границы оси (с учётом invert).
@@ -159,6 +164,10 @@ inline ImU32 dim_grid_col(ImU32 c) {
 
 // Форматирует подпись тика (с текущей точностью).
 std::string fmt_tick(double v);
+// Подпись тика линейной оси с шагом step: «0» только при |v| < 1e-6*step, без абсолютного порога.
+std::string fmt_tick(double v, double step);
+// Подпись тика лог-оси: без порога «|v| < 1e-12 -> 0» и без хвостовых нулей (%g).
+std::string fmt_log_tick(double v);
 
 // Точность тиков: число значащих цифр для fmt_tick (форматирует через %g).
 // Clamp'ится в [2, 10]. Дёргается при смене настройки в Settings.
@@ -178,12 +187,12 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     ImVec2 plot_pos, float plot_w, float plot_h,
     ImU32 col_grid, ImU32 col_text,
     double snap_lo = 0.0, double snap_hi = 0.0, int snap_n = 0,
-    bool tick_labels = true);
+    bool tick_labels = true, bool grid_lines = true);
 
 // Рисует сетку и подписи по Y (горизонтальные линии + текст слева).
 void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     ImVec2 plot_pos, float plot_w, float plot_h,
-    ImU32 col_grid, ImU32 col_text, bool tick_labels = true);
+    ImU32 col_grid, ImU32 col_text, bool tick_labels = true, bool grid_lines = true);
 
 // Plot color palette — переключается между Dark и Light темами. AppModel
 // дёргает set_plot_light_theme(bool) на смену темы в Settings, а каждый
@@ -301,6 +310,9 @@ struct PlotWindowPrefs {
     // render() берёт их отсюда, пункты меню пишут сюда.
     bool swap_axes = false;
     bool invert_x  = false, invert_y = false;
+    // Сетка 2D-диаграммы (Plot2DView): показывать ли её и поверх данных или под ними.
+    bool grid = true;
+    bool grid_on_top = true;
     // Цвета серий из меню легенды (ПКМ по квадрату -> legend_color_popup). Ключ — подпись серии,
     // а не индекс (серии сдвигаются, цвет должен остаться на своей кривой); альфа — от вызывающего.
     std::map<std::string, ImVec4> series_colors;
@@ -372,6 +384,7 @@ enum PlotShowItems : unsigned {
     PlotShowColorbar = 1u << 2,
     PlotShowAxes3D   = 1u << 3,
     PlotShowSmooth   = 1u << 4,   // сглаживание картинки карты
+    PlotShowGrid     = 1u << 5,   // сетка 2D-диаграммы: есть ли, поверх данных или под ними
 };
 void plot_show_menu(PlotWindowPrefs& p, unsigned items);
 

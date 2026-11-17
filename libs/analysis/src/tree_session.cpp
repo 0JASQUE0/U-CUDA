@@ -494,9 +494,16 @@ CustomTabSharedConfig TreeSession::effective_shared(int leaf_id) const {
     if (sl) {
         dir = sl->slice_dir;
         const auto& c = sl->cfg;
-        s.l1d_h_text = c.l1d_h_text;
-        s.l1d_transient_text = c.l1d_transient_text;
-        s.l1d_t_max_text = c.l1d_t_max_text;
+        // Интегратор среза: свой (галка Own integration) или общий System.
+        if (sl->own_integration) {
+            s.l1d_h_text = c.l1d_h_text;
+            s.l1d_transient_text = c.l1d_transient_text;
+            s.l1d_t_max_text = c.l1d_t_max_text;
+        } else {
+            s.l1d_h_text = s.h_text;
+            s.l1d_transient_text = s.transient_text;
+            s.l1d_t_max_text = s.t_max_text;
+        }
         s.continuation_1d_enabled = c.continuation_1d_enabled;
         s.plot_inter_peaks_1d = c.plot_inter_peaks_1d;
         const bool inherit = reg && c.inherit_sweep_from_2d;
@@ -817,7 +824,18 @@ bool TreeSession::tick_basins_phase(double now) {
 
 void TreeSession::enable_own_integration(int leaf_id) {
     TreeNode* n = tree.find(leaf_id);
-    if (!n || tree_kind_is_context(n->kind) || n->own_integration) return;
+    if (!n || n->own_integration) return;
+    if (n->kind == TreeNodeKind::Slice1D) {
+        // Свой 1D-интегратор среза стартует с унаследованных значений System.
+        const CustomTabSharedConfig& root = tree.nodes.front().cfg;
+        n->cfg.l1d_h_text         = root.h_text;
+        n->cfg.l1d_transient_text = root.transient_text;
+        n->cfg.l1d_t_max_text     = root.t_max_text;
+        n->own_integration = true;
+        dirty = true;
+        return;
+    }
+    if (tree_kind_is_context(n->kind)) return;
     const CustomTabSharedConfig s = effective_shared(leaf_id);
     const bool is1d = tree_kind_is_1d_leaf(n->kind);
     n->cfg.h_text             = is1d ? s.l1d_h_text : s.h_text;

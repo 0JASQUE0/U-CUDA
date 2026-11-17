@@ -112,6 +112,8 @@ std::string tree_state_to_json(const AnalysisTree& t, const std::map<int, std::s
         if (tree_kind_is_context(n.kind) || n.own_integration) {
             o << ",\"cfg\":"; write_shared_config(o, n.cfg);
         }
+        if (n.kind == TreeNodeKind::Slice1D)
+            o << ",\"own_integration\":" << (n.own_integration ? "true" : "false");
         if (!tree_kind_is_context(n.kind)) {
             o << ",\"own_integration\":" << (n.own_integration ? "true" : "false");
             o << ",\"extra_views\":[";
@@ -143,6 +145,7 @@ bool tree_state_from_json(const std::string& json, AnalysisTree& out, std::map<i
                         while (true) {
                             TreeNode n;
                             bool kind_ok = false;
+                            bool own_seen = false;
                             p.expect('{');
                             if (!p.opt('}')) {
                                 while (true) {
@@ -158,7 +161,7 @@ bool tree_state_from_json(const std::string& json, AnalysisTree& out, std::map<i
                                     else if (k == "live")          n.live = p.boolean();
                                     else if (k == "slice_dir")     n.slice_dir = std::stoi(p.str_or_num());
                                     else if (k == "children")      n.children = read_int_array(p);
-                                    else if (k == "own_integration") n.own_integration = p.boolean();
+                                    else if (k == "own_integration") { n.own_integration = p.boolean(); own_seen = true; }
                                     else if (k == "extra_views")   n.extra_views = read_int_array(p);
                                     else if (k == "cfg" || k == "leaf") {
                                         p.ws();
@@ -175,6 +178,9 @@ bool tree_state_from_json(const std::string& json, AnalysisTree& out, std::map<i
                             }
                             // Неизвестный вид узла (файл новее программы) — дерево не грузим целиком.
                             if (!kind_ok) return false;
+                            // Срез из файла до галки Own integration всегда считал своими полями
+                            // 1D integrator — сохраняем это, чтобы старые сессии не пересчитались.
+                            if (n.kind == TreeNodeKind::Slice1D && !own_seen) n.own_integration = true;
                             t.nodes.push_back(std::move(n));
                             if (p.opt(',')) continue;
                             p.expect(']'); break;

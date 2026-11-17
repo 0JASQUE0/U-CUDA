@@ -290,7 +290,7 @@ void draw_1d_leaf(AppModel& model, TreeSession& ts, const TreeNode& n, TreeLeafR
     if (pkind != ParamPlotKind::Bifurcation) {
         draw_style_toolbar("Custom line style", "tree_lyapunov", v.custom_line_style, [&v]() {
             ImGui::SetNextItemWidth(150.0f);
-            bool changed = slider_float_typed("Line width##tree_lyapunov", &v.line_width, 0.5f, 8.0f, "%.1f");
+            bool changed = slider_float_typed("Line width##tree_lyapunov", &v.line_width, 0.5f, 12.0f, "%.1f");
             ImGui::SetNextItemWidth(150.0f);
             changed |= slider_float_typed("Alpha##tree_lyapunov", &v.line_alpha, 0.05f, 1.0f, "%.2f");
             return changed;

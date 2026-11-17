@@ -819,7 +819,7 @@ int g_window_scope = -1;   // вкладка приложения текущег
 bool prefs_default(const PlotWindowPrefs& p) {
     return p.toolbar && p.legend && p.x_label && p.x_ticks && p.y_label && p.y_ticks &&
            p.colorbar && p.axes3d && !p.smooth && !p.swap_axes && !p.invert_x && !p.invert_y &&
-           !p.fit_pane &&
+           !p.fit_pane && p.grid && p.grid_on_top &&
            p.series_colors.empty();
 }
 
@@ -857,6 +857,8 @@ void prefs_read_line(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const ch
     else if (std::sscanf(line, "InvertX=%d", &v) == 1)  p.invert_x = v != 0;
     else if (std::sscanf(line, "InvertY=%d", &v) == 1)  p.invert_y = v != 0;
     else if (std::sscanf(line, "FitPane=%d", &v) == 1)  p.fit_pane = v != 0;
+    else if (std::sscanf(line, "Grid=%d", &v) == 1)     p.grid     = v != 0;
+    else if (std::sscanf(line, "GridTop=%d", &v) == 1)  p.grid_on_top = v != 0;
     else {
         // Color=r,g,b,a,<подпись серии> — подпись последней: в ней могут быть запятые.
         float r, g, b, a;
@@ -872,11 +874,12 @@ void prefs_write_all(ImGuiContext*, ImGuiSettingsHandler*, ImGuiTextBuffer* out)
         if (prefs_default(p)) continue;
         out->appendf("[UcudaPlot][%s]\n", name.c_str());
         out->appendf("Toolbar=%d\nLegend=%d\nXLabel=%d\nXTicks=%d\nYLabel=%d\nYTicks=%d\n"
-                     "Colorbar=%d\nAxes3D=%d\nSmooth=%d\nSwap=%d\nInvertX=%d\nInvertY=%d\nFitPane=%d\n",
+                     "Colorbar=%d\nAxes3D=%d\nSmooth=%d\nSwap=%d\nInvertX=%d\nInvertY=%d\nFitPane=%d\n"
+                     "Grid=%d\nGridTop=%d\n",
                      (int)p.toolbar, (int)p.legend, (int)p.x_label, (int)p.x_ticks,
                      (int)p.y_label, (int)p.y_ticks, (int)p.colorbar, (int)p.axes3d,
                      (int)p.smooth, (int)p.swap_axes, (int)p.invert_x, (int)p.invert_y,
-                     (int)p.fit_pane);
+                     (int)p.fit_pane, (int)p.grid, (int)p.grid_on_top);
         for (const auto& [label, c] : p.series_colors) {
             if (label.find('\n') != std::string::npos) continue;   // строка ini — одна строка
             out->appendf("Color=%.4f,%.4f,%.4f,%.4f,%s\n", c.x, c.y, c.z, c.w, label.c_str());
@@ -1141,6 +1144,16 @@ void plot_show_menu(PlotWindowPrefs& p, unsigned items) {
         prefs_item(p, "X tick labels", &PlotWindowPrefs::x_ticks);
         prefs_item(p, "Y label", &PlotWindowPrefs::y_label);
         prefs_item(p, "Y tick labels", &PlotWindowPrefs::y_ticks);
+        if (items & PlotShowGrid) {
+            prefs_item(p, "Grid", &PlotWindowPrefs::grid);
+            if (!p.grid) ImGui::BeginDisabled();
+            prefs_item(p, "Grid over data", &PlotWindowPrefs::grid_on_top);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("On: grid lines are drawn on top of the curves and points.\n"
+                                  "Off: under them - visible only in empty places and through\n"
+                                  "semi-transparent lines.");
+            if (!p.grid) ImGui::EndDisabled();
+        }
     }
     ImGui::Separator();
     prefs_item(p, "Fit to pane", &PlotWindowPrefs::fit_pane);
@@ -1177,7 +1190,7 @@ float plot_y_axis_margin(const AxisInfo& y, const char* y_name) {
             // Высоты плота здесь нет (марджин нужен до layout'а) — берём с запасом: на высоком
             // плоте подписей больше, а ширину задаёт самая длинная из них.
             for (const LogAxisTick& t : log_axis_ticks(lo, hi, 2000.0f, false))
-                if (t.major) max_w = std::max(max_w, plot_text_size(fmt_tick(t.value).c_str()).x);
+                if (t.major) max_w = std::max(max_w, plot_text_size(fmt_log_tick(t.value).c_str()).x);
         } else if (y.log_scale) {
             // Лог-ось подписывает только границы диапазона — см. draw_axis_y_grid.
             max_w = std::max(plot_text_size(fmt_tick(lo).c_str()).x,
@@ -1189,7 +1202,7 @@ float plot_y_axis_margin(const AxisInfo& y, const char* y_name) {
             // Ограничение сверху — страховка от вырожденного шага: рисуется всё
             // равно не больше десятка тиков, а мерить миллион строк тут нельзя.
             for (int i = 0; i < n && i < 64; ++i)
-                max_w = std::max(max_w, plot_text_size(fmt_tick(ystart + i * sy).c_str()).x);
+                max_w = std::max(max_w, plot_text_size(fmt_tick(ystart + i * sy, sy).c_str()).x);
         }
     }
     return plot_left_margin_for_width(max_w, y_name && *y_name);
@@ -1212,6 +1225,33 @@ std::string fmt_tick(double v) {
     return buf;
 }
 
+// Подпись тика линейной оси с шагом step: «0» — только для тика, лежащего на нуле с
+// точностью до шума start + i*step (|v| < 1e-6 * step). Абсолютный порог fmt_tick
+// (1e-12) обнулял ВСЕ подписи оси, на которой лежат ошибки порядка 1e-13 и меньше.
+std::string fmt_tick(double v, double step) {
+    const double s = std::fabs(step);
+    if (!(s > 0.0) || !std::isfinite(s)) return fmt_tick(v);
+    if (std::fabs(v) < s * 1e-6) return "0";
+    char buf[32];
+    const double a = std::fabs(v);
+    if (a < 1e-3 || a >= 1e5)
+        std::snprintf(buf, sizeof(buf), "%.*e", std::max(1, g_tick_precision - 1), v);
+    else
+        std::snprintf(buf, sizeof(buf), "%.*g", g_tick_precision, v);
+    return buf;
+}
+
+// Подпись тика лог-оси. Отдельно от fmt_tick по двум причинам: порог «|v| < 1e-12 — это 0»
+// нужен линейной оси (гасит шум вроде -1e-17 на месте нуля), а лог-тик — точная степень,
+// и ошибки в double-double лежат на 1e-20..1e-30, где порог превращал все подписи в «0»;
+// значения лог-сетки круглые (1, 2, 3, 5, 7 x 10^k), и хвостовые нули «3.000e-11» им не нужны.
+std::string fmt_log_tick(double v) {
+    char buf[32];
+    if (!(v > 0.0) || !std::isfinite(v)) return fmt_tick(v);
+    std::snprintf(buf, sizeof(buf), "%.*g", g_tick_precision, v);
+    return buf;
+}
+
 double fit_tick_step_x(double step, double lo, double hi, float plot_w) {
     const double range = hi - lo;
     if (!(step > 0.0) || !(range > 0.0) || plot_w <= 1.0f) return step;
@@ -1221,7 +1261,7 @@ double fit_tick_step_x(double step, double lo, double hi, float plot_w) {
         if (n <= 1) return step;   // одна подпись ни на что не наезжает
         float w = 0.0f;
         for (int i = 0; i < n && i < 40; ++i)
-            w = std::max(w, plot_text_size(fmt_tick(v0 + i * step).c_str()).x);
+            w = std::max(w, plot_text_size(fmt_tick(v0 + i * step, step).c_str()).x);
         if ((double)plot_w * step / range >= (double)w + 8.0) return step;
         const double up = nice_step_up(step);
         if (!(up > step)) return step;
@@ -1408,9 +1448,10 @@ void make_ortho_mvp(double xmin, double xmax, double ymin, double ymax, float ou
 void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     ImVec2 pos, float plot_w, float plot_h,
     ImU32 col_grid, ImU32 col_text,
-    double snap_lo, double snap_hi, int snap_n, bool tick_labels)
+    double snap_lo, double snap_hi, int snap_n, bool tick_labels, bool grid_lines)
 {
     if (!tick_labels) col_text = 0;   // прозрачный текст ImDrawList не рисует (см. plot_text)
+    if (!grid_lines)  col_grid = 0;   // так же — линии сетки (и производные от цвета минорные)
     double emin, emax;
     axis_effective(x, emin, emax);
     double vrx = emax - emin;
@@ -1432,7 +1473,7 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
                                pos.x, plot_w);
             fill_col_px(dl, px, pos.y, pos.y + plot_h, t.major ? col_grid : col_minor);
             if (!t.major) continue;
-            std::string lbl = fmt_tick(t.value);
+            std::string lbl = fmt_log_tick(t.value);
             ImVec2 ts = plot_text_size(lbl.c_str());
             plot_text(dl, ImVec2(px_center(px) - ts.x * 0.5f, pos.y + plot_h + 2), col_text, lbl.c_str());
         }
@@ -1445,14 +1486,20 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     // закрывает тултип: он снапится к узлам, включая те, где точек не вышло.
     // Границы свипа по-прежнему подписываются всегда — блок ниже.
     double sx = fit_tick_step_x(nice_step(std::abs(vrx), 8), lo, hi, plot_w);
-    double xstart = std::ceil(lo / sx) * sx;
+    // Допуск у краёв масштабируется шагом подписей: край вида ближе 5% шага к круглому тику
+    // (с любой стороны) — тик подписывается у края. Плюс два шага данных
+    // (AxisInfo::edge_tick_tol) на случай мелкой сетки подписей. Не больше четверти шага —
+    // иначе соседние подписи сошлись бы у края.
+    const double tol = std::max(sx * 1e-6,
+                                std::min(sx * 0.25, std::max(sx * 0.05, x.edge_tick_tol)));
+    double xstart = std::ceil((lo - tol) / sx) * sx;
     // hi-xstart нормируется на sx → floor(...) + 1 даёт ровно столько тиков,
     // сколько помещается в [xstart, hi]. Эпсилон ловит floating-point случаи
     // когда xstart + k*sx должно совпадать с hi, но из-за accumulation lo чуть
     // меньше. Дополнительно: tick рисуем только если он в пределах view (с
     // запасом в полстепа в обе стороны) — это исключает overshoot на правом
     // краю при zoom, когда последний tick визуально выпадает за границу плота.
-    int nx = (int)std::floor((hi - xstart) / sx + 1e-9) + 1;
+    int nx = (int)std::floor((hi + tol - xstart) / sx + 1e-9) + 1;
     if (nx < 0) nx = 0;
 
     // Подпись центрирована по px — её половина уезжает в margin_left/right
@@ -1461,7 +1508,7 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     auto draw_tick = [&](double xv) {
         float px = axis_px(pos.x + (float)((xv - emin) / vrx) * plot_w, pos.x, plot_w);
         fill_col_px(dl, px, pos.y, pos.y + plot_h, col_grid);
-        std::string lbl = fmt_tick(xv);
+        std::string lbl = fmt_tick(xv, sx);
         ImVec2 ts = plot_text_size(lbl.c_str());
         plot_text(dl, ImVec2(px_center(px) - ts.x * 0.5f, pos.y + plot_h + 2), col_text, lbl.c_str());
     };
@@ -1472,7 +1519,7 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     vals.reserve((size_t)(nx > 0 ? nx : 0) + 2);
     for (int ix = 0; ix < nx; ++ix) {
         double xv = xstart + ix * sx;
-        if (xv > hi + sx * 1e-6 || xv < lo - sx * 1e-6) continue;
+        if (xv > hi + tol || xv < lo - tol) continue;
         vals.push_back(xv);
     }
 
@@ -1489,10 +1536,10 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
             vals.push_back(lo);
             if (tick_label_fits(hi, lo, lo, hi, plot_w, true)) vals.push_back(hi);
         } else {
-            if (std::abs(vals.front() - lo) > sx * 1e-6 &&
+            if (std::abs(vals.front() - lo) > tol &&
                 tick_label_fits(lo, vals.front(), lo, hi, plot_w, true))
                 vals.insert(vals.begin(), lo);
-            if (std::abs(vals.back() - hi) > sx * 1e-6 &&
+            if (std::abs(vals.back() - hi) > tol &&
                 tick_label_fits(hi, vals.back(), lo, hi, plot_w, true))
                 vals.push_back(hi);
         }
@@ -1503,9 +1550,10 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
 
 void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     ImVec2 pos, float plot_w, float plot_h,
-    ImU32 col_grid, ImU32 col_text, bool tick_labels)
+    ImU32 col_grid, ImU32 col_text, bool tick_labels, bool grid_lines)
 {
     if (!tick_labels) col_text = 0;   // см. draw_axis_x_grid
+    if (!grid_lines)  col_grid = 0;
     double emin, emax;
     axis_effective(y, emin, emax);
     double vry = emax - emin;
@@ -1525,7 +1573,7 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
                                pos.y, plot_h);
             fill_row_px(dl, py, pos.x, pos.x + plot_w, t.major ? col_grid : col_minor);
             if (!t.major) continue;
-            std::string lbl = fmt_tick(t.value);
+            std::string lbl = fmt_log_tick(t.value);
             ImVec2 ts = plot_text_size(lbl.c_str());
             plot_text(dl, ImVec2(pos.x - ts.x - 4, px_center(py) - ts.y * 0.5f), col_text, lbl.c_str());
         }
@@ -1563,7 +1611,7 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
         // высоте плота, иначе крайние tick'и (на самой границе view) без
         // подписей.
         fill_row_px(dl, py, pos.x, pos.x + plot_w, col_grid);
-        std::string lbl = fmt_tick(yv);
+        std::string lbl = fmt_tick(yv, sy);
         ImVec2 ts = plot_text_size(lbl.c_str());
         plot_text(dl, ImVec2(pos.x - ts.x - 4, px_center(py) - ts.y * 0.5f), col_text, lbl.c_str());
     }

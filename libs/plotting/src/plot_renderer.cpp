@@ -4,6 +4,7 @@
 // объявленные в plot_renderer.h функции.
 #include "ucuda/plotting/colormap_slancm_data.h"
 #include <cstdio>
+#include <cmath>
 #include <algorithm>
 
 // CPU-side colormap (то же сэмплирование, что в шейдере draw_heatmap)
@@ -222,6 +223,250 @@ void main() {
     g_dist =  h; gl_Position = vec4((p1_ndc + off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
     g_dist = -h; gl_Position = vec4((p1_ndc - off_ndc) * p1.w, p1.z, p1.w); EmitVertex();
     EndPrimitive();
+}
+)";
+
+// 2D-вариант толстой линии с круглыми концами (капсула): полоса продлевается на h за оба
+// конца отрезка, а FS считает расстояние до ОТРЕЗКА, а не до его оси. Соседние отрезки
+// GL_LINE_STRIP перекрываются полукругами — это и есть круглый стык: без него на изломах
+// толстой линии видны клиновидные зазубрины. u_round = 0 — прежняя полоса без продления
+// (полупрозрачная линия: перекрытие концов дало бы тёмную точку на каждом стыке).
+static const char* GS_2D_THICK_ROUND = R"(
+#version 330 core
+layout(lines) in;
+layout(triangle_strip, max_vertices = 4) out;
+noperspective out vec2 g_local;   // (вдоль отрезка от p0, поперёк), px
+flat out float g_len;             // длина отрезка, px
+uniform vec2  u_viewport;
+uniform float u_thickness_px;
+uniform int   u_round;
+)" GS_AA_HALF_GLSL R"(
+void main() {
+    vec4 p0 = gl_in[0].gl_Position;
+    vec4 p1 = gl_in[1].gl_Position;
+    if (p0.w <= 0.0 || p1.w <= 0.0) return;
+    vec2 a = (p0.xy / p0.w) * (u_viewport * 0.5);
+    vec2 b = (p1.xy / p1.w) * (u_viewport * 0.5);
+    vec2 d = b - a;
+    float len = length(d);
+    if (len < 1e-6) return;
+    vec2 t = d / len;
+    vec2 n = vec2(-t.y, t.x);
+    float h = aa_half_extent();
+    float e = (u_round != 0) ? h : 0.0;
+    vec2 scale = 1.0 / (u_viewport * 0.5);
+    g_len = len;
+    g_local = vec2(-e,       h); gl_Position = vec4((a - t * e + n * h) * scale, 0.0, 1.0); EmitVertex();
+    g_local = vec2(-e,      -h); gl_Position = vec4((a - t * e - n * h) * scale, 0.0, 1.0); EmitVertex();
+    g_local = vec2(len + e,  h); gl_Position = vec4((b + t * e + n * h) * scale, 0.0, 1.0); EmitVertex();
+    g_local = vec2(len + e, -h); gl_Position = vec4((b + t * e - n * h) * scale, 0.0, 1.0); EmitVertex();
+    EndPrimitive();
+}
+)";
+
+static const char* FS_2D_THICK_ROUND = R"(
+#version 330 core
+uniform vec4  u_color;
+uniform float u_thickness_px;
+uniform int   u_round;
+noperspective in vec2 g_local;
+flat in float g_len;
+out vec4 frag_color;
+void main() {
+    float along = g_local.x;
+    float dist = abs(g_local.y);
+    if (u_round != 0) {
+        if (along < 0.0)        dist = length(g_local);
+        else if (along > g_len) dist = length(vec2(along - g_len, g_local.y));
+    }
+    float w = max(u_thickness_px, 1.0);
+    float cov = clamp(0.5 * w + 0.5 - dist, 0.0, 1.0) * min(u_thickness_px, 1.0);
+    if (cov <= 0.0) discard;
+    frag_color = vec4(u_color.rgb, u_color.a * cov);
+}
+)";
+
+// Ломаная 2D со скруглёнными стыками и «честной» прозрачностью (draw_polyline_2d).
+// Отрезки — капсулы (полоса, продлённая на h за оба конца; FS считает расстояние до ОТРЕЗКА),
+// соседние капсулы перекрываются полукругами — круглый стык. Каждая вершина несёт длину дуги s
+// (px). Перекрытие капсул, близких по дуге (стык, острый излом), — одно покрытие (слой);
+// каждый следующий проход кривой по пикселю дальше по дуге — следующий слой. По слоям j:
+//   1) FS_2D_SMIN    -> R32F, GL_MIN:  s_min_j (дальше s_min_{j-1} + gap1), есть ли слой —
+//                                      по запросу занятости; нет — выход;
+//   2) FS_2D_CLUSTER -> RG8,  GL_MAX:  покрытие слоя (R) и его мягкий хвост gap..gap1 (G);
+//   3) FS_2D_TRANS   -> R16F, *=:      пропускание *= (1 - a R)(1 - a G);
+// и в конце FS_2D_COMPOSE -> плот:    альфа = 1 - пропускание, цвет раз на пиксель.
+static const char* VS_2D_S = R"(
+#version 330 core
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in float a_s;
+uniform mat4 u_mvp;
+out float v_s;
+void main() {
+    gl_Position = u_mvp * vec4(a_pos, 0.0, 1.0);
+    v_s = a_s;
+}
+)";
+
+static const char* GS_2D_CAPS_S = R"(
+#version 330 core
+layout(lines) in;
+layout(triangle_strip, max_vertices = 4) out;
+in float v_s[];
+noperspective out vec2 g_local;   // (вдоль отрезка от p0, поперёк), px
+flat out float g_len;             // длина отрезка, px
+flat out float g_s0;              // длина дуги в p0, px
+uniform vec2  u_viewport;
+uniform float u_thickness_px;
+)" GS_AA_HALF_GLSL R"(
+void main() {
+    vec4 p0 = gl_in[0].gl_Position;
+    vec4 p1 = gl_in[1].gl_Position;
+    vec2 a = (p0.xy / p0.w) * (u_viewport * 0.5);
+    vec2 b = (p1.xy / p1.w) * (u_viewport * 0.5);
+    vec2 d = b - a;
+    float len = length(d);
+    vec2 t = (len > 1e-6) ? d / len : vec2(1.0, 0.0);
+    vec2 n = vec2(-t.y, t.x);
+    float h = aa_half_extent();
+    vec2 scale = 1.0 / (u_viewport * 0.5);
+    g_len = len; g_s0 = v_s[0];
+    g_local = vec2(-h,       h); gl_Position = vec4((a - t * h + n * h) * scale, 0.0, 1.0); EmitVertex();
+    g_len = len; g_s0 = v_s[0];
+    g_local = vec2(-h,      -h); gl_Position = vec4((a - t * h - n * h) * scale, 0.0, 1.0); EmitVertex();
+    g_len = len; g_s0 = v_s[0];
+    g_local = vec2(len + h,  h); gl_Position = vec4((b + t * h + n * h) * scale, 0.0, 1.0); EmitVertex();
+    g_len = len; g_s0 = v_s[0];
+    g_local = vec2(len + h, -h); gl_Position = vec4((b + t * h - n * h) * scale, 0.0, 1.0); EmitVertex();
+    EndPrimitive();
+}
+)";
+
+#define FS_CAPSULE_GLSL R"(
+noperspective in vec2 g_local;
+flat in float g_len;
+flat in float g_s0;
+uniform float u_thickness_px;
+float capsule_cov() {
+    float along = g_local.x;
+    float dist = abs(g_local.y);
+    if (along < 0.0)        dist = length(g_local);
+    else if (along > g_len) dist = length(vec2(along - g_len, g_local.y));
+    float w = max(u_thickness_px, 1.0);
+    return clamp(0.5 * w + 0.5 - dist, 0.0, 1.0) * min(u_thickness_px, 1.0);
+}
+float arc_s() { return g_s0 + clamp(g_local.x, 0.0, g_len); }
+)"
+
+// Слой j: s_min_j — наименьшая длина дуги среди фрагментов дальше s_min_{j-1} + gap1 (первый
+// слой — среди всех). Фрагменты в [s_min_j, s_min_j + gap1] — покрытие слоя j (с мягким
+// переходом gap..gap1 во «второй» канал, см. FS_2D_CLUSTER).
+static const char* FS_2D_SMIN = R"(
+#version 330 core
+uniform sampler2D u_prev;   // s_min предыдущего слоя
+uniform int   u_first;      // 1 — первый слой, u_prev не читается
+uniform float u_gap1;
+out vec4 frag_color;
+)" FS_CAPSULE_GLSL R"(
+void main() {
+    if (capsule_cov() <= 0.0) discard;
+    float s = arc_s();
+    if (u_first == 0 && s <= texelFetch(u_prev, ivec2(gl_FragCoord.xy), 0).r + u_gap1) discard;
+    frag_color = vec4(s, 0.0, 0.0, 1.0);
+}
+)";
+
+static const char* FS_2D_CLUSTER = R"(
+#version 330 core
+uniform sampler2D u_smin;
+uniform float u_gap;    // с этого зазора по дуге начинается второй слой
+uniform float u_gap1;   // с этого он полный
+out vec4 frag_color;
+)" FS_CAPSULE_GLSL R"(
+void main() {
+    float cov = capsule_cov();
+    if (cov <= 0.0) discard;
+    float smin = texelFetch(u_smin, ivec2(gl_FragCoord.xy), 0).r;
+    float ds = arc_s() - smin;
+    // Раньше s_min — фрагмент прежних слоёв, дальше gap1 — следующего.
+    if (ds < 0.0 || ds > u_gap1) discard;
+    // Мягкий порог: вершина плавной волны (ветви расходятся по дуге на 1..2 толщины) почти не
+    // темнеет, длинный узкий пик (ветви идут вместе далеко) темнеет полностью, к острию — плавно.
+    float k = smoothstep(u_gap, u_gap1, ds);
+    frag_color = vec4(cov * (1.0 - k), cov * k, 0.0, 0.0);
+}
+)";
+
+// Пропускание пикселя: умножается на (1 - a R)(1 - a G) каждого слоя (смешивание ZERO, SRC_COLOR).
+static const char* FS_2D_TRANS = R"(
+#version 330 core
+uniform sampler2D u_cov;
+uniform float u_alpha;
+out vec4 frag_color;
+void main() {
+    vec2 c = texelFetch(u_cov, ivec2(gl_FragCoord.xy), 0).rg;
+    float t = (1.0 - u_alpha * c.r) * (1.0 - u_alpha * c.g);
+    frag_color = vec4(t, t, t, t);
+}
+)";
+
+// Хвост дальше последнего разобранного слоя (их не больше kPolylineMaxLayers): каждый фрагмент
+// дальше s_min последнего слоя + gap1 ставит бит своей «корзины» длины дуги (размер u_bucket) в
+// маску пикселя — логическим ИЛИ в RGBA32UI. Сеток две, со сдвигом на полкорзины (RG и BA, по
+// 64 бита): один проход кривой по пикселю (разброс s меньше полукорзины) целиком лежит в одной
+// корзине хотя бы одной сетки, поэтому число проходов — меньшее из двух чисел битов.
+static const char* FS_2D_REM_BITS = R"(
+#version 330 core
+uniform sampler2D u_prev;
+uniform float u_gap1;
+uniform float u_bucket;
+out uvec4 frag_bits;
+)" FS_CAPSULE_GLSL R"(
+void main() {
+    if (capsule_cov() < 0.5 * min(u_thickness_px, 1.0)) discard;   // край — не проход
+    float s = arc_s();
+    if (s <= texelFetch(u_prev, ivec2(gl_FragCoord.xy), 0).r + u_gap1) discard;
+    // Номер корзины перемешивается (мультипликативный хеш, старшие 6 бит): у регулярной кривой
+    // проходы идут с постоянным шагом по дуге, и простой остаток по 64 собирал их в десяток бит.
+    uint ba = uint(floor(s / u_bucket));
+    uint bb = uint(floor(s / u_bucket + 0.5));
+    int ia = int((ba * 2654435761u) >> 26u);
+    int ib = int(((bb ^ 0x5bd1e995u) * 2246822519u) >> 26u);
+    uvec4 m = uvec4(0u);
+    if (ia < 32) m.x = 1u << uint(ia); else m.y = 1u << uint(ia - 32);
+    if (ib < 32) m.z = 1u << uint(ib); else m.w = 1u << uint(ib - 32);
+    frag_bits = m;
+}
+)";
+
+// Пропускание *= (1 - a)^k, k — оценка числа проходов хвоста по маске FS_2D_REM_BITS.
+static const char* FS_2D_REM_TRANS = R"(
+#version 330 core
+uniform usampler2D u_bits;
+uniform float u_alpha;
+out vec4 frag_color;
+int pc(uint v) { int c = 0; for (int i = 0; i < 32; ++i) c += int((v >> uint(i)) & 1u); return c; }
+void main() {
+    uvec4 m = texelFetch(u_bits, ivec2(gl_FragCoord.xy), 0);
+    int c = min(pc(m.x) + pc(m.y), pc(m.z) + pc(m.w));
+    if (c == 0) discard;
+    // Линейный подсчёт: c занятых бит из 64 при случайных совпадениях соответствуют
+    // k = -64 ln(1 - c/64) проходам; полная маска — заведомо больше, чем видно.
+    float k = (c >= 64) ? 400.0 : -64.0 * log(1.0 - float(c) / 64.0);
+    float t = pow(1.0 - u_alpha, k);
+    frag_color = vec4(t, t, t, t);
+}
+)";
+
+static const char* FS_2D_COMPOSE = R"(
+#version 330 core
+uniform sampler2D u_trans;
+uniform vec4 u_color;
+out vec4 frag_color;
+void main() {
+    float a = 1.0 - texelFetch(u_trans, ivec2(gl_FragCoord.xy), 0).r;
+    if (a <= 0.0) discard;
+    frag_color = vec4(u_color.rgb, a);
 }
 )";
 
@@ -607,6 +852,50 @@ PlotRenderer::~PlotRenderer() {
     if (heatmap_vbo_)     glDeleteBuffers(1, &heatmap_vbo_);
     if (lut_tex_)         glDeleteTextures(1, &lut_tex_);
     if (vao_)             glDeleteVertexArrays(1, &vao_);
+    if (quad_vbo_)        glDeleteBuffers(1, &quad_vbo_);
+    if (pl_vbo_)          glDeleteBuffers(1, &pl_vbo_);
+    if (prog_pl_smin_)    glDeleteProgram(prog_pl_smin_);
+    if (prog_pl_cluster_) glDeleteProgram(prog_pl_cluster_);
+    if (prog_pl_compose_) glDeleteProgram(prog_pl_compose_);
+    if (prog_pl_trans_)   glDeleteProgram(prog_pl_trans_);
+    if (prog_pl_rem_bits_)  glDeleteProgram(prog_pl_rem_bits_);
+    if (prog_pl_rem_trans_) glDeleteProgram(prog_pl_rem_trans_);
+    if (pl_queries_[0])   glDeleteQueries(kPolylineMaxLayers, pl_queries_);
+    destroy_polyline_aux();
+}
+
+void PlotRenderer::destroy_polyline_aux() {
+    for (GLuint* f : { &pl_smin_fbo_, &pl_smin2_fbo_, &pl_cov_fbo_, &pl_trans_fbo_, &pl_bits_fbo_ })
+        if (*f) { glDeleteFramebuffers(1, f); *f = 0; }
+    for (GLuint* t : { &pl_smin_tex_, &pl_smin2_tex_, &pl_cov_tex_, &pl_trans_tex_, &pl_bits_tex_ })
+        if (*t) { glDeleteTextures(1, t); *t = 0; }
+    pl_aux_w_ = pl_aux_h_ = 0;
+}
+
+bool PlotRenderer::ensure_polyline_aux(int w, int h) {
+    if (pl_smin_fbo_ && pl_aux_w_ == w && pl_aux_h_ == h) return true;
+    destroy_polyline_aux();
+    auto make = [w, h](GLenum ifmt, GLenum fmt, GLenum type, GLuint& tex, GLuint& fbo) {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, ifmt, w, h, 0, fmt, type, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    };
+    const bool ok = make(GL_R32F, GL_RED, GL_FLOAT, pl_smin_tex_, pl_smin_fbo_)
+                 && make(GL_R32F, GL_RED, GL_FLOAT, pl_smin2_tex_, pl_smin2_fbo_)
+                 && make(GL_RG8, GL_RG, GL_UNSIGNED_BYTE, pl_cov_tex_, pl_cov_fbo_)
+                 && make(GL_R16F, GL_RED, GL_FLOAT, pl_trans_tex_, pl_trans_fbo_)
+                 && make(GL_RGBA32UI, GL_RGBA_INTEGER, GL_UNSIGNED_INT, pl_bits_tex_, pl_bits_fbo_);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    if (!ok) { destroy_polyline_aux(); return false; }
+    pl_aux_w_ = w; pl_aux_h_ = h;
+    return true;
 }
 
 void PlotRenderer::ensure_lut_texture() {
@@ -692,8 +981,56 @@ void PlotRenderer::compile_shaders() {
             loc_zrange_3d_thick_    = glGetUniformLocation(program_3d_thick_, "u_zrange");
         }
     }
-    // 2D-вариант толстой линии: тот же GS (z = 0, w = 1 у 2D-вершин), вход — VS_2D.
-    if (fs_thick && vs2 && gs3t) {
+    // 2D-вариант толстой линии: свой GS/FS с круглыми концами (GS_2D_THICK_ROUND); если они
+    // не собрались — прежний GS_3D_THICK (z = 0, w = 1 у 2D-вершин) без стыков.
+    {
+        GLuint gs_r = compile(GL_GEOMETRY_SHADER, GS_2D_THICK_ROUND);
+        GLuint fs_r = compile(GL_FRAGMENT_SHADER, FS_2D_THICK_ROUND);
+        if (gs_r && fs_r && vs2) {
+            program_2d_thick_ = link_program_3(vs2, gs_r, fs_r);
+            if (program_2d_thick_) {
+                loc_mvp_2d_thick_       = glGetUniformLocation(program_2d_thick_, "u_mvp");
+                loc_color_2d_thick_     = glGetUniformLocation(program_2d_thick_, "u_color");
+                loc_viewport_2d_thick_  = glGetUniformLocation(program_2d_thick_, "u_viewport");
+                loc_thickness_2d_thick_ = glGetUniformLocation(program_2d_thick_, "u_thickness_px");
+                loc_round_2d_thick_     = glGetUniformLocation(program_2d_thick_, "u_round");
+            }
+        }
+        if (gs_r) glDeleteShader(gs_r);
+        if (fs_r) glDeleteShader(fs_r);
+    }
+    {
+        // Ломаная со скруглёнными стыками (draw_polyline_2d): три программы.
+        GLuint vs_s  = compile(GL_VERTEX_SHADER,   VS_2D_S);
+        GLuint gs_c  = compile(GL_GEOMETRY_SHADER, GS_2D_CAPS_S);
+        GLuint fs_mn = compile(GL_FRAGMENT_SHADER, FS_2D_SMIN);
+        GLuint fs_cl = compile(GL_FRAGMENT_SHADER, FS_2D_CLUSTER);
+        GLuint fs_cp = compile(GL_FRAGMENT_SHADER, FS_2D_COMPOSE);
+        GLuint fs_tr = compile(GL_FRAGMENT_SHADER, FS_2D_TRANS);
+        if (vs_s && gs_c && fs_mn && fs_cl && fs_cp && fs_tr && vs2) {
+            prog_pl_smin_    = link_program_3(vs_s, gs_c, fs_mn);
+            prog_pl_cluster_ = link_program_3(vs_s, gs_c, fs_cl);
+            prog_pl_compose_ = link_program(vs2, fs_cp);
+            prog_pl_trans_   = link_program(vs2, fs_tr);
+        }
+        if (!prog_pl_smin_ || !prog_pl_cluster_ || !prog_pl_compose_ || !prog_pl_trans_) {
+            for (GLuint* p : { &prog_pl_smin_, &prog_pl_cluster_, &prog_pl_compose_, &prog_pl_trans_ })
+                if (*p) { glDeleteProgram(*p); *p = 0; }
+        }
+        // Хвост слоёв (FS_2D_REM_*) — необязательный: не собрался — ломаная работает без него.
+        GLuint fs_rb = compile(GL_FRAGMENT_SHADER, FS_2D_REM_BITS);
+        GLuint fs_rt = compile(GL_FRAGMENT_SHADER, FS_2D_REM_TRANS);
+        if (prog_pl_smin_ && fs_rb && fs_rt) {
+            prog_pl_rem_bits_  = link_program_3(vs_s, gs_c, fs_rb);
+            prog_pl_rem_trans_ = link_program(vs2, fs_rt);
+            if (!prog_pl_rem_bits_ || !prog_pl_rem_trans_) {
+                for (GLuint* p : { &prog_pl_rem_bits_, &prog_pl_rem_trans_ })
+                    if (*p) { glDeleteProgram(*p); *p = 0; }
+            }
+        }
+        for (GLuint sh : { vs_s, gs_c, fs_mn, fs_cl, fs_cp, fs_tr, fs_rb, fs_rt }) if (sh) glDeleteShader(sh);
+    }
+    if (!program_2d_thick_ && fs_thick && vs2 && gs3t) {
         program_2d_thick_ = link_program_3(vs2, gs3t, fs_thick);
         if (program_2d_thick_) {
             loc_mvp_2d_thick_       = glGetUniformLocation(program_2d_thick_, "u_mvp");
@@ -910,6 +1247,7 @@ void PlotRenderer::begin_frame(int w, int h, float r, float g, float b, float a,
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
     glViewport(0, 0, w, h);
     glClearColor(r, g, b, a);
+    frame_clear_alpha_ = a;
     if (with_depth) {
         glEnable(GL_DEPTH_TEST);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -944,13 +1282,97 @@ void PlotRenderer::draw_line_thick_2d(GLuint vbo, int point_count, const float m
     if (point_count < 2 || !vbo) return;
     const GLboolean was_blend = glIsEnabled(GL_BLEND);
     glEnable(GL_BLEND);
+
+    auto draw_strip = [&]() {
+        glUseProgram(program_2d_thick_);
+        glUniformMatrix4fv(loc_mvp_2d_thick_, 1, GL_FALSE, mvp);
+        glUniform4fv(loc_color_2d_thick_, 1, color);
+        if (loc_viewport_2d_thick_ >= 0)  glUniform2f(loc_viewport_2d_thick_, (float)fbo_w_, (float)fbo_h_);
+        if (loc_thickness_2d_thick_ >= 0) glUniform1f(loc_thickness_2d_thick_, line_width);
+        if (loc_round_2d_thick_ >= 0)     glUniform1i(loc_round_2d_thick_, 1);
+        glBindVertexArray(vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+        glDrawArrays(GL_LINE_STRIP, 0, point_count);
+        glDisableVertexAttribArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+        glUseProgram(0);
+    };
+
+    // Линия — ОБЪЕДИНЕНИЕ отрезков-капсул (GS_2D_THICK_ROUND): соседние отрезки перекрываются
+    // на стыках, а плотная кривая — ещё и десятками субпиксельных отрезков на пиксель. Обычное
+    // смешивание накладывало бы полупрозрачный цвет в перекрытиях повторно (тёмные «крестики»
+    // на стыках, шершавый край). Поэтому альфа-канал FBO служит черновиком покрытия:
+    //   1) альфа := 0;  2) альфа := max(альфа, alpha * покрытие) по всем отрезкам (GL_MAX);
+    //   3) цвет кладётся ОДИН раз на пиксель полноэкранным прямоугольником с весом этой альфы;
+    //   4) альфа возвращается к альфе фона кадра (её у плота и держат постоянной).
+    if (loc_round_2d_thick_ >= 0 && program_2d_) {
+        if (!quad_vbo_) {
+            const float q[8] = { -1.f, -1.f, 1.f, -1.f, -1.f, 1.f, 1.f, 1.f };
+            glGenBuffers(1, &quad_vbo_);
+            glBindBuffer(GL_ARRAY_BUFFER, quad_vbo_);
+            glBufferData(GL_ARRAY_BUFFER, sizeof(q), q, GL_STATIC_DRAW);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+        }
+        GLfloat saved_clear[4];
+        glGetFloatv(GL_COLOR_CLEAR_VALUE, saved_clear);
+
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+        glClearColor(0.f, 0.f, 0.f, 0.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        glBlendEquation(GL_MAX);
+        draw_strip();
+        glBlendEquation(GL_FUNC_ADD);
+
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE);
+        glBlendFunc(GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA);
+        static const float kIdentity[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+        const float opaque[4] = { color[0], color[1], color[2], 1.0f };
+        glUseProgram(program_2d_);
+        glUniformMatrix4fv(loc_mvp_2d_, 1, GL_FALSE, kIdentity);
+        glUniform4fv(loc_color_2d_, 1, opaque);
+        glBindVertexArray(vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, quad_vbo_);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glDisableVertexAttribArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+        glUseProgram(0);
+
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+        glClearColor(0.f, 0.f, 0.f, frame_clear_alpha_);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glClearColor(saved_clear[0], saved_clear[1], saved_clear[2], saved_clear[3]);
+    } else {
+        // Запасная программа (GS_3D_THICK): прежнее смешивание поверх.
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        draw_strip();
+    }
     // Альфа FBO держим на 1, как у draw_points (иначе полупрозрачная линия «продырявит» текстуру).
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    if (!was_blend) glDisable(GL_BLEND);
+}
+
+bool PlotRenderer::draw_line_capsules_2d(GLuint vbo, int point_count, const float mvp[16],
+    const float color[4], float line_width) {
+    if (!program_2d_thick_ || loc_round_2d_thick_ < 0) return false;   // нет программы капсул
+    if (point_count < 2 || !vbo) return true;
+    const GLboolean was_blend = glIsEnabled(GL_BLEND);
+    glEnable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
     glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(program_2d_thick_);
     glUniformMatrix4fv(loc_mvp_2d_thick_, 1, GL_FALSE, mvp);
     glUniform4fv(loc_color_2d_thick_, 1, color);
     if (loc_viewport_2d_thick_ >= 0)  glUniform2f(loc_viewport_2d_thick_, (float)fbo_w_, (float)fbo_h_);
     if (loc_thickness_2d_thick_ >= 0) glUniform1f(loc_thickness_2d_thick_, line_width);
+    glUniform1i(loc_round_2d_thick_, 1);
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glEnableVertexAttribArray(0);
@@ -961,6 +1383,208 @@ void PlotRenderer::draw_line_thick_2d(GLuint vbo, int point_count, const float m
     glBindVertexArray(0);
     glUseProgram(0);
     if (!was_blend) glDisable(GL_BLEND);
+    return true;
+}
+
+bool PlotRenderer::draw_polyline_2d(const std::vector<float>& xys, const std::vector<int>& first,
+    const std::vector<int>& count, const float mvp[16], const float color[4], float line_width) {
+    if (!prog_pl_smin_ || !prog_pl_cluster_ || !prog_pl_compose_ || !prog_pl_trans_) return false;
+    if (first.empty() || xys.size() < 6) return true;   // ни одного отрезка — рисовать нечего
+    if (!ensure_polyline_aux(fbo_w_, fbo_h_)) return false;
+    if (!pl_queries_[0]) glGenQueries(kPolylineMaxLayers, pl_queries_);
+
+    GLfloat saved_clear[4];
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, saved_clear);
+    const GLboolean was_blend = glIsEnabled(GL_BLEND);
+
+    if (!pl_vbo_) glGenBuffers(1, &pl_vbo_);
+    if (!quad_vbo_) {
+        const float q[8] = { -1.f, -1.f, 1.f, -1.f, -1.f, 1.f, 1.f, 1.f };
+        glGenBuffers(1, &quad_vbo_);
+        glBindBuffer(GL_ARRAY_BUFFER, quad_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(q), q, GL_STATIC_DRAW);
+    }
+    glBindVertexArray(vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, pl_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(xys.size() * sizeof(float)), xys.data(), GL_STREAM_DRAW);
+    const GLsizei n_strips = (GLsizei)std::min(first.size(), count.size());
+    static const float kIdentity[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+
+    // Зазор по дуге, за которым перекрытие — следующий слой. На прямом участке отрезки,
+    // накрывающие один пиксель, расходятся по дуге не дальше скруглённого конца (полутолщина
+    // + 1 px), на изгибе радиусом от толщины — примерно на 0.65 толщины. От gap до gap1
+    // следующий слой нарастает плавно (FS_2D_CLUSTER).
+    const float w    = std::max(line_width, 1.0f);
+    const float gap  = w + 2.0f;
+    const float gap1 = 2.0f * w + 2.0f;
+    // Слоёв — сколько ещё видно при этой альфе: после k слоёв пропускание (1 - a)^k, и ниже
+    // 1/255 следующие слои пиксель уже не меняют (a = 0.3 -> 16), но не больше 20: каждый слой —
+    // два прохода геометрии, а 100 слоёв при малой альфе заметно тормозили зум. Непрозрачной
+    // линии хватает одного. Реальное число слоёв в кадре обычно меньше — см. ранний выход ниже.
+    // Непрозрачность линии — альфа цвета на покрытие: линия тоньше пикселя кроет его на свою
+    // толщину (capsule_cov), и даже при альфе 1 её витки обязаны копиться слоями. Сверх
+    // kPolylineMaxLayers слоёв — хвост одним проходом по маске корзин (FS_2D_REM_*).
+    const float a = std::clamp(color[3], 0.0f, 1.0f);
+    const float a_eff = a * std::min(std::max(line_width, 0.0f), 1.0f);
+    int needed = 1;
+    if (a_eff < 0.999f && a_eff > 0.0f)
+        needed = std::max(1, (int)std::ceil(std::log(1.0 / 255.0) / std::log(1.0 - a_eff)));
+    const int  max_layers = std::min(needed, kPolylineMaxLayers);
+    // Хвост — всегда, а не только когда слоёв не хватило: слой строится вокруг самого раннего
+    // по дуге прохода через пиксель, а им часто бывает край линии, лишь задевший пиксель. Без
+    // хвоста при малом числе слоёв (высокая альфа) поздние проходы, кроющие пиксель целиком,
+    // не учитывались бы вовсе, и плотная линия выходила почти пустой.
+    const bool want_tail  = prog_pl_rem_bits_ && prog_pl_rem_trans_;
+    bool loop_broke = false;
+
+    auto bind_line_attribs = [&]() {
+        glBindBuffer(GL_ARRAY_BUFFER, pl_vbo_);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)(2 * sizeof(float)));
+    };
+    auto bind_quad_attribs = [&]() {
+        glDisableVertexAttribArray(1);
+        glBindBuffer(GL_ARRAY_BUFFER, quad_vbo_);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    };
+    auto use_line_prog = [&](GLuint prog) {
+        glUseProgram(prog);
+        glUniformMatrix4fv(glGetUniformLocation(prog, "u_mvp"), 1, GL_FALSE, mvp);
+        glUniform2f(glGetUniformLocation(prog, "u_viewport"), (float)fbo_w_, (float)fbo_h_);
+        glUniform1f(glGetUniformLocation(prog, "u_thickness_px"), line_width);
+    };
+    auto use_quad_prog = [&](GLuint prog) {
+        glUseProgram(prog);
+        glUniformMatrix4fv(glGetUniformLocation(prog, "u_mvp"), 1, GL_FALSE, kIdentity);
+    };
+
+    glEnable(GL_BLEND);
+    glActiveTexture(GL_TEXTURE0);
+
+    // Пропускание := 1.
+    glBindFramebuffer(GL_FRAMEBUFFER, pl_trans_fbo_);
+    glClearColor(1.f, 1.f, 1.f, 1.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    GLuint smin_cur_fbo = pl_smin_fbo_,  smin_cur_tex = pl_smin_tex_;
+    GLuint smin_prv_fbo = pl_smin2_fbo_, smin_prv_tex = pl_smin2_tex_;
+    for (int layer = 0; layer < max_layers; ++layer) {
+        // Ранний выход без остановки процессора: запрос слоя двумя раньше к этому времени обычно
+        // уже готов. Пуст он — пусты и все дальнейшие, и гнать по ним геометрию незачем.
+        if (layer >= 3) {
+            GLuint ready = 0;
+            glGetQueryObjectuiv(pl_queries_[layer - 2], GL_QUERY_RESULT_AVAILABLE, &ready);
+            if (ready) {
+                GLuint any = 1;
+                glGetQueryObjectuiv(pl_queries_[layer - 2], GL_QUERY_RESULT, &any);
+                if (!any) { loop_broke = true; break; }
+            }
+        }
+        // 1) s_min слоя; запрос занятости — есть ли он вообще.
+        glBindFramebuffer(GL_FRAMEBUFFER, smin_cur_fbo);
+        glClearColor(3.0e38f, 0.f, 0.f, 0.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBlendEquation(GL_MIN);
+        bind_line_attribs();
+        use_line_prog(prog_pl_smin_);
+        glBindTexture(GL_TEXTURE_2D, smin_prv_tex);
+        glUniform1i(glGetUniformLocation(prog_pl_smin_, "u_prev"), 0);
+        glUniform1i(glGetUniformLocation(prog_pl_smin_, "u_first"), layer == 0 ? 1 : 0);
+        glUniform1f(glGetUniformLocation(prog_pl_smin_, "u_gap1"), gap1);
+        // Слоя нет (ни один фрагмент не прошёл) — проходы 2 и 3 пропускает сама видеокарта
+        // (условная отрисовка): процессор не ждёт результата запроса. Следующие слои тогда
+        // тоже пусты — их s_min-проход отбросит всё по бесконечному s_min пустого слоя.
+        const bool cond = layer > 0;
+        if (cond) glBeginQuery(GL_ANY_SAMPLES_PASSED, pl_queries_[layer]);
+        glMultiDrawArrays(GL_LINE_STRIP, first.data(), count.data(), n_strips);
+        if (cond) {
+            glEndQuery(GL_ANY_SAMPLES_PASSED);
+            glBeginConditionalRender(pl_queries_[layer], GL_QUERY_WAIT);
+        }
+
+        // 2) покрытие слоя (R) и его мягкого хвоста (G), максимум внутри слоя.
+        glBindFramebuffer(GL_FRAMEBUFFER, pl_cov_fbo_);
+        glClearColor(0.f, 0.f, 0.f, 0.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBlendEquation(GL_MAX);
+        use_line_prog(prog_pl_cluster_);
+        glBindTexture(GL_TEXTURE_2D, smin_cur_tex);
+        glUniform1i(glGetUniformLocation(prog_pl_cluster_, "u_smin"), 0);
+        glUniform1f(glGetUniformLocation(prog_pl_cluster_, "u_gap"), gap);
+        glUniform1f(glGetUniformLocation(prog_pl_cluster_, "u_gap1"), gap1);
+        glMultiDrawArrays(GL_LINE_STRIP, first.data(), count.data(), n_strips);
+
+        // 3) пропускание *= (1 - a R)(1 - a G).
+        glBindFramebuffer(GL_FRAMEBUFFER, pl_trans_fbo_);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendFunc(GL_ZERO, GL_SRC_COLOR);
+        bind_quad_attribs();
+        use_quad_prog(prog_pl_trans_);
+        glBindTexture(GL_TEXTURE_2D, pl_cov_tex_);
+        glUniform1i(glGetUniformLocation(prog_pl_trans_, "u_cov"), 0);
+        glUniform1f(glGetUniformLocation(prog_pl_trans_, "u_alpha"), a);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        if (cond) glEndConditionalRender();
+
+        std::swap(smin_cur_fbo, smin_prv_fbo);
+        std::swap(smin_cur_tex, smin_prv_tex);
+    }
+
+    // Хвост дальше последнего слоя: маска корзин (логическое ИЛИ, без смешивания) и
+    // пропускание *= (1 - a_eff)^k. s_min последнего слоя после swap — в smin_prv_tex.
+    if (want_tail && !loop_broke) {
+        glBindFramebuffer(GL_FRAMEBUFFER, pl_bits_fbo_);
+        const GLuint zeros[4] = { 0, 0, 0, 0 };
+        glClearBufferuiv(GL_COLOR, 0, zeros);
+        glDisable(GL_BLEND);
+        glEnable(GL_COLOR_LOGIC_OP);
+        glLogicOp(GL_OR);
+        bind_line_attribs();
+        use_line_prog(prog_pl_rem_bits_);
+        glBindTexture(GL_TEXTURE_2D, smin_prv_tex);
+        glUniform1i(glGetUniformLocation(prog_pl_rem_bits_, "u_prev"), 0);
+        glUniform1f(glGetUniformLocation(prog_pl_rem_bits_, "u_gap1"), gap1);
+        // Корзина — две ширины зазора: проход кривой по пикселю (разброс s до ~толщины) короче
+        // полукорзины и в одной из двух сеток не делится.
+        glUniform1f(glGetUniformLocation(prog_pl_rem_bits_, "u_bucket"), 2.0f * gap);
+        glMultiDrawArrays(GL_LINE_STRIP, first.data(), count.data(), n_strips);
+        glDisable(GL_COLOR_LOGIC_OP);
+        glEnable(GL_BLEND);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, pl_trans_fbo_);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendFunc(GL_ZERO, GL_SRC_COLOR);
+        bind_quad_attribs();
+        use_quad_prog(prog_pl_rem_trans_);
+        glBindTexture(GL_TEXTURE_2D, pl_bits_tex_);
+        glUniform1i(glGetUniformLocation(prog_pl_rem_trans_, "u_bits"), 0);
+        glUniform1f(glGetUniformLocation(prog_pl_rem_trans_, "u_alpha"), a_eff);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+
+    // Цвет на плот — раз на пиксель, альфа = 1 - пропускание.
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    bind_quad_attribs();
+    use_quad_prog(prog_pl_compose_);
+    glBindTexture(GL_TEXTURE_2D, pl_trans_tex_);
+    glUniform1i(glGetUniformLocation(prog_pl_compose_, "u_trans"), 0);
+    glUniform4fv(glGetUniformLocation(prog_pl_compose_, "u_color"), 1, color);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    glDisableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glUseProgram(0);
+    glClearColor(saved_clear[0], saved_clear[1], saved_clear[2], saved_clear[3]);
+    if (!was_blend) glDisable(GL_BLEND);
+    return true;
 }
 
 void PlotRenderer::draw_points(GLuint vbo, int point_count, const float mvp[16],

@@ -5,7 +5,8 @@
 //    все листья, правка значения свипуемого параметра — ничего;
 //  - cursor_leaves отбирает живые следующие за курсором листья;
 //  - duplicate / remove / move и очередь AppModel (без повторов, удалённые узлы уходят);
-//  - круг JSON -> дерево -> JSON, битый и чужой файл не трогают сессию.
+//  - круг JSON -> дерево -> JSON, битый и чужой файл не трогают сессию;
+//  - 1D-интегратор среза наследуется от System, Own integration и старые файлы.
 #include "ucuda/application/app_model.h"
 #include "ucuda/application/session_persistence.h"
 #include "ucuda/domain/num_parse.h"
@@ -228,6 +229,41 @@ void json_round_trip() {
     require(session_to_json_tree(b) == before, "failed load keeps the session");
 }
 
+// 1D-интегратор среза: по умолчанию — System, галка Own integration — свои поля;
+// старый файл без ключа грузится со своими полями (счёт старых сессий не меняется).
+void slice_integrator_inherits() {
+    TreeSession ts;
+    ts.load_from_record(make_record(), kVars, kParams);
+    const int sx = find_kind(ts, TreeNodeKind::Slice1D, 0);
+    const int bif1d = ts.tree.find(sx)->children.front();
+    require(!ts.tree.find(sx)->own_integration, "new slice inherits the integrator");
+    ts.tree.nodes.front().cfg.transient_text = "1700";
+    ts.tree.find(sx)->cfg.l1d_transient_text = "100";
+    require(ts.effective_shared(bif1d).l1d_transient_text == "1700", "slice inherits System transient");
+
+    ts.enable_own_integration(sx);
+    require(ts.tree.find(sx)->own_integration, "slice own integration on");
+    require(ts.tree.find(sx)->cfg.l1d_transient_text == "1700", "own integrator starts from inherited values");
+    ts.tree.find(sx)->cfg.l1d_transient_text = "100";
+    require(ts.effective_shared(bif1d).l1d_transient_text == "100", "own slice integrator is used");
+
+    const std::string j = session_to_json_tree(ts);
+    TreeSession b;
+    b.load_from_record(make_record(), kVars, kParams);
+    require(session_from_json_tree(j, b) && b.tree.find(sx)->own_integration, "slice own integration restored");
+
+    ts.tree.find(sx)->own_integration = false;
+    std::string legacy = session_to_json_tree(ts);
+    const size_t at = legacy.find(",\"own_integration\":false", legacy.find("\"slice1d\""));
+    require(at != std::string::npos, "slice writes own_integration");
+    legacy.erase(at, std::string(",\"own_integration\":false").size());
+    TreeSession c;
+    c.load_from_record(make_record(), kVars, kParams);
+    require(session_from_json_tree(legacy, c), "legacy tree JSON parses");
+    require(c.tree.find(sx)->own_integration, "legacy slice keeps its own integrator");
+    require(c.effective_shared(bif1d).l1d_transient_text == "100", "legacy slice keeps its values");
+}
+
 } // namespace
 
 int main() {
@@ -236,6 +272,7 @@ int main() {
         signatures_follow_the_cursor();
         structure_and_queue();
         json_round_trip();
+        slice_integrator_inherits();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FAIL: %s\n", e.what());
         return 1;

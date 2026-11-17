@@ -30,6 +30,7 @@ struct FastSyncResult;
 struct OrderResult;
 struct PerfResult;
 struct StabilityResult;
+struct ErrTimeResult;
 // AnalysisResult is defined in analysis_session.h.
 struct AnalysisResult;
 
@@ -197,6 +198,12 @@ bool export_order(const OrderResult& res, const OrderSnapshot& snap, const std::
 // (см. PerfRequest). Узел, на котором замера не было, оставляет ячейки времени
 // пустыми, а не нулями.
 bool export_perf(const PerfResult& res, const OrderSnapshot& snap, const std::string& path);
+
+// Error(t): <path> — по строке на точку графика, "t,E[,E_richardson],d_<var>...".
+// Точка — максимум по своей корзине узлов (ErrTimeResult::stride); итоговые max
+// и RMS по всем узлам, референс и норма — в _config.csv. ref_scheme снимка —
+// схема референса, когда он не h/2.
+bool export_errt(const ErrTimeResult& res, const OrderSnapshot& snap, const std::string& path);
 
 // Stability: <path> — по строке на ячейку в row-major порядке сетки,
 //   "sigma,omega,rho,stable,status".

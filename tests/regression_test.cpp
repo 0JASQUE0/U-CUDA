@@ -197,6 +197,73 @@ TEST(SerializationCpu, LegacyFixturesPreserveValuesAndNewNewtonOptionsRoundTrip)
     NetworkSession netLoaded; ASSERT_TRUE(session_from_json_network(net, netLoaded));
     EXPECT_EQ(session_to_json_network(netLoaded), net);
 }
+// Error(t) вкладки Order: RK4 на Лоренце (t_max = 1, до развития хаоса).
+// При h -> h/2 ошибка против h/2 должна падать в 2^4 = 16 раз, против DOP853 — тоже;
+// оценка Ричардсона по h/2 обязана совпасть с ошибкой против DOP853.
+ErrTimeRequest lorenz_errt(double h, bool half) {
+    System sys; sys.vars = {"x", "y", "z"}; sys.params = {"sigma", "r", "b"};
+    sys.rhs = {"sigma*(y-x)", "x*(r-z)-y", "x*y-b*z"};
+    ErrTimeRequest req;
+    req.krs_body = codegen_scheme(sys, Scheme::RK4);
+    req.amountOfX = 3;
+    req.initial_conditions = {1.0, 1.0, 1.0};
+    req.values.assign(4 + kSchemeTailSlots, 0.0);
+    req.values[0] = .5; req.values[1] = 10; req.values[2] = 28; req.values[3] = 8.0 / 3.0;
+    scheme_fill_tail(req.values.data() + 4, "4", NewtonSettings{});
+    req.h = h; req.t_max = 1.0;
+    req.ref_is_half = half;
+    req.ref_substeps = half ? 2 : 4;
+    if (!half) req.ref_krs_body = codegen_scheme(sys, Scheme::DOP853);
+    req.order_p = 4;
+    req.max_points = 64;
+    return req;
+}
+TEST(ErrTimeCpu, Rk4LorenzConvergesWithFourthOrderAgainstHalfStepAndDop853) {
+    std::vector<double> half, ref;
+    for (double h : {0.01, 0.005, 0.0025}) {
+        const ErrTimeResult a = run_order_error_time(lorenz_errt(h, true));
+        ASSERT_TRUE(a.ok) << a.error;
+        const ErrTimeResult b = run_order_error_time(lorenz_errt(h, false));
+        ASSERT_TRUE(b.ok) << b.error;
+        EXPECT_FALSE(a.diverged); EXPECT_FALSE(b.diverged);
+        EXPECT_EQ(a.n_steps, (long long)std::llround(1.0 / h));
+        EXPECT_LE(a.t.size(), 64u + 1u); EXPECT_DOUBLE_EQ(a.t.back(), 1.0);
+        ASSERT_EQ(a.e_var.size(), 3u); ASSERT_EQ(a.e_rich.size(), a.t.size());
+        EXPECT_GE(a.max_norm, a.rms_norm);
+        // Ричардсон по h/2 — оценка той же ошибки, что даёт эталон DOP853.
+        EXPECT_NEAR(a.max_rich / b.max_norm, 1.0, 0.1) << "h = " << h;
+        half.push_back(a.max_norm); ref.push_back(b.max_norm);
+    }
+    for (size_t i = 1; i < half.size(); ++i) {
+        EXPECT_GT(half[i - 1] / half[i], 14.0); EXPECT_LT(half[i - 1] / half[i], 18.0);
+        EXPECT_GT(ref[i - 1] / ref[i], 14.0);  EXPECT_LT(ref[i - 1] / ref[i], 18.0);
+    }
+}
+TEST(SerializationCpu, OrderErrTimeFieldsRoundTripAndLegacyDefaults) {
+    const auto root = std::filesystem::path(UCUDA_TEST_SOURCE) / "tests/fixtures/library/Dahlquist 2D/sessions";
+    std::ifstream in(root / "_last_order.json"); ASSERT_TRUE(in.good());
+    const std::string legacy((std::istreambuf_iterator<char>(in)), {});
+    OrderAnalysisSession order; ASSERT_TRUE(session_from_json_order(legacy, order));
+    ASSERT_EQ(order.configs.size(), 1u);
+    const OrderConfig def;
+    EXPECT_EQ(order.configs[0].errt_ref, def.errt_ref);
+    EXPECT_EQ(order.configs[0].errt_ref_scheme, def.errt_ref_scheme);
+    EXPECT_EQ(order.configs[0].errt_norm, def.errt_norm);
+    OrderConfig& c = order.configs[0];
+    c.calc_kind = kOrderCalcErrT; c.errt_ref = kErrTimeRefScheme; c.errt_ref_scheme = "DOPRI78";
+    c.errt_ref_substeps_text = "8"; c.errt_order_text = "4"; c.errt_norm = kErrTimeNormL2;
+    const auto saved = session_to_json_order(order);
+    OrderAnalysisSession loaded; ASSERT_TRUE(session_from_json_order(saved, loaded));
+    const OrderConfig& l = loaded.configs[0];
+    EXPECT_EQ(l.calc_kind, kOrderCalcErrT); EXPECT_EQ(l.errt_ref, kErrTimeRefScheme);
+    EXPECT_EQ(l.errt_ref_scheme, "DOPRI78"); EXPECT_EQ(l.errt_ref_substeps_text, "8");
+    EXPECT_EQ(l.errt_order_text, "4"); EXPECT_EQ(l.errt_norm, kErrTimeNormL2);
+    EXPECT_EQ(session_to_json_order(loaded), saved);
+    std::vector<OrderPlotWindow> wins(1); wins[0].kind = OrderPlotWindow::Kind::ErrT; wins[0].errt_show_vars = true;
+    std::vector<OrderPlotWindow> wl;
+    ASSERT_TRUE(session_from_json_order_windows(session_to_json_order_windows(wins), wl));
+    ASSERT_EQ(wl.size(), 1u); EXPECT_EQ(wl[0].kind, OrderPlotWindow::Kind::ErrT); EXPECT_TRUE(wl[0].errt_show_vars);
+}
 void cancelled_sweep_recovers(bool gpu) {
     System sys; sys.vars = {"x", "y"}; sys.params = {"p"}; sys.rhs = {"-p*x", "-2*p*y"};
     ParametricEngine engine;

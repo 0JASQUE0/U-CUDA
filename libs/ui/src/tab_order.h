@@ -80,6 +80,11 @@ void draw_order_map_window(AppModel& model, OrderPlotWindow& win,
                                   PlotRenderer& renderer, HeatmapView& hv) ;
 
 
+void draw_order_errt_window(AppModel& model, OrderPlotWindow& win,
+                            const GuiCallbacks& cb,
+                            PlotRenderer& renderer, Plot2DView& view);
+
+
 void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                                     const GuiCallbacks& cb,
                                     PlotRenderer& renderer, Plot2DView& view) ;

@@ -317,6 +317,17 @@ public:
 
 private:
     GpuLineSeriesSet series_cache_;
+    // Ломаная серии для PlotRenderer::draw_polyline_2d: тройки (x, y, s) — точки, прорежённые в
+    // экранных координатах (ближе 0.75 px к предыдущей оставленной — пропуск), в координатах VBO,
+    // s — длина дуги в px; first/count — куски между нечисловыми точками. Пересчёт — только при
+    // смене данных, вида или размера.
+    struct LineIdxCache {
+        unsigned long long key = 0;
+        bool built = false;
+        std::vector<float> xys;
+        std::vector<int> first, count;
+    };
+    std::vector<LineIdxCache> line_idx_cache_;
     // Начало координат, в котором залит series_cache_ (см. gpu_line_series.h).
     // Выбирается при перезаливке по центру данных и живёт ровно столько же: матрица
     // проекции обязана строиться в ТОМ ЖЕ начале, иначе серия уедет относительно осей.

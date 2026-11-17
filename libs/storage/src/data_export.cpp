@@ -1205,6 +1205,53 @@ bool export_stability(const StabilityResult& res, const OrderSnapshot& snap,
     return true;
 }
 
+bool export_errt(const ErrTimeResult& res, const OrderSnapshot& snap, const std::string& path)
+{
+    std::ofstream cfg(path + "_config.csv");
+    if (!cfg.is_open()) return false;
+    OrderSnapshot s = snap;
+    s.use_gpu = false;                 // Error(t) считается только на CPU
+    s.axis_x_name = "t";
+    s.axis_y_name.clear();
+    write_order_config(cfg, s, /*perf*/ false);
+    cfg << "calculation = error in time, ||x_h(t) - x_ref(t)|| at t_k = k*h\n";
+    if (res.ref_is_half)
+        cfg << "reference = the same scheme, h/2\n";
+    else
+        cfg << "reference = " << snap.ref_scheme << ", " << res.ref_substeps << " substep(s) per tested step\n";
+    cfg << "norm = " << (res.norm == kErrTimeNormL2 ? "L2 (Euclidean)" : "L-inf (max over variables)") << "\n";
+    cfg << "h_eff = " << res.h_eff << "\n";
+    cfg << "nodes = " << res.n_steps << ", nodes per row = " << res.stride
+        << " (rows hold the maximum over their nodes)\n";
+    cfg << "max error = " << res.max_norm << " at t = " << res.t_at_max << "\n";
+    cfg << "RMS error = " << res.rms_norm << "\n";
+    if (!res.e_rich.empty())
+        cfg << "Richardson, p = " << res.order_p << ": max = " << res.max_rich
+            << ", RMS = " << res.rms_rich << " (|x_h - x_h/2| * 2^p / (2^p - 1))\n";
+    for (size_t i = 0; i < res.max_var.size(); ++i)
+        cfg << "variable " << (i < snap.var_names.size() ? snap.var_names[i] : std::to_string(i))
+            << ": max = " << res.max_var[i]
+            << ", RMS = " << (i < res.rms_var.size() ? res.rms_var[i] : 0.0) << "\n";
+    if (res.diverged) cfg << "diverged: the data end at t = " << res.t_end << "\n";
+    cfg.close();
+
+    std::ofstream out(path);
+    if (!out.is_open()) return false;
+    out << std::setprecision(set_precision);
+    out << "t,E";
+    if (!res.e_rich.empty()) out << ",E_richardson";
+    for (size_t i = 0; i < res.e_var.size(); ++i)
+        out << ",d_" << (i < snap.var_names.size() ? snap.var_names[i] : std::to_string(i));
+    out << "\n";
+    for (size_t k = 0; k < res.t.size(); ++k) {
+        out << res.t[k] << "," << (k < res.e_norm.size() ? res.e_norm[k] : 0.0);
+        if (!res.e_rich.empty()) out << "," << (k < res.e_rich.size() ? res.e_rich[k] : 0.0);
+        for (const auto& v : res.e_var) out << "," << (k < v.size() ? v[k] : 0.0);
+        out << "\n";
+    }
+    return true;
+}
+
 bool export_perf(const PerfResult& res, const OrderSnapshot& snap, const std::string& path)
 {
     std::ofstream cfg(path + "_config.csv");

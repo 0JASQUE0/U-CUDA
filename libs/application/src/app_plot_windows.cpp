@@ -216,10 +216,11 @@ void AppModel::load_or_init_order_plot_windows(const std::string& json) {
     next_order_plot_window_id = 1;
     // Дефолт — одно окно с кривой p, в котором лежат все сеточные конфиги:
     // именно так вкладка и выглядела до появления окон.
-    std::vector<int> curves, maps, perfs;
+    std::vector<int> curves, maps, perfs, errts;
     for (size_t i = 0; i < order_session.configs.size(); ++i) {
         const OrderConfig& c = order_session.configs[i];
         if (c.calc_kind == kOrderCalcPerf)      perfs.push_back((int)i);
+        else if (c.calc_kind == kOrderCalcErrT) errts.push_back((int)i);
         // Область устойчивости — всегда карта, своего вида окна у неё нет:
         // в окне Map лежит ровно один член, что хитмапе и нужно.
         else if (c.calc_kind == kOrderCalcStab) maps.push_back((int)i);
@@ -228,6 +229,7 @@ void AppModel::load_or_init_order_plot_windows(const std::string& json) {
     }
     if (!curves.empty()) add_order_plot_window(OrderPlotWindow::Kind::P, curves);
     if (!perfs.empty())  add_order_plot_window(OrderPlotWindow::Kind::Perf, perfs);
+    if (!errts.empty())  add_order_plot_window(OrderPlotWindow::Kind::ErrT, errts);
     for (int m : maps)   add_order_plot_window(OrderPlotWindow::Kind::Map, { m });
     if (order_plot_windows.empty())
         add_order_plot_window(OrderPlotWindow::Kind::P, {});

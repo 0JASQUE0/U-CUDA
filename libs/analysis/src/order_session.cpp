@@ -1,6 +1,7 @@
 ﻿#include "ucuda/analysis/order_session.h"
 #include "ucuda/domain/num_parse.h"
 #include "ucuda/cuda/parametric_engine.h"
+#include "ucuda/equations/codegen.hpp"   // builtin_scheme_traits — паспортный порядок для Ричардсона
 #include "ucuda/numerics/krs_cpu.h"      // CPU-ветка считает шаг тем же телом КРС, что уходит в NVRTC
 #include "ucuda/cuda/phase_portrait_nvrtc.h"   // computeAdaptiveEndpointNVRTC — замер адаптивного шага
 #include <algorithm>
@@ -333,6 +334,10 @@ void OrderAnalysisSession::add_config() {
         c.stab_last_run_ok = false;
         c.stab_data_generation = 0;
         c.stab_fit_request = false;
+        c.errt_result = ErrTimeResult{};
+        c.errt_last_run_ok = false;
+        c.errt_data_generation = 0;
+        c.errt_fit_request = false;
     } else {
         for (const auto& p : params) c.param_values[p] = "";
         for (const auto& v : vars)   c.initial_conditions[v] = "";
@@ -1239,12 +1244,213 @@ static StabilityResult run_stability_cpu_t(const StabilityRequest& req) {
     return res;
 }
 
+// ---------------------------------------------------------------------------
+// Error(t). Испытуемая копия Xh идёт шагом h, референс Xr — ref_substeps
+// подшагами h/m на каждый шаг h, оба в локстепе: узлы сравнения t_k = k*h
+// у них общие ТОЧНО, без интерполяции. Явное t каждой копии ставится её
+// номером шага (как в run_order_cpu_t), иначе неавтономная система получила
+// бы у референса чужое время.
+template <class S>
+static ErrTimeResult run_errt_cpu_t(const ErrTimeRequest& req) {
+    using Tr = CpuScalarTraits<S>;
+    using std::fabs; using std::sqrt;
+    ErrTimeResult res;
+    res.ref_is_half  = req.ref_is_half;
+    res.order_p      = req.ref_is_half ? req.order_p : 0;
+    res.norm         = req.norm;
+    auto fail = [&](const std::string& msg) -> ErrTimeResult { res.error = msg; return res; };
+
+    std::string why;
+    if (!krs_cpu_backend_available(&why)) return fail("CPU backend is unavailable: " + why);
+    const int n = req.amountOfX;
+    if (n < 1) return fail("the system is empty");
+    if ((int)req.initial_conditions.size() < n) return fail("not enough initial conditions");
+    const int amountOfValues = (int)req.values.size();
+    if (amountOfValues < 1) return fail("the values array is empty");
+    if (!(req.h > 0.0) || !std::isfinite(req.h)) return fail("h must be > 0");
+    if (!(req.t_max > 0.0) || !std::isfinite(req.t_max)) return fail("computing time must be > 0");
+    const int m = req.ref_is_half ? 2 : req.ref_substeps;
+    if (m < 1) return fail("reference substeps must be >= 1");
+    if (!req.ref_is_half && req.ref_krs_body.empty()) return fail("the reference scheme has no KRS body");
+    res.ref_substeps = m;
+
+    const long long N = order_steps_for_cpu(req.h, req.t_max, req.snap_steps);
+    if ((double)N * (double)(m + 1) > 1.0e11)
+        return fail("t_max / h too large for the CPU: the work does not fit into a reasonable time");
+    S hEff = S(req.h);
+    if (req.snap_steps) hEff = S(req.t_max) / S((double)N);
+    const S hRef = hEff / S((double)m);
+    res.h_eff   = as_d(hEff);
+
+    std::string err;
+    KrsCpuStep step_main, step_ref;
+    if (!compile_cpu_step<S>(req.krs_body, n, amountOfValues, "KRS", step_main, err)) return fail(err);
+    if (!req.ref_is_half &&
+        !compile_cpu_step<S>(req.ref_krs_body, n, amountOfValues, "reference KRS", step_ref, err))
+        return fail(err);
+    KrsCpuStep& rstep = req.ref_is_half ? step_main : step_ref;
+    const typename Tr::Fn fmain = Tr::fn(step_main);
+    const typename Tr::Fn fref  = Tr::fn(rstep);
+
+    const int maxPts = std::max(16, req.max_points);
+    const long long stride = std::max<long long>(1, (N + maxPts - 1) / maxPts);
+    res.stride = (int)std::min<long long>(stride, std::numeric_limits<int>::max());
+
+    const bool rich = req.ref_is_half && req.order_p > 0;
+    const double richK = rich ? std::ldexp(1.0, req.order_p) / (std::ldexp(1.0, req.order_p) - 1.0) : 0.0;
+
+    std::vector<S> a((size_t)amountOfValues), Xh((size_t)n), Xr((size_t)n);
+    for (int i = 0; i < amountOfValues; ++i) a[(size_t)i] = S(req.values[(size_t)i]);
+    for (int i = 0; i < n; ++i) Xh[(size_t)i] = Xr[(size_t)i] = S(req.initial_conditions[(size_t)i]);
+    const S maxValue = S(req.max_value);
+
+    const size_t reserve = (size_t)std::min<long long>(N / stride + 2, (long long)maxPts + 2);
+    res.t.reserve(reserve); res.e_norm.reserve(reserve);
+    if (rich) res.e_rich.reserve(reserve);
+    res.e_var.assign((size_t)n, std::vector<double>());
+    for (auto& v : res.e_var) v.reserve(reserve);
+    res.max_var.assign((size_t)n, 0.0);
+    std::vector<double> sq_var((size_t)n, 0.0), bucket_var((size_t)n, 0.0), d((size_t)n, 0.0);
+    double sq_norm = 0.0, bucket_norm = 0.0;
+    long long counted = 0, in_bucket = 0;
+
+    for (long long k = 0; k < N; ++k) {
+        step_main.step_index(k);
+        Tr::call(fmain, Xh.data(), a.data(), hEff);
+        rstep.step_index(k * (long long)m);
+        for (int q = 0; q < m; ++q) Tr::call(fref, Xr.data(), a.data(), hRef);
+
+        const bool last = (k == N - 1);
+        if ((k % (long long)CHECK_INTERVAL) == 0 || last) {
+            if (order_bad_vec_cpu(Xh.data(), n, maxValue) || order_bad_vec_cpu(Xr.data(), n, maxValue)) {
+                res.diverged = true;
+                break;
+            }
+            if (req.cancel && req.cancel->load(std::memory_order_relaxed)) { res.cancelled = true; return res; }
+            if (req.progress) req.progress->store((float)((double)k / (double)N), std::memory_order_relaxed);
+        }
+
+        // Разность берётся в арифметике S и только потом сводится к double:
+        // в dd/qd малые разности близких решений иначе утонули бы в округлении.
+        double e = 0.0;
+        for (int i = 0; i < n; ++i) {
+            const double di = as_d(fabs(Xh[(size_t)i] - Xr[(size_t)i]));
+            d[(size_t)i] = di;
+            if (req.norm == kErrTimeNormL2) e += di * di; else if (di > e) e = di;
+        }
+        if (req.norm == kErrTimeNormL2) e = std::sqrt(e);
+
+        const double t = (double)(k + 1) * res.h_eff;
+        ++counted;
+        sq_norm += e * e;
+        if (e > res.max_norm || counted == 1) { res.max_norm = e; res.t_at_max = t; }
+        for (int i = 0; i < n; ++i) {
+            sq_var[(size_t)i] += d[(size_t)i] * d[(size_t)i];
+            if (d[(size_t)i] > res.max_var[(size_t)i]) res.max_var[(size_t)i] = d[(size_t)i];
+            if (in_bucket == 0 || d[(size_t)i] > bucket_var[(size_t)i]) bucket_var[(size_t)i] = d[(size_t)i];
+        }
+        if (in_bucket == 0 || e > bucket_norm) bucket_norm = e;
+        ++in_bucket;
+        res.t_end = t;
+
+        if (in_bucket >= stride || last) {
+            res.t.push_back(t);
+            res.e_norm.push_back(bucket_norm);
+            if (rich) res.e_rich.push_back(bucket_norm * richK);
+            for (int i = 0; i < n; ++i) res.e_var[(size_t)i].push_back(bucket_var[(size_t)i]);
+            in_bucket = 0;
+        }
+    }
+    // Хвост корзины, оборванной расхождением.
+    if (in_bucket > 0) {
+        res.t.push_back(res.t_end);
+        res.e_norm.push_back(bucket_norm);
+        if (rich) res.e_rich.push_back(bucket_norm * richK);
+        for (int i = 0; i < n; ++i) res.e_var[(size_t)i].push_back(bucket_var[(size_t)i]);
+    }
+
+    res.n_steps = counted;
+    if (counted > 0) {
+        res.rms_norm = std::sqrt(sq_norm / (double)counted);
+        res.rms_var.resize((size_t)n);
+        for (int i = 0; i < n; ++i) res.rms_var[(size_t)i] = std::sqrt(sq_var[(size_t)i] / (double)counted);
+    } else {
+        res.rms_var.assign((size_t)n, 0.0);
+    }
+    if (rich) { res.max_rich = res.max_norm * richK; res.rms_rich = res.rms_norm * richK; }
+    if (req.progress) req.progress->store(1.0f, std::memory_order_relaxed);
+    res.ok = true;
+    return res;
+}
+
 static StabilityResult run_stability_cpu(const StabilityRequest& req) {
     switch (req.cpu_prec) {
         case kOrderPrecQD: return run_stability_cpu_t<ucuda::qd>(req);
         case kOrderPrecDD: return run_stability_cpu_t<ucuda::dd>(req);
         default:           return run_stability_cpu_t<numb>(req);
     }
+}
+
+ErrTimeResult run_order_error_time(const ErrTimeRequest& req) {
+    switch (req.cpu_prec) {
+        case kOrderPrecQD: return run_errt_cpu_t<ucuda::qd>(req);
+        case kOrderPrecDD: return run_errt_cpu_t<ucuda::dd>(req);
+        default:           return run_errt_cpu_t<numb>(req);
+    }
+}
+
+int order_scheme_passport_order(const OrderAnalysisSession& s, const std::string& scheme) {
+    for (const auto& cs : s.custom_schemes)
+        if (cs.name == scheme) return cs.order > 0 ? cs.order : 0;
+    int p = 0; bool sym = false;
+    if (builtin_scheme_traits(scheme, &p, &sym) && p > 0) return p;
+    return 0;
+}
+
+int order_errt_effective_order(const OrderAnalysisSession& s, const OrderConfig& c) {
+    if (c.errt_ref != kErrTimeRefHalf) return 0;
+    const int user = parse_i(c.errt_order_text, 0);
+    if (user > 0) return std::min(user, 60);
+    return order_scheme_passport_order(s, c.scheme);
+}
+
+// Error(t) берёт всё общее (схема, a[], начальные условия, h, t_max, подгонку,
+// точность) у того же построителя, что Order: настройки двух расчётов одной
+// вкладки не могут разойтись.
+static ErrTimeRequest build_errt_request(const OrderAnalysisSession& s, const OrderConfig& c) {
+    const OrderRequest o = build_order_request(s, c);
+    ErrTimeRequest req;
+    req.krs_body           = o.krs_body;
+    req.amountOfX          = o.amountOfX;
+    req.initial_conditions = o.initial_conditions;
+    req.values             = o.values;
+    req.h                  = o.h;
+    req.t_max              = o.t_max;
+    req.snap_steps         = o.snap_steps;
+    req.max_value          = o.max_value;
+    // GPU-ветки у Error(t) нет, поэтому точность берётся всегда.
+    req.cpu_prec           = c.cpu_precision;
+    if (o.cpu_prec != req.cpu_prec) {
+        // build_order_request при выбранном GPU сбросил точность в double и
+        // Ньютон под неё не подтянул — пересобираем хвост a[] под реальную.
+        scheme_fill_tail(req.values.data() + s.params.size() + 1, c.cd_fp_iters,
+                         order_newton_settings(c.newton, req.cpu_prec));
+    }
+    req.ref_is_half  = (c.errt_ref == kErrTimeRefHalf);
+    req.ref_substeps = req.ref_is_half ? 2 : std::max(1, parse_i(c.errt_ref_substeps_text, 4));
+    if (!req.ref_is_half && !c.errt_ref_scheme.empty())
+        req.ref_krs_body = compute_krs_for_scheme(s.custom_schemes, s.sys, c.errt_ref_scheme);
+    req.order_p    = order_errt_effective_order(s, c);
+    req.norm       = (c.errt_norm == kErrTimeNormL2) ? kErrTimeNormL2 : kErrTimeNormInf;
+    return req;
+}
+
+static void apply_errt_result(OrderConfig& c, ErrTimeResult&& r) {
+    c.errt_result = std::move(r);
+    c.errt_last_run_ok = c.errt_result.ok;
+    if (!c.errt_result.ok) c.last_error = c.errt_result.error;
+    c.errt_data_generation++;
+    c.errt_fit_request = true;
 }
 
 bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
@@ -1275,6 +1481,27 @@ bool OrderAnalysisSession::run_async(ParametricEngine& engine, int config_idx) {
         const bool on_gpu = c.use_gpu;
         stab_future = std::async(std::launch::async, [&engine, on_gpu, sreq = std::move(sreq)]() {
             return on_gpu ? engine.run_stability(sreq) : run_stability_cpu(sreq);
+        });
+        return true;
+    }
+
+    if (c.calc_kind == kOrderCalcErrT) {
+        ErrTimeRequest ereq = build_errt_request(*this, c);
+        if (ereq.krs_body.empty()) {
+            c.last_error = order_krs_empty_error(*this, c);
+            cancel_token.reset();
+            progress_token.reset();
+            return false;
+        }
+        ereq.cancel   = cancel_token;
+        ereq.progress = progress_token;
+
+        in_flight = true;
+        running_kind = kOrderCalcErrT;
+        running_config_index = config_idx;
+        compute_start_time = std::chrono::steady_clock::now();
+        errt_future = std::async(std::launch::async, [ereq = std::move(ereq)]() {
+            return run_order_error_time(ereq);
         });
         return true;
     }
@@ -1333,6 +1560,7 @@ bool OrderAnalysisSession::poll() {
     const int kind = running_kind;
     const bool valid = (kind == kOrderCalcStab) ? stab_future.valid()
                      : (kind == kOrderCalcPerf) ? perf_future.valid()
+                     : (kind == kOrderCalcErrT) ? errt_future.valid()
                                                 : run_future.valid();
     if (!valid) {
         in_flight = false;
@@ -1344,6 +1572,7 @@ bool OrderAnalysisSession::poll() {
     const std::future_status st =
         (kind == kOrderCalcStab) ? stab_future.wait_for(std::chrono::seconds(0))
       : (kind == kOrderCalcPerf) ? perf_future.wait_for(std::chrono::seconds(0))
+      : (kind == kOrderCalcErrT) ? errt_future.wait_for(std::chrono::seconds(0))
                                  : run_future.wait_for(std::chrono::seconds(0));
     if (st != std::future_status::ready) return false;
 
@@ -1357,6 +1586,11 @@ bool OrderAnalysisSession::poll() {
         cancelled = r.cancelled;
         if (!cancelled && slot_ok)
             apply_stability_result(configs[(size_t)idx], std::move(r));
+    } else if (kind == kOrderCalcErrT) {
+        ErrTimeResult r = errt_future.get();
+        cancelled = r.cancelled;
+        if (!cancelled && slot_ok)
+            apply_errt_result(configs[(size_t)idx], std::move(r));
     } else if (kind == kOrderCalcPerf) {
         PerfResult r = perf_future.get();
         cancelled = r.cancelled;

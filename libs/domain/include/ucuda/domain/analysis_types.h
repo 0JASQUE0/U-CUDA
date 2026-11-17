@@ -1379,6 +1379,75 @@ struct StabilityResult {
     double err_min = 0.0, err_max = 0.0;   // только по конечным err ячеек со status OK
 };
 
+// ---------------------------------------------------------------------------
+// Error(t) — ошибка схемы во временной области против референса (четвёртый
+// расчёт вкладки Order, только CPU: траектория одна).
+//
+// Испытуемая схема идёт шагом h (после подгонки к t_max/N), референс — в
+// локстепе подшагами: либо та же схема шагом h/2 (ref_krs_body пустое,
+// ref_substeps = 2), либо другая схема шагом h/m. Поэтому сетки совпадают
+// ТОЧНО в узлах t_k = k*h и интерполяция не нужна. Разность d_i(t_k) =
+// x_h,i - x_ref,i сворачивается в норму L-inf (max_i |d_i|) или L2.
+//
+// Для референса h/2 и известного порядка p добавляется оценка Ричардсона
+// ошибки самой x_h: |x_h - x_h/2| * 2^p / (2^p - 1).
+constexpr int kErrTimeNormInf = 0;
+constexpr int kErrTimeNormL2  = 1;
+
+struct ErrTimeRequest {
+    std::string krs_body;
+    int amountOfX = 0;
+    std::vector<double> initial_conditions;   // [amountOfX]
+    std::vector<double> values;               // a[], values[0] = symmetry s
+
+    double h = 0.01, t_max = 10.0;
+    bool   snap_steps = true;
+    double max_value = 1.0e6;
+    int    cpu_prec = 0;                      // kOrderPrec*
+
+    // Пустое тело — та же схема шагом h/ref_substeps (для h/2 подшагов два).
+    std::string ref_krs_body;
+    int         ref_substeps = 2;
+    bool        ref_is_half = true;           // референс = та же схема, h/2
+    int         order_p = 0;                  // для Ричардсона; 0 — не считать
+    int         norm = kErrTimeNormInf;
+    // Сколько точек отдавать на график. Узлов больше — точки сворачиваются в
+    // корзины по максимуму (огибающая не теряет пиков); max и RMS считаются
+    // по ВСЕМ узлам, не по корзинам.
+    int         max_points = 20000;
+
+    std::shared_ptr<std::atomic<bool>>  cancel;
+    std::shared_ptr<std::atomic<float>> progress;
+};
+
+struct ErrTimeResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string error;
+
+    bool   ref_is_half = true;
+    int    order_p = 0;
+    int    norm = kErrTimeNormInf;
+    int    ref_substeps = 2;
+    double h_eff = 0.0;
+    long long n_steps = 0;                    // узлов сравнения (шагов h)
+    int    stride = 1;                        // узлов в одной точке графика
+
+    // Точки графика: t — конец корзины, значения — максимум по корзине.
+    std::vector<double> t;
+    std::vector<double> e_norm;               // ||x_h - x_ref||
+    std::vector<double> e_rich;               // оценка Ричардсона; пусто — не считалась
+    std::vector<std::vector<double>> e_var;   // [amountOfX][точки] |d_i|
+
+    // Итог по всем узлам (0 < t <= t_end).
+    double max_norm = 0.0, t_at_max = 0.0, rms_norm = 0.0;
+    double max_rich = 0.0, rms_rich = 0.0;
+    std::vector<double> max_var, rms_var;
+
+    bool   diverged = false;                  // траектория улетела; данные до t_end
+    double t_end = 0.0;
+};
+
 // Ячейка области предпочтительности: посчитана, устойчива (rho <= 1) и
 // ошибка шага не больше допуска. Одно определение на карту, счётчик и экспорт.
 inline bool stability_cell_preferred(const StabilityResult& res, size_t i, double tol) {

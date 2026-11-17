@@ -52,7 +52,7 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
             // Controls-панели рядом с прочими compute-параметрами.
             topts.extras_tail = [&]() {
                 ImGui::SameLine(); ImGui::SetNextItemWidth(120);
-                slider_float_typed("Line width", &c.line_width, 0.1f, 5.0f, "%.2f");
+                slider_float_typed("Line width", &c.line_width, 0.1f, 12.0f, "%.2f");
                 ImGui::SameLine(); ImGui::SetNextItemWidth(120);
                 slider_float_typed("Alpha", &c.alpha, 0.0f, 1.0f, "%.2f");
             };

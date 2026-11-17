@@ -66,7 +66,8 @@ constexpr int kOrderPaletteOkabe    = 2;
 struct OrderPlotWindow {
     // Одномерные виды (P / Error / Perf) оверлеят сколько угодно конфигов;
     // Map — хитмапа, и живёт ровно с одним.
-    enum class Kind { P = 0, Error = 1, Map = 2, Perf = 3 };
+    // ErrT — ошибка во времени (calc_kind == kOrderCalcErrT): ось X = t.
+    enum class Kind { P = 0, Error = 1, Map = 2, Perf = 3, ErrT = 4 };
     Kind kind = Kind::P;
 
     std::string label = "Plot 1";
@@ -102,6 +103,8 @@ struct OrderPlotWindow {
     bool stab_paper_cmap = true;
     int  colormap_idx = -1;     // Map; -1 = взять app-дефолт
     int  error_source = 0;      // Perf: 0 = E1, 1 = E2 по оси X
+    bool errt_show_vars = false;  // ErrT: кривые |d_i(t)| по переменным рядом с нормой
+    bool errt_show_rich = true;   // ErrT: оценка Ричардсона (только референс h/2)
     int  time_unit = 0;         // Perf: 0 = мкс, 1 = мс
     bool show_min = true, show_avg = true, show_max = true;   // Perf
 
@@ -110,12 +113,16 @@ struct OrderPlotWindow {
     // нескольких вкладок, и толщина линии у них обязана быть одна. Выключенный
     // custom_line_style даёт ровно прежний вид (1.5 px, непрозрачно, маркеры
     // узлов только на диаграмме производительности).
+    // Меню — то же, что у проекций Phase Analysis (draw_line_style_controls): «Custom line
+    // style» (толщина, альфа) и независимый от него «Points» (размер, альфа, форма; при обоих
+    // флагах точки поверх линии).
     bool  custom_line_style = false;
     float line_width   = 1.5f;
     float line_alpha   = 1.0f;
-    bool  points_mode  = false;   // точки вместо линии
-    int   point_marker = 0;       // PointMarker в points_mode
+    bool  points_mode  = false;   // «Points»: точки в узлах (поверх линии при Custom line style)
+    int   point_marker = 0;       // -1 — пиксель, иначе PointMarker
     float point_size   = 3.0f;
+    float point_alpha  = 1.0f;
     // Маркеры в узлах ПОВЕРХ линии. На диаграмме производительности включены
     // всегда (иначе не к чему подвести курсор за подсказкой — h и время на
     // осях не лежат), здесь флаг добавляет их остальным видам.

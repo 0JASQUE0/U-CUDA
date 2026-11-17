@@ -708,16 +708,6 @@ bool proj_has_style_controls(ProjType t) {
     return t == ProjType::Phase2D || t == ProjType::TimeDomain || t == ProjType::Phase3D ||
            t == ProjType::StepSize || t == ProjType::Rejections;
 }
-
-// Галка стиля проекции. Ctrl+Shift+клик — то же значение во всех проекциях вкладки с этим же
-// меню (как Ctrl+Shift в меню «Show» у окон диаграмм).
-void proj_style_checkbox(Projection& pr, const std::string& label, bool Projection::* field) {
-    if (!ImGui::Checkbox(label.c_str(), &(pr.*field))) return;
-    const ImGuiIO& io = ImGui::GetIO();
-    if (io.KeyCtrl && io.KeyShift && g_proj_style_group)
-        for (Projection& other : *g_proj_style_group)
-            if (proj_has_style_controls(other.type)) other.*field = pr.*field;
-}
 }
 
 ProjStyleGroupScope::ProjStyleGroupScope(std::vector<Projection>* group) : prev_(g_proj_style_group) {
@@ -725,44 +715,83 @@ ProjStyleGroupScope::ProjStyleGroupScope(std::vector<Projection>* group) : prev_
 }
 ProjStyleGroupScope::~ProjStyleGroupScope() { g_proj_style_group = prev_; }
 
+static LineStyleFields proj_style_fields(Projection& pr) {
+    return { &pr.custom_line_style, &pr.line_width, &pr.alpha, &pr.draw_points,
+             &pr.point_size, &pr.point_alpha, &pr.point_marker };
+}
+
+float line_style_point_alpha(const LineStyleFields& f) {
+    return (*f.draw_points && (*f.custom_line_style || *f.point_alpha != 1.0f)) ? *f.point_alpha : -1.0f;
+}
+
+void apply_line_style(Plot2DView& v, const LineStyleFields& f) {
+    v.point_marker      = *f.point_marker;
+    v.imdraw_lines      = *f.custom_line_style;
+    v.gpu_thick_lines   = true;
+    v.line_thickness_px = *f.line_width;
+    v.points_mode       = *f.draw_points;
+    v.points_with_lines = *f.draw_points && *f.custom_line_style;
+    v.point_size_px     = *f.point_size;
+    v.point_alpha       = line_style_point_alpha(f);
+}
+
 void draw_proj_style_controls(Projection& pr, const char* sfx, const char* points_tip) {
-    // В меню диаграммы — те же флажки и стрелка; стиль вид берёт из pr со следующего кадра.
-    plot_toolbar_menu_add([p = &pr, id = std::string(sfx), tip = std::string(points_tip ? points_tip : "")]() {
-        draw_proj_style_controls(*p, id.c_str(), tip.c_str());
+    // Ctrl+Shift+клик по флажку — то же значение во всех проекциях вкладки с этим меню.
+    Projection* p = &pr;
+    draw_line_style_controls(proj_style_fields(pr), sfx, points_tip, [p](bool* field) {
+        const ImGuiIO& io = ImGui::GetIO();
+        if (!(io.KeyCtrl && io.KeyShift && g_proj_style_group)) return;
+        bool Projection::* m = (field == &p->custom_line_style) ? &Projection::custom_line_style
+                                                                 : &Projection::draw_points;
+        for (Projection& other : *g_proj_style_group)
+            if (proj_has_style_controls(other.type)) other.*m = p->*m;
+    });
+}
+
+void draw_line_style_controls(const LineStyleFields& f, const char* sfx, const char* points_tip,
+                              const std::function<void(bool*)>& on_toggle) {
+    // В меню диаграммы — те же флажки и стрелка; стиль вид берёт из полей со следующего кадра.
+    plot_toolbar_menu_add([f, id = std::string(sfx), tip = std::string(points_tip ? points_tip : ""),
+                           on_toggle]() {
+        draw_line_style_controls(f, id.c_str(), tip.c_str(), on_toggle);
     });
     if (plot_toolbar_hidden()) return;   // скрыт в меню диаграммы (Toolbar); стиль действует
     const std::string s = sfx;
-    proj_style_checkbox(pr, "Custom line style##" + s, &Projection::custom_line_style);
-    if (ImGui::IsItemHovered())
+    const char* tip = points_tip ? points_tip : "";
+    if (ImGui::Checkbox(("Custom line style##" + s).c_str(), f.custom_line_style) && on_toggle)
+        on_toggle(f.custom_line_style);
+    if (on_toggle && ImGui::IsItemHovered())
         ImGui::SetTooltip("Ctrl+Shift+click: all projections of this tab");
     ImGui::SameLine();
-    proj_style_checkbox(pr, "Points##" + s, &Projection::draw_points);
+    if (ImGui::Checkbox(("Points##" + s).c_str(), f.draw_points) && on_toggle)
+        on_toggle(f.draw_points);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s\nWith Custom line style on too: points on top of the line.\n"
-                          "Ctrl+Shift+click: all projections of this tab", points_tip);
+        ImGui::SetTooltip("%s%sWith Custom line style on too: points on top of the line.%s",
+                          tip, *tip ? "\n" : "",
+                          on_toggle ? "\nCtrl+Shift+click: all projections of this tab" : "");
 
     auto contents = [&]() {
-        if (pr.custom_line_style) {
+        if (*f.custom_line_style) {
             ImGui::SeparatorText("Line");
             ImGui::SetNextItemWidth(150);
-            slider_float_typed(("Width##ln" + s).c_str(), &pr.line_width, 0.1f, 5.0f, "%.2f");
+            slider_float_typed(("Width##ln" + s).c_str(), f.line_width, 0.1f, 12.0f, "%.2f");
             ImGui::SetNextItemWidth(150);
-            slider_float_typed(("Alpha##ln" + s).c_str(), &pr.alpha, 0.0f, 1.0f, "%.2f");
+            slider_float_typed(("Alpha##ln" + s).c_str(), f.line_alpha, 0.0f, 1.0f, "%.2f");
         }
-        if (pr.draw_points) {
+        if (*f.draw_points) {
             ImGui::SeparatorText("Points");
             ImGui::SetNextItemWidth(150);
-            slider_float_typed(("Size##pt" + s).c_str(), &pr.point_size, 0.5f, 25.0f, "%.1f");
+            slider_float_typed(("Size##pt" + s).c_str(), f.point_size, 0.5f, 25.0f, "%.1f");
             ImGui::SetNextItemWidth(150);
-            slider_float_typed(("Alpha##pt" + s).c_str(), &pr.point_alpha, 0.0f, 1.0f, "%.2f");
+            slider_float_typed(("Alpha##pt" + s).c_str(), f.point_alpha, 0.0f, 1.0f, "%.2f");
             // -1 — прежний сплошной пиксель (самый быстрый), дальше формы PointMarker.
-            int idx = (pr.point_marker >= 0 && pr.point_marker < kPointMarkerCount) ? pr.point_marker + 1 : 0;
+            int idx = (*f.point_marker >= 0 && *f.point_marker < kPointMarkerCount) ? *f.point_marker + 1 : 0;
             const char* cur = idx == 0 ? "Pixel" : kPointMarkerNames[idx - 1];
             ImGui::SetNextItemWidth(150);
             if (ImGui::BeginCombo(("Marker##pt" + s).c_str(), cur)) {
                 for (int m = 0; m <= kPointMarkerCount; ++m) {
                     const char* name = m == 0 ? "Pixel" : kPointMarkerNames[m - 1];
-                    if (ImGui::Selectable(name, m == idx)) pr.point_marker = m - 1;
+                    if (ImGui::Selectable(name, m == idx)) *f.point_marker = m - 1;
                     if (m == idx) ImGui::SetItemDefaultFocus();
                 }
                 ImGui::EndCombo();
@@ -775,7 +804,7 @@ void draw_proj_style_controls(Projection& pr, const char* sfx, const char* point
         return;
     }
     const std::string pop_id = "##stylepop_" + s;
-    if (pr.custom_line_style || pr.draw_points) {
+    if (*f.custom_line_style || *f.draw_points) {
         ImGui::SameLine(0.0f, 4.0f);
         if (ImGui::ArrowButton(("##styleopen_" + s).c_str(), ImGuiDir_Down))
             ImGui::OpenPopup(pop_id.c_str());
@@ -790,14 +819,7 @@ void draw_proj_style_controls(Projection& pr, const char* sfx, const char* point
 
 void draw_proj_line_style(Projection& pr, const char* sfx, const char* points_tip) {
     draw_proj_style_controls(pr, sfx, points_tip);
-    projection_views(pr).view2d->point_marker      = pr.point_marker;
-    projection_views(pr).view2d->imdraw_lines      = pr.custom_line_style;
-    projection_views(pr).view2d->gpu_thick_lines   = true;
-    projection_views(pr).view2d->line_thickness_px = pr.line_width;
-    projection_views(pr).view2d->points_mode       = pr.draw_points;
-    projection_views(pr).view2d->points_with_lines = pr.draw_points && pr.custom_line_style;
-    projection_views(pr).view2d->point_size_px     = pr.point_size;
-    projection_views(pr).view2d->point_alpha       = proj_point_alpha(pr);
+    apply_line_style(*projection_views(pr).view2d, proj_style_fields(pr));
 }
 }
 
