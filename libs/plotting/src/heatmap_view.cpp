@@ -1140,7 +1140,7 @@ void HeatmapView::render(PlotRenderer& renderer,
                             img_pos.y + plot_h + (t.major ? 5.0f : 3.0f),
                             t.major ? col_axis : col_minor);
                 if (!t.major) continue;
-                std::string lbl = fmt_tick(t.value);
+                std::string lbl = fmt_log_tick(t.value);
                 ImVec2 ts = plot_text_size(lbl.c_str());
                 const float left = px_center(px) - ts.x * 0.5f;
                 if (sym_x) {
@@ -1198,7 +1198,7 @@ void HeatmapView::render(PlotRenderer& renderer,
                 fill_row_px(dl, py, img_pos.x - (t.major ? 5.0f : 3.0f), img_pos.x,
                             t.major ? col_axis : col_minor);
                 if (!t.major) continue;
-                std::string lbl = fmt_tick(t.value);
+                std::string lbl = fmt_log_tick(t.value);
                 ImVec2 ts = plot_text_size(lbl.c_str());
                 const float top = px_center(py) - ts.y * 0.5f;
                 if (sym_y) {

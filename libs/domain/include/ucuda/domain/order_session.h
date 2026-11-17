@@ -44,6 +44,13 @@ constexpr int kOrderTargetH = -1;
 constexpr int kOrderCalcOrder = 0;
 constexpr int kOrderCalcPerf  = 1;
 constexpr int kOrderCalcStab  = 2;
+//   kOrderCalcErrT  — ошибка во времени |x_h(t) - x_ref(t)| против референса
+//                     (h/2 той же схемы или другая схема мелким шагом), CPU.
+constexpr int kOrderCalcErrT  = 3;
+
+// Референс расчёта Error(t) (OrderConfig::errt_ref).
+constexpr int kErrTimeRefHalf   = 0;   // та же схема, h/2 (+ оценка Ричардсона)
+constexpr int kErrTimeRefScheme = 1;   // другая схема, h/m
 
 // Точность CPU-арифметики (OrderConfig::cpu_precision).
 //   kOrderPrecDouble — numb, как везде в проекте и как на GPU;
@@ -206,6 +213,22 @@ struct OrderConfig {
     bool            stab_last_run_ok = false;
     int             stab_data_generation = 0;
     bool            stab_fit_request = false;
+
+    // ---- Error(t) ----
+    // Шаг, t_max, подгонка h, max value и точность — общие из блока Integration.
+    // Сравнение идёт точно в узлах t_k = k*h: референс делает 2 (h/2) или m
+    // подшагов на каждый шаг испытуемой схемы, интерполяции нет.
+    int         errt_ref = kErrTimeRefHalf;
+    std::string errt_ref_scheme = "DOP853";
+    std::string errt_ref_substeps_text = "4";
+    // Порядок для Ричардсона; пусто — паспортный порядок схемы (если известен).
+    std::string errt_order_text;
+    int         errt_norm = kErrTimeNormInf;
+
+    ErrTimeResult errt_result;
+    bool          errt_last_run_ok = false;
+    int           errt_data_generation = 0;
+    bool          errt_fit_request = false;
 };
 
 struct OrderAnalysisState {
@@ -222,6 +245,10 @@ struct OrderAnalysisState {
 
     int active_config_index  = 0;
     int running_config_index = -1;
+
+    // Auto-compute: пересчитывать активную вкладку сразу после правки её настроек (как
+    // «Auto recompute» у Phase Analysis). Правка во время расчёта запускает новый после него.
+    bool auto_compute = false;
 
     int  running_kind = kOrderCalcOrder;
 

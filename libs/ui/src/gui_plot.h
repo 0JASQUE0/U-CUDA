@@ -186,6 +186,28 @@ private:
 // (альфа серии, прежний путь).
 float proj_point_alpha(const Projection& pr);
 
+// Поля стиля «Custom line style / Points» в разметке Phase Analysis — указателями, чтобы то же
+// меню и ту же настройку вида получали окна с другими структурами (окна Order). Все поля обязаны
+// жить дольше кадра: меню диаграммы (ПКМ) зовёт контролы позже в том же кадре.
+struct LineStyleFields {
+    bool*  custom_line_style;
+    float* line_width;
+    float* line_alpha;
+    bool*  draw_points;
+    float* point_size;
+    float* point_alpha;
+    int*   point_marker;   // -1 — пиксель, иначе PointMarker
+};
+// Контролы стиля — ровно те же, что у проекций Phase Analysis (draw_proj_style_controls).
+// on_toggle (может быть пустым) зовётся после щелчка по флажку с указателем на изменённое поле.
+void draw_line_style_controls(const LineStyleFields& f, const char* sfx, const char* points_tip,
+                              const std::function<void(bool*)>& on_toggle = {});
+// Настройка Plot2DView по стилю — как у 2D-проекций (draw_proj_line_style). Альфу линии в цвет
+// серий кладёт вызывающий (si.color.w = line_alpha при Custom line style).
+void apply_line_style(Plot2DView& view, const LineStyleFields& f);
+// Альфа точек для вида (см. proj_point_alpha).
+float line_style_point_alpha(const LineStyleFields& f);
+
 
 bool draw_point_style_toolbar(BifurcationDiagramConfig& bd, const char* id_suffix);
 

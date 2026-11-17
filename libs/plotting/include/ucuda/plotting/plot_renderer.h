@@ -132,6 +132,18 @@ public:
     // поэтому точки, нарисованные после, ложатся поверх. Нет программы — draw_line.
     void draw_line_thick_2d(GLuint vbo, int point_count, const float mvp[16],
         const float color[4], float line_width);
+    // Непрозрачная 2D-линия одним проходом прямо из vbo: капсулы со скруглёнными стыками,
+    // обычное смешивание (у непрозрачной линии наложения не видны). Нет программы — false.
+    bool draw_line_capsules_2d(GLuint vbo, int point_count, const float mvp[16],
+        const float color[4], float line_width);
+    // Ломаная 2D со скруглёнными стыками (капсулы). xys — тройки (x, y, s) в координатах VBO
+    // серии (т. е. до u_mvp), s — длина дуги в px; куски ломаной — [first[i], first[i]+count[i]).
+    // Перекрытие участков, близких по дуге (стык, излом), — одно покрытие, далёких (кривая
+    // прошла по себе дальше gap px по дуге) — второе: полупрозрачная линия темнеет только там.
+    // false — программ нет (вызывающий берёт draw_line_thick_2d).
+    bool draw_polyline_2d(const std::vector<float>& xys, const std::vector<int>& first,
+        const std::vector<int>& count, const float mvp[16], const float color[4],
+        float line_width);
 
     // Рисует 2D-точки (vbo с float[2] на вершину) через GL_POINTS; этим же путём рисуются точки
     // 1D-бифуркационных диаграмм. marker < 0 — старый путь: сплошной квадрат, GL-состояние не
@@ -248,9 +260,10 @@ private:
     GLuint program_points_ = 0;   // VS_2D + FS_POINT (маска формы маркера)
     GLuint program_3d_ = 0;
     GLuint program_3d_thick_ = 0;
-    GLuint program_2d_thick_ = 0;   // VS_2D + GS_3D_THICK + FS
+    GLuint program_2d_thick_ = 0;   // VS_2D + GS_2D_THICK_ROUND + FS_2D_THICK_ROUND (запасной: GS_3D_THICK + FS)
     GLint  loc_mvp_2d_thick_ = -1, loc_color_2d_thick_ = -1,
-           loc_viewport_2d_thick_ = -1, loc_thickness_2d_thick_ = -1;
+           loc_viewport_2d_thick_ = -1, loc_thickness_2d_thick_ = -1,
+           loc_round_2d_thick_ = -1;   // -1 — запасная программа, круглых стыков нет
     GLuint program_3d_cmap_ = 0;    // VS_3D_VAL + GS_3D_THICK_VAL + FS_CMAP
     GLint  loc_mvp_3d_cmap_ = -1, loc_viewport_3d_cmap_ = -1, loc_thickness_3d_cmap_ = -1,
            loc_lut_3d_cmap_ = -1, loc_cmap_3d_cmap_ = -1, loc_vmin_3d_cmap_ = -1,
@@ -274,6 +287,26 @@ private:
     GLuint lut_tex_ = 0;         // 256x200 RGB8, см. ensure_lut_texture()
 
     GLuint vao_ = 0;
+    // Полноэкранный прямоугольник (NDC, GL_TRIANGLE_STRIP) — композит толстой 2D-линии
+    // (draw_line_thick_2d): цвет кладётся один раз на пиксель по накопленному покрытию.
+    GLuint quad_vbo_ = 0;
+    // draw_polyline_2d: вершины (x, y, s) кадра, три программы и два вспомогательных
+    // плота размера FBO — R32F (s_min пикселя) и RG8 (покрытие двух групп проходов).
+    GLuint pl_vbo_ = 0;
+    GLuint prog_pl_smin_ = 0, prog_pl_cluster_ = 0, prog_pl_compose_ = 0, prog_pl_trans_ = 0;
+    GLuint pl_smin_fbo_ = 0, pl_smin_tex_ = 0, pl_smin2_fbo_ = 0, pl_smin2_tex_ = 0;   // ping-pong слоёв
+    GLuint pl_cov_fbo_ = 0, pl_cov_tex_ = 0, pl_trans_fbo_ = 0, pl_trans_tex_ = 0;
+    GLuint pl_bits_fbo_ = 0, pl_bits_tex_ = 0;   // RGBA32UI: маска корзин хвоста слоёв
+    GLuint prog_pl_rem_bits_ = 0, prog_pl_rem_trans_ = 0;
+    // GL_ANY_SAMPLES_PASSED по слою: есть ли он (условная отрисовка, без ожидания процессора).
+    static constexpr int kPolylineMaxLayers = 10;
+    GLuint pl_queries_[kPolylineMaxLayers] = {};
+    int    pl_aux_w_ = 0, pl_aux_h_ = 0;
+    bool   ensure_polyline_aux(int w, int h);
+    void   destroy_polyline_aux();
+    // Альфа фона текущего кадра (begin_frame): draw_line_thick_2d использует альфа-канал
+    // FBO как черновик покрытия и возвращает его к этому значению.
+    float  frame_clear_alpha_ = 1.0f;
 
     GLint  saved_viewport_[4]{};
     GLint  saved_fbo_ = 0;

@@ -501,9 +501,21 @@ bool draw_slice_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
     if (inheriting) ImGui::EndDisabled();
     ch |= InputNumStr("N", c.n_x_1d_text, kFieldW);
     ImGui::SeparatorText("1D integrator");
-    ch |= InputNumStr("h##l1d", c.l1d_h_text, kFieldW);
-    ch |= InputNumStr("transient time##l1d", c.l1d_transient_text, kFieldW);
-    ch |= InputNumStr("computing time##l1d", c.l1d_t_max_text, kFieldW);
+    bool own = n.own_integration;
+    if (ImGui::Checkbox("Own integration##l1d", &own)) {
+        if (own) ts.enable_own_integration(n.id);
+        else     n.own_integration = false;
+        ch = true;
+    }
+    if (n.own_integration) {
+        if (!model.is_map) ch |= InputNumStr("h##l1d", c.l1d_h_text, kFieldW);
+        ch |= InputNumStr(model.is_map ? "transient iterations##l1d" : "transient time##l1d", c.l1d_transient_text, kFieldW);
+        ch |= InputNumStr(model.is_map ? "iterations##l1d" : "computing time##l1d", c.l1d_t_max_text, kFieldW);
+    } else {
+        const CustomTabSharedConfig& root = ts.tree.nodes.front().cfg;
+        ImGui::TextDisabled("Inherited: h %s, transient %s, time %s",
+                            root.h_text.c_str(), root.transient_text.c_str(), root.t_max_text.c_str());
+    }
     ch |= ImGui::Checkbox("Continuation", &c.continuation_1d_enabled);
     ch |= ImGui::Checkbox("Inter-peak intervals on Y (Bif)", &c.plot_inter_peaks_1d);
     ImGui::SeparatorText("Cursor");

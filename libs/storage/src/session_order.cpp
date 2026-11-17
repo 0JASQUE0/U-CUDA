@@ -48,6 +48,11 @@ void write_order_config(std::ostringstream& o, const OrderConfig& c) {
     o << "\"stab_idx_c\":" << c.stab_idx_c << ",";
     o << "\"stab_idx_d\":" << c.stab_idx_d << ",";
     o << "\"stab_pref_tol_text\":"; jstr(o, c.stab_pref_tol_text); o << ",";
+    o << "\"errt_ref\":" << c.errt_ref << ",";
+    o << "\"errt_ref_scheme\":";        jstr(o, c.errt_ref_scheme);        o << ",";
+    o << "\"errt_ref_substeps_text\":"; jstr(o, c.errt_ref_substeps_text); o << ",";
+    o << "\"errt_order_text\":";        jstr(o, c.errt_order_text);        o << ",";
+    o << "\"errt_norm\":" << c.errt_norm << ",";
     o << "\"initial_conditions\":"; jmap(o, c.initial_conditions); o << ",";
     o << "\"param_values\":";       jmap(o, c.param_values);
     o << "}";
@@ -64,9 +69,19 @@ bool read_order_field(JP& p, OrderConfig& c, const std::string& key) {
     else if (key == "newton_full")         c.newton.full      = p.boolean();
     else if (key == "calc_kind") {
         const int k = std::stoi(p.str_or_num());
-        c.calc_kind = (k == kOrderCalcPerf || k == kOrderCalcStab) ? k : kOrderCalcOrder;
+        c.calc_kind = (k == kOrderCalcPerf || k == kOrderCalcStab || k == kOrderCalcErrT) ? k : kOrderCalcOrder;
     }
-    else if (key == "stab_k_text")      c.stab_k_text      = p.str();
+    else if (key == "errt_ref") {
+        const int k = std::stoi(p.str_or_num());
+        c.errt_ref = (k == kErrTimeRefScheme) ? k : kErrTimeRefHalf;
+    }
+    else if (key == "errt_ref_scheme")        c.errt_ref_scheme        = p.str();
+    else if (key == "errt_ref_substeps_text") c.errt_ref_substeps_text = p.str();
+    else if (key == "errt_order_text")        c.errt_order_text        = p.str();
+    else if (key == "errt_norm") {
+        const int k = std::stoi(p.str_or_num());
+        c.errt_norm = (k == kErrTimeNormL2) ? k : kErrTimeNormInf;
+    }    else if (key == "stab_k_text")      c.stab_k_text      = p.str();
     else if (key == "stab_r_text")      c.stab_r_text      = p.str();
     else if (key == "stab_h_text")      c.stab_h_text      = p.str();
     else if (key == "stab_sig_lo_text") c.stab_sig_lo_text = p.str();
@@ -125,6 +140,7 @@ std::string session_to_json_order(const OrderAnalysisState& s) {
     std::ostringstream o;
     o << "{\n";
     o << "  \"active_config_index\":" << s.active_config_index << ",\n";
+    o << "  \"auto_compute\":" << (s.auto_compute ? "true" : "false") << ",\n";
     o << "  \"configs\":[";
     for (size_t i = 0; i < s.configs.size(); ++i) {
         if (i) o << ",";
@@ -168,6 +184,7 @@ bool session_from_json_order(const std::string& json, OrderAnalysisState& s) {
                 }
             }
             else if (key == "active_config_index") s.active_config_index = std::stoi(p.str_or_num());
+            else if (key == "auto_compute")        s.auto_compute = p.boolean();
             else                                   p.skip_value();
             if (p.opt(',')) continue;
             p.expect('}'); break;
@@ -205,6 +222,8 @@ std::string session_to_json_order_windows(const std::vector<OrderPlotWindow>& wi
         o << ",\"stab_paper_cmap\":" << (w.stab_paper_cmap ? "true" : "false");
         o << ",\"colormap_idx\":" << w.colormap_idx;
         o << ",\"error_source\":" << w.error_source;
+        o << ",\"errt_show_vars\":" << (w.errt_show_vars ? "true" : "false");
+        o << ",\"errt_show_rich\":" << (w.errt_show_rich ? "true" : "false");
         o << ",\"time_unit\":"    << w.time_unit;
         o << ",\"perf_cost\":"    << w.perf_cost;
         o << ",\"show_min\":" << (w.show_min ? "true" : "false");
@@ -216,6 +235,7 @@ std::string session_to_json_order_windows(const std::vector<OrderPlotWindow>& wi
         o << ",\"points_mode\":"  << (w.points_mode ? "true" : "false");
         o << ",\"point_marker\":" << w.point_marker;
         o << ",\"point_size\":"   << w.point_size;
+        o << ",\"point_alpha\":"  << w.point_alpha;
         o << ",\"node_markers\":" << (w.node_markers ? "true" : "false");
         o << ",\"vary_markers\":" << (w.vary_markers ? "true" : "false");
         o << ",\"palette\":"      << w.palette;
@@ -249,7 +269,7 @@ bool session_from_json_order_windows(const std::string& json, std::vector<OrderP
                                 if      (k == "id")              w.id              = std::stoi(p.str_or_num());
                                 else if (k == "kind") {
                                     const int kk = std::stoi(p.str_or_num());
-                                    w.kind = (kk >= 0 && kk <= 3) ? (OrderPlotWindow::Kind)kk
+                                    w.kind = (kk >= 0 && kk <= 4) ? (OrderPlotWindow::Kind)kk
                                                                   : OrderPlotWindow::Kind::P;
                                 }
                                 else if (k == "label")           w.label           = p.str();
@@ -269,6 +289,8 @@ bool session_from_json_order_windows(const std::string& json, std::vector<OrderP
                                 else if (k == "stab_pref_edge_w") w.stab_pref_edge_w = std::max(0, std::stoi(p.str_or_num()));
                                 else if (k == "colormap_idx")    w.colormap_idx    = std::stoi(p.str_or_num());
                                 else if (k == "error_source")    w.error_source    = std::stoi(p.str_or_num());
+                                else if (k == "errt_show_vars")  w.errt_show_vars  = p.boolean();
+                                else if (k == "errt_show_rich")  w.errt_show_rich  = p.boolean();
                                 else if (k == "time_unit")       w.time_unit       = std::stoi(p.str_or_num());
                                 else if (k == "perf_cost")       w.perf_cost       = std::stoi(p.str_or_num());
                                 else if (k == "show_min")        w.show_min        = p.boolean();
@@ -280,6 +302,7 @@ bool session_from_json_order_windows(const std::string& json, std::vector<OrderP
                                 else if (k == "points_mode")     w.points_mode     = p.boolean();
                                 else if (k == "point_marker")    w.point_marker    = std::stoi(p.str_or_num());
                                 else if (k == "point_size")      w.point_size      = std::stof(p.str_or_num());
+                                else if (k == "point_alpha")     w.point_alpha     = std::stof(p.str_or_num());
                                 else if (k == "node_markers")    w.node_markers    = p.boolean();
                                 else if (k == "vary_markers")    w.vary_markers    = p.boolean();
                                 else if (k == "palette")         w.palette         = std::stoi(p.str_or_num());

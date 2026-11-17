@@ -124,8 +124,13 @@ static void axis_range_from_data(double lo, double hi, bool log_axis, bool pad,
         whi = std::pow(10.0, hi + lpad);
     } else {
         double p = pad ? (hi - lo) * frac : 0.0;
-        if (pad && p < 1e-9) {
-            const double rel = std::max(std::fabs(lo), std::fabs(hi)) * frac;
+        // Порог вырожденности относительный для данных меньше единицы: ошибки порядка
+        // 1e-11 с размахом 1e-11 — не константа, и абсолютный 1e-9 раздувал ось до ±1.
+        // Для |y| >= 1 порог прежний, 1e-9.
+        const double scale = std::max(std::fabs(lo), std::fabs(hi));
+        const double thr = 1e-9 * std::min(1.0, scale);
+        if (pad && (p < thr || p == 0.0)) {
+            const double rel = scale * frac;
             p = (degenerate_rel && rel >= 1e-9) ? rel : 1.0;
         }
         wlo = lo - p;
@@ -245,19 +250,37 @@ void Plot2DView::render(PlotRenderer& renderer,
     const bool upload_series = data_generation != series_generation ||
                                series_xlog_cached != upload_xlog || series_ylog_cached != upload_ylog ||
                                visible.size() != series_in.size();
+    // Неположительная координата на лог-оси невыразима: уводим точку далеко за край (-300 в
+    // лог-домене) вместо NaN, который испортил бы весь VBO. В начало координат и в границы
+    // данных такие заглушки не идут.
+    const double kLogOff = -300.0;
+    auto tf = [kLogOff](double v, bool lg) { return lg ? ((v > 0.0) ? std::log10(v) : kLogOff) : v; };
+    auto real = [kLogOff](double v, bool lg) { return !lg || v != kLogOff; };
+    // Заливка VBO в текущем начале координат (series_origin_x_/y_). bbox кэша — абсолютный,
+    // поэтому перезаливка с другим началом его не меняет.
+    auto upload_cache = [&]() {
+        series_cache_.clear();
+        std::vector<double> log_buf;
+        for (const auto& s : series_in) {
+            if ((upload_xlog || upload_ylog) && s.points && s.n_points > 0) {
+                log_buf.assign(s.points, s.points + (size_t)s.n_points * 2);
+                for (size_t t = 0; t < log_buf.size(); t += 2) {
+                    log_buf[t]     = tf(log_buf[t], upload_xlog);
+                    log_buf[t + 1] = tf(log_buf[t + 1], upload_ylog);
+                }
+                series_cache_.upload(log_buf.data(), s.n_points,
+                                     series_origin_x_, series_origin_y_);
+            } else {
+                series_cache_.upload(s.points, s.n_points,
+                                     series_origin_x_, series_origin_y_);
+            }
+        }
+    };
     if (upload_series) {
         bool count_changed = ((int)visible.size() != (int)series_in.size());
-        series_cache_.clear();
-        // Неположительная координата на лог-оси невыразима: уводим точку далеко за край (-300 в
-        // лог-домене) вместо NaN, который испортил бы весь VBO. В начало координат и в границы
-        // данных такие заглушки не идут.
-        const double kLogOff = -300.0;
-        auto tf = [kLogOff](double v, bool lg) { return lg ? ((v > 0.0) ? std::log10(v) : kLogOff) : v; };
-        auto real = [kLogOff](double v, bool lg) { return !lg || v != kLogOff; };
         // Свой bbox — при лог-Y и пользовательском лог-X; лог-сетка свипа без display_log
         // остаётся на прежнем (см. own_bbox_ в plot_view_2d.h).
         own_bbox_ = has_bars || upload_ylog || (upload_xlog && !x_axis.log_scale);
-        std::vector<double> log_buf;
         // Начало координат для VBO: центр данных ПОСЛЕ лог-переноса, общий на весь
         // набор (матрица проекции одна на все серии). Проход по данным здесь дешевле
         // самой заливки и делается только при перезаливке.
@@ -299,20 +322,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             series_origin_x_ = (xlo <= xhi) ? (xlo + xhi) * 0.5 : 0.0;
             series_origin_y_ = (ylo <= yhi) ? (ylo + yhi) * 0.5 : 0.0;
         }
-        for (const auto& s : series_in) {
-            if ((upload_xlog || upload_ylog) && s.points && s.n_points > 0) {
-                log_buf.assign(s.points, s.points + (size_t)s.n_points * 2);
-                for (size_t t = 0; t < log_buf.size(); t += 2) {
-                    log_buf[t]     = tf(log_buf[t], upload_xlog);
-                    log_buf[t + 1] = tf(log_buf[t + 1], upload_ylog);
-                }
-                series_cache_.upload(log_buf.data(), s.n_points,
-                                     series_origin_x_, series_origin_y_);
-            } else {
-                series_cache_.upload(s.points, s.n_points,
-                                     series_origin_x_, series_origin_y_);
-            }
-        }
+        upload_cache();
         series_xlog_cached = upload_xlog;
         series_ylog_cached = upload_ylog;
         series_generation = data_generation;
@@ -541,14 +551,42 @@ void Plot2DView::render(PlotRenderer& renderer,
     // Мировой Y под экранной долей высоты my (0 — низ, 1 — верх).
     auto y_at = [&](double my) { return YW(sy0 + my * (sy1 - sy0)); };
 
+    // Начало координат VBO — центр данных; если вид ушёл от него на много своих ширин
+    // (зум в основную полосу при редких выбросах до max_value), float-вершины теряют
+    // разряды и точки ложатся ступеньками. Тогда переливаем VBO в центре вида: при
+    // отношении сдвиг/ширина <= 1e3 ошибка float ~1e3*6e-8 ширины — сотые доли пикселя.
+    bool reoriginated = false;
+    {
+        constexpr double kMaxOffsetPerSpan = 1e3;
+        const double vx = std::abs(sx1 - sx0), vy = std::abs(sy1 - sy0);
+        const double cx = 0.5 * (sx0 + sx1), cy = 0.5 * (sy0 + sy1);
+        const bool far_x = vx > 0.0 && std::isfinite(cx) && std::abs(cx - series_origin_x_) > kMaxOffsetPerSpan * vx;
+        const bool far_y = vy > 0.0 && std::isfinite(cy) && std::abs(cy - series_origin_y_) > kMaxOffsetPerSpan * vy;
+        if ((far_x || far_y) && series_cache_.size() > 0) {
+            if (far_x) series_origin_x_ = cx;
+            if (far_y) series_origin_y_ = cy;
+            upload_cache();
+            reoriginated = true;
+        }
+    }
+
     // Одноцветная линия Custom line style, которая идёт GL-путём (см. gpu_thick_lines).
-    auto gpu_thick_line_series = [this](const PlotSeriesInput* si) {
-        return imdraw_lines && gpu_thick_lines && si && !si->values && !si->segment_order;
+    // Полупрозрачная одноцветная линия идёт этим путём всегда: GL-путь рисует её ломаной со
+    // стыками без перекрытия (draw_polyline_2d), а посегментный ImDrawList накладывал бы альфу
+    // повторно на каждом стыке — тёмные «крестики» и шершавый край.
+    auto gpu_thick_line_series = [this, &series_color](const PlotSeriesInput* si) {
+        return imdraw_lines && si && !si->values && !si->segment_order
+            && (gpu_thick_lines || series_color(*si).w < 0.999f);
     };
 
     // 4. FBO render
     float br, bg, bb, ba;
     plot_bg_color(br, bg, bb, ba);
+    // Сетка под данными (Show -> Grid over data выключено): кадр данных — с прозрачным фоном,
+    // под него ImDrawList кладёт фон плота и линии сетки (см. «5. Вывод FBO»).
+    const bool grid_under = wp.grid && !wp.grid_on_top;
+    const bool grid_top   = wp.grid && wp.grid_on_top;
+    const float fbo_a     = grid_under ? 0.0f : ba;
     float mvp[16];
     // Границы — в экранной координате: VBO залит тем же преобразованием.
     // В ТОМ ЖЕ начале координат, в котором залит VBO (см. series_origin_x_):
@@ -556,13 +594,12 @@ void Plot2DView::render(PlotRenderer& renderer,
     // и float-матрицы хватает с запасом даже на окне шириной 5e-7 около 0.15.
     make_ortho_mvp(sx0 - series_origin_x_, sx1 - series_origin_x_,
                    sy0 - series_origin_y_, sy1 - series_origin_y_, mvp);
-    // Cache ordinary bifurcation point clouds without per-series
-    // geometry overrides. The axes and cursor are drawn separately below.
+    // Кэш готового кадра FBO: точки и линии (оси, курсор и ImDrawList-линии рисуются отдельно,
+    // поверх). Ключ — всё, от чего зависит содержимое FBO; не изменилось — FBO не трогаем вовсе.
+    // Многослойная ломаная (draw_polyline_2d) дорогая, и без кэша её перерисовка каждый кадр
+    // интерфейса садила производительность.
     unsigned long long frame_key = 0;
-    if (points_mode && !points_with_lines && !series_in.empty() && !has_bars &&
-        std::all_of(series_in.begin(), series_in.end(), [](const PlotSeriesInput& s) {
-            return s.points_override < 0;
-        })) {
+    if (!series_in.empty() && !has_bars) {
         frame_key = 1469598103934665603ull;
         const auto mix = [&frame_key](const auto& value) {
             const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
@@ -572,21 +609,93 @@ void Plot2DView::render(PlotRenderer& renderer,
             }
         };
         mix(this); mix(owner_id); mix(data_generation); mix(series_in.size());
-        mix(mvp); mix(br); mix(bg); mix(bb); mix(ba);
+        mix(mvp); mix(br); mix(bg); mix(bb); mix(fbo_a);
         for (size_t k = 0; k < series_in.size(); ++k) {
             const bool visible = eff_visible((int)k);
             mix(visible);
             if (!visible) continue;
-            const ImVec4 color = series_color(series_in[k]);
+            const PlotSeriesInput& s = series_in[k];
+            const ImVec4 color = series_color(s);
             mix(color.x); mix(color.y); mix(color.z); mix(color.w);
+            mix(s.points_override); mix(s.point_marker); mix(s.point_size_px);
+            mix(s.values != nullptr); mix(s.segment_order != nullptr);
+            mix(s.points); mix(s.n_points);
         }
         mix(point_alpha); mix(point_size_px); mix(point_marker);
+        mix(points_mode); mix(points_with_lines); mix(imdraw_lines); mix(gpu_thick_lines);
+        mix(line_thickness_px);
         if (frame_key == 0) frame_key = 1;
     }
-    const bool frame_cached = frame_key != 0 && !upload_series && renderer.content_key() == frame_key &&
+    const bool frame_cached = frame_key != 0 && !upload_series && !reoriginated && renderer.content_key() == frame_key &&
                               renderer.width() == plot_w && renderer.height() == plot_h;
+    // Линия серии k в FBO — ломаной со скошенными стыками (draw_polyline_2d) по точкам,
+    // прорежённым в экранных координатах; индексы кэшируются до смены данных, вида или размера.
+    // Нет программы ломаной — прежняя линия из капсул (draw_line_thick_2d).
+    line_idx_cache_.resize(series_cache_.size());
+    auto draw_series_line = [&](int k, const PlotSeriesInput* si, const GpuLineSeries& g,
+                                const float color[4], float width) {
+        // Непрозрачная линия (альфа × покрытие ≥ 1): наложения не видны, и многослойный разбор
+        // с прореживанием на CPU — пустая трата. Капсулы одним проходом прямо из VBO; это и путь
+        // по умолчанию (1 px, альфа 1), и continuation, где данные меняются каждый кадр.
+        if (color[3] * std::min(width, 1.0f) >= 0.999f &&
+            renderer.draw_line_capsules_2d(g.vbo, g.point_count, mvp, color, width))
+            return;
+        if (si && si->points && si->n_points == g.point_count) {
+            unsigned long long key = 1469598103934665603ull;
+            auto mix = [&key](const auto& v) {
+                const auto* b = reinterpret_cast<const unsigned char*>(&v);
+                for (size_t i = 0; i < sizeof(v); ++i) { key ^= b[i]; key *= 1099511628211ull; }
+            };
+            mix(data_generation); mix(si->points); mix(si->n_points); mix(sx0); mix(sx1);
+            mix(sy0); mix(sy1); mix(plot_w); mix(plot_h); mix(xlog); mix(ylog);
+            mix(series_origin_x_); mix(series_origin_y_);
+            LineIdxCache& lc = line_idx_cache_[(size_t)k];
+            if (lc.key != key || !lc.built) {
+                lc.key = key;
+                lc.built = true;
+                lc.xys.clear(); lc.first.clear(); lc.count.clear();
+                const double kx = (double)plot_w / (sx1 - sx0), ky = (double)plot_h / (sy1 - sy0);
+                const int n = si->n_points;
+                bool open = false;
+                double lx = 0.0, ly = 0.0, s = 0.0;
+                auto close_strip = [&lc]() {
+                    if (!lc.count.empty() && lc.count.back() < 2) {   // одиночная точка — не ломаная
+                        lc.xys.resize(lc.xys.size() - 3 * (size_t)lc.count.back());
+                        lc.first.pop_back(); lc.count.pop_back();
+                    }
+                };
+                for (int i = 0; i < n; ++i) {
+                    const double wx = XS(si->points[2 * i]), wy = YS(si->points[2 * i + 1]);
+                    const double px = (wx - sx0) * kx, py = (wy - sy0) * ky;
+                    if (!std::isfinite(px) || !std::isfinite(py)) {
+                        if (open) close_strip();
+                        open = false;
+                        continue;
+                    }
+                    if (open) {
+                        const double dx = px - lx, dy = py - ly;
+                        const double d2 = dx * dx + dy * dy;
+                        if (d2 < 0.5625 && i != n - 1) continue;   // < 0.75 px
+                        s += std::sqrt(d2);
+                    } else {
+                        lc.first.push_back((int)(lc.xys.size() / 3));
+                        lc.count.push_back(0);
+                        open = true;
+                    }
+                    lc.xys.push_back((float)(wx - series_origin_x_));
+                    lc.xys.push_back((float)(wy - series_origin_y_));
+                    lc.xys.push_back((float)s);
+                    ++lc.count.back();
+                    lx = px; ly = py;
+                }
+                if (open) close_strip();
+            }
+            if (renderer.draw_polyline_2d(lc.xys, lc.first, lc.count, mvp, color, width)) return;
+        }
+        renderer.draw_line_thick_2d(g.vbo, g.point_count, mvp, color, width);
+    };
     if (!frame_cached) {
-        renderer.begin_frame(plot_w, plot_h, br, bg, bb, ba);
+        renderer.begin_frame(plot_w, plot_h, br, bg, bb, fbo_a);
         for (int k = (int)series_cache_.size() - 1; k >= 0; --k) {
             if (!eff_visible(k)) continue;
             const GpuLineSeries& g = series_cache_.get(k);
@@ -609,8 +718,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             if (as_points) {
                 // Points + линия: линия первой, точки поверх (обе в FBO).
                 if (points_with_lines && !(si && si->points_override == 1)) {
-                    if (imdraw_lines) renderer.draw_line_thick_2d(g.vbo, g.point_count, mvp, color, line_thickness_px);
-                    else              renderer.draw_line(g.vbo, g.point_count, mvp, color, line_thickness_px);
+                    draw_series_line(k, si, g, color, imdraw_lines ? line_thickness_px : 1.0f);
                     // Точки поверх — со смешиванием (шейдерный квадрат, PointMarker 1): старый сплошной
                     // GL-пойнт пишет α цвета прямо в текстуру плота, и плотные точки закрашивали
                     // траекторию ровным бледным тоном вместо накопления полупрозрачных витков.
@@ -623,17 +731,52 @@ void Plot2DView::render(PlotRenderer& renderer,
                 }
                 renderer.draw_points(g.vbo, g.point_count, mvp, pcolor, psize, marker);
             }
-            else if (!imdraw_lines)  // линии нарисуем через ImDrawList после осей
-                renderer.draw_line(g.vbo, g.point_count, mvp, color, line_thickness_px);
+            else if (!imdraw_lines)
+                // Обычная GL-линия — той же ломаной, что толстая: сглаженный край, стыки без
+                // перекрытия. Толщина 1 px — ровно та, что давал прежний glLineWidth.
+                draw_series_line(k, si, g, color, 1.0f);
             else if (gpu_thick_line_series(si))
-                renderer.draw_line_thick_2d(g.vbo, g.point_count, mvp, color, line_thickness_px);
+                draw_series_line(k, si, g, color, line_thickness_px);
         }
         renderer.end_frame();
         renderer.set_content_key(frame_key);
     }
 
+    // Шаг данных по X — по первым двум точкам каждой видимой серии (наименьший): ось сама
+    // шага интегрирования не знает, а крайний круглый тик (0, 500) отстоит от первой/последней
+    // точки ровно на долю шага. Два шага — допуск крайних подписей (AxisInfo::edge_tick_tol).
+    {
+        double ds = 0.0;
+        for (int k = 0; k < (int)series_in.size(); ++k) {
+            const PlotSeriesInput& s = series_in[k];
+            if (!eff_visible(k) || !s.points || s.n_points < 2 || is_bar(s)) continue;
+            const double d = std::fabs(s.points[2] - s.points[0]);
+            if (std::isfinite(d) && d > 0.0 && (ds == 0.0 || d < ds)) ds = d;
+        }
+        x_axis.edge_tick_tol = 2.0 * ds;
+    }
+    // Snap-to-node тиков X — активируется, когда caller выставил snap-конфиг
+    // (1D Bif/LLE/LS). Оси других графиков (Phase/TimeDomain) идут по дефолту
+    // без snap.
+    const double snap_axis_lo = std::min(snap_x_min, snap_x_max);
+    const double snap_axis_hi = std::max(snap_x_min, snap_x_max);
+    const int    snap_axis_n  = (snap_x_to_grid && snap_x_n > 1) ? snap_x_n : 0;
+    // Только линии сетки (подписи рисует шаг 8): под кадром данных или поверх всего.
+    auto draw_grid_lines = [&](ImDrawList* d) {
+        const ImU32 cg = plot_col_grid();
+        draw_axis_x_grid(d, x_axis, img_pos, (float)plot_w, (float)plot_h, cg, 0,
+                         snap_axis_lo, snap_axis_hi, snap_axis_n, false, true);
+        draw_axis_y_grid(d, y_axis, img_pos, (float)plot_w, (float)plot_h, cg, 0, false, true);
+    };
+
     // 5. Вывод FBO
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (grid_under) {
+        // Кадр данных прозрачен вне данных: под ним — фон плота и сетка.
+        dl->AddRectFilled(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
+                          ImGui::ColorConvertFloat4ToU32(ImVec4(br, bg, bb, ba)));
+        draw_grid_lines(dl);
+    }
     dl->AddImage((ImTextureID)(intptr_t)renderer.texture_id(),
         img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h),
         ImVec2(0, 1), ImVec2(1, 0));
@@ -714,16 +857,11 @@ void Plot2DView::render(PlotRenderer& renderer,
     ImU32 col_grid = plot_col_grid();
     ImU32 col_axis = plot_col_axis();
     ImU32 col_text = plot_col_text();
-    // Snap-to-node тиков X — активируется, когда caller выставил snap-конфиг
-    // (1D Bif/LLE/LS). Оси других графиков (Phase/TimeDomain) идут по дефолту
-    // без snap.
-    double snap_axis_lo = std::min(snap_x_min, snap_x_max);
-    double snap_axis_hi = std::max(snap_x_min, snap_x_max);
-    int    snap_axis_n  = (snap_x_to_grid && snap_x_n > 1) ? snap_x_n : 0;
+    // Подписи тиков; линии сетки — под кадром данных (выше) или поверх линий ImDrawList (ниже).
     draw_axis_x_grid(dl, x_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text,
-                     snap_axis_lo, snap_axis_hi, snap_axis_n, show_x_ticks);
+                     snap_axis_lo, snap_axis_hi, snap_axis_n, show_x_ticks, false);
     draw_axis_y_grid(dl, y_axis, img_pos, (float)plot_w, (float)plot_h, col_grid, col_text,
-                     show_y_ticks);
+                     show_y_ticks, false);
 
     double vrx = sx1 - sx0;
     double vry = sy1 - sy0;
@@ -790,6 +928,35 @@ void Plot2DView::render(PlotRenderer& renderer,
             const ImU32  uniform_col = ImGui::ColorConvertFloat4ToU32(series_color(s));
             const int    n_seg = s.n_points - 1;
 
+            // Одноцветная серия в порядке точек — с прореживанием в экранных координатах: точка
+            // ближе 0.75 px к последней нарисованной пропускается (последняя точка — всегда).
+            // Без этого плотная кривая (десятки отрезков на пиксель) рисовалась из субпиксельных
+            // отрезков, сглаженные края которых накладывались, и линия выглядела зашумлённой и
+            // рваной. Отклонение — меньше 0.75 px, пики сохраняются (их шаги длиннее пикселя).
+            // Толстая линия получает круглые стыки: AddLine режет концы торцом, и на изломах
+            // между отрезками иначе видны зазубрины.
+            if (!colored && !s.segment_order) {
+                const float min_d2 = 0.75f * 0.75f;
+                // Полупрозрачной линии стыки не рисуем: перекрытие кружка с отрезками дало бы
+                // тёмные точки на каждом изломе.
+                const bool  joints = line_thickness_px > 2.0f
+                                  && ((uniform_col >> IM_COL32_A_SHIFT) & 0xFF) == 0xFF;
+                const float jr     = line_thickness_px * 0.5f;
+                ImVec2 last(X(s.points[0]), Y(s.points[1]));
+                bool last_ok = std::isfinite(last.x) && std::isfinite(last.y);
+                for (int i = 1; i < s.n_points; ++i) {
+                    const ImVec2 p(X(s.points[2 * i + 0]), Y(s.points[2 * i + 1]));
+                    if (!std::isfinite(p.x) || !std::isfinite(p.y)) { last_ok = false; continue; }
+                    if (!last_ok) { last = p; last_ok = true; continue; }
+                    const float dx = p.x - last.x, dy = p.y - last.y;
+                    if (dx * dx + dy * dy < min_d2 && i != s.n_points - 1) continue;
+                    dl->AddLine(last, p, uniform_col, line_thickness_px);
+                    if (joints) dl->AddCircleFilled(p, jr, uniform_col);
+                    last = p;
+                }
+                continue;
+            }
+
             // Если задан segment_order — painter's algorithm. Иначе линейный
             // обход (старое поведение).
             for (int sk = 0; sk < n_seg; ++sk) {
@@ -812,8 +979,18 @@ void Plot2DView::render(PlotRenderer& renderer,
                     }
                 }
                 dl->AddLine(a, b, col, line_thickness_px);
+                // Круглый стык цветом сегмента — то же правило, что у одноцветной ветки выше.
+                if (line_thickness_px > 2.0f && ((col >> IM_COL32_A_SHIFT) & 0xFF) == 0xFF)
+                    dl->AddCircleFilled(b, line_thickness_px * 0.5f, col);
             }
         }
+        dl->PopClipRect();
+    }
+
+    // Сетка поверх данных (Show -> Grid over data): после кадра данных и линий ImDrawList.
+    if (grid_top) {
+        dl->PushClipRect(img_pos, ImVec2(img_pos.x + plot_w, img_pos.y + plot_h), true);
+        draw_grid_lines(dl);
         dl->PopClipRect();
     }
 
@@ -999,7 +1176,7 @@ void Plot2DView::render(PlotRenderer& renderer,
                 // Лог-ось подписана главными тиками log_axis_ticks (draw_axis_y_grid).
                 for (const LogAxisTick& t : log_axis_ticks(std::min(ey0, ey1), std::max(ey0, ey1),
                                                            (float)plot_h, false))
-                    if (t.major) max_tick_w = std::max(max_tick_w, plot_text_size(fmt_tick(t.value).c_str()).x);
+                    if (t.major) max_tick_w = std::max(max_tick_w, plot_text_size(fmt_log_tick(t.value).c_str()).x);
             } else if (std::abs(vry) >= 1e-30) {
                 double lo = std::min(ey0, ey1);
                 double hi = std::max(ey0, ey1);
@@ -1007,7 +1184,7 @@ void Plot2DView::render(PlotRenderer& renderer,
                 double ystart = std::ceil(lo / sy) * sy;
                 int ny = (int)std::floor((hi - ystart) / sy + 1) + 1;
                 for (int iy = 0; iy < ny; ++iy) {
-                    std::string tl = fmt_tick(ystart + iy * sy);
+                    std::string tl = fmt_tick(ystart + iy * sy, sy);
                     float w = plot_text_size(tl.c_str()).x;
                     if (w > max_tick_w) max_tick_w = w;
                 }
@@ -1366,7 +1543,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         ImGui::Separator();
         plot_toolbar_menu();   // элементы тулбара окна (plot_axis.h)
         // Легенда — галка окна (wp.legend), если вызывающий её вообще не выключил (show_legend).
-        plot_show_menu(wp, (show_legend ? PlotShowLegend : 0u) | PlotShowAxes2D |
+        plot_show_menu(wp, (show_legend ? PlotShowLegend : 0u) | PlotShowAxes2D | PlotShowGrid |
                            (external_colorbar ? PlotShowColorbar : 0u));
         ImGui::MenuItem("Lock X axis", nullptr, &x_axis.lock);
         ImGui::MenuItem("Lock Y axis", nullptr, &y_axis.lock);

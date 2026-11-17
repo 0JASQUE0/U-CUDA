@@ -835,7 +835,7 @@ void draw_network_series_window(AppModel& model, PlotRenderer& renderer, Plot2DV
         [&vs]() {
             bool ch = false;
             ImGui::SetNextItemWidth(150);
-            ch |= slider_float_typed("Line width##netseries", &vs.line_width, 0.5f, 8.0f, "%.1f");
+            ch |= slider_float_typed("Line width##netseries", &vs.line_width, 0.5f, 12.0f, "%.1f");
             ImGui::SetNextItemWidth(150);
             ch |= slider_float_typed("Alpha##netseries", &vs.line_alpha, 0.05f, 1.0f, "%.2f");
             ch |= ImGui::Checkbox("Points instead of lines##netseries", &vs.points_mode);

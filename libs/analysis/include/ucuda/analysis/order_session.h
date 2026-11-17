@@ -11,6 +11,7 @@ struct OrderAnalysisSession : OrderAnalysisState {
     // future; running_kind (kOrderCalc*) говорит poll'у, какое забирать.
     std::future<PerfResult>       perf_future;
     std::future<StabilityResult>  stab_future;
+    std::future<ErrTimeResult>    errt_future;
     bool in_flight = false;
     std::chrono::steady_clock::time_point compute_start_time;
     std::shared_ptr<std::atomic<bool>>  cancel_token;
@@ -48,3 +49,15 @@ long long order_steps_for_h(double h, double t_max, bool snap);
 // бы потолком раньше арифметики. Функция публичная, потому что UI показывает
 // подставленное значение: молча менять чужую настройку нельзя.
 double order_newton_tol_for_precision(int prec);
+
+// Error(t): ошибка схемы во времени против референса (см. ErrTimeRequest).
+// Однопоточный CPU-расчёт тем же телом КРС, что у остальных расчётов вкладки.
+ErrTimeResult run_order_error_time(const ErrTimeRequest& req);
+
+// Паспортный порядок схемы для Ричардсона: встроенная — из таблицы кодогена,
+// кастомная — со слов автора; обёртки (Extr/Comp) и неизвестные — 0.
+int order_scheme_passport_order(const OrderAnalysisSession& s, const std::string& scheme);
+
+// Порядок, с которым Error(t) считает Ричардсона: errt_order_text, если задан,
+// иначе паспортный; 0 — оценка не считается.
+int order_errt_effective_order(const OrderAnalysisSession& s, const OrderConfig& c);

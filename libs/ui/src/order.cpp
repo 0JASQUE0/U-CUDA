@@ -33,6 +33,7 @@ const char* order_window_kind_name(OrderPlotWindow::Kind k) {
         case OrderPlotWindow::Kind::Error: return "Error";
         case OrderPlotWindow::Kind::Map:   return "Map 2D";
         case OrderPlotWindow::Kind::Perf:  return "Performance";
+        case OrderPlotWindow::Kind::ErrT:  return "Error(t)";
     }
     return "Order";
 }
@@ -42,6 +43,7 @@ namespace ucuda::ui_detail {
 bool order_member_fits(const OrderConfig& c, OrderPlotWindow::Kind k) {
     switch (k) {
         case OrderPlotWindow::Kind::Perf: return c.calc_kind == kOrderCalcPerf;
+        case OrderPlotWindow::Kind::ErrT: return c.calc_kind == kOrderCalcErrT;
         case OrderPlotWindow::Kind::Map:  return c.calc_kind == kOrderCalcStab
                                               || (c.calc_kind == kOrderCalcOrder && c.two_d);
         default:                          return c.calc_kind == kOrderCalcOrder && !c.two_d;
@@ -203,7 +205,9 @@ void draw_order_export_items(AppModel& model, const OrderPlotWindow& win,
         if (mi < 0 || mi >= (int)s.configs.size()) continue;
         const OrderConfig& c = s.configs[(size_t)mi];
         const bool stab = (c.calc_kind == kOrderCalcStab);
-        const bool has = stab ? c.stab_last_run_ok : (perf ? c.perf_last_run_ok : c.last_run_ok);
+        const bool errt = (win.kind == OrderPlotWindow::Kind::ErrT);
+        const bool has = errt ? c.errt_last_run_ok
+                       : stab ? c.stab_last_run_ok : (perf ? c.perf_last_run_ok : c.last_run_ok);
         const std::string item = "Export " + c.label + "...";
         if (!ImGui::MenuItem(item.c_str(), nullptr, false, has && !busy)) continue;
         if (!cb.pick_save_file_csv) continue;
@@ -212,7 +216,13 @@ void draw_order_export_items(AppModel& model, const OrderPlotWindow& win,
         const data_export::OrderSnapshot sn =
             order_snapshot(s, c, win.kind == OrderPlotWindow::Kind::Map,
                            model.nvrtc_fmad, model.nvrtc_rdc);
-        if      (stab) data_export::export_stability(c.stab_result, sn, path);
+        if (errt) {
+            data_export::OrderSnapshot se = sn;
+            se.ref_scheme = c.errt_result.ref_is_half ? std::string() : c.errt_ref_scheme;
+            se.endpoint_only = false;
+            data_export::export_errt(c.errt_result, se, path);
+        }
+        else if (stab) data_export::export_stability(c.stab_result, sn, path);
         else if (perf) data_export::export_perf(c.perf_result, sn, path);
         else           data_export::export_order(c.result, sn, path);
     }
@@ -582,6 +592,12 @@ struct OrderCurveData {
     bool got_x = false;
 };
 
+// Поля стиля окна в разметке меню Phase Analysis (draw_line_style_controls).
+LineStyleFields order_style_fields(OrderPlotWindow& win) {
+    return { &win.custom_line_style, &win.line_width, &win.line_alpha, &win.points_mode,
+             &win.point_size, &win.point_alpha, &win.point_marker };
+}
+
 auto& order_curve_caches() {
     return ui_resource<std::map<int, PlotDataCache<OrderCurveKey, OrderCurveData>>, 3015>();
 }
@@ -694,46 +710,8 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
             ImGui::SameLine();
         });
         // sfx — копией: элемент отдаётся и в меню диаграммы, а оно рисуется после этого блока.
-        draw_style_toolbar("Custom line style", sfx.c_str(), win.custom_line_style,
-            [&win, sfx]() {
-                bool ch = false;
-                ImGui::SetNextItemWidth(150);
-                ch |= slider_float_typed(("Line width##" + sfx).c_str(), &win.line_width,
-                                         0.5f, 8.0f, "%.1f");
-                ImGui::SetNextItemWidth(150);
-                ch |= slider_float_typed(("Alpha##" + sfx).c_str(), &win.line_alpha,
-                                         0.05f, 1.0f, "%.2f");
-                ch |= ImGui::Checkbox(("Points instead of lines##" + sfx).c_str(), &win.points_mode);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Points go through GL_POINTS, and the hover tooltip hangs on\n"
-                                      "the ImDrawList markers - on the performance diagram it is\n"
-                                      "lost in this mode, together with the h / error / steps of a node.");
-                if (win.points_mode) {
-                    if (win.point_marker < 0 || win.point_marker >= kPointMarkerCount)
-                        win.point_marker = 0;
-                    ImGui::SetNextItemWidth(150);
-                    ch |= ImGui::Combo(("Marker##" + sfx).c_str(), &win.point_marker,
-                                       kPointMarkerNames, kPointMarkerCount);
-                    ImGui::SetNextItemWidth(150);
-                    ch |= slider_float_typed(("Point size##" + sfx).c_str(), &win.point_size,
-                                             0.5f, 25.0f, "%.1f");
-                } else {
-                    ch |= ImGui::Checkbox(("Mark data points##" + sfx).c_str(), &win.node_markers);
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("On the performance diagram the markers are always on:\n"
-                                          "neither the step nor the time itself lies on the axes,\n"
-                                          "and the tooltip is attached to the marker.");
-                    ImGui::SetNextItemWidth(150);
-                    ch |= slider_float_typed(("Marker size##" + sfx).c_str(), &win.point_size,
-                                             1.0f, 25.0f, "%.1f");
-                }
-                ch |= ImGui::Checkbox(("Marker shape per curve##" + sfx).c_str(), &win.vary_markers);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("min / avg / max (and E1 / E2) get different shapes:\n"
-                                      "one tab is one hue, and on a dense grid the hue alone\n"
-                                      "is not enough to tell the curves apart.");
-                return ch;
-            });
+        // Стиль — то же меню, что у проекций Phase Analysis.
+        draw_line_style_controls(order_style_fields(win), sfx.c_str(), "Points at the nodes.");
     }
 
     const bool   ylog       = win.y_log && !is_p;
@@ -980,19 +958,15 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         return;
     }
 
-    // Толщина > 1 px существует только на пути ImDrawList: glLineWidth в core
-    // OpenGL драйверы клампят до 1.0 (то же решение, что у LLE/LS и Network).
-    const bool pts = win.custom_line_style && win.points_mode;
-    view.imdraw_lines = !pts;
+    // Стиль — как у 2D-проекций Phase Analysis (apply_line_style).
+    const LineStyleFields style = order_style_fields(win);
+    apply_line_style(view, style);
+    const bool pts = win.points_mode;
     view.show_zero_x  = false;
     // Линия y = 0 осмысленна только на графике порядка: ниже неё разности
     // перестали сокращаться. В логарифме ошибки нуль — это E = 1, рисовать
     // его незачем.
     view.show_zero_y  = is_p;
-    view.points_mode  = pts;
-    view.point_marker  = pts ? win.point_marker : -1;
-    view.point_size_px = pts ? win.point_size : 2.0f;
-    view.line_thickness_px = win.custom_line_style ? win.line_width : 1.5f;
 
     // Подписи осей. У членов окна ось X по построению одна и та же величина,
     // поэтому имя берём у первого valid-члена.
@@ -1035,8 +1009,8 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     // Маркеры узлов нужны именно на диаграмме производительности: ни шага, ни
     // самого времени в лог-режиме на осях нет. На диаграмме порядка h лежит
     // прямо на оси X, спрашивать нечего.
-    view.point_markers = !pts && (is_perf || (win.custom_line_style && win.node_markers));
-    view.point_marker_px = win.custom_line_style ? win.point_size : 3.5f;
+    view.point_markers = !pts && is_perf;
+    view.point_marker_px = 3.5f;
     if (is_perf) {
         const char* ename = (win.error_source == 3) ? "E(T)" : (win.error_source == 2) ? "Eref"
                           : (win.error_source == 1) ? "E2" : "E1";
@@ -1103,6 +1077,207 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
 }
 
 namespace ucuda::ui_detail {
+// Окно Error(t): ось X — время, Y — ошибка против референса (по умолчанию
+// log10: ошибка у устойчивой схемы растёт на порядки, у хаотической системы —
+// экспоненциально, и в линейном масштабе начало траектории не читается).
+// Кривые: норма разности, оценка Ричардсона (референс h/2) и, по желанию,
+// |d_i(t)| по переменным. Под тулбаром — итог: max, t максимума и RMS.
+using OrderErrtKey = std::vector<long long>;
+auto& order_errt_caches() {
+    return ui_resource<std::map<int, PlotDataCache<OrderErrtKey, OrderCurveData>>, 3027>();
+}
+
+void draw_order_errt_window(AppModel& model, OrderPlotWindow& win,
+                            const GuiCallbacks& cb,
+                            PlotRenderer& renderer, Plot2DView& view) {
+    OrderAnalysisSession& s = model.order_session;
+    const bool bar = !plot_toolbar_hidden();
+    bool any_rich = false;
+    for (int mi : win.members)
+        if (mi >= 0 && mi < (int)s.configs.size() && !s.configs[(size_t)mi].errt_result.e_rich.empty())
+            any_rich = true;
+
+    // Масштаб Y (lin/log) — в меню графика по ПКМ (AxisInfo::display_log): в VBO
+    // идут сами ошибки, своей галки и своего log10 у окна нет.
+    toolbar_row([&]() {
+        ImGui::Checkbox("per variable", &win.errt_show_vars);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Add |x_h,i(t) - x_ref,i(t)| for every variable next to the norm.");
+        if (any_rich) {
+            ImGui::SameLine();
+            ImGui::Checkbox("Richardson", &win.errt_show_rich);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Reference h/2 only: the estimate of the error of x_h itself,\n"
+                    "|x_h - x_h/2| * 2^p / (2^p - 1), p - the order of the scheme.\n"
+                    "The bare difference |x_h - x_h/2| is the error of x_h minus the\n"
+                    "error of x_h/2, i.e. (1 - 2^-p) of the error of x_h.");
+        }
+        ImGui::SameLine();
+        if (win.palette < 0 || win.palette > kOrderPaletteOkabe) win.palette = kOrderPaletteContrast;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+        ImGui::Combo("##palerrt", &win.palette, kOrderPaletteNames, 3);
+    });
+    if (bar) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+    }
+    {
+        // Стиль — то же меню, что у проекций Phase Analysis.
+        const std::string sfx = "orderrt" + std::to_string(win.id);
+        draw_line_style_controls(order_style_fields(win), sfx.c_str(), "Points at the nodes t_k.");
+    }
+
+    OrderErrtKey key = { model.session_epoch[(int)AppModel::AppMode::Order],
+                         win.errt_show_vars ? 1 : 0, win.errt_show_rich ? 1 : 0, win.palette,
+                         (long long)series_palette() };
+    bool any_data = false, fit = false;
+    for (int mi : win.members) {
+        if (mi < 0 || mi >= (int)s.configs.size()) continue;
+        OrderConfig& c = s.configs[(size_t)mi];
+        key.push_back(mi);
+        key.push_back(c.errt_data_generation);
+        if (!c.errt_last_run_ok || c.errt_result.t.empty()) continue;
+        any_data = true;
+        fit |= c.errt_fit_request;
+        c.errt_fit_request = false;
+    }
+
+    auto& cache = order_errt_caches()[win.id];
+    if (cache.update(key, [&](OrderCurveData& data) {
+        data = {};
+        auto add = [&](const std::vector<double>& t, const std::vector<double>& e,
+                       const std::string& label, ImVec4 color) {
+            std::vector<double> xy;
+            xy.reserve(t.size() * 2);
+            const size_t n = std::min(t.size(), e.size());
+            for (size_t k = 0; k < n; ++k) {
+                const double v = e[k];
+                if (!std::isfinite(v)) continue;
+                xy.push_back(t[k]); xy.push_back(v);
+                if (!data.got_x) { data.xlo = data.xhi = t[k]; data.got_x = true; }
+                else { data.xlo = std::min(data.xlo, t[k]); data.xhi = std::max(data.xhi, t[k]); }
+            }
+            if (xy.empty()) return;
+            data.bufs.push_back(std::move(xy));
+            data.labels.push_back(label);
+            data.colors.push_back(color);
+            data.markers.push_back(-1);
+        };
+        for (size_t j = 0; j < win.members.size(); ++j) {
+            const int mi = win.members[j];
+            if (mi < 0 || mi >= (int)s.configs.size()) continue;
+            const OrderConfig& c = s.configs[(size_t)mi];
+            const ErrTimeResult& r = c.errt_result;
+            if (!c.errt_last_run_ok || r.t.empty()) continue;
+            const ImVec4 base = order_base_color((int)j, win.palette);
+            add(r.t, r.e_norm, c.label + (r.norm == kErrTimeNormL2 ? " ||d||2" : " ||d||inf"), base);
+            if (win.errt_show_rich && !r.e_rich.empty())
+                add(r.t, r.e_rich, c.label + " Richardson p=" + std::to_string(r.order_p), order_shade(base, 0.55f));
+            if (win.errt_show_vars) {
+                const int nv = (int)r.e_var.size();
+                for (int i = 0; i < nv; ++i) {
+                    const float k = nv > 1 ? 0.5f + 1.0f * (float)i / (float)(nv - 1) : 1.3f;
+                    const std::string vn = (size_t)i < s.vars.size() ? s.vars[(size_t)i] : std::to_string(i);
+                    add(r.t, r.e_var[(size_t)i], c.label + " |d " + vn + "|", order_shade(base, k));
+                }
+            }
+        }
+    })) view.series_generation = -1;
+    auto& data = cache.data;
+
+    // Итог по каждому члену: часть тулбара, скрытый прячет и его.
+    for (size_t j = 0; bar && j < win.members.size(); ++j) {
+        const int mi = win.members[j];
+        if (mi < 0 || mi >= (int)s.configs.size()) continue;
+        const OrderConfig& c = s.configs[(size_t)mi];
+        if (!c.errt_last_run_ok) continue;
+        const ErrTimeResult& r = c.errt_result;
+        ImGui::TextDisabled("%s:", c.label.c_str());
+        ImGui::SameLine();
+        ImGui::Text("max %.3e at t = %.6g, RMS %.3e", r.max_norm, r.t_at_max, r.rms_norm);
+        if (ImGui::IsItemHovered()) {
+            std::string tip = "Over all " + std::to_string(r.n_steps) + " nodes t_k = k*h:\n";
+            char b[200];
+            for (size_t i = 0; i < r.max_var.size(); ++i) {
+                std::snprintf(b, sizeof(b), "  %s: max %.3e, RMS %.3e\n",
+                              i < s.vars.size() ? s.vars[i].c_str() : "?", r.max_var[i],
+                              i < r.rms_var.size() ? r.rms_var[i] : 0.0);
+                tip += b;
+            }
+            if (r.stride > 1) {
+                std::snprintf(b, sizeof(b), "Plot points hold the maximum over %d nodes each.", r.stride);
+                tip += b;
+            }
+            ImGui::SetTooltip("%s", tip.c_str());
+        }
+        if (!r.e_rich.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("| Richardson (p=%d): max %.3e, RMS %.3e", r.order_p, r.max_rich, r.rms_rich);
+        }
+        ImGui::SameLine();
+        if (r.ref_is_half)
+            ImGui::TextDisabled("| ref: h/2, h = %.6g", r.h_eff);
+        else
+            ImGui::TextDisabled("| ref: %s x%d, h = %.6g", c.errt_ref_scheme.c_str(), r.ref_substeps, r.h_eff);
+        if (r.diverged) {
+            ImGui::SameLine();
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.5f, 0.3f, 1.0f)), "| diverged at t = %.6g", r.t_end);
+        }
+    }
+
+    if (win.members.empty()) {
+        ImGui::TextDisabled("The window is empty - add a tab via \"Members...\".");
+        return;
+    }
+    if (!any_data || data.bufs.empty()) {
+        ImGui::TextDisabled("No data yet. Press Run.");
+        return;
+    }
+
+    // Стиль — как у 2D-проекций Phase Analysis (apply_line_style).
+    apply_line_style(view, order_style_fields(win));
+    view.show_zero_x   = false;
+    view.show_zero_y   = false;
+    view.point_markers = false;
+    view.x_axis.name = "t";
+    view.x_axis.log_scale = false;
+    view.y_axis.name = "E";
+    view.point_tag_names.clear();
+    view.x_fit_use_explicit = data.got_x && (data.xhi > data.xlo);
+    view.x_fit_min = data.xlo;
+    view.x_fit_max = data.xhi;
+
+    std::vector<PlotSeriesInput> series;
+    std::vector<bool> init_vis, glob_vis;
+    for (size_t i = 0; i < data.bufs.size(); ++i) {
+        PlotSeriesInput si;
+        si.points   = data.bufs[i].data();
+        si.n_points = (int)(data.bufs[i].size() / 2);
+        si.color    = data.colors[i];
+        if (win.custom_line_style) si.color.w = win.line_alpha;
+        si.label    = data.labels[i];
+        series.push_back(si);
+        init_vis.push_back(true);
+        glob_vis.push_back(true);
+    }
+    unsigned long long h = 1469598103934665603ULL;
+    for (long long v : key) h = h * 1099511628211ULL + (unsigned long long)v;
+    const int sig = (int)((h ^ (h >> 32)) & 0x3FFFFFFFULL) + (int)data.bufs.size();
+    if (win.plot_sig != sig) { fit = true; win.plot_sig = sig; }
+
+    view.popup_extras = [&model, &win, &cb, &s]() {
+        draw_order_export_items(model, win, cb, s.in_flight);
+    };
+    ImVec2 avail  = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    view.render(renderer, origin, avail, /*owner_id*/ 0x0BDE2000 + win.id, sig,
+                series, init_vis, glob_vis, fit);
+}
+}
+
+namespace ucuda::ui_detail {
 void draw_order_plot_windows(AppModel& model, const GuiCallbacks& cb) {
     auto& renderers = ui_resource<std::map<int, std::unique_ptr<PlotRenderer>>, 3016>();
     auto& heatmaps = ui_resource<std::map<int, std::unique_ptr<HeatmapView>>, 3017>();
@@ -1112,6 +1287,7 @@ void draw_order_plot_windows(AppModel& model, const GuiCallbacks& cb) {
         invalidate_views(heatmaps);
         invalidate_views(curves);
         order_curve_caches().clear();
+        order_errt_caches().clear();
     }
 
     int to_remove = -1;
@@ -1141,6 +1317,15 @@ void draw_order_plot_windows(AppModel& model, const GuiCallbacks& cb) {
                     hv->colormap = (HeatmapColormap)colormap_id_or(win.colormap_idx, model.heatmap_colormap);
                 }
                 draw_order_map_window(model, win, cb, *renderer, *hv);
+            } else if (win.kind == OrderPlotWindow::Kind::ErrT) {
+                order_curve_caches().erase(win.id);
+                auto& cv = curves[win.id];
+                if (!cv) {
+                    cv = std::make_unique<Plot2DView>();
+                    // Ошибка растёт на порядки — по умолчанию лог; меню ПКМ переключает.
+                    cv->y_axis.display_log = true;
+                }
+                draw_order_errt_window(model, win, cb, *renderer, *cv);
             } else {
                 auto& cv = curves[win.id];
                 if (!cv) cv = std::make_unique<Plot2DView>();
@@ -1157,6 +1342,7 @@ void draw_order_plot_windows(AppModel& model, const GuiCallbacks& cb) {
         heatmaps.erase(id);
         curves.erase(id);
         order_curve_caches().erase(id);
+        order_errt_caches().erase(id);
         model.remove_order_plot_window(to_remove);
     }
 }
@@ -1459,6 +1645,7 @@ void draw_order_stability_block(AppModel& model, const OrderAnalysisSession& s,
 namespace ucuda::ui_detail {
 OrderPlotWindow::Kind order_kind_for(const OrderConfig& c) {
     if (c.calc_kind == kOrderCalcPerf) return OrderPlotWindow::Kind::Perf;
+    if (c.calc_kind == kOrderCalcErrT) return OrderPlotWindow::Kind::ErrT;
     // Область устойчивости — карта по построению: сетка всегда (sigma, omega).
     if (c.calc_kind == kOrderCalcStab) return OrderPlotWindow::Kind::Map;
     return c.two_d ? OrderPlotWindow::Kind::Map : OrderPlotWindow::Kind::P;
@@ -1571,6 +1758,11 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                              { g },
                              [&model]() { model.start_next_in_order_queue(); },
                              model.order_queue().size());
+        ImGui::SameLine();
+        ImGui::Checkbox("Auto-compute", &s.auto_compute);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Recompute the active tab as soon as its settings change.\n"
+                              "A change made during a run starts a new run after it.");
     }
     ImGui::Separator();
 
@@ -1609,9 +1801,8 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     const int idx = s.active_config_index;
     OrderConfig& c = s.configs[(size_t)idx];
 
+    // Шапка в три строки: метка; вид расчёта; устройство и точность.
     draw_label_rename("##order_label", c.label, kFieldW);
-    ImGui::SameLine();
-    ImGui::TextDisabled("|"); ImGui::SameLine();
     const int calc_kind_before = c.calc_kind;
     ImGui::RadioButton("order p", &c.calc_kind, kOrderCalcOrder);
     if (ImGui::IsItemHovered())
@@ -1637,15 +1828,27 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             "\n"
             "Needs the linear two-dimensional test system - Library ->\n"
             "Dahlquist 2D. Any other system is refused.");
+    ImGui::SameLine();
+    ImGui::RadioButton("error(t)", &c.calc_kind, kOrderCalcErrT);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Error of the scheme in time on this system: |x_h(t) - x_ref(t)| at the\n"
+            "nodes t_k = k*h against a reference - the same scheme with h/2 (plus the\n"
+            "Richardson estimate) or another scheme with h/m. The reference runs in\n"
+            "lockstep, so the grids coincide exactly and nothing is interpolated.\n"
+            "One trajectory, computed on the CPU.");
     if (c.calc_kind != calc_kind_before) order_rehome_config(model, idx);
+    const bool errt_mode = (c.calc_kind == kOrderCalcErrT);
 
     // Устройство расчёта. Обе ветки считают по одним формулам и одним порогам,
     // но замер времени у них меряет РАЗНОЕ: GPU — ядро с replicas нитями,
     // CPU — одну траекторию последовательно. Числа между устройствами поэтому
     // не сопоставимы, и это не баг, а два разных вопроса к схеме.
-    ImGui::SameLine();
-    ImGui::TextDisabled("|"); ImGui::SameLine();
-    int ord_dev = c.use_gpu ? 0 : 1;
+    // Error(t) — одна траектория, только CPU: переключатель устройства гасится,
+    // настройка вкладки при этом не трогается (её читают остальные расчёты).
+    const bool gpu_eff = c.use_gpu && !errt_mode;
+    if (errt_mode) ImGui::BeginDisabled();
+    int ord_dev = gpu_eff ? 0 : 1;
     ImGui::RadioButton("GPU##ord_dev", &ord_dev, 0);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Kernel compiled by NVRTC (kernels/order.template.cu).");
@@ -1659,13 +1862,14 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             "with the GPU one.\n"
             "Performance means something else here: the time of ONE trajectory,\n"
             "not the throughput of a loaded GPU - replicas are ignored.");
-    c.use_gpu = (ord_dev == 0);
+    if (errt_mode) ImGui::EndDisabled();
+    else           c.use_gpu = (ord_dev == 0);
 
     // Точность арифметики. Есть только у CPU: на GPU ядро собирается в numb,
     // и выбор там был бы обманом — цифры те же, смысл другой.
     ImGui::SameLine();
     ImGui::TextDisabled("|"); ImGui::SameLine();
-    if (c.use_gpu) ImGui::BeginDisabled();
+    if (gpu_eff) ImGui::BeginDisabled();
     const char* prec_items[] = { "double", "double-double", "quad-double" };
     ImGui::SetNextItemWidth(150.0f);
     ImGui::Combo("precision##ord_prec", &c.cpu_precision, prec_items, IM_ARRAYSIZE(prec_items));
@@ -1688,10 +1892,10 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             "\n"
             "The same KRS body is rebuilt with numb = ucuda::dd / ucuda::qd;\n"
             "each build is cached separately, so switching does not recompile.");
-    if (c.use_gpu) ImGui::EndDisabled();
-    if (!c.use_gpu && c.cpu_precision > 0) order_float_build_warning();
+    if (gpu_eff) ImGui::EndDisabled();
+    if (!gpu_eff && c.cpu_precision > 0) order_float_build_warning();
 
-    if (!c.use_gpu) {
+    if (!gpu_eff) {
         std::string why;
         if (!cpu_compiler_available(&why))
             ImGui::TextColored(readable_text(ImVec4(1.0f, 0.5f, 0.3f, 1.0f)),
@@ -1746,8 +1950,8 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             ImGui::TextDisabled("The step and the grid of the stability region live in "
                                 "\"Stability region\" below.");
         } else {
-        const bool h_swept = (c.axis_x_target == kOrderTargetH)
-                          || (c.two_d && c.axis_y_target == kOrderTargetH);
+        const bool h_swept = !errt_mode && ((c.axis_x_target == kOrderTargetH)
+                          || (c.two_d && c.axis_y_target == kOrderTargetH));
         if (!model.is_map) {
             if (h_swept) ImGui::BeginDisabled();
             InputNumStr("h", c.h_text, kFieldW);
@@ -1766,6 +1970,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                 "Adjust the step so that the number of steps is an integer.\n"
                 "Turning this off reproduces the behaviour of the other tabs\n"
                 "(floor(t_max/h)) at the cost of a parasitic O(h) contribution to the error.");
+        if (!errt_mode) {
         ImGui::SameLine();
         ImGui::Checkbox("endpoint only", &c.endpoint_only);
         if (ImGui::IsItemHovered())
@@ -1776,6 +1981,54 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
 
         draw_order_steps_hint(c, s);
         }
+        }
+    }
+
+    // ---- Error vs time ----
+    if (errt_mode && ImGui::CollapsingHeader("Error vs time", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextDisabled("reference:"); ImGui::SameLine();
+        ImGui::RadioButton("same scheme, h/2##errtref", &c.errt_ref, kErrTimeRefHalf);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "The same scheme with half the step, two substeps per step of x_h.\n"
+                "|x_h - x_h/2| is the error of x_h up to a factor (1 - 2^-p); the\n"
+                "Richardson curve restores it: |x_h - x_h/2| * 2^p / (2^p - 1).");
+        ImGui::SameLine();
+        ImGui::RadioButton("other scheme, h/m##errtref", &c.errt_ref, kErrTimeRefScheme);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Another scheme (DOP853 by default) with m substeps per step of x_h.\n"
+                "With its own error far below that of x_h, the difference IS the\n"
+                "error of the scheme under test.");
+        if (c.errt_ref == kErrTimeRefScheme) {
+            draw_scheme_combo("reference scheme", c.errt_ref_scheme, s.custom_schemes, {},
+                              &s.enabled_builtin_schemes, &model, s.sys.is_map, &s.wrapper_schemes,
+                              /*broadcast*/ false);
+            InputNumStr("substeps m", c.errt_ref_substeps_text, kFieldW);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Reference steps per step of the tested scheme: the reference step is h/m.");
+        } else {
+            InputNumStr("order p (Richardson)", c.errt_order_text, kFieldW);
+            const int pp = order_scheme_passport_order(s, c.scheme);
+            const int pe = order_errt_effective_order(s, c);
+            ImGui::SameLine();
+            if (pe > 0)
+                ImGui::TextDisabled(c.errt_order_text.empty() ? "(nominal p = %d)" : "(p = %d)", pe);
+            else
+                ImGui::TextDisabled("(order unknown: enter p for the Richardson estimate)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Empty - the nominal order of the scheme%s.",
+                                  pp > 0 ? "" : " (not known for this scheme)");
+        }
+        const char* norms[] = { "L-inf (max over variables)", "L2 (Euclidean)" };
+        ImGui::SetNextItemWidth(kComboW);
+        ImGui::Combo("norm##errt", &c.errt_norm, norms, IM_ARRAYSIZE(norms));
+        const double hh = parse_num(c.h_text, 0.01), tt = parse_num(c.t_max_text, 10.0);
+        const long long N = order_steps_for_h(hh, tt, c.snap_steps);
+        const int m = (c.errt_ref == kErrTimeRefHalf) ? 2
+                    : std::max(1, (int)parse_num(c.errt_ref_substeps_text, 4.0));
+        ImGui::TextDisabled("%lld nodes t_k = k*h, the reference takes %d substep%s each",
+                            N, m, m == 1 ? "" : "s");
     }
 
     // ---- Stability region ----
@@ -1913,7 +2166,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     // вещественная и мнимая части собственных чисел тестовой матрицы), и
     // общий селектор «h + элементы a[]» к ней неприменим: показывать его
     // рядом с настоящими границами значило бы предлагать выбор, которого нет.
-    if (c.calc_kind != kOrderCalcStab &&
+    if (c.calc_kind != kOrderCalcStab && c.calc_kind != kOrderCalcErrT &&
         ImGui::CollapsingHeader("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) {
         const bool perf_mode = (c.calc_kind == kOrderCalcPerf);
         const bool perf_ad   = perf_mode && c.adaptive.enabled && !s.sys.is_map;
@@ -2000,8 +2253,8 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         ImGui::SameLine();
         ImGui::SetNextItemWidth(140);
         int kind = (int)win.kind;
-        const char* kind_names[] = { "Order p", "Error", "Order map 2D", "Performance" };
-        if (ImGui::Combo("##wkind", &kind, kind_names, 4)) {
+        const char* kind_names[] = { "Order p", "Error", "Order map 2D", "Performance", "Error(t)" };
+        if (ImGui::Combo("##wkind", &kind, kind_names, 5)) {
             win.kind = (OrderPlotWindow::Kind)kind;
             // Члены, которые новому виду не подходят, из окна выпадают: иначе
             // окно молча показывало бы "нет данных" от чужой вкладки.
@@ -2054,5 +2307,26 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         model.add_order_plot_window(order_kind_for(c), { s.active_config_index });
     ImGui::SameLine();
     if (ImGui::Button("Reset windows layout")) model.order_layout_generation++;
+
+    // ---- Auto-compute ----
+    // Сигнатура настроек — JSON сессии (результатов в нём нет). Переключение вкладки,
+    // загрузка сессии и само включение флажка лишь запоминают её; пересчёт — когда она
+    // поменялась при той же активной вкладке, и не во время расчёта (тогда — после него).
+    {
+        struct AutoState { int epoch = -1, active = -1; std::string sig; bool pending = false; };
+        auto& st = ui_resource<AutoState, 3028>();
+        const int epoch = model.session_epoch[(int)AppModel::AppMode::Order];
+        const std::string sig = session_to_json_order(s);
+        if (st.epoch != epoch || st.active != s.active_config_index || !s.auto_compute) {
+            st.epoch = epoch; st.active = s.active_config_index; st.sig = sig; st.pending = false;
+        } else if (sig != st.sig) {
+            st.sig = sig;
+            st.pending = true;
+        }
+        if (st.pending && !s.in_flight && s.auto_compute) {
+            st.pending = false;
+            model.run_order(s.active_config_index);
+        }
+    }
 }
 }
