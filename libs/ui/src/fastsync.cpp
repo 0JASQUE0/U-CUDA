@@ -555,13 +555,17 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
             std::snprintf(buf, sizeof(buf), "%.10g", (2.0 * iter_v - 1.0) * window_v);
             c.total_time_text = buf;
         }
-        if (InputNumStr("total sync time", c.total_time_text, kFieldW)) {
+        // Правкой считается ЛЮБОЕ изменение текста, не только набор: "Reset to default" и
+        // рассылка из ПКМ пишут в total_time_text мимо возврата InputNumStr, и без пересчёта
+        // window следующий кадр вернул бы total, выведенный из прежних window/iter.
+        const std::string total_before = c.total_time_text;
+        if (InputNumStr("total sync time", c.total_time_text, kFieldW) || c.total_time_text != total_before) {
             // Пользователь правит total → пересчитываем window (iter фиксирован).
             double total_v = parse_ratio_or(c.total_time_text, 0.0);
             double iter_v  = std::max(1.0, parse_ratio_or(c.iter_of_synchr_text, 0.0));
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "%.10g", total_v / (2.0 * iter_v - 1.0));
-            c.window_text = buf;
+            // Кратчайшая запись, читающаяся в тот же double: с %.10g обратный пересчёт
+            // total = (2·iter − 1)·window давал 9950.000001 вместо набранного 9950.
+            c.window_text = fmt_num_shortest(total_v / (2.0 * iter_v - 1.0));
         }
         if (c.mode == 0) {
             InputNumStr("decimator",    c.pre_scaller_text, kFieldW);

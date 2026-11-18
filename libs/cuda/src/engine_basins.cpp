@@ -230,7 +230,6 @@ BasinsResult ParametricEngine::Impl::run_basins(const BasinsRequest& req) {
             const int blockSizeCap = launch_block_size(sharedPerThread);
             if (blockSize > blockSizeCap)     blockSize = blockSizeCap;
             int gridSize = (int)((cur_limiter + blockSize - 1) / blockSize);
-
             // calculateDiscreteModelAvgPeaksCUDA: интегрирование и фичи в одном ядре.
             // h-свипа и лог-осей у бассейнов нет в запросе вовсе, ядро зашивает их
             // константами -1 / 0 — ровно тем, что сюда передавалась раздельная пара.
@@ -320,6 +319,29 @@ BasinsResult ParametricEngine::Impl::run_basins(const BasinsRequest& req) {
             BAS_CHECK(cudaMemcpy(h_adStats.data(), adArgs.stats, total_cells * 4 * sizeof(numb),
                                  cudaMemcpyDeviceToHost), "memcpy adaptive stats");
             res.ad_stats.assign(h_adStats.begin(), h_adStats.end());
+        }
+
+        // Узлы осей НУ — тем же модулем, что считал ячейки (ucudaBasinsAxisNodes): по ним хост
+        // ставит НУ портретов бассейнов побитово равными стартовой точке ячейки. Сбой здесь не
+        // роняет расчёт: без узлов хост вернётся к своей формуле (basins_grid_value).
+        {
+            CUfunction fn_nodes = nullptr;
+            CUmodule   mod      = ad ? cached_ad.module : cached_basins.module;
+            numb*      d_nodes  = nullptr;
+            if (mod && cuModuleGetFunction(&fn_nodes, mod, "ucudaBasinsAxisNodes") == CUDA_SUCCESS
+                && cudaMalloc((void**)&d_nodes, 2 * (size_t)nPts * sizeof(numb)) == cudaSuccess) {
+                int   n_arg = nPts, mask_arg = logAxisMask;
+                void* args_nodes[] = { &n_arg, &d_ranges, &mask_arg, &d_nodes };
+                std::vector<numb> h_nodes(2 * (size_t)nPts);
+                if (cuLaunchKernel(fn_nodes, (nPts + 255) / 256, 1, 1, 256, 1, 1, 0, nullptr,
+                                   args_nodes, nullptr) == CUDA_SUCCESS
+                    && cudaMemcpy(h_nodes.data(), d_nodes, h_nodes.size() * sizeof(numb),
+                                  cudaMemcpyDeviceToHost) == cudaSuccess) {
+                    res.axis_x_nodes.assign(h_nodes.begin(), h_nodes.begin() + nPts);
+                    res.axis_y_nodes.assign(h_nodes.begin() + nPts, h_nodes.end());
+                }
+            }
+            if (d_nodes) cudaFree(d_nodes);
         }
 
         const auto bas_t_sim = bas_clock::now();

@@ -1067,16 +1067,13 @@ int main(int argc, char** argv) {
         // рисовалось на полных ~60 FPS и отнимало GPU у ядра — один и тот же
         // расчёт из Custom и из Parametric заметно расходился по времени.
         // Тот же недосмотр был у 1D DFT и Fast Synchro: их сессии тоже
-        // появились после того, как троттлинг был написан.
-        bool compute_in_flight =
-            model.bifurcation_session.in_flight ||
-            model.lle_session.in_flight ||
-            model.ls_session.in_flight ||
-            model.metrics_session.in_flight ||
-            model.basins_session.in_flight ||
-            model.dft1d_session.in_flight ||
-            model.fastsync_session.in_flight ||
-            model.custom_session.any_in_flight();
+        // появились после того, как троттлинг был написан. И у Tree (листья в
+        // tree_session.leaves): без него бассейны из Tree считались ~3x дольше,
+        // чем тот же конфиг во вкладке Basins (7.0 s против 2.3 s, тот же модуль
+        // и разметка запуска; замер 2026-11-18). Поэтому список теперь один —
+        // AppModel::any_gpu_job_in_flight (все вкладки, включая Phase, Order,
+        // Network, Neural и портреты бассейнов), его же берёт выбор системы.
+        const bool compute_in_flight = model.any_gpu_job_in_flight();
         // During heavy compute throttle the main loop: glfwWaitEventsTimeout
         // blocks the thread up to 100 ms unless an input event arrives. Drops
         // render rate from ~60 FPS to ~10 FPS, freeing GPU and CPU for CUDA

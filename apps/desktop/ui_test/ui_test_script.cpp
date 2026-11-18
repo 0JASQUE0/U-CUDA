@@ -220,9 +220,8 @@ void run_line(ImGuiTestContext* ctx, const Line& l) {
         const double timeout = n >= 1 ? std::atof(a[1].c_str()) : 120.0;
         const double t0 = ImGui::GetTime();
         ctx->Yield(2);
-        while (m && (m->bifurcation_session.in_flight || m->lle_session.in_flight || m->ls_session.in_flight ||
-                     m->metrics_session.in_flight || m->basins_session.in_flight || m->dft1d_session.in_flight ||
-                     m->fastsync_session.in_flight || m->custom_session.any_in_flight())) {
+        // The app's own list (all tabs, Tree and basins portraits included); a copy here missed several.
+        while (m && m->any_gpu_job_in_flight()) {
             if (ImGui::GetTime() - t0 > timeout) SCRIPT_FAIL("line %d: still computing after %.0f s", l.no, timeout);
             ctx->SleepNoSkip(0.1f, 1.0f / 60.0f);
         }

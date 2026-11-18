@@ -690,19 +690,9 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     // Disabled while ANY session is in-flight so a switch can't race a worker
     // that will apply its result to the already-swapped session.
     {
-        bool any_in_flight =
-              model.phase_session.in_flight
-           || model.bifurcation_session.in_flight
-           || model.lle_session.in_flight
-           || model.ls_session.in_flight
-           || model.metrics_session.in_flight
-           || model.dft1d_session.in_flight
-           || model.basins_session.in_flight
-           || model.fastsync_session.in_flight
-           || model.order_session.in_flight
-           || model.network_session.in_flight
-           || model.neural_session.in_flight
-           || model.custom_session.any_in_flight();
+        // Тот же список, по которому главный цикл придерживает отрисовку (раньше их было два,
+        // и в обоих не хватало вкладок).
+        const bool any_in_flight = model.any_gpu_job_in_flight();
         const float combo_w = 240.0f;
         std::string preview = model.name.empty() ? std::string("(select system)") : model.name;
         // Центрируем, но не левее конца ряда вкладок: с добавлением Order ряд

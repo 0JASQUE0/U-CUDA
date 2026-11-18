@@ -346,7 +346,16 @@ static void width_handle_rect(const std::string& key, ImGuiID id, ImVec2 imin, I
         widths.erase(key);
         g_width_store->field_widths_dirty = true;
     }
-    if (hovered && fit && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) set_w(fit());
+    // По ОТПУСКАНИЮ, а не по нажатию: контекстные меню полей (BeginPopupContextItem)
+    // открываются на отпускании. Подгонка по нажатию сдвигала столбец, к отпусканию под
+    // курсором оказывалось соседнее поле — и открывалось его меню.
+    // Отпускание после этого гасим: прямоугольник поля с подписью справа ("Param lo") включает
+    // зазор, где стоит ручка, и BeginPopupContextItem поля, нарисованного следом, открыл бы
+    // его меню тем же щелчком.
+    if (hovered && fit && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        set_w(fit());
+        ImGui::GetIO().MouseReleased[ImGuiMouseButton_Right] = false;
+    }
 
     if (hovered || held) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);

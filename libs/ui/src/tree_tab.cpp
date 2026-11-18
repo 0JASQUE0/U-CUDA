@@ -375,6 +375,39 @@ void apply_pending(AppModel& model, TreeSession& ts, const Pending& p) {
 
 // --- Панели параметров ---
 
+// ПКМ у полей узла (InputNumStr внутри n.cfg): "Reset to default" и "Apply to all Tree" — как у
+// вкладок с несколькими конфигами. "Все" — узлы того же вида: Resolution региона не должна
+// уходить в срезы и листья, у которых это поле ничего не значит.
+struct TreeNodeFieldScope {
+    TreeNodeFieldScope(AppModel& m, TreeSession& ts, const TreeNode& n) {
+        auto same = std::make_shared<std::vector<int>>();
+        int active = -1;
+        for (int i = 0; i < (int)ts.tree.nodes.size(); ++i)
+            if (ts.tree.nodes[(size_t)i].kind == n.kind) {
+                if (&ts.tree.nodes[(size_t)i] == &n) active = (int)same->size();
+                same->push_back(i);
+            }
+        if (active < 0) return;
+        static const CustomTabSharedConfig def_cfg{};
+        std::vector<TreeNode>* nodes = &ts.tree.nodes;
+        CfgFieldScope s;
+        s.model = &m; s.tab = "Tree";
+        s.base = reinterpret_cast<const char*>(&n.cfg);
+        s.size = sizeof(CustomTabSharedConfig);
+        s.def = reinterpret_cast<const char*>(&def_cfg);
+        s.active = active;
+        s.count = [same] { return (int)same->size(); };
+        s.at = [nodes, same](int i) { return reinterpret_cast<char*>(&(*nodes)[(size_t)(*same)[(size_t)i]].cfg); };
+        s.label = [nodes, same](int i) { return (*nodes)[(size_t)(*same)[(size_t)i]].name; };
+        push_cfg_scope(std::move(s));
+        pushed = true;
+    }
+    ~TreeNodeFieldScope() { if (pushed) pop_cfg_scope(); }
+    TreeNodeFieldScope(const TreeNodeFieldScope&) = delete;
+    TreeNodeFieldScope& operator=(const TreeNodeFieldScope&) = delete;
+    bool pushed = false;
+};
+
 // Курсор вдоль оси: InputDouble с запуском автопересчёта по отпусканию.
 void cursor_field(const char* label, double& v, int owner) {
     item_w(kFieldW);
@@ -422,7 +455,8 @@ bool draw_system_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
                                   kAdUiRaw | kAdUiInterp | kAdUiMaxPts, model.is_map, nullptr);
     }
     const auto ic0 = c.initial_conditions;
-    draw_named_num_fields("Initial conditions##tree_ic", ts.vars, c.initial_conditions);
+    draw_named_num_fields("Initial conditions##tree_ic", ts.vars, c.initial_conditions,
+                          nullptr, &model, BroadcastField::InitCondition);
     ch |= ic0 != c.initial_conditions;
 
     if (ucuda::ui_detail::block_header("Parameters##tree_par", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -444,7 +478,10 @@ bool draw_system_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
         }
         draw_param_tree(&model.param_groups, ts.params, [&](const std::string& p) {
             ImGui::PushID(p.c_str());
-            const bool edited = InputNumStr("##v", c.param_values[p], kFieldW);
+            const bool edited = InputNumStr("##v", c.param_values[p], kFieldW, [&] {
+                field_apply_all_menu(&model, BroadcastField::Param, p, p, c.param_values[p],
+                                     [&] { field_restore_menu_items(&model, BroadcastField::Param, p, c.param_values, ts.params); });
+            });
             ImGui::SameLine();
             draw_field_name(p, &model.field_labels);
             auto it = uses.find(p);
@@ -574,7 +611,8 @@ bool draw_leaf_integration(AppModel& model, TreeSession& ts, TreeNode& n,
             ch |= InputNumStr("decimator##own", c.pre_scaller_text, kFieldW);
             const auto ic0 = c.initial_conditions;
             draw_named_num_fields("Initial conditions##own_ic", ts.vars, c.initial_conditions,
-                                  n.kind == TreeNodeKind::Basins ? "Values for non-axis variables." : nullptr);
+                                  n.kind == TreeNodeKind::Basins ? "Values for non-axis variables." : nullptr,
+                                  &model, BroadcastField::InitCondition);
             ch |= ic0 != c.initial_conditions;
         }
     } else {
@@ -601,6 +639,7 @@ bool draw_leaf_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
     };
     switch (n.kind) {
     case TreeNodeKind::Bif2D: case TreeNodeKind::Bif1D: {
+        const ConfigFieldScope<BifurcationDiagramConfig> leaf_scope(model, "Tree", rt.bif->diagrams, 0);
         auto& d = rt.bif->diagrams[0];
         auto& wo = writable_owner();
         const int wv0 = wo.bif_writable_var;
@@ -613,14 +652,18 @@ bool draw_leaf_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
         }
         break;
     }
-    case TreeNodeKind::LLE2D: case TreeNodeKind::LLE1D:
+    case TreeNodeKind::LLE2D: case TreeNodeKind::LLE1D: {
+        const ConfigFieldScope<LLECurveConfig> leaf_scope(model, "Tree", rt.lle->curves, 0);
         ch |= InputNumStr("eps", rt.lle->curves[0].eps_text, kFieldW);
         ch |= InputNumStr("NT", rt.lle->curves[0].nt_text, kFieldW);
         break;
-    case TreeNodeKind::LS2D: case TreeNodeKind::LS1D:
+    }
+    case TreeNodeKind::LS2D: case TreeNodeKind::LS1D: {
+        const ConfigFieldScope<LSCurveConfig> leaf_scope(model, "Tree", rt.ls->curves, 0);
         ch |= InputNumStr("eps", rt.ls->curves[0].eps_text, kFieldW);
         ch |= InputNumStr("NT", rt.ls->curves[0].nt_text, kFieldW);
         break;
+    }
     case TreeNodeKind::Phase: {
         const int id = n.id;
         // Recompute и Auto recompute — через очередь дерева: прямой расчёт взял бы поля панели
@@ -637,6 +680,7 @@ bool draw_leaf_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
     case TreeNodeKind::Basins: {
         // Как во вкладке Basins: оси по НУ, сетка, фичи DBSCAN, перекластеризация, портреты.
         auto& b  = *rt.basins;
+        const ConfigFieldScope<BasinsConfig> leaf_scope(model, "Tree", b.configs, 0);
         auto& bc = b.configs[0];
         if (!ts.vars.empty()) {
             if (bc.axis_x_var < 0 || bc.axis_x_var >= (int)ts.vars.size()) bc.axis_x_var = 0;
@@ -714,6 +758,7 @@ void draw_params_panel(AppModel& model, TreeSession& ts) {
     ImGui::Separator();
     ImGui::PushID(n->id);
     bool ch = false;
+    const TreeNodeFieldScope cfg_field_scope(model, ts, *n);
     switch (n->kind) {
     case TreeNodeKind::System:   ch = draw_system_panel(model, ts, *n); break;
     case TreeNodeKind::Region2D: ch = draw_region_panel(model, ts, *n); break;

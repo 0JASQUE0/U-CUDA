@@ -474,16 +474,14 @@ std::string build_basins_phase_signature(const BasinsConfig& c) {
 namespace ucuda::analysis_detail {
 
 
-// Значение узла сетки — зеркало getValueByIdx (cudaLibrary.cu): та же
-// lerp-форма и те же вырожденные случаи, иначе восстановленное НУ не совпадёт
-// с тем, что реально считало ядро для этой ячейки.
-// ±log-ось — та же ucuda_node_value_symlog, что у getValueByIdx_symlog в ядре.
+// Значение узла сетки по формуле — запасной путь, когда ядро не отдало узлы
+// (BasinsResult::axis_*_nodes). Линейная ось — та же ucuda_node_value, что у
+// getValueByIdx в ядре (рукописная копия здесь не знала про fma и расходилась с
+// ядром в последних битах). ±log — ucuda_node_value_symlog, но её log10/pow на
+// хосте и на устройстве не обязаны совпадать побитово: поэтому узлы и берутся у ядра.
 double basins_grid_value(int point_idx, int n_pts, double lo, double hi, bool symlog) {
     if (symlog) return (double)ucuda_node_value_symlog(point_idx, n_pts, (numb)lo, (numb)hi);
-    if (n_pts <= 0) return lo;
-    if (n_pts == 1) return hi;
-    const double t = (double)point_idx / (double)(n_pts - 1);
-    return (1.0 - t) * lo + t * hi;
+    return (double)ucuda_node_value(point_idx, n_pts, (numb)lo, (numb)hi);
 }
 }
 
@@ -599,15 +597,20 @@ bool BasinsAnalysisSession::rebuild_phase_ics(int config_idx) {
             auto it = c.initial_conditions.find(v);
             ic.values[v] = (it != c.initial_conditions.end()) ? it->second : std::string();
         }
-        // Осевые переменные перекрываем координатами узла сетки.
+        // Осевые переменные перекрываем координатами узла сетки: узел ячейки берётся у ядра
+        // (axis_*_nodes) — это побитово та стартовая точка, которую оно классифицировало.
+        // %.17g переживает обратный разбор без потерь. Формула — только если ядро узлов не дало.
+        auto node = [n](const std::vector<double>& nodes, int k, double lo, double hi, bool symlog) {
+            return (int)nodes.size() == n ? nodes[(size_t)k] : basins_grid_value(k, n, lo, hi, symlog);
+        };
         if (c.result.axis_x_var >= 0 && c.result.axis_x_var < (int)vars.size())
             ic.values[vars[(size_t)c.result.axis_x_var]] =
-                basins_fmt_num(basins_grid_value(ix, n, c.result.axis_x_lo, c.result.axis_x_hi,
-                                                 c.result.axis_x_symlog));
+                basins_fmt_num(node(c.result.axis_x_nodes, ix, c.result.axis_x_lo, c.result.axis_x_hi,
+                                    c.result.axis_x_symlog));
         if (c.result.axis_y_var >= 0 && c.result.axis_y_var < (int)vars.size())
             ic.values[vars[(size_t)c.result.axis_y_var]] =
-                basins_fmt_num(basins_grid_value(iy, n, c.result.axis_y_lo, c.result.axis_y_hi,
-                                                 c.result.axis_y_symlog));
+                basins_fmt_num(node(c.result.axis_y_nodes, iy, c.result.axis_y_lo, c.result.axis_y_hi,
+                                    c.result.axis_y_symlog));
 
         auto pv = prev_visible.find(cell);
         ic.visible = (pv != prev_visible.end()) ? pv->second : true;
