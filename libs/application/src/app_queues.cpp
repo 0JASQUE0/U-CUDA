@@ -603,6 +603,29 @@ bool AppModel::run_neural(int idx, bool resume) {
     return neural_session.run_async(ensure_engine(), idx, resume, neural_result_settings_key(idx));
 }
 
+namespace {
+// Портреты бассейнов считаются в слотах phase_slots, а не под in_flight самой карты.
+bool basins_portraits_in_flight(const BasinsAnalysisSession& s) {
+    for (const auto& sl : s.phase_slots)
+        if (sl && sl->phase.in_flight) return true;
+    return false;
+}
+}
+
+bool AppModel::any_gpu_job_in_flight() const {
+    if (phase_session.in_flight || bifurcation_session.in_flight || lle_session.in_flight ||
+        ls_session.in_flight || metrics_session.in_flight || dft1d_session.in_flight ||
+        basins_session.in_flight || fastsync_session.in_flight || order_session.in_flight ||
+        network_session.in_flight || neural_session.in_flight ||
+        custom_session.any_in_flight() || tree_session.any_in_flight())
+        return true;
+    if (basins_portraits_in_flight(basins_session) || basins_portraits_in_flight(custom_session.basins_session))
+        return true;
+    for (const auto& [id, rt] : tree_session.leaves)
+        if (rt.basins && basins_portraits_in_flight(*rt.basins)) return true;
+    return false;
+}
+
 void AppModel::reset_engine() {
     if (parametric_prewarm_future.valid()) parametric_prewarm_future.wait();
     parametric_engine.reset();
