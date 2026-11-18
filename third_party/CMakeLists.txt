@@ -30,6 +30,26 @@ add_library(ucuda_gui_dependencies STATIC
 target_include_directories(ucuda_gui_dependencies PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends
     ${implot_SOURCE_DIR} ${implot3d_SOURCE_DIR})
 target_link_libraries(ucuda_gui_dependencies PUBLIC glfw OpenGL::GL ${CMAKE_DL_LIBS})
+if(U_CUDA_UI_TESTS)
+    # Dear ImGui Test Engine, tag v1.92.8 to match imgui v1.92.8-docking above.
+    # Licence: imgui_test_engine/LICENSE.txt (free for individuals and educational use).
+    FetchContent_Declare(imgui_test_engine GIT_REPOSITORY https://github.com/ocornut/imgui_test_engine.git
+        GIT_TAG 7be88e7fa267f251c7271a33d72b1aa5ca04a4cb SOURCE_SUBDIR ucuda-no-cmake)
+    FetchContent_MakeAvailable(imgui_test_engine)
+    set(ucuda_te_dir ${imgui_test_engine_SOURCE_DIR}/imgui_test_engine)
+    target_sources(ucuda_gui_dependencies PRIVATE
+        ${ucuda_te_dir}/imgui_capture_tool.cpp ${ucuda_te_dir}/imgui_te_context.cpp
+        ${ucuda_te_dir}/imgui_te_coroutine.cpp ${ucuda_te_dir}/imgui_te_engine.cpp
+        ${ucuda_te_dir}/imgui_te_exporters.cpp ${ucuda_te_dir}/imgui_te_perftool.cpp
+        ${ucuda_te_dir}/imgui_te_ui.cpp ${ucuda_te_dir}/imgui_te_utils.cpp)
+    target_include_directories(ucuda_gui_dependencies PUBLIC ${imgui_test_engine_SOURCE_DIR} ${ucuda_te_dir})
+    # Its stb_image_write copy stays file-local: ucuda_platform links its own implementation.
+    set_source_files_properties(${ucuda_te_dir}/imgui_capture_tool.cpp PROPERTIES COMPILE_DEFINITIONS STB_IMAGE_WRITE_STATIC)
+    # The hooks must be compiled into imgui itself and seen identically by every user of imgui.h.
+    target_compile_definitions(ucuda_gui_dependencies PUBLIC
+        "IMGUI_USER_CONFIG=\"imgui_te_imconfig.h\""
+        IMGUI_TEST_ENGINE_ENABLE_COROUTINE_STDTHREAD_IMPL=1)
+endif()
 if(MSVC)
     # MSBuild expects an actual PDB filename when copying static-library symbols.
     set_target_properties(glfw PROPERTIES COMPILE_PDB_NAME glfw)

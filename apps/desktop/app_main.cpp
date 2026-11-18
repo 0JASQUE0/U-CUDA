@@ -32,6 +32,9 @@
 
 #include "ucuda/platform/platform_paths.h"
 #include "ucuda/platform/platform_posix.h"
+#ifdef UCUDA_UI_TESTS
+#include "ui_test/ui_test_host.h"   // UI test mode (CMake -DU_CUDA_UI_TESTS=ON only)
+#endif
 #ifdef _WIN32
 #include <shobjidl.h>         // IFileDialog: современный диалог файлов
 #endif
@@ -603,7 +606,12 @@ static void set_clipboard_win(const std::string& text) {
     glfwSetClipboardString(nullptr, text.c_str());
 }
 
-int main() {
+int main(int argc, char** argv) {
+#ifdef UCUDA_UI_TESTS
+    ui_test::parse_args(argc, argv);   // --ui-*: runs before the config is read (--ui-fresh)
+#else
+    (void)argc; (void)argv;
+#endif
     // ocr_server.py, kernels\ и NVRTC-заголовки копируются рядом с exe в
     // Post-Build Event. library\ живёт по другой схеме: baseline лежит в
     // library_template\ (git-tracked), а рабочая library\ — per-user, в
@@ -650,6 +658,9 @@ int main() {
     model.params_text = "sigma, rho, beta";
 
     SystemLibrary library(library_dir);
+#ifdef UCUDA_UI_TESTS
+    ui_test::bind_app(&model, &library);
+#endif
 
     GuiCallbacks cb;
     cb.pick_image_file = pick_image_file_win;
@@ -686,6 +697,9 @@ int main() {
         "U-CUDA", nullptr, nullptr);
     if (!window) { glfwTerminate(); return 1; }
     glfwMaximizeWindow(window);
+#ifdef UCUDA_UI_TESTS
+    if (ui_test::active()) ui_test::configure_window(window);   // fixed size: reproducible layout
+#endif
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
@@ -716,6 +730,9 @@ int main() {
     ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
+#ifdef UCUDA_UI_TESTS
+    if (ui_test::active()) ui_test::start();
+#endif
 
     // UI scale: auto-detect через GLFW + override из _app_config.json
     {
@@ -1123,6 +1140,9 @@ int main() {
 
         model.tick(library);
         draw_gui(model, library, cb);
+#ifdef UCUDA_UI_TESTS
+        ui_test::draw_windows();
+#endif
 
         ImGui::Render();
         if (hud_on)
@@ -1161,8 +1181,17 @@ int main() {
         gui_process_deferred(model, cb);
 
         glfwSwapBuffers(window);
+#ifdef UCUDA_UI_TESTS
+        if (ui_test::active()) {
+            glfwSwapInterval(ui_test::wants_max_speed() ? 0 : 1);
+            if (ui_test::post_swap()) glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
+#endif
     }
 
+#ifdef UCUDA_UI_TESTS
+    const int ui_test_exit = ui_test::stop();   // engine must stop before ImGui::DestroyContext
+#endif
     release_gui_resources();
     // Списки подкладки узора и текстуры камуфляжа — до DestroyContext:
     // деструктор ImDrawList обращается к общим данным контекста (_Data), и
@@ -1176,7 +1205,13 @@ int main() {
     ImPlot3D::DestroyContext();
     ImPlot::DestroyContext();
     ImGui::DestroyContext();
+#ifdef UCUDA_UI_TESTS
+    ui_test::destroy();
+#endif
     glfwDestroyWindow(window);
     glfwTerminate();
+#ifdef UCUDA_UI_TESTS
+    if (ui_test::active()) return ui_test_exit;
+#endif
     return 0;
 }

@@ -250,7 +250,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     prune_projection_views();
 
     // Ctrl+Z / Ctrl+Shift+Z — отмена и повтор МАССОВЫХ команд: "Calculation
-    // range from view" (Ctrl+T / Ctrl+Shift+T) и "Apply to all calculation tabs".
+    // range from view" (Ctrl+T / Ctrl+Shift+T) и "Apply to...".
     // Обычные правки полей в стек не идут. Стек свой у каждой вкладки, и
     // работают хоткеи по ОТКРЫТОЙ (см. AppModel::undo_stacks).
     // Условие !WantTextInput принципиально: внутри активного InputText Ctrl+Z —
@@ -262,6 +262,20 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
             if (io.KeyShift) do_redo(model);
             else             do_undo(model);
+        }
+    }
+
+    // Escape закрывает верхний попап или меню. Сама ImGui делает это только при
+    // NavEnableKeyboard, а он включил бы ещё и навигацию стрелками/Tab по всему
+    // интерфейсу. Модальные окна не трогаем: у них свои Cancel (они же ловят Escape).
+    // Внутри активного InputText Escape принадлежит полю: откат набранного.
+    {
+        ImGuiContext& g = *GImGui;
+        if (!ImGui::GetIO().WantTextInput && g.OpenPopupStack.Size > 0 &&
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            const ImGuiWindow* top = g.OpenPopupStack.back().Window;
+            if (!top || !(top->Flags & ImGuiWindowFlags_Modal))
+                ImGui::ClosePopupToLevel(g.OpenPopupStack.Size - 1, true);
         }
     }
 

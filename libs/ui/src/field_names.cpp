@@ -755,10 +755,10 @@ void field_apply_all_menu(AppModel* model, BroadcastField f,
         ImGui::EndMenu();
     }
 
-    // 3. Прежний адресат: активный конфиг каждой вкладки (only = nullptr).
-    count_and_item("Apply to all calculation tabs", nullptr, "all tabs");
+    // Рассылки "в активный конфиг каждой вкладки" (only = nullptr) в меню нет: адресатов
+    // выбирают явно в "Apply to...", привязки к тому, какая вкладка сейчас активна, не нужно.
 
-    // 4. Сброс к умолчанию — если поле лежит в активном конфиге (ConfigFieldScope). Пункты
+    // 3. Сброс к умолчанию — если поле лежит в активном конфиге (ConfigFieldScope). Пункты
     //    "в конфиги вкладки" не дублируем: их конфиги уже есть в рассылке выше.
     if (std::string* fs = cfg_menu_field(); fs && cfg_field_scope_model(fs)) {
         ImGui::Separator();
