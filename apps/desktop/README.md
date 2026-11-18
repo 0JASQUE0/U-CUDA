@@ -17,3 +17,7 @@ The executable links UI, plotting, and OCR. It may know concrete implementations
 ## Build and checks
 
 On Windows build **Release|x64** of `U-CUDA.sln`; in CMake the target is `U-CUDA`. Start it from a working directory outside the source tree, and verify GL resources are released before context destruction.
+
+## UI tests
+
+With CMake `-DU_CUDA_UI_TESTS=ON` the executable gets Dear ImGui Test Engine and a `--ui-*` test mode (command scripts, compiled tests, screenshots). Hooks in `app_main.cpp` are under `#ifdef UCUDA_UI_TESTS`; the `.sln` build does not contain them. See [ui_test/README.md](ui_test/README.md).

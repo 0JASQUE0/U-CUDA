@@ -2,7 +2,13 @@ set(ucuda_desktop_sources app_main.cpp hud_theme.cpp)
 if(WIN32)
     list(APPEND ucuda_desktop_sources "${PROJECT_SOURCE_DIR}/resources/windows/U-CUDA.rc")
 endif()
+if(U_CUDA_UI_TESTS)
+    list(APPEND ucuda_desktop_sources ui_test/ui_test_host.cpp ui_test/ui_test_script.cpp ui_test/ui_tests.cpp ui_test/ui_tests_sweep.cpp)
+endif()
 add_executable(U-CUDA ${ucuda_desktop_sources})
+if(U_CUDA_UI_TESTS)
+    target_compile_definitions(U-CUDA PRIVATE UCUDA_UI_TESTS=1)
+endif()
 target_link_libraries(U-CUDA PRIVATE ucuda::ui ucuda::plotting ucuda::ocr)
 target_compile_definitions(U-CUDA PRIVATE
     U_CUDA_PROJECT_DIR="${PROJECT_SOURCE_DIR}"

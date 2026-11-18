@@ -10,6 +10,9 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
 option(U_CUDA_BUILD_GUI "Build the desktop GUI" ON)
+# Desktop app with Dear ImGui Test Engine compiled in (UI test mode, see apps/desktop/ui_test).
+# Off by default: the classic U-CUDA.sln build and ordinary test builds never contain the engine.
+option(U_CUDA_UI_TESTS "Build the desktop GUI with Dear ImGui Test Engine" OFF)
 find_package(CUDAToolkit REQUIRED)
 find_package(Threads REQUIRED)
 include(cmake/Targets.cmake)
