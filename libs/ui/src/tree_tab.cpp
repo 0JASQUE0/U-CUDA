@@ -377,7 +377,7 @@ void apply_pending(AppModel& model, TreeSession& ts, const Pending& p) {
 
 // Курсор вдоль оси: InputDouble с запуском автопересчёта по отпусканию.
 void cursor_field(const char* label, double& v, int owner) {
-    ImGui::SetNextItemWidth(kFieldW);
+    item_w(kFieldW);
     ImGui::InputDouble(label, &v, 0.0, 0.0, "%.10g");
     if (ImGui::IsItemDeactivatedAfterEdit()) tree_cursor_moved(owner);
 }
@@ -404,7 +404,7 @@ bool draw_system_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
     auto& c = n.cfg;
     ch |= draw_scheme_combo("Scheme", c.scheme, ts.custom_schemes, {}, &ts.enabled_builtin_schemes,
                             nullptr, model.is_map, &ts.wrapper_schemes, false);
-    if (ImGui::CollapsingHeader("Integration##tree_int", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("Integration##tree_int", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (!model.is_map) ch |= InputNumStr("h", c.h_text, kFieldW);
         if (scheme_uses_symmetry(c.scheme, ts.custom_schemes))
             ch |= InputNumStr("symmetry s", c.symmetry_s, kFieldW);
@@ -425,7 +425,7 @@ bool draw_system_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
     draw_named_num_fields("Initial conditions##tree_ic", ts.vars, c.initial_conditions);
     ch |= ic0 != c.initial_conditions;
 
-    if (ImGui::CollapsingHeader("Parameters##tree_par", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("Parameters##tree_par", ImGuiTreeNodeFlags_DefaultOpen)) {
         // Параметры осей свипа помечены; правка такого параметра двигает курсор владельца.
         struct AxisUse { int owner; int dir; };
         std::map<std::string, std::vector<AxisUse>> uses;
@@ -478,7 +478,7 @@ bool draw_region_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
     const int wv0 = c.bif_writable_var;
     draw_writable_var_combo(ts.vars, c.bif_writable_var, "Bif variable##tree_wv");
     ch |= wv0 != c.bif_writable_var;
-    ImGui::SeparatorText("Cursor");
+    ucuda::ui_detail::block_separator("Cursor");
     cursor_field("x##cur", c.fix_x_value, n.id);
     cursor_field("y##cur", c.fix_y_value, n.id);
     ImGui::TextDisabled("Middle drag or Shift+drag on a map moves it.");
@@ -500,7 +500,7 @@ bool draw_slice_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
                    c.sweep_x_over_h, &other_oh, c.sweep_x_log, c.sweep_x_lo_text, c.sweep_x_hi_text);
     if (inheriting) ImGui::EndDisabled();
     ch |= InputNumStr("N", c.n_x_1d_text, kFieldW);
-    ImGui::SeparatorText("1D integrator");
+    ucuda::ui_detail::block_separator("1D integrator");
     bool own = n.own_integration;
     if (ImGui::Checkbox("Own integration##l1d", &own)) {
         if (own) ts.enable_own_integration(n.id);
@@ -518,7 +518,7 @@ bool draw_slice_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
     }
     ch |= ImGui::Checkbox("Continuation", &c.continuation_1d_enabled);
     ch |= ImGui::Checkbox("Inter-peak intervals on Y (Bif)", &c.plot_inter_peaks_1d);
-    ImGui::SeparatorText("Cursor");
+    ucuda::ui_detail::block_separator("Cursor");
     ch |= ImGui::Checkbox("Live (recompute when the cursor moves)", &n.live);
     if (reg) {
         ch |= ImGui::Checkbox("Follow the region cursor", &n.follow_cursor);
@@ -558,7 +558,7 @@ bool draw_point_panel(TreeSession& ts, TreeNode& n) {
 bool draw_leaf_integration(AppModel& model, TreeSession& ts, TreeNode& n,
                            PhaseAnalysisSession* phase = nullptr) {
     bool ch = false;
-    ImGui::SeparatorText("Integration");
+    ucuda::ui_detail::block_separator("Integration");
     bool own = n.own_integration;
     if (ImGui::Checkbox(phase ? "Own integration" : "Own integration and initial conditions", &own)) {
         if (own) ts.enable_own_integration(n.id);
@@ -651,12 +651,12 @@ bool draw_leaf_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
                                       "(nodes -hi..-lo, +lo..+hi, monotone).\n"
                                       "lo, hi > 0; Resolution even.");
             };
-            ImGui::SetNextItemWidth(kComboW);
+            item_w(kComboW, combo_items_need(items.data(), (int)items.size()));
             ch |= ImGui::Combo("Axis X (IC)", &bc.axis_x_var, items.data(), (int)items.size());
             symlog("\xC2\xB1log##tbas_xsym", bc.axis_x_symlog);
             ch |= InputNumStr(bc.axis_x_symlog ? "|X| lo" : "X lo", bc.axis_x_lo_text, kFieldW);
             ch |= InputNumStr(bc.axis_x_symlog ? "|X| hi" : "X hi", bc.axis_x_hi_text, kFieldW);
-            ImGui::SetNextItemWidth(kComboW);
+            item_w(kComboW, combo_items_need(items.data(), (int)items.size()));
             ch |= ImGui::Combo("Axis Y (IC)", &bc.axis_y_var, items.data(), (int)items.size());
             symlog("\xC2\xB1log##tbas_ysym", bc.axis_y_symlog);
             ch |= InputNumStr(bc.axis_y_symlog ? "|Y| lo" : "Y lo", bc.axis_y_lo_text, kFieldW);
@@ -666,14 +666,14 @@ bool draw_leaf_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
         const int wv0 = bc.writable_var;
         draw_writable_var_combo(ts.vars, bc.writable_var, "Writable var##tree_bas_wv");
         ch |= wv0 != bc.writable_var;
-        if (ImGui::CollapsingHeader("Features (DBSCAN axes + plot data)", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ucuda::ui_detail::block_header("Features (DBSCAN axes + plot data)", ImGuiTreeNodeFlags_DefaultOpen)) {
             if (bc.feature1 < 0 || bc.feature1 >= BF_FEATURE_COUNT) bc.feature1 = BF_FEATURE1_DEFAULT;
             if (bc.feature2 < 0 || bc.feature2 >= BF_FEATURE_COUNT) bc.feature2 = BF_FEATURE2_DEFAULT;
-            ImGui::SetNextItemWidth(220);
+            item_w(220, combo_items_need(kBasinFeatureNames, BF_FEATURE_COUNT));
             ch |= ImGui::Combo("Feature 1##tbas", &bc.feature1, kBasinFeatureNames, BF_FEATURE_COUNT);
             ImGui::SameLine();
             ch |= InputNumStr("mult##tbas_f1", bc.mult_feature1_text, 80);
-            ImGui::SetNextItemWidth(220);
+            item_w(220, combo_items_need(kBasinFeatureNames, BF_FEATURE_COUNT));
             ch |= ImGui::Combo("Feature 2##tbas", &bc.feature2, kBasinFeatureNames, BF_FEATURE_COUNT);
             ImGui::SameLine();
             ch |= InputNumStr("mult##tbas_f2", bc.mult_feature2_text, 80);
@@ -686,7 +686,7 @@ bool draw_leaf_panel(AppModel& model, TreeSession& ts, TreeNode& n) {
         if (ImGui::Button("Clustering")) model.recluster_tree_basins(n.id);
         if (!can_recluster) ImGui::EndDisabled();
         ImGui::TextDisabled("Clustering radius in (Feature 1, Feature 2) space.");
-        if (ImGui::CollapsingHeader("Phase portraits")) draw_basins_phase_controls(model, b, 0);
+        if (ucuda::ui_detail::block_header("Phase portraits")) draw_basins_phase_controls(model, b, 0);
         if (bc.last_run_ok)
             ImGui::TextColored(readable_text(ImVec4(0.4f, 1.0f, 0.4f, 1.0f)), "OK: %dx%d, %d clusters (+ %d FP clusters)",
                                bc.result.n_pts, bc.result.n_pts, bc.result.n_clusters, -bc.result.min_cluster_idx);

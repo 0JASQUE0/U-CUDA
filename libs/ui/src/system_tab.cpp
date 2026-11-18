@@ -99,7 +99,7 @@ bool extr_base_needs_half_s(const std::string& nm) {
 namespace ucuda::ui_detail {
 void draw_extrapolation_builder(SystemEditor& model) {
     ImGui::Spacing();
-    if (!ImGui::CollapsingHeader("Extrapolated schemes (Richardson)",
+    if (!ucuda::ui_detail::block_header("Extrapolated schemes (Richardson)",
         model.wrapper_schemes.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen))
         return;
 
@@ -110,19 +110,19 @@ void draw_extrapolation_builder(SystemEditor& model) {
         "Every thread does the same work, so there is no warp divergence.");
 
     // --- выбор базы -------------------------------------------------------
-    ImGui::SetNextItemWidth(kComboW);
+    item_w(kComboW);
     if (ImGui::BeginCombo("base scheme", model.extr_builder_base.c_str())) {
         std::string shown_group;
         for (const auto& b : kBuiltinSchemes) {
             if (!(model.*(b.flag)) && model.extr_builder_base != b.name) continue;
             if (scheme_group_title(b) != shown_group) {
-                ImGui::SeparatorText(scheme_group_title(b).c_str());
+                ucuda::ui_detail::block_separator(scheme_group_title(b).c_str());
                 shown_group = scheme_group_title(b);
             }
             if (ImGui::Selectable(b.name, model.extr_builder_base == b.name))
                 model.extr_builder_base = b.name;
         }
-        if (!model.custom_schemes.empty()) ImGui::SeparatorText("Custom");
+        if (!model.custom_schemes.empty()) ucuda::ui_detail::block_separator("Custom");
         for (const auto& cs : model.custom_schemes)
             if (ImGui::Selectable((cs.name + "##custom").c_str(),
                                   model.extr_builder_base == cs.name))
@@ -161,7 +161,7 @@ void draw_extrapolation_builder(SystemEditor& model) {
     const bool eff_sym = extrapolation_symmetric(re_out, base_sym);
 
     // --- число стадий и сами n -------------------------------------------
-    ImGui::SetNextItemWidth(120);
+    item_w(120);
     if (ImGui::InputInt("stages K", &model.extr_builder_stages)) {
         if (model.extr_builder_stages < kExtrMinStages) model.extr_builder_stages = kExtrMinStages;
         if (model.extr_builder_stages > kExtrMaxStages) model.extr_builder_stages = kExtrMaxStages;
@@ -185,7 +185,7 @@ void draw_extrapolation_builder(SystemEditor& model) {
         ImGui::PushID(k);
         char lbl[24];
         std::snprintf(lbl, sizeof(lbl), "n[%d]", k);
-        ImGui::SetNextItemWidth(90.0f);
+        item_w(90.0f);
         ImGui::InputInt(lbl, &model.extr_builder_n[k], 0, 0);
         if (model.extr_builder_n[k] < 1) model.extr_builder_n[k] = 1;
         if (model.extr_builder_n[k] > kExtrMaxSubsteps) model.extr_builder_n[k] = kExtrMaxSubsteps;
@@ -323,7 +323,7 @@ void comp_load_coeffs_from_file(SystemEditor& model, const std::string& path) {
 namespace ucuda::ui_detail {
 void draw_composition_builder(SystemEditor& model, const GuiCallbacks& cb) {
     ImGui::Spacing();
-    if (!ImGui::CollapsingHeader("Composed schemes (triple jump / Suzuki)"))
+    if (!ucuda::ui_detail::block_header("Composed schemes (triple jump / Suzuki)"))
         return;
 
     ImGui::TextDisabled(
@@ -333,19 +333,19 @@ void draw_composition_builder(SystemEditor& model, const GuiCallbacks& cb) {
         "A coefficient may be a parameter name - then the Order tab can sweep it.");
 
     // --- база -------------------------------------------------------------
-    ImGui::SetNextItemWidth(kComboW);
+    item_w(kComboW);
     if (ImGui::BeginCombo("base scheme##comp", model.comp_builder_base.c_str())) {
         std::string shown_group;
         for (const auto& b : kBuiltinSchemes) {
             if (!(model.*(b.flag)) && model.comp_builder_base != b.name) continue;
             if (scheme_group_title(b) != shown_group) {
-                ImGui::SeparatorText(scheme_group_title(b).c_str());
+                ucuda::ui_detail::block_separator(scheme_group_title(b).c_str());
                 shown_group = scheme_group_title(b);
             }
             if (ImGui::Selectable(b.name, model.comp_builder_base == b.name))
                 model.comp_builder_base = b.name;
         }
-        if (!model.custom_schemes.empty()) ImGui::SeparatorText("Custom");
+        if (!model.custom_schemes.empty()) ucuda::ui_detail::block_separator("Custom");
         for (const auto& cs : model.custom_schemes)
             if (ImGui::Selectable((cs.name + "##custom").c_str(),
                                   model.comp_builder_base == cs.name))
@@ -365,7 +365,7 @@ void draw_composition_builder(SystemEditor& model, const GuiCallbacks& cb) {
     }
 
     // --- стадии -----------------------------------------------------------
-    ImGui::SetNextItemWidth(120);
+    item_w(120);
     if (ImGui::InputInt("stages K##comp", &model.comp_builder_stages)) {
         if (model.comp_builder_stages < kCompMinStages) model.comp_builder_stages = kCompMinStages;
         if (model.comp_builder_stages > kCompMaxStages) model.comp_builder_stages = kCompMaxStages;
@@ -567,7 +567,7 @@ namespace ucuda::ui_detail {
 void draw_wrapper_list(SystemEditor& model) {
     if (model.wrapper_schemes.empty()) return;
     ImGui::Spacing();
-    if (!ImGui::CollapsingHeader("Assembled wrappers", ImGuiTreeNodeFlags_DefaultOpen))
+    if (!ucuda::ui_detail::block_header("Assembled wrappers", ImGuiTreeNodeFlags_DefaultOpen))
         return;
 
     int to_delete = -1;
@@ -580,7 +580,7 @@ void draw_wrapper_list(SystemEditor& model) {
     for (int i = 0; i < (int)model.wrapper_schemes.size(); ++i) {
         const std::string wg = wrapper_group_title(model.wrapper_schemes[i]);
         if (wg != shown_wgroup) {
-            if (!wg.empty()) ImGui::SeparatorText(wg.c_str());
+            if (!wg.empty()) ucuda::ui_detail::block_separator(wg.c_str());
             shown_wgroup = wg;
         }
         ImGui::PushID(i);
@@ -737,7 +737,7 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
         ImGui::SameLine(0.0f, gap);
         draw_latex_preview("##latex_preview", model.latex_text, ImVec2(-1, model.latex_editor_h));
         draw_resize_handle("##latex_resize", model.latex_editor_h);
-        if (ImGui::CollapsingHeader("LaTeX format examples")) {
+        if (ucuda::ui_detail::block_header("LaTeX format examples")) {
             if (model.is_map)
                 ImGui::TextDisabled(
                     "Each equation on its own line, LHS is the next iterate:\n"
@@ -756,7 +756,7 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
         ImGui::Text("Equations (plain syntax):");
         InputTextMultilineStr("##plain", model.plain_text, ImVec2(-1, model.plain_editor_h));
         draw_resize_handle("##plain_resize", model.plain_editor_h);
-        if (ImGui::CollapsingHeader("Plain format examples")) {
+        if (ucuda::ui_detail::block_header("Plain format examples")) {
             if (model.is_map)
                 ImGui::TextDisabled(
                     "  x_{n+1} = 1 - a*x_n^2 + y_n \\\\\n  y_{n+1} = b*x_n\n"
@@ -777,7 +777,7 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
         ImGui::Text("Function definitions (one per line, e.g. h(x) = m_1 x + ...):");
         InputTextMultilineStr("##funcs", model.func_defs_text, ImVec2(-1, model.funcs_editor_h));
         draw_resize_handle("##funcs_resize", model.funcs_editor_h);
-        if (ImGui::CollapsingHeader("Auxiliary function examples")) {
+        if (ucuda::ui_detail::block_header("Auxiliary function examples")) {
             ImGui::TextDisabled(
                 "h(x) = m_1 x + \\frac{1}{2}(m_0-m_1)(|x+1| - |x-1|)\n"
                 "Then call h(x) in equations. Body is inlined.\n"
@@ -813,7 +813,7 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
     InputTextStr("##params_text", model.params_text);
 
     // Legacy: единый алфавит
-    if (ImGui::CollapsingHeader("Legacy: single alphabet field")) {
+    if (ucuda::ui_detail::block_header("Legacy: single alphabet field")) {
         ImGui::TextDisabled("Used by older systems where vars/params live in one list.\n"
                             "If Variables AND Parameters above are both filled, this is ignored.");
         InputTextStr("##alphabet", model.alphabet_text);
@@ -848,7 +848,7 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
         ImGui::Spacing();
         ImGui::Text("Newton solver (defaults for new tabs):");
         int jac_mode = model.newton_full ? 1 : 0;
-        ImGui::SetNextItemWidth(kFieldW * 2.0f);
+        item_w(kFieldW * 2.0f, combo_items_need("modified (once per step)\0full (every iteration)\0"));
         if (ImGui::Combo("jacobian", &jac_mode, "modified (once per step)\0full (every iteration)\0"))
             model.newton_full = (jac_mode == 1);
         if (ImGui::IsItemHovered())
@@ -868,7 +868,7 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
 
     // Custom KRS schemes (raw C/CUDA код вместо codegen)
     ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Custom KRS schemes",
+    if (ucuda::ui_detail::block_header("Custom KRS schemes",
         model.custom_schemes.empty() ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::TextDisabled(
             "Raw C/CUDA in calculateDiscreteModel body. Available: X[0..N-1] (vars),\n"
@@ -898,7 +898,7 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
                                   "and can still be the base of a wrapper; a tab that\n"
                                   "already uses it keeps it.");
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(220);
+            item_w(220);
             std::string name_label = "name##cs_name_" + std::to_string(i);
             InputTextStr(name_label.c_str(), cs.name);
             ImGui::SameLine();
@@ -906,7 +906,7 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
             // Паспорт КРС. Нужен ТОЛЬКО когда эта схема берётся опорной для
             // Extr(...): из порядка и симметричности считаются веса стадий.
             // Кодоген тела не разбирает, так что сказать может только автор.
-            ImGui::SetNextItemWidth(90);
+            item_w(90);
             std::string ord_label = "order##cs_ord_" + std::to_string(i);
             if (ImGui::InputInt(ord_label.c_str(), &cs.order)) {
                 if (cs.order < 1)  cs.order = 1;
@@ -1047,7 +1047,7 @@ void draw_parameters_tab(SystemEditor& model) {
 
     // начальные условия
     if (!model.known_vars.empty()) {
-        ImGui::SeparatorText("Initial conditions");
+        ucuda::ui_detail::block_separator("Initial conditions");
         if (ImGui::Button("Groups...##sys_icg")) { model.pg_ui.open = true; model.pg_ui.kind_req = 1; }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Group and label the initial-condition fields (layout only)");
         if (ImGui::BeginTable("ics", 2, ImGuiTableFlags_SizingFixedFit)) {
@@ -1068,7 +1068,7 @@ void draw_parameters_tab(SystemEditor& model) {
 
     // параметры: значение
     if (!model.known_params.empty()) {
-        ImGui::SeparatorText("Parameters (value)");
+        ucuda::ui_detail::block_separator("Parameters (value)");
         if (ImGui::Button("Groups...##sys_pg")) { model.pg_ui.open = true; model.pg_ui.kind_req = 0; }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Group and label the parameter fields (layout only)");
         if (ImGui::BeginTable("params", 2, ImGuiTableFlags_SizingFixedFit)) {
@@ -1123,7 +1123,7 @@ void draw_builtin_scheme_checkboxes(SystemEditor& model) {
         for (const auto& b : kBuiltinSchemes) {
             if (!scheme_shown(b)) continue;
             if (scheme_group_title(b) != shown_group) {
-                ImGui::SeparatorText(scheme_group_title(b).c_str());
+                ucuda::ui_detail::block_separator(scheme_group_title(b).c_str());
                 shown_group   = scheme_group_title(b);
                 first_in_line = true;
             }
@@ -1190,7 +1190,7 @@ void draw_dae_method_checkboxes(SystemEditor& model) {
         if (n == "DAE CD") group = 1;
         if (n == kBdfSchemeDae) group = 2;
         if (model.dae_method_hidden(n)) continue;
-        if (group != shown_group) { ImGui::SeparatorText(kGroupTitle[group]); shown_group = group; first_in_line = true; }
+        if (group != shown_group) { ucuda::ui_detail::block_separator(kGroupTitle[group]); shown_group = group; first_in_line = true; }
         if (!first_in_line) ImGui::SameLine();
         first_in_line = false;
         bool on = model.dae_scheme_on(n);

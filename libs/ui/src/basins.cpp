@@ -192,7 +192,7 @@ void draw_basins_phase_controls(AppModel& model, BasinsAnalysisSession& s, int c
     changed |= InputNumStr("decimator##pp",      c.pp_prescaller_text, kFieldW);
     ImGui::TextDisabled("Decimator only thins the drawn points (applied after integration).");
     changed |= InputNumStr("max attractors##pp", c.pp_max_attractors_text, kFieldW);
-    ImGui::SetNextItemWidth(200);
+    item_w(200);
     if (slider_float_typed("FP marker size##pp", &c.pp_marker_size, 2.0f, 12.0f, "%.0f px"))
         changed = true;
 
@@ -249,7 +249,7 @@ void draw_basins_phase_controls(AppModel& model, BasinsAnalysisSession& s, int c
     }
 
     // Окна (проекции)
-    ImGui::SeparatorText("Windows");
+    ucuda::ui_detail::block_separator("Windows");
     int pr_to_remove = -1;
     for (int i = 0; i < (int)sl.phase.projections.size(); ++i) {
         Projection& pr = sl.phase.projections[i];
@@ -257,9 +257,9 @@ void draw_basins_phase_controls(AppModel& model, BasinsAnalysisSession& s, int c
         // Plot3DView) — старые сессии с Phase3D мягко приводим к 2D.
         if (pr.type == ProjType::Phase3D) pr.type = ProjType::Phase2D;
         ImGui::PushID(2000 + i);
-        ImGui::SetNextItemWidth(90);
+        item_w(90);
         InputTextStr("##pplabel", pr.label); ImGui::SameLine();
-        ImGui::SetNextItemWidth(110);
+        item_w(110);
         const char* tnames[] = { "Phase 2D", "Time domain" };
         int t = (pr.type == ProjType::TimeDomain) ? 1 : 0;
         if (ImGui::Combo("##pptype", &t, tnames, 2)) {
@@ -270,14 +270,14 @@ void draw_basins_phase_controls(AppModel& model, BasinsAnalysisSession& s, int c
         if (pr.type == ProjType::Phase2D) {
             const auto& vars = sl.phase.vars;
             ImGui::Text("X:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(55);
+            item_w(55);
             if (ImGui::BeginCombo("##ppx", vars.empty() ? "-" : vars[pr.axis_x < (int)vars.size() ? pr.axis_x : 0].c_str())) {
                 for (int k = 0; k < (int)vars.size(); ++k)
                     if (ImGui::Selectable(vars[k].c_str(), pr.axis_x == k)) { pr.axis_x = k; sl.phase.fit_request = true; }
                 ImGui::EndCombo();
             }
             ImGui::SameLine(); ImGui::Text("Y:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(55);
+            item_w(55);
             if (ImGui::BeginCombo("##ppy", vars.empty() ? "-" : vars[pr.axis_y < (int)vars.size() ? pr.axis_y : 0].c_str())) {
                 for (int k = 0; k < (int)vars.size(); ++k)
                     if (ImGui::Selectable(vars[k].c_str(), pr.axis_y == k)) { pr.axis_y = k; sl.phase.fit_request = true; }
@@ -313,7 +313,7 @@ void draw_basins_phase_controls(AppModel& model, BasinsAnalysisSession& s, int c
 
     // Легенда/видимость бассейнов
     if (!sl.phase.ic_sets.empty()) {
-        ImGui::SeparatorText("Basins drawn");
+        ucuda::ui_detail::block_separator("Basins drawn");
         ImGui::Checkbox("Legend shows initial conditions##pp", &sl.phase.legend_show_ic);
         const int* ids = basins_display_ids(c);
         for (int k = 0; k < (int)sl.phase.ic_sets.size(); ++k) {
@@ -387,6 +387,8 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
         s.active_config_index = 0;
     BasinsConfig& c = s.configs[s.active_config_index];
+    // Поля активного конфига: ПКМ — во все конфиги вкладки и сброс к умолчанию.
+    const ConfigFieldScope<BasinsConfig> cfg_field_scope(model, "Basins", s.configs, s.active_config_index);
 
     // Inline rename для активной вкладки.
     draw_label_rename("Label##basins_label", c.label);
@@ -414,13 +416,13 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
                                   "(nodes -hi..-lo, +lo..+hi, monotone).\n"
                                   "lo, hi > 0; Resolution even.");
         };
-        ImGui::SetNextItemWidth(kComboW);
+        item_w(kComboW, combo_items_need(items.data(), (int)items.size()));
         ImGui::Combo("Axis X (IC)", &c.axis_x_var, items.data(), (int)items.size());
         symlog_toggle("\xC2\xB1log##bas_xsym", c.axis_x_symlog);
         InputNumStr(c.axis_x_symlog ? "|X| lo" : "X lo", c.axis_x_lo_text, kFieldW);
         InputNumStr(c.axis_x_symlog ? "|X| hi" : "X hi", c.axis_x_hi_text, kFieldW);
 
-        ImGui::SetNextItemWidth(kComboW);
+        item_w(kComboW, combo_items_need(items.data(), (int)items.size()));
         ImGui::Combo("Axis Y (IC)", &c.axis_y_var, items.data(), (int)items.size());
         symlog_toggle("\xC2\xB1log##bas_ysym", c.axis_y_symlog);
         InputNumStr(c.axis_y_symlog ? "|Y| lo" : "Y lo", c.axis_y_lo_text, kFieldW);
@@ -458,15 +460,15 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     // Feature 1 пишется в outAvgPeaks-буфер (X-координата DBSCAN), Feature 2 —
     // в AvgTimeOfPeaks-буфер (Y-координата). Множители применяются ПОСЛЕ
     // вычисления фичи и нужны для масштабирования кластеризации.
-    if (ImGui::CollapsingHeader("Features (DBSCAN axes + plot data)",
+    if (ucuda::ui_detail::block_header("Features (DBSCAN axes + plot data)",
                                 ImGuiTreeNodeFlags_DefaultOpen)) {
         if (c.feature1 < 0 || c.feature1 >= BF_FEATURE_COUNT) c.feature1 = BF_FEATURE1_DEFAULT;
         if (c.feature2 < 0 || c.feature2 >= BF_FEATURE_COUNT) c.feature2 = BF_FEATURE2_DEFAULT;
-        ImGui::SetNextItemWidth(220);
+        item_w(220, combo_items_need(kBasinFeatureNames, BF_FEATURE_COUNT));
         ImGui::Combo("Feature 1##bas", &c.feature1, kBasinFeatureNames, BF_FEATURE_COUNT);
         ImGui::SameLine();
         InputNumStr("mult##bas_f1", c.mult_feature1_text, 80);
-        ImGui::SetNextItemWidth(220);
+        item_w(220, combo_items_need(kBasinFeatureNames, BF_FEATURE_COUNT));
         ImGui::Combo("Feature 2##bas", &c.feature2, kBasinFeatureNames, BF_FEATURE_COUNT);
         ImGui::SameLine();
         InputNumStr("mult##bas_f2", c.mult_feature2_text, 80);
@@ -499,7 +501,7 @@ void draw_basins_controls(AppModel& model, SystemLibrary& lib) {
     // Phase portraits from basins (collapsible)
     // Отдельные окна 2D / Time domain по одной представительной точке из
     // каждого найденного бассейна (см. draw_basins_phase_controls).
-    if (ImGui::CollapsingHeader("Phase portraits")) {
+    if (ucuda::ui_detail::block_header("Phase portraits")) {
         draw_basins_phase_controls(model, s.active_config_index);
     }
 
@@ -686,13 +688,13 @@ void draw_basins_plot(AppModel& model, BasinsAnalysisSession& s, int ci,
                             if (c.scatter_marker < 0 || c.scatter_marker >= kPointMarkerCount)
                                 c.scatter_marker = 0;
                             bool ch = false;
-                            ImGui::SetNextItemWidth(150);
+                            item_w(150, combo_items_need(kPointMarkerNames, kPointMarkerCount));
                             ch |= ImGui::Combo("Marker##bas_scatter", &c.scatter_marker,
                                                kPointMarkerNames, kPointMarkerCount);
-                            ImGui::SetNextItemWidth(150);
+                            item_w(150);
                             ch |= slider_float_typed("Point size##bas_scatter", &c.scatter_point_size,
                                                      0.5f, 25.0f, "%.1f");
-                            ImGui::SetNextItemWidth(150);
+                            item_w(150);
                             ch |= slider_float_typed("Alpha##bas_scatter", &c.scatter_alpha,
                                                      0.0f, 1.0f, "%.2f");
                             return ch;

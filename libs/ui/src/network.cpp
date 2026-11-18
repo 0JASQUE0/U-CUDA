@@ -9,10 +9,10 @@ using namespace ucuda::ui_detail;
 
 namespace ucuda::ui_detail {
 void draw_network_topology_block(AppModel& model, NetworkSession& s, NetworkConfig& c) {
-    if (!ImGui::CollapsingHeader("Topology", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!ucuda::ui_detail::block_header("Topology", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
     int topo = (int)c.topology;
-    ImGui::SetNextItemWidth(kFieldW + 60.0f);
+    item_w(kFieldW + 60.0f, combo_items_need(kNetTopologyNames, IM_ARRAYSIZE(kNetTopologyNames)));
     if (ImGui::Combo("preset", &topo, kNetTopologyNames, IM_ARRAYSIZE(kNetTopologyNames))) {
         c.topology = (NetTopology)topo;
         if (c.topology != NetTopology::Custom) {
@@ -69,7 +69,7 @@ void draw_network_topology_block(AppModel& model, NetworkSession& s, NetworkConf
 
 namespace ucuda::ui_detail {
 void draw_network_coupling_block(AppModel& model, NetworkSession& s, NetworkConfig& c) {
-    if (!ImGui::CollapsingHeader("Coupling", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!ucuda::ui_detail::block_header("Coupling", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
     InputNumStr("coupling K", c.coupling_text, kFieldW);
     if (ImGui::IsItemHovered())
@@ -91,7 +91,7 @@ void draw_network_coupling_block(AppModel& model, NetworkSession& s, NetworkConf
             if (e.law != common) { common = -1; break; }
         const char* preview = (common < 0) ? "(mixed)"
                             : (common < (int)c.laws.size() ? c.laws[(size_t)common].name.c_str() : "?");
-        ImGui::SetNextItemWidth(kFieldW + 60.0f);
+        item_w(kFieldW + 60.0f);
         if (ImGui::BeginCombo("law for all edges", preview)) {
             for (size_t li = 0; li < c.laws.size(); ++li) {
                 const bool selected = ((int)li == common);
@@ -122,7 +122,7 @@ void draw_network_coupling_block(AppModel& model, NetworkSession& s, NetworkConf
             InputTextStr("name", law.name);
             for (size_t k = 0; k < s.vars.size(); ++k) {
                 const std::string lbl = "d" + s.vars[k] + " +=";
-                ImGui::SetNextItemWidth(260.0f);
+                item_w(260.0f);
                 InputTextStr(lbl.c_str(), law.expr[k]);
             }
             if (c.laws.size() > 1 && ImGui::SmallButton("Delete law")) to_remove = (int)li;
@@ -178,7 +178,7 @@ void draw_network_coupling_block(AppModel& model, NetworkSession& s, NetworkConf
 
 namespace ucuda::ui_detail {
 void draw_network_nodes_table(AppModel& model, NetworkSession& s, NetworkConfig& c) {
-    if (!ImGui::CollapsingHeader("Nodes")) return;
+    if (!ucuda::ui_detail::block_header("Nodes")) return;
     if (c.nodes.empty()) { ImGui::TextDisabled("No nodes."); return; }
 
     ImGui::TextDisabled("Empty cell = the shared value below. Fill one to detune that node.");
@@ -277,7 +277,7 @@ void draw_network_nodes_table(AppModel& model, NetworkSession& s, NetworkConfig&
 
 namespace ucuda::ui_detail {
 void draw_network_edges_table(AppModel& model, NetworkSession& s, NetworkConfig& c) {
-    if (!ImGui::CollapsingHeader("Edges")) return;
+    if (!ucuda::ui_detail::block_header("Edges")) return;
 
     std::vector<std::string> law_names;
     for (const NetCouplingLaw& l : c.laws) law_names.push_back(l.name);
@@ -315,7 +315,7 @@ void draw_network_edges_table(AppModel& model, NetworkSession& s, NetworkConfig&
                 if (model.network_view.selected_edge == i)
                     ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(60, 90, 140, 160));
                 ImGui::TableNextColumn();
-                ImGui::SetNextItemWidth(60.0f);
+                item_w(60.0f);
                 if (ImGui::InputInt("##f", &e.from, 0, 0)) { net_mark_custom(c); }
                 if (ImGui::IsItemActivated()) model.network_view.selected_edge = i;
                 // ПОСЛЕ первого виджета строки: SetScrollHereY целится в
@@ -323,7 +323,7 @@ void draw_network_edges_table(AppModel& model, NetworkSession& s, NetworkConfig&
                 // на строку выше.
                 if (want_scroll && i == scroll_to) ImGui::SetScrollHereY(0.5f);
                 ImGui::TableNextColumn();
-                ImGui::SetNextItemWidth(60.0f);
+                item_w(60.0f);
                 if (ImGui::InputInt("##t", &e.to, 0, 0)) { net_mark_custom(c); }
                 if (ImGui::IsItemActivated()) model.network_view.selected_edge = i;
                 ImGui::TableNextColumn();
@@ -332,7 +332,7 @@ void draw_network_edges_table(AppModel& model, NetworkSession& s, NetworkConfig&
                 InputNumStr("##w", e.weight_text, 80.0f);
                 if (ImGui::IsItemActivated()) model.network_view.selected_edge = i;
                 ImGui::TableNextColumn();
-                ImGui::SetNextItemWidth(120.0f);
+                item_w(120.0f, combo_items_need(law_items.data(), (int)law_items.size()));
                 if (!law_items.empty())
                     ImGui::Combo("##l", &e.law, law_items.data(), (int)law_items.size());
                 ImGui::TableNextColumn();
@@ -416,6 +416,8 @@ void draw_network_controls(AppModel& model, SystemLibrary& lib) {
     if (s.active_config_index >= (int)s.configs.size())
         s.active_config_index = (int)s.configs.size() - 1;
     NetworkConfig& c = s.configs[(size_t)s.active_config_index];
+    // Поля активного конфига: ПКМ — во все конфиги вкладки и сброс к умолчанию.
+    const ConfigFieldScope<NetworkConfig> cfg_field_scope(model, "Network", s.configs, s.active_config_index);
 
     draw_label_rename("Label##net", c.label);
 
@@ -469,7 +471,7 @@ void draw_network_controls(AppModel& model, SystemLibrary& lib) {
                           "Shared by every node unless the node overrides it.");
     draw_named_num_fields("Initial conditions##net", s.vars, c.initial_conditions,
                           "Shared base; the spread below is added on top.");
-    if (ImGui::CollapsingHeader("Initial spread", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("Initial spread", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("spread", c.ic_spread_text, kFieldW);
         InputNumStr("spread seed", c.ic_seed_text, kFieldW);
         ImGui::TextDisabled("Uniform noise in [-spread, +spread] per node and variable.");
@@ -509,14 +511,14 @@ void draw_network_graph_window(AppModel& model) {
     // Панель над холстом: переменная раскраски, курсор времени, воспроизведение.
     if (!s.vars.empty()) {
         const std::vector<const char*> vitems = c_str_list(s.vars);
-        ImGui::SetNextItemWidth(90.0f);
+        item_w(90.0f, combo_items_need(vitems.data(), (int)vitems.size()));
         ImGui::Combo("colour by", &vs.color_var, vitems.data(), (int)vitems.size());
     }
     if (has_data) {
         ImGui::SameLine();
         if (vs.time_index >= r.n_points) vs.time_index = r.n_points - 1;
         if (vs.time_index < 0) vs.time_index = 0;
-        ImGui::SetNextItemWidth(260.0f);
+        item_w(260.0f);
         ImGui::SliderInt("##net_t", &vs.time_index, 0, r.n_points - 1,
                          "t index %d");
         ImGui::SameLine();
@@ -807,14 +809,14 @@ void draw_network_series_window(AppModel& model, PlotRenderer& renderer, Plot2DV
 
     if (!s.vars.empty()) {
         const std::vector<const char*> vitems = c_str_list(s.vars);
-        ImGui::SetNextItemWidth(90.0f);
+        item_w(90.0f, combo_items_need(vitems.data(), (int)vitems.size()));
         ImGui::Combo("variable", &vs.series_var, vitems.data(), (int)vitems.size());
     }
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(80.0f);
+    item_w(80.0f);
     ImGui::InputInt("first node", &vs.first_series_node, 1, 8);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(80.0f);
+    item_w(80.0f);
     ImGui::InputInt("count", &vs.series_count, 1, 8);
     if (vs.series_count < 1) vs.series_count = 1;
     if (vs.first_series_node < 0) vs.first_series_node = 0;
@@ -834,17 +836,17 @@ void draw_network_series_window(AppModel& model, PlotRenderer& renderer, Plot2DV
     draw_style_toolbar("Custom line style", "netseries", vs.custom_line_style,
         [&vs]() {
             bool ch = false;
-            ImGui::SetNextItemWidth(150);
+            item_w(150);
             ch |= slider_float_typed("Line width##netseries", &vs.line_width, 0.5f, 12.0f, "%.1f");
-            ImGui::SetNextItemWidth(150);
+            item_w(150);
             ch |= slider_float_typed("Alpha##netseries", &vs.line_alpha, 0.05f, 1.0f, "%.2f");
             ch |= ImGui::Checkbox("Points instead of lines##netseries", &vs.points_mode);
             if (vs.points_mode) {
                 if (vs.point_marker < 0 || vs.point_marker >= kPointMarkerCount) vs.point_marker = 0;
-                ImGui::SetNextItemWidth(150);
+                item_w(150, combo_items_need(kPointMarkerNames, kPointMarkerCount));
                 ch |= ImGui::Combo("Marker##netseries", &vs.point_marker,
                                    kPointMarkerNames, kPointMarkerCount);
-                ImGui::SetNextItemWidth(150);
+                item_w(150);
                 ch |= slider_float_typed("Point size##netseries", &vs.point_size, 0.5f, 25.0f, "%.1f");
             } else {
                 ch |= ImGui::Checkbox("Mark data points##netseries", &vs.node_markers);
@@ -934,7 +936,7 @@ void draw_network_raster_window(AppModel& model, PlotRenderer& renderer, Heatmap
 
     if (!s.vars.empty()) {
         const std::vector<const char*> vitems = c_str_list(s.vars);
-        ImGui::SetNextItemWidth(90.0f);
+        item_w(90.0f, combo_items_need(vitems.data(), (int)vitems.size()));
         ImGui::Combo("variable##raster", &vs.color_var, vitems.data(), (int)vitems.size());
     }
     // Тот же тулбар, что у всех хитмап: колормапа, автоскейл, ручные vmin/vmax.

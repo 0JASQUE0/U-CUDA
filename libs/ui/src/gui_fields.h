@@ -11,6 +11,58 @@ void field_apply_all_menu(AppModel* model, BroadcastField f,
 
 void set_field_library(SystemLibrary* lib);
 
+
+// Конфиги вкладки, которую сейчас рисует панель: поле ввода (InputNumStr, InputNumListStr),
+// лежащее ВНУТРИ активного конфига, получает в ПКМ "применить во все конфиги вкладки" и
+// "сбросить к значению по умолчанию". Тот же член в другом конфиге находим по смещению от
+// начала объекта — у объектов одного типа оно одно, поэтому знать имена полей не нужно.
+struct CfgFieldScope {
+    AppModel* model = nullptr;
+    const char* tab = "";                  // для меню и записи отмены
+    const char* base = nullptr;            // активный конфиг
+    size_t size = 0;                       // sizeof конфига
+    const char* def = nullptr;             // конфиг по умолчанию того же типа
+    int active = -1;
+    std::function<int()> count;
+    std::function<char*(int)> at;
+    std::function<std::string(int)> label;
+};
+void push_cfg_scope(CfgFieldScope s);
+void pop_cfg_scope();
+// Пункты меню для поля str (если оно в активном конфиге). true — значение где-то поменялось.
+// label — подпись поля для отчёта и отмены; with_apply = false — только сброс (рассылку
+// рисует меню вызывающего).
+bool cfg_field_menu_items(std::string* str, const std::string& label, bool with_apply = true);
+// Модель области, в чей активный конфиг входит str; nullptr — поле не из конфига вкладки.
+AppModel* cfg_field_scope_model(const std::string* str);
+// Поле, чьё ПКМ-меню сейчас рисуется (InputNumStr ставит его на время ctx_menu), — чтобы
+// field_apply_all_menu дописал в своё меню пункты конфигов вкладки.
+std::string* cfg_menu_field();
+void set_cfg_menu_field(std::string* str);
+
+template <class Cfg>
+struct ConfigFieldScope {
+    ConfigFieldScope(AppModel& m, const char* tab, std::vector<Cfg>& v, int active) {
+        if (active < 0 || active >= (int)v.size()) return;
+        static const Cfg def_cfg{};
+        CfgFieldScope s;
+        s.model = &m; s.tab = tab;
+        s.base = reinterpret_cast<const char*>(&v[(size_t)active]);
+        s.size = sizeof(Cfg);
+        s.def = reinterpret_cast<const char*>(&def_cfg);
+        s.active = active;
+        s.count = [&v] { return (int)v.size(); };
+        s.at = [&v](int i) { return reinterpret_cast<char*>(&v[(size_t)i]); };
+        s.label = [&v](int i) { return v[(size_t)i].label; };
+        push_cfg_scope(std::move(s));
+        pushed = true;
+    }
+    ~ConfigFieldScope() { if (pushed) pop_cfg_scope(); }
+    ConfigFieldScope(const ConfigFieldScope&) = delete;
+    ConfigFieldScope& operator=(const ConfigFieldScope&) = delete;
+    bool pushed = false;
+};
+
 bool field_restore_menu_items(const SystemEditor* model, BroadcastField f, const std::string& name,
                               std::map<std::string, std::string>& values, const std::vector<std::string>& names);
 
@@ -49,6 +101,9 @@ void var_combo_preview();
 
 
 bool var_selectable(const std::string& name, bool selected);
+
+// Ширина имени переменной так, как его рисуют превью комбо и var_selectable (формулой или текстом).
+[[nodiscard]] float var_name_width(const std::string& name);
 
 
 [[nodiscard]] std::string plot_var_name(const std::string& name);

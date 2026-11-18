@@ -51,9 +51,9 @@ void draw_fastsync_plot(AppModel& model, const GuiCallbacks& cb) {
             // Толщина/α для colored trajectory. Выбор Display X/Y живёт в
             // Controls-панели рядом с прочими compute-параметрами.
             topts.extras_tail = [&]() {
-                ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                ImGui::SameLine(); item_w(120);
                 slider_float_typed("Line width", &c.line_width, 0.1f, 12.0f, "%.2f");
-                ImGui::SameLine(); ImGui::SetNextItemWidth(120);
+                ImGui::SameLine(); item_w(120);
                 slider_float_typed("Alpha", &c.alpha, 0.0f, 1.0f, "%.2f");
             };
         }
@@ -434,6 +434,8 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     if (s.active_config_index < 0 || s.active_config_index >= (int)s.configs.size())
         s.active_config_index = 0;
     FastSyncConfig& c = s.configs[s.active_config_index];
+    // Поля активного конфига: ПКМ — во все конфиги вкладки и сброс к умолчанию.
+    const ConfigFieldScope<FastSyncConfig> cfg_field_scope(model, "FastSync", s.configs, s.active_config_index);
 
     // Label rename.
     draw_label_rename("Label##fs_label", c.label);
@@ -467,11 +469,11 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
 
         const char* axis_role_x = c.grid_swap_master_slave ? "Axis X (slave IC)" : "Axis X (master IC)";
         const char* axis_role_y = c.grid_swap_master_slave ? "Axis Y (slave IC)" : "Axis Y (master IC)";
-        ImGui::SetNextItemWidth(kComboW);
+        item_w(kComboW, combo_items_need(items.data(), (int)items.size()));
         ImGui::Combo(axis_role_x, &c.axis_x_var, items.data(), (int)items.size());
         InputNumStr("X lo", c.axis_x_lo_text, kFieldW);
         InputNumStr("X hi", c.axis_x_hi_text, kFieldW);
-        ImGui::SetNextItemWidth(kComboW);
+        item_w(kComboW, combo_items_need(items.data(), (int)items.size()));
         ImGui::Combo(axis_role_y, &c.axis_y_var, items.data(), (int)items.size());
         InputNumStr("Y lo", c.axis_y_lo_text, kFieldW);
         InputNumStr("Y hi", c.axis_y_hi_text, kFieldW);
@@ -486,9 +488,9 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     else if (c.mode == 0 && !s.vars.empty()) {
         // На траектории — какие 2 переменные показывать как X/Y фазового портрета.
         const std::vector<const char*> items = c_str_list(s.vars);
-        ImGui::SetNextItemWidth(kComboW);
+        item_w(kComboW, combo_items_need(items.data(), (int)items.size()));
         ImGui::Combo("Display X var", &c.axis_x_var, items.data(), (int)items.size());
-        ImGui::SetNextItemWidth(kComboW);
+        item_w(kComboW, combo_items_need(items.data(), (int)items.size()));
         ImGui::Combo("Display Y var", &c.axis_y_var, items.data(), (int)items.size());
         // 3D-портрет — только когда есть третья переменная.
         const bool can_3d = s.vars.size() >= 3;
@@ -501,14 +503,14 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
                                      : "Needs at least three state variables.");
         if (c.plot_3d) {
             if (c.axis_z_var < 0 || c.axis_z_var >= (int)s.vars.size()) c.axis_z_var = 2;
-            ImGui::SetNextItemWidth(kComboW);
+            item_w(kComboW, combo_items_need(items.data(), (int)items.size()));
             ImGui::Combo("Display Z var", &c.axis_z_var, items.data(), (int)items.size());
         }
         ImGui::Separator();
     }
 
     // Integration (collapsible)
-    if (ImGui::CollapsingHeader("Integration", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("Integration", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (!model.is_map) InputNumStr("h",  c.h_text, kFieldW);
         if (c.mode == 0) {
             InputNumStr(model.is_map ? "iterations" : "t_max", c.t_max_text, kFieldW);
@@ -568,9 +570,9 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     }
 
     // Synchro runtime (collapsible)
-    if (ImGui::CollapsingHeader("Synchro runtime", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("Synchro runtime", ImGuiTreeNodeFlags_DefaultOpen)) {
         static const char* tos_names[] = { "Unidirectional", "Bidirectional" };
-        ImGui::SetNextItemWidth(kComboW);
+        item_w(kComboW, combo_items_need(tos_names, IM_ARRAYSIZE(tos_names)));
         ImGui::Combo("Type of synch.", &c.type_of_synch, tos_names, IM_ARRAYSIZE(tos_names));
         // Формулировки правлены по факту кода (cudaLibrary.cu): и 0, и 2 —
         // евклидовы нормы по переменным, БЕЗ деления на их количество.
@@ -585,7 +587,7 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
             "6: log10(err_stop / err_start) / iter",
             "7: log10(rho) per cycle (Gram-Schmidt)"
         };
-        ImGui::SetNextItemWidth(280);
+        item_w(280, combo_items_need(ee_names, IM_ARRAYSIZE(ee_names)));
         ImGui::Combo("Error estim.", &c.error_estim, ee_names, IM_ARRAYSIZE(ee_names));
         if (c.error_estim >= 4 && c.error_estim <= 6)
             ImGui::TextDisabled("err_start/err_stop: ||e|| at the window start before / after all\n"
@@ -619,7 +621,7 @@ void draw_fastsync_controls(AppModel& model, SystemLibrary& lib) {
     // чтобы x_master вставал напротив x_slave (то же для K forward/backward).
     auto paired_header = [](const char* label, bool& open) {
         ImGui::SetNextItemOpen(open, ImGuiCond_Always);
-        ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_None);
+        ucuda::ui_detail::block_header(label, ImGuiTreeNodeFlags_None);
         if (ImGui::IsItemToggledOpen()) open = !open;
     };
     auto paired_input = [&](const char* var,

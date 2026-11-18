@@ -28,7 +28,7 @@ static const NeuralSourceKind kNeuralSources[] = { NeuralSourceKind::Constant, N
                                                    NeuralSourceKind::Noise, NeuralSourceKind::Bits, NeuralSourceKind::System };
 
 static void draw_neural_populations(NeuralSession& s, NeuralConfig& c) {
-    if (!ImGui::CollapsingHeader("Populations", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!ucuda::ui_detail::block_header("Populations", ImGuiTreeNodeFlags_DefaultOpen)) return;
     int remove = -1;
     for (size_t i = 0; i < c.populations.size(); ++i) {
         NeuralPopulation& p = c.populations[i];
@@ -77,12 +77,12 @@ static void draw_neural_populations(NeuralSession& s, NeuralConfig& c) {
 static bool neural_pop_combo(const char* label, int& index, const NeuralConfig& c) {
     std::vector<const char*> names;
     for (const NeuralPopulation& p : c.populations) names.push_back(p.name.c_str());
-    ImGui::SetNextItemWidth(kFieldW);
+    item_w(kFieldW, combo_items_need(names.data(), (int)names.size()));
     return ImGui::Combo(label, &index, names.data(), (int)names.size());
 }
 
 static void draw_neural_projections(NeuralConfig& c, const std::vector<std::string>& vars) {
-    if (!ImGui::CollapsingHeader("Projections", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!ucuda::ui_detail::block_header("Projections", ImGuiTreeNodeFlags_DefaultOpen)) return;
     int remove = -1;
     for (size_t i = 0; i < c.projections.size(); ++i) {
         NeuralProjection& p = c.projections[i];
@@ -94,7 +94,7 @@ static void draw_neural_projections(NeuralConfig& c, const std::vector<std::stri
             neural_pop_combo("from", p.from, c);
             neural_pop_combo("to", p.to, c);
             int rule = (int)p.rule;
-            ImGui::SetNextItemWidth(kFieldW + 60.0f);
+            item_w(kFieldW + 60.0f, combo_items_need(kNeuralRules, IM_ARRAYSIZE(kNeuralRules)));
             if (ImGui::Combo("rule", &rule, kNeuralRules, IM_ARRAYSIZE(kNeuralRules))) p.rule = (NeuralRule)rule;
             if (p.rule == NeuralRule::Probability) InputNumStr("probability", p.p_text, kFieldW);
             if (p.rule == NeuralRule::FixedDegree) InputNumStr("in-degree", p.degree_text, kFieldW);
@@ -109,7 +109,7 @@ static void draw_neural_projections(NeuralConfig& c, const std::vector<std::stri
             InputNumStr("weight", p.weight_text, kFieldW);
             InputNumStr("relative weight spread", p.weight_spread_text, kFieldW);
             int norm = (int)p.norm;
-            ImGui::SetNextItemWidth(kFieldW + 60.0f);
+            item_w(kFieldW + 60.0f, combo_items_need(kNeuralNorms, IM_ARRAYSIZE(kNeuralNorms)));
             if (ImGui::Combo("normalisation", &norm, kNeuralNorms, IM_ARRAYSIZE(kNeuralNorms))) p.norm = (NeuralNorm)norm;
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Divide the weight by the number of inputs: of this projection,\n"
@@ -118,7 +118,7 @@ static void draw_neural_projections(NeuralConfig& c, const std::vector<std::stri
             if (c.schedule == NeuralSchedule::Spike) {
                 std::vector<const char*> synapses;
                 for (const NeuralReceptor& q : c.receptors) synapses.push_back(q.name.c_str());
-                ImGui::SetNextItemWidth(kFieldW);
+                item_w(kFieldW, combo_items_need(synapses.data(), (int)synapses.size()));
                 ImGui::Combo("synapse", &p.receptor, synapses.data(), (int)synapses.size());
                 InputNumStr("delay", p.delay_text, kFieldW);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("A multiple of h. 0 = one step, the shortest possible.");
@@ -126,7 +126,7 @@ static void draw_neural_projections(NeuralConfig& c, const std::vector<std::stri
                 for (const NeuralPlasticRule& q : c.plastic_rules) rules.push_back(q.name.c_str());
                 int rule = p.plastic + 1;
                 if (rule < 0 || rule >= (int)rules.size()) rule = 0;
-                ImGui::SetNextItemWidth(kFieldW);
+                item_w(kFieldW, combo_items_need(rules.data(), (int)rules.size()));
                 if (ImGui::Combo("plasticity", &rule, rules.data(), (int)rules.size())) p.plastic = rule - 1;
             }
             else {
@@ -141,13 +141,13 @@ static void draw_neural_projections(NeuralConfig& c, const std::vector<std::stri
                                           "Off: every arc is its own element, the current only enters the receiver.");
                     const std::vector<const char*> items = c_str_list(vars);
                     if (p.device_var < 0 || p.device_var >= (int)items.size()) p.device_var = 0;
-                    ImGui::SetNextItemWidth(kFieldW);
+                    item_w(kFieldW, combo_items_need(items.data(), (int)items.size()));
                     ImGui::Combo("device variable", &p.device_var, items.data(), (int)items.size());
                 }
                 else {
                     std::vector<const char*> laws;
                     for (const NetCouplingLaw& l : c.laws) laws.push_back(l.name.c_str());
-                    ImGui::SetNextItemWidth(kFieldW);
+                    item_w(kFieldW, combo_items_need(laws.data(), (int)laws.size()));
                     ImGui::Combo("coupling law", &p.law, laws.data(), (int)laws.size());
                 }
             }
@@ -161,10 +161,10 @@ static void draw_neural_projections(NeuralConfig& c, const std::vector<std::stri
 }
 
 static void draw_neural_spiking(NeuralSession& s, NeuralConfig& c) {
-    if (!ImGui::CollapsingHeader("Spiking", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!ucuda::ui_detail::block_header("Spiking", ImGuiTreeNodeFlags_DefaultOpen)) return;
     const std::vector<const char*> items = c_str_list(s.vars);
     if (c.threshold_var < 0 || c.threshold_var >= (int)items.size()) c.threshold_var = 0;
-    ImGui::SetNextItemWidth(kFieldW);
+    item_w(kFieldW, combo_items_need(items.data(), (int)items.size()));
     ImGui::Combo("threshold variable", &c.threshold_var, items.data(), (int)items.size());
     InputTextStr("threshold", c.threshold_text, kFieldW + 120.0f);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("A spike when the variable is at or above this expression, checked after every step.");
@@ -174,7 +174,7 @@ static void draw_neural_spiking(NeuralSession& s, NeuralConfig& c) {
     InputNumStr("refractory time", c.refractory_text, kFieldW);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("A multiple of h. The node is held after a spike, its synapses keep decaying.");
 
-    ImGui::SeparatorText("Synapses");
+    ucuda::ui_detail::block_separator("Synapses");
     int remove = -1;
     for (size_t i = 0; i < c.receptors.size(); ++i) {
         NeuralReceptor& q = c.receptors[i];
@@ -184,7 +184,7 @@ static void draw_neural_spiking(NeuralSession& s, NeuralConfig& c) {
             InputTextStr("name", q.name, kFieldW);
             InputNumStr("decay time", q.tau_text, kFieldW);
             if (q.target < 0 || q.target >= (int)items.size()) q.target = 0;
-            ImGui::SetNextItemWidth(kFieldW);
+            item_w(kFieldW, combo_items_need(items.data(), (int)items.size()));
             ImGui::Combo("acts on", &q.target, items.data(), (int)items.size());
             ImGui::Checkbox("conductance", &q.conductance);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Off: adds gain * s to the equation.\nOn: adds gain * s * (reversal - variable).");
@@ -206,7 +206,7 @@ static void draw_neural_spiking(NeuralSession& s, NeuralConfig& c) {
         c.receptors.push_back(std::move(q));
     }
 
-    ImGui::SeparatorText("Plasticity");
+    ucuda::ui_detail::block_separator("Plasticity");
     int removeRule = -1;
     for (size_t i = 0; i < c.plastic_rules.size(); ++i) {
         NeuralPlasticRule& q = c.plastic_rules[i];
@@ -247,7 +247,7 @@ static void draw_neural_spiking(NeuralSession& s, NeuralConfig& c) {
 }
 
 static void draw_neural_device(NeuralConfig& c) {
-    if (!ImGui::CollapsingHeader("Device")) return;
+    if (!ucuda::ui_detail::block_header("Device")) return;
     ImGui::TextDisabled("State s, voltage v = x source - x receiver, current I enters the receiver. Stage schedule only.");
     for (NeuralDevicePreset q : { NeuralDevicePreset::Vteam, NeuralDevicePreset::Team }) {
         if (q != NeuralDevicePreset::Vteam) ImGui::SameLine();
@@ -265,7 +265,7 @@ static void draw_neural_device(NeuralConfig& c) {
 }
 
 static void draw_neural_checkpoint(AppModel& model, NeuralSession& s, NeuralConfig& c) {
-    if (!ImGui::CollapsingHeader("Checkpoint")) return;
+    if (!ucuda::ui_detail::block_header("Checkpoint")) return;
     ImGui::Checkbox("keep a checkpoint at the end of the run", &c.keep_checkpoint);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("State, weights, traces, delayed spikes and the time. Does not work with R or the Lyapunov exponent.");
     if (c.keep_checkpoint && c.schedule != NeuralSchedule::Spike && c.order_var >= 0) ImGui::TextDisabled("R is not computed while a checkpoint is kept.");
@@ -293,7 +293,7 @@ static void draw_neural_checkpoint(AppModel& model, NeuralSession& s, NeuralConf
 }
 
 static void draw_neural_laws(NeuralSession& s, NeuralConfig& c) {
-    if (!ImGui::CollapsingHeader("Coupling laws")) return;
+    if (!ucuda::ui_detail::block_header("Coupling laws")) return;
     ImGui::TextDisabled("x_j is the source, x or x_i the receiver, K or w the arc weight.");
     int remove = -1;
     for (size_t i = 0; i < c.laws.size(); ++i) {
@@ -333,11 +333,11 @@ static void neural_take_system(SystemLibrary& lib, const std::string& name, Neur
 }
 
 static void draw_neural_input(SystemLibrary& lib, NeuralSession& s, NeuralConfig& c) {
-    if (!ImGui::CollapsingHeader("Input", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!ucuda::ui_detail::block_header("Input", ImGuiTreeNodeFlags_DefaultOpen)) return;
     if (!s.vars.empty()) {
         const std::vector<const char*> items = c_str_list(s.vars);
         if (c.input_var < 0 || c.input_var >= (int)items.size()) c.input_var = 0;
-        ImGui::SetNextItemWidth(kFieldW);
+        item_w(kFieldW, combo_items_need(items.data(), (int)items.size()));
         ImGui::Combo("input variable", &c.input_var, items.data(), (int)items.size());
     }
     InputNumStr("sample time", c.input_hold_text, kFieldW);
@@ -351,14 +351,14 @@ static void draw_neural_input(SystemLibrary& lib, NeuralSession& s, NeuralConfig
             const std::string title = q.name + ": " + neural_source_name(q.kind) + "###src";
             if (ImGui::TreeNodeEx(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
                 InputTextStr("name", q.name, kFieldW);
-                ImGui::SetNextItemWidth(kFieldW + 100.0f);
+                item_w(kFieldW + 100.0f);
                 if (ImGui::BeginCombo("source", neural_source_name(q.kind))) {
                     for (NeuralSourceKind v : kNeuralSources)
                         if (ImGui::Selectable(neural_source_name(v), v == q.kind)) q.kind = v;
                     ImGui::EndCombo();
                 }
                 if (q.kind == NeuralSourceKind::System) {
-                    ImGui::SetNextItemWidth(kFieldW + 100.0f);
+                    item_w(kFieldW + 100.0f);
                     if (ImGui::BeginCombo("system", q.system_name.empty() ? "(pick a system)" : q.system_name.c_str())) {
                         for (const std::string& name : library_list_cached(lib).names)
                             if (ImGui::Selectable(name.c_str(), name == q.system_name)) neural_take_system(lib, name, q, c.last_error);
@@ -367,7 +367,7 @@ static void draw_neural_input(SystemLibrary& lib, NeuralSession& s, NeuralConfig
                     if (!q.vars.empty()) {
                         const std::vector<const char*> items = c_str_list(q.vars);
                         if (q.variable < 0 || q.variable >= (int)items.size()) q.variable = 0;
-                        ImGui::SetNextItemWidth(kFieldW);
+                        item_w(kFieldW, combo_items_need(items.data(), (int)items.size()));
                         ImGui::Combo("signal", &q.variable, items.data(), (int)items.size());
                     }
                     InputNumStr("integration step", q.step_text, kFieldW);
@@ -426,9 +426,9 @@ static void draw_neural_input(SystemLibrary& lib, NeuralSession& s, NeuralConfig
         const char* to = l.population >= 0 && l.population < (int)pops.size() ? pops[(size_t)l.population] : "?";
         const std::string title = std::string(from) + " -> " + to + "###link";
         if (ImGui::TreeNodeEx(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::SetNextItemWidth(kFieldW);
+            item_w(kFieldW, combo_items_need(sources.data(), (int)sources.size()));
             ImGui::Combo("from", &l.source, sources.data(), (int)sources.size());
-            ImGui::SetNextItemWidth(kFieldW);
+            item_w(kFieldW, combo_items_need(pops.data(), (int)pops.size()));
             ImGui::Combo("to population", &l.population, pops.data(), (int)pops.size());
             InputNumStr("gain", l.gain_text, kFieldW);
             InputNumStr("relative gain spread", l.gain_spread_text, kFieldW);
@@ -460,7 +460,7 @@ static void draw_neural_classes(NeuralConfig& c) {
         } catch (const std::exception& e) { c.last_error = e.what(); }
     }
     if (!t.dataset_path.empty()) {
-        ImGui::SetNextItemWidth(kFieldW);
+        item_w(kFieldW);
         ImGui::InputInt("Frames per stimulus", &t.dataset_frames);
         t.dataset_frames = (std::max)(1, t.dataset_frames);
         if (t.dataset)
@@ -507,7 +507,7 @@ static void draw_neural_delayed(NeuralConfig& c) {
     NeuralTask& t = c.task;
     if (c.sources.empty()) { ImGui::TextDisabled("Add an input source in Input and link it to the network."); return; }
     if (t.source < 0 || t.source >= (int)c.sources.size()) t.source = 0;
-    ImGui::SetNextItemWidth(kFieldW);
+    item_w(kFieldW);
     if (ImGui::BeginCombo("input", c.sources[(size_t)t.source].name.c_str())) {
         for (int i = 0; i < (int)c.sources.size(); ++i)
             if (ImGui::Selectable(c.sources[(size_t)i].name.c_str(), i == t.source)) t.source = i;
@@ -577,7 +577,7 @@ static void draw_neural_forecast(NeuralConfig& c) {
 static void draw_neural_saved(NeuralConfig& c, bool classifier);
 
 static void draw_neural_readout(NeuralConfig& c) {
-    if (!ImGui::CollapsingHeader("Readout")) return;
+    if (!ucuda::ui_detail::block_header("Readout")) return;
     NeuralTask& t = c.task;
     ImGui::Checkbox("use a readout on the response", &t.enabled);
     if (ImGui::IsItemHovered())
@@ -590,7 +590,7 @@ static void draw_neural_readout(NeuralConfig& c) {
     static const char* const kinds[] = { "Recover or predict the input system", "Classify the stimulus",
                                          "Memory capacity: recall the delayed input", "XOR of two delayed bits of the input",
                                          "Autonomous forecast: the readout drives the input" };
-    ImGui::SetNextItemWidth(kFieldW + 160.0f);
+    item_w(kFieldW + 160.0f, combo_items_need(kinds, IM_ARRAYSIZE(kinds)));
     if (ImGui::Combo("task", &kind, kinds, IM_ARRAYSIZE(kinds))) t.kind = (NeuralTaskKind)kind;
     if (t.kind == NeuralTaskKind::Forecast) { draw_neural_forecast(c); return; }
     ImGui::Checkbox("control: the same network with K = 0", &t.control_k0);
@@ -604,7 +604,7 @@ static void draw_neural_readout(NeuralConfig& c) {
     for (int i = 0; i < (int)c.sources.size(); ++i) if (c.sources[(size_t)i].kind == NeuralSourceKind::System) systems.push_back(i);
     if (systems.empty()) { ImGui::TextDisabled("Add an input source that is a system from the library."); return; }
     if (std::find(systems.begin(), systems.end(), t.source) == systems.end()) t.source = systems[0];
-    ImGui::SetNextItemWidth(kFieldW);
+    item_w(kFieldW);
     if (ImGui::BeginCombo("input system", c.sources[(size_t)t.source].name.c_str())) {
         for (int i : systems) if (ImGui::Selectable(c.sources[(size_t)i].name.c_str(), i == t.source)) { t.source = i; t.targets.clear(); }
         ImGui::EndCombo();
@@ -638,7 +638,7 @@ static void draw_neural_readout(NeuralConfig& c) {
 static void draw_neural_saved(NeuralConfig& c, bool classifier) {
     NeuralReadoutSaved& saved = classifier ? c.classifier : c.readout;
     bool& apply = classifier ? c.task.use_saved_classifier : c.task.use_saved;
-    ImGui::SeparatorText(classifier ? "Saved classifier" : "Saved readout");
+    ucuda::ui_detail::block_separator(classifier ? "Saved classifier" : "Saved readout");
     const bool have = !saved.empty(), fresh = !c.task_result.model.empty() && c.task_result.model.is_classifier() == classifier;
     if (!have) ImGui::TextDisabled("None yet: train and press Keep.");
     else {
@@ -698,10 +698,10 @@ static void draw_neural_saved(NeuralConfig& c, bool classifier) {
 }
 
 static void draw_neural_protocol(NeuralConfig& c) {
-    if (!ImGui::CollapsingHeader("Protocol", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!ucuda::ui_detail::block_header("Protocol", ImGuiTreeNodeFlags_DefaultOpen)) return;
     int kind = (int)c.protocol;
     static const char* const kinds[] = { "One continuous run", "Separate trials" };
-    ImGui::SetNextItemWidth(kFieldW + 100.0f);
+    item_w(kFieldW + 100.0f, combo_items_need(kinds, IM_ARRAYSIZE(kinds)));
     if (ImGui::Combo("protocol", &kind, kinds, IM_ARRAYSIZE(kinds))) c.protocol = (NeuralProtocol)kind;
     if (c.protocol != NeuralProtocol::Trials) return;
     const bool external = c.task.enabled && c.task.kind == NeuralTaskKind::Classification && c.task.dataset;
@@ -718,7 +718,7 @@ static void draw_neural_protocol(NeuralConfig& c) {
 }
 
 static void draw_neural_sweep_axis(NeuralSession& s, NeuralConfig& c, NeuralSweep& w) {
-    ImGui::SetNextItemWidth(kFieldW + 60.0f);
+    item_w(kFieldW + 60.0f);
     if (ImGui::BeginCombo("sweep over", neural_sweep_name(w.kind))) {
         for (NeuralSweepKind v : kNeuralSweeps)
             if (ImGui::Selectable(neural_sweep_name(v), v == w.kind)) w.kind = v;
@@ -729,10 +729,10 @@ static void draw_neural_sweep_axis(NeuralSession& s, NeuralConfig& c, NeuralSwee
         for (const NeuralPopulation& p : c.populations) names.push_back(p.name.c_str());
         int pop = w.population + 1;
         if (pop < 0 || pop >= (int)names.size()) pop = 0;
-        ImGui::SetNextItemWidth(kFieldW + 60.0f);
+        item_w(kFieldW + 60.0f, combo_items_need(names.data(), (int)names.size()));
         if (ImGui::Combo("in", &pop, names.data(), (int)names.size())) w.population = pop - 1;
         if (w.param.empty() && !s.params.empty()) w.param = s.params[0];
-        ImGui::SetNextItemWidth(kFieldW);
+        item_w(kFieldW);
         if (ImGui::BeginCombo("parameter", w.param.c_str())) {
             for (const std::string& n : s.params)
                 if (ImGui::Selectable(n.c_str(), n == w.param)) w.param = n;
@@ -748,7 +748,7 @@ static void draw_neural_sweep_axis(NeuralSession& s, NeuralConfig& c, NeuralSwee
 }
 
 static void draw_neural_sweep(NeuralSession& s, NeuralConfig& c) {
-    if (!ImGui::CollapsingHeader("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!ucuda::ui_detail::block_header("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) return;
     ImGui::Checkbox("sweep this experiment", &c.sweep.enabled);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Every value runs as a separate network in one launch.\n"
@@ -769,7 +769,7 @@ static void draw_neural_sweep(NeuralSession& s, NeuralConfig& c) {
 }
 
 static void draw_neural_lyapunov(NeuralConfig& c) {
-    if (!ImGui::CollapsingHeader("Lyapunov exponent")) return;
+    if (!ucuda::ui_detail::block_header("Lyapunov exponent")) return;
     ImGui::Checkbox("largest exponent of the whole network", &c.lyap_on);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("A perturbed copy of every network runs next to it, with the same parameters, input and links.\n"
@@ -822,6 +822,8 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
     if (tabs.to_remove >= 0) model.remove_neural_config(tabs.to_remove);
     if (s.active_config_index >= (int)s.configs.size()) s.active_config_index = (int)s.configs.size() - 1;
     NeuralConfig& c = s.configs[(size_t)s.active_config_index];
+    // Поля активного конфига: ПКМ — во все конфиги вкладки и сброс к умолчанию.
+    const ConfigFieldScope<NeuralConfig> cfg_field_scope(model, "Neural", s.configs, s.active_config_index);
 
     draw_label_rename("Label##neural", c.label);
     // Ошибка сверху: внизу под свёрнутыми разделами её не видно, а старые числа выглядят как результат.
@@ -831,7 +833,7 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
         c.hash_mismatch = false; c.last_error.clear();
     }
 
-    ImGui::SetNextItemWidth(kFieldW + 100.0f);
+    item_w(kFieldW + 100.0f);
     if (ImGui::BeginCombo("coupling in time", neural_schedule_name(c.schedule))) {
         for (NeuralSchedule v : kNeuralSchedules)
             if (ImGui::Selectable(neural_schedule_name(v), v == c.schedule)) c.schedule = v;
@@ -858,7 +860,7 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
     draw_integration_block("Integration", c.schedule == NeuralSchedule::Stage || spiking ? std::string("RK4") : c.scheme,
                            s.custom_schemes, f, nullptr, s.sys.is_map);
 
-    if (ImGui::CollapsingHeader("Network", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("Network", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("coupling K", c.coupling_text, kFieldW);
         InputNumStr("seed", c.seed_text, kFieldW);
         InputNumStr("observed nodes per population", c.observed_per_pop_text, kFieldW);
@@ -867,7 +869,7 @@ void draw_neural_controls(AppModel& model, SystemLibrary& lib) {
             for (const std::string& v : s.vars) names.push_back(v.c_str());
             int order = c.order_var + 1;
             if (order < 0 || order >= (int)names.size()) order = 0;
-            ImGui::SetNextItemWidth(kFieldW);
+            item_w(kFieldW, combo_items_need(names.data(), (int)names.size()));
             if (ImGui::Combo("order parameter variable", &order, names.data(), (int)names.size())) c.order_var = order - 1;
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("R(t) per population. The phase of a node grows by 2 pi between upward threshold\n"
@@ -1039,7 +1041,7 @@ static void neural_instance_picker(const NeuralConfig& c, NeuralViewState& vs, c
     vs.instance = std::clamp(vs.instance, 0, (std::max)(0, nInst - 1));
     if (nInst <= 1) return;
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(140.0f);
+    item_w(140.0f);
     ImGui::SliderInt(id, &vs.instance, 0, nInst - 1);
     const int n2 = (std::max)(1, (int)c.sweep2_values.size());
     if (vs.instance / n2 < (int)c.sweep_values.size()) {
@@ -1059,7 +1061,7 @@ static void choose_result_metric(const char* id, int& selected, const std::vecto
     auto current = std::find_if(choices.begin(), choices.end(), [&](const auto& p) { return p.first == selected; });
     if (current == choices.end()) { current = choices.begin(); selected = current->first; }
     if (choices.size() == 1) { ImGui::TextUnformatted(current->second); return; }
-    ImGui::SetNextItemWidth(175.0f);
+    item_w(175.0f);
     if (ImGui::BeginCombo(id, current->second)) {
         for (const auto& p : choices) if (ImGui::Selectable(p.second, selected == p.first)) selected = p.first;
         ImGui::EndCombo();
@@ -1131,7 +1133,7 @@ static void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, P
         const std::vector<const char*> items = c_str_list(task.names);
         if (vs.readout_target >= taskT) vs.readout_target = 0;
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(90.0f);
+        item_w(90.0f, combo_items_need(items.data(), taskT));
         ImGui::Combo("target##readout_sweep", &vs.readout_target, items.data(), taskT);
         if ((size_t)vs.readout_target < task.delay_test.size()) {
             ImGui::SameLine();
@@ -1210,7 +1212,7 @@ static void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, P
         std::vector<std::string> labels = task.names;
         const std::vector<const char*> items = c_str_list(labels);
         if (vs.readout_target >= (int)items.size()) vs.readout_target = 0;
-        ImGui::SetNextItemWidth(90.0f);
+        item_w(90.0f, combo_items_need(items.data(), (int)items.size()));
         ImGui::Combo("target##readout", &vs.readout_target, items.data(), (int)items.size());
         ImGui::SameLine();
         if (task.forecast)
@@ -1606,13 +1608,13 @@ static void draw_neural_map_window(AppModel& model, PlotRenderer& renderer, std:
         const std::vector<const char*> items = c_str_list(task.names);
         if (vs.readout_target >= T) vs.readout_target = 0;
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(90.0f);
+        item_w(90.0f, combo_items_need(items.data(), T));
         ImGui::Combo("target##readout_map", &vs.readout_target, items.data(), T);
     }
     if (vs.map_pop >= K) vs.map_pop = 0;
     if (K > 1 && !readout && (spikes || vs.map_kind != 2)) {
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(120.0f);
+        item_w(120.0f);
         if (ImGui::BeginCombo("##neural_map_pop", ctx.populations[(size_t)vs.map_pop].c_str())) {
             for (int p = 0; p < K; ++p)
                 if (ImGui::Selectable(ctx.populations[(size_t)p].c_str(), p == vs.map_pop)) vs.map_pop = p;

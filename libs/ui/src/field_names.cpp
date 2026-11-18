@@ -103,7 +103,9 @@ bool field_restore_menu_items(const SystemEditor* model, BroadcastField f, const
 namespace ucuda::ui_detail {
 bool field_restore_popup(const char* popup_id, const SystemEditor* model, BroadcastField f, const std::string& name,
                          std::map<std::string, std::string>& values, const std::vector<std::string>& names) {
-    if (!ImGui::BeginPopupContextItem(popup_id)) return false;
+    // Id меню — свой у каждого поля: поля одного списка (параметры, НУ набора) лежат на одном
+    // уровне ID-стека, и общий popup_id открывал одно меню во всех разом (ImGui: conflicting ID).
+    if (!ImGui::BeginPopupContextItem((std::string(popup_id) + "_" + name).c_str())) return false;
     const bool changed = field_restore_menu_items(model, f, name, values, names);
     ImGui::EndPopup();
     return changed;
@@ -210,10 +212,21 @@ bool var_selectable(const std::string& name, bool selected) {
     const std::string tex = field_label(nullptr, name);
     const MathExtent ext = field_tex_extent(tex, field_tex_size());
     const float h = std::max(ImGui::GetTextLineHeight(), ext.ascent + ext.descent);
+    // Рисуем от курсора, а не от GetItemRectMin: рамка Selectable расширена на половину
+    // ItemSpacing влево и вверх, и формула оттуда уезжала под отступ окна и обрезалась слева.
+    const ImVec2 p = ImGui::GetCursorScreenPos();
     const bool clicked = ImGui::Selectable(("##vs_" + name).c_str(), selected, 0, ImVec2(std::max(ext.width, 1.0f), h));
-    if (ImGui::IsItemVisible()) field_tex_draw(ImGui::GetWindowDrawList(), ImGui::GetItemRectMin(), tex, h);
+    if (ImGui::IsItemVisible()) field_tex_draw(ImGui::GetWindowDrawList(), p, tex, h);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", name.c_str());
     return clicked;
+}
+}
+
+
+namespace ucuda::ui_detail {
+float var_name_width(const std::string& name) {
+    if (!g_field_latex) return ImGui::CalcTextSize(name.c_str()).x;
+    return field_tex_extent(field_label(nullptr, name), field_tex_size()).width;
 }
 }
 
@@ -238,7 +251,7 @@ void draw_named_num_fields(const char* header,
                                   // игнорируются: живое поле, ни на что не влияющее,
                                   // читается как настройка, которой оно не является.
                                   const std::function<bool(const std::string&)>& overwritten) {
-    if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!ucuda::ui_detail::block_header(header, ImGuiTreeNodeFlags_DefaultOpen)) return;
     if (note) ImGui::TextDisabled("%s", note);
     // Группы и подписи — у системы, загруженной в модель (bc); без модели — плоский список имён.
     ParamGroups* groups = !bc ? nullptr
@@ -421,6 +434,145 @@ void draw_param_tree(ParamGroups* groups, const std::vector<std::string>& names,
 
 
 namespace ucuda::ui_detail {
+static std::vector<CfgFieldScope> g_cfg_scopes;
+static std::string* g_cfg_menu_field = nullptr;
+
+void push_cfg_scope(CfgFieldScope s) { g_cfg_scopes.push_back(std::move(s)); }
+void pop_cfg_scope() { if (!g_cfg_scopes.empty()) g_cfg_scopes.pop_back(); }
+std::string* cfg_menu_field() { return g_cfg_menu_field; }
+void set_cfg_menu_field(std::string* str) { g_cfg_menu_field = str; }
+
+// Внутренняя область, в которой лежит str, и смещение str от начала конфига.
+static const CfgFieldScope* cfg_scope_of(const std::string* str, size_t& off) {
+    const char* p = reinterpret_cast<const char*>(str);
+    for (auto it = g_cfg_scopes.rbegin(); it != g_cfg_scopes.rend(); ++it) {
+        if (p >= it->base && p + sizeof(std::string) <= it->base + it->size) {
+            off = (size_t)(p - it->base);
+            return &*it;
+        }
+    }
+    return nullptr;
+}
+
+AppModel* cfg_field_scope_model(const std::string* str) {
+    size_t off = 0;
+    const CfgFieldScope* sc = str ? cfg_scope_of(str, off) : nullptr;
+    return sc ? sc->model : nullptr;
+}
+
+bool cfg_field_menu_items(std::string* str, const std::string& label, bool with_apply) {
+    size_t off = 0;
+    const CfgFieldScope* sc = str ? cfg_scope_of(str, off) : nullptr;
+    if (!sc || !sc->model) return false;
+    auto field_at = [at = sc->at, off](int i) { return reinterpret_cast<std::string*>(at(i) + off); };
+    const std::string value = *str;
+    const int n = sc->count();
+    bool changed = false;
+
+    // Запись отмены: конфиг ищется по индексу и подписи (его могли закрыть, и на индекс встал
+    // соседний), значения — те, что были до команды.
+    struct Snap { int idx; std::string label, before, after; };
+    auto push = [&](std::vector<Snap> snaps, const std::string& what) {
+        if (snaps.empty()) return;
+        auto writer = [count = sc->count, label = sc->label, field_at](std::vector<Snap> s, bool fwd) {
+            return [count, label, field_at, s = std::move(s), fwd]() {
+                for (const Snap& x : s) {
+                    if (x.idx >= count() || label(x.idx) != x.label) continue;
+                    *field_at(x.idx) = fwd ? x.after : x.before;
+                }
+            };
+        };
+        sc->model->push_undo(what, writer(snaps, false), writer(snaps, true));
+        sc->model->undo_note = "Applied: " + what;
+        sc->model->undo_note_time = ImGui::GetTime();
+    };
+
+    // Применить к выбранным конфигам вкладки (pick[i] == '1'); отчёт и отмена — одной записью.
+    auto apply_to = [&](const auto& pick, const std::string& note) {
+        std::vector<Snap> snaps;
+        for (int i = 0; i < n && i < (int)pick.size(); ++i) {
+            if (pick[(size_t)i] != '1' || *field_at(i) == value) continue;
+            snaps.push_back({ i, sc->label(i), *field_at(i), value });
+            *field_at(i) = value;
+        }
+        if (snaps.empty()) {
+            sc->model->undo_note = "Nothing to apply: " + note + " already at " + value;
+            sc->model->undo_note_time = ImGui::GetTime();
+        }
+        push(std::move(snaps), label + " = " + value + " -> " + note);
+        changed = true;
+    };
+    auto differ_in = [&](const auto& pick) {
+        int d = 0;
+        for (int i = 0; i < n && i < (int)pick.size(); ++i)
+            if (pick[(size_t)i] == '1' && *field_at(i) != value) ++d;
+        return d;
+    };
+
+    if (with_apply && n > 1) {
+        // Как у рассылки по вкладкам: число разошедшихся не гасит пункт ("0 differ" — не поломка).
+        const std::string all(n, '1');
+        const std::string title = std::string("Apply to all ") + sc->tab;
+        if (ImGui::MenuItem((title + " (" + std::to_string(differ_in(all)) + " differ)").c_str()))
+            apply_to(all, "all " + std::string(sc->tab));
+
+        if (ImGui::BeginMenu("Apply to...")) {
+            // Маска галочек — в модели (общая с рассылкой по вкладкам); подпись состава
+            // отличается, поэтому при переходе между меню она собирается заново.
+            std::string sig = std::string("cfg\x1f") + sc->tab;
+            for (int i = 0; i < n; ++i) { sig += '\x1f'; sig += sc->label(i); }
+            AppModel& m = *sc->model;
+            if (m.broadcast_pick_sig != sig || (int)m.broadcast_pick.size() != n) {
+                m.broadcast_pick.assign((size_t)n, '1');   // по умолчанию — все конфиги вкладки
+                m.broadcast_pick_sig = sig;
+            }
+            if (ImGui::SmallButton("All")) m.broadcast_pick.assign((size_t)n, '1');
+            ImGui::SameLine();
+            if (ImGui::SmallButton("None")) m.broadcast_pick.assign((size_t)n, '0');
+            const int nsel = (int)std::count(m.broadcast_pick.begin(), m.broadcast_pick.end(), '1');
+            char btn[64];
+            std::snprintf(btn, sizeof btn, "Apply to %d selected", nsel);
+            if (nsel == 0) ImGui::BeginDisabled();
+            if (ImGui::Button(btn)) {
+                char note[48];
+                std::snprintf(note, sizeof note, "%d selected", nsel);
+                apply_to(m.broadcast_pick, note);
+                ImGui::CloseCurrentPopup();
+            }
+            if (nsel == 0) ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (nsel == 0) ImGui::TextDisabled("nothing ticked");
+            else if (const int d = differ_in(m.broadcast_pick); d > 0) ImGui::TextDisabled("%d differ", d);
+            else ImGui::TextDisabled("already at this value");
+            ucuda::ui_detail::block_separator(sc->tab);
+            for (int i = 0; i < n; ++i) {
+                ImGui::PushID(i);
+                bool on = m.broadcast_pick[(size_t)i] == '1';
+                if (ImGui::Checkbox("##pick", &on)) m.broadcast_pick[(size_t)i] = on ? '1' : '0';
+                ImGui::SameLine();
+                const std::string l = sc->label(i);
+                if (*field_at(i) != value) ImGui::TextUnformatted(l.c_str());
+                else ImGui::TextDisabled("%s", l.c_str());   // уже с этим значением
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", field_at(i)->c_str());
+                ImGui::PopID();
+            }
+            ImGui::EndMenu();
+        }
+    }
+    const std::string& def = *reinterpret_cast<const std::string*>(sc->def + off);
+    const std::string rl = "Reset to default (" + (def.empty() ? std::string("empty") : def) + ")";
+    if (ImGui::MenuItem(rl.c_str(), nullptr, false, value != def)) {
+        push({ { sc->active, sc->label(sc->active), value, def } },
+             label + " reset to default " + (def.empty() ? std::string("(empty)") : def));
+        *str = def;
+        changed = true;
+    }
+    return changed;
+}
+}
+
+
+namespace ucuda::ui_detail {
 void field_apply_all_menu(AppModel* model, BroadcastField f,
                                  const std::string& name, const std::string& label,
                                  const std::string& value,
@@ -532,18 +684,71 @@ void field_apply_all_menu(AppModel* model, BroadcastField f,
         }
         ImGui::Separator();
 
-        std::string shown_group;
-        for (size_t i = 0; i < all.size(); ++i) {
-            if (all[i].group != shown_group) {
-                shown_group = all[i].group;
-                ImGui::SeparatorText(shown_group.c_str());
+        // Цели сгруппированы по вкладкам верхнего ряда (Parametric держит Bifurcation, LLE, LS и
+        // Metrics), каждая — сворачиваемый узел с галочкой "вся вкладка"; внутри — разделители по
+        // типу конфига, как раньше. Ctrl+Shift по заголовку раскрывает / сворачивает все разом.
+        auto tab_title = [](BroadcastTab t) -> const char* {
+            switch (t) {
+                case BroadcastTab::Phase:       return "Phase analysis";
+                case BroadcastTab::Bifurcation:
+                case BroadcastTab::LLE:
+                case BroadcastTab::LS:
+                case BroadcastTab::Metrics:     return "Parametric";
+                case BroadcastTab::Dft1D:       return "1D DFT";
+                case BroadcastTab::Basins:      return "Basins";
+                case BroadcastTab::FastSync:    return "Fast Synchro";
+                case BroadcastTab::Custom:      return "Custom";
+                case BroadcastTab::Order:       return "Order";
             }
-            ImGui::PushID((int)i);
-            bool on = (model->broadcast_pick[i] == '1');
-            if (ImGui::Checkbox("##pick", &on))
-                model->broadcast_pick[i] = on ? '1' : '0';
+            return "";
+        };
+        std::vector<std::string> titles;   // порядок первого появления
+        for (const auto& t : all)
+            if (std::find(titles.begin(), titles.end(), tab_title(t.tab)) == titles.end())
+                titles.push_back(tab_title(t.tab));
+        const int force = model->broadcast_pick_open_all;
+        model->broadcast_pick_open_all = -1;
+        for (const std::string& title : titles) {
+            std::vector<size_t> members;
+            for (size_t i = 0; i < all.size(); ++i)
+                if (title == tab_title(all[i].tab)) members.push_back(i);
+            int on_n = 0;
+            for (size_t i : members) on_n += model->broadcast_pick[i] == '1';
+            ImGui::PushID(title.c_str());
+            // Галочка вкладки: все отмечены — снять все, иначе отметить все.
+            bool all_on = on_n == (int)members.size();
+            if (on_n > 0 && !all_on) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
+            if (ImGui::Checkbox("##tab", &all_on))
+                for (size_t i : members) model->broadcast_pick[i] = all_on ? '1' : '0';
+            if (on_n > 0 && on_n < (int)members.size()) ImGui::PopItemFlag();
             ImGui::SameLine();
-            ImGui::TextUnformatted(all[i].label.c_str());
+            if (force >= 0) ImGui::SetNextItemOpen(force == 1);
+            // По умолчанию раскрыта вкладка, где что-то отмечено (обычно своя).
+            const std::string head = title + " (" + std::to_string(on_n) + "/" + std::to_string(members.size()) + ")###grp";
+            const bool open = ImGui::TreeNodeEx(head.c_str(), on_n > 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0);
+            if (ImGui::IsItemToggledOpen() && ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift)
+                model->broadcast_pick_open_all = open ? 1 : 0;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ctrl+Shift+click: expand / collapse all tabs");
+            if (open) {
+                std::string shown_group;
+                for (size_t i : members) {
+                    if (all[i].group != shown_group) {
+                        shown_group = all[i].group;
+                        // Подгруппа нужна, только если типов во вкладке больше одного.
+                        const bool several = std::any_of(members.begin(), members.end(),
+                            [&](size_t k) { return all[k].group != shown_group; });
+                        if (several) ucuda::ui_detail::block_separator(shown_group.c_str());
+                    }
+                    ImGui::PushID((int)i);
+                    bool on = (model->broadcast_pick[i] == '1');
+                    if (ImGui::Checkbox("##pick", &on))
+                        model->broadcast_pick[i] = on ? '1' : '0';
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(all[i].label.c_str());
+                    ImGui::PopID();
+                }
+                ImGui::TreePop();
+            }
             ImGui::PopID();
         }
 
@@ -552,6 +757,13 @@ void field_apply_all_menu(AppModel* model, BroadcastField f,
 
     // 3. Прежний адресат: активный конфиг каждой вкладки (only = nullptr).
     count_and_item("Apply to all calculation tabs", nullptr, "all tabs");
+
+    // 4. Сброс к умолчанию — если поле лежит в активном конфиге (ConfigFieldScope). Пункты
+    //    "в конфиги вкладки" не дублируем: их конфиги уже есть в рассылке выше.
+    if (std::string* fs = cfg_menu_field(); fs && cfg_field_scope_model(fs)) {
+        ImGui::Separator();
+        cfg_field_menu_items(fs, label, /*with_apply*/false);
+    }
 
     draw_undo_menu_item(model);
     ImGui::EndPopup();
@@ -606,7 +818,7 @@ void draw_param_groups_window(SystemEditor& m, const std::vector<std::string>& p
     std::string drop_from, drop_to, drop_name;
     bool drop_after = false;
 
-    ImGui::SeparatorText("Groups");
+    ucuda::ui_detail::block_separator("Groups");
     if (rows.empty()) ImGui::TextDisabled("No groups: the tabs show a flat list.");
     std::string del, ren_from, ren_to;
     if (!rows.empty() && ImGui::BeginChild("##pg_rows", ImVec2(0, std::min(240.0f, 26.0f * (float)rows.size() + 8.0f)),
@@ -679,7 +891,7 @@ void draw_param_groups_window(SystemEditor& m, const std::vector<std::string>& p
         u.target.clear();
     }
 
-    ImGui::SeparatorText(u.kind == 1 ? "Initial conditions" : "Parameters");
+    ucuda::ui_detail::block_separator(u.kind == 1 ? "Initial conditions" : "Parameters");
     InputTextStr("filter##pg", u.filter, 200.0f);
     std::vector<std::string> shown;
     for (const std::string& p : names)
@@ -701,7 +913,7 @@ void draw_param_groups_window(SystemEditor& m, const std::vector<std::string>& p
         }
         return changed;
     };
-    ImGui::SetNextItemWidth(260.0f);
+    item_w(260.0f);
     group_combo("##pg_target", u.target);
     ImGui::SameLine();
     int nsel = 0;
@@ -746,7 +958,7 @@ void draw_param_groups_window(SystemEditor& m, const std::vector<std::string>& p
                 {
                     auto it = m.field_labels.find(p);
                     std::string lab = it == m.field_labels.end() ? std::string() : it->second;
-                    ImGui::SetNextItemWidth(-1.0f);
+                    item_w(-1.0f);
                     const std::string hint = field_label_auto(p);
                     if (InputTextStrHint("##lab", lab, hint.c_str())) {
                         if (lab.find_first_not_of(" \t") == std::string::npos) m.field_labels.erase(p);
@@ -757,7 +969,7 @@ void draw_param_groups_window(SystemEditor& m, const std::vector<std::string>& p
                 draw_field_name(p, &m.field_labels);
                 ImGui::TableSetColumnIndex(4);
                 std::string g = pg_group_of(G, p);
-                ImGui::SetNextItemWidth(-1.0f);
+                item_w(-1.0f);
                 if (group_combo("##g", g)) pg_move(G, p, g);
                 ImGui::PopID();
             }

@@ -4,6 +4,8 @@
 #include "ucuda/domain/analysis_types.h"   // PeakConfig, kGpuBlockSizeDefault
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -184,6 +186,43 @@ struct AppSettings {
             }
         }
         return tc;
+    }
+
+    // Ширины полей, заданные пользователем (ручка на правом краю поля, field_width_handle):
+    // ключ столбца ("phase.var", "phase.proj_type", ...) -> ширина в пикселях. Ключа нет —
+    // поле рисуется с шириной по умолчанию из кода. Зеркалит AppConfig::field_widths в виде
+    // строки "phase.var=120;phase.proj_type=140"; dirty — правилось, но ещё не записано
+    // (файл пишется, когда кнопку мыши отпустили, а не на каждом кадре перетаскивания).
+    std::map<std::string, float> field_widths;
+    bool field_widths_dirty = false;
+
+    static std::string field_widths_to_string(const std::map<std::string, float>& w) {
+        std::string out;
+        for (const auto& [k, v] : w) {
+            char buf[32];
+            std::snprintf(buf, sizeof buf, "%.0f", v);
+            if (!out.empty()) out += ';';
+            out += k + '=' + buf;
+        }
+        return out;
+    }
+    static std::map<std::string, float> field_widths_from_string(const std::string& s) {
+        std::map<std::string, float> w;
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t end = s.find(';', pos);
+            if (end == std::string::npos) end = s.size();
+            const std::string item = s.substr(pos, end - pos);
+            pos = end + 1;
+            const size_t eq = item.find('=');
+            if (eq == 0 || eq == std::string::npos) continue;
+            const char* num = item.c_str() + eq + 1;
+            char* num_end = nullptr;
+            const float v = std::strtof(num, &num_end);
+            if (num_end == num || !(v >= 1.0f && v <= 4000.0f)) continue;
+            w[item.substr(0, eq)] = v;
+        }
+        return w;
     }
 
     // Knobs configCUDA.h (peak-finder + пороги режимов). Зеркалит

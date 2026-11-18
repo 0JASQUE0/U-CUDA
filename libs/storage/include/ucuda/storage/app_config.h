@@ -69,6 +69,9 @@ struct AppConfig {
     // Пользовательские цвета темы: "bg=#rrggbb;text=...;frame=...;accent=...;plot=...".
     // Пустая строка = все цвета берутся из темы. Разбор — AppSettings::theme_colors_from_string.
     std::string theme_colors;
+    // Ширины полей, заданные пользователем: "phase.var=120;phase.proj_type=140".
+    // Пустая строка = все поля с шириной по умолчанию. Разбор — AppSettings::field_widths_from_string.
+    std::string field_widths;
 
     // Последний выбранный тип анализа (значение AppModel::AppMode как int).
     // На старте app_main выставляет model.app_mode из этого поля (после

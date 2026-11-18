@@ -52,7 +52,7 @@ namespace ucuda::ui_detail {
 bool draw_parametric_window_setup_row(AppModel& model, ParametricPlotWindow& win) {
     bool close_clicked = false;
 
-    ImGui::SetNextItemWidth(220);
+    item_w(220);
     if (InputTextStr("##wlabel", win.label)) {
         win.label_is_manual = !win.label.empty();   // empty → back to auto
         model.parametric_plot_windows_dirty = true;
@@ -63,7 +63,7 @@ bool draw_parametric_window_setup_row(AppModel& model, ParametricPlotWindow& win
     // (they're only meaningful within the previous session+dimension),
     // so switching type clears members.
     int t = parametric_type_index_of(win.kind, win.mode_2d);
-    ImGui::SetNextItemWidth(130);
+    item_w(130, combo_items_need(kParametricTypeNames, IM_ARRAYSIZE(kParametricTypeNames)));
     if (ImGui::Combo("##wtype", &t, kParametricTypeNames, IM_ARRAYSIZE(kParametricTypeNames))) {
         ParametricPlotWindow::Kind new_kind; bool new_2d;
         parametric_type_from_index(t, new_kind, new_2d);
@@ -123,14 +123,14 @@ namespace ucuda::ui_detail {
 // для меню окна графика (вверху меню тулбара карты или под своей стрелкой). Закрывается окно
 // крестиком в заголовке, поэтому X здесь нет.
 static void draw_parametric_window_menu(AppModel& model, ParametricPlotWindow& win) {
-    ImGui::SeparatorText("Window");
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+    ucuda::ui_detail::block_separator("Window");
+    item_w(ImGui::GetFontSize() * 12.0f);
     if (InputTextStr("Label##wlabel_m", win.label)) {
         win.label_is_manual = !win.label.empty();   // empty → back to auto
         model.parametric_plot_windows_dirty = true;
     }
     int t = parametric_type_index_of(win.kind, win.mode_2d);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+    item_w(ImGui::GetFontSize() * 12.0f, combo_items_need(kParametricTypeNames, IM_ARRAYSIZE(kParametricTypeNames)));
     if (ImGui::Combo("Type##wtype_m", &t, kParametricTypeNames, IM_ARRAYSIZE(kParametricTypeNames))) {
         ParametricPlotWindow::Kind new_kind; bool new_2d;
         parametric_type_from_index(t, new_kind, new_2d);
@@ -142,7 +142,7 @@ static void draw_parametric_window_menu(AppModel& model, ParametricPlotWindow& w
             model.parametric_plot_windows_dirty = true;
         }
     }
-    ImGui::SeparatorText("Members");
+    ucuda::ui_detail::block_separator("Members");
     draw_parametric_members_list(model, win);
 }
 }
@@ -361,7 +361,7 @@ void draw_parametric_controls(AppModel& model, SystemLibrary& lib) {
     // can be any (kind, dimension) combo. Each row has its own Type combo so the chart type
     // can be changed after creation instead of being fixed at "Add".
     ImGui::Separator();
-    ImGui::SeparatorText("Plot windows");
+    ucuda::ui_detail::block_separator("Plot windows");
 
     int win_to_remove = -1;
     for (int i = 0; i < (int)model.parametric_plot_windows.size(); ++i) {

@@ -243,6 +243,7 @@ bool load_app_config(const std::string& dir, AppConfig& out) {
     if (parse_int_field(body, "camo_theme", camo))
         out.camo_theme = camo;
     parse_string_field(body, "theme_colors", out.theme_colors);
+    parse_string_field(body, "field_widths", out.field_widths);
     int lam = 0;
     if (parse_int_field(body, "last_app_mode", lam))
         out.last_app_mode = lam;
@@ -319,6 +320,7 @@ bool save_app_config(const std::string& dir, const AppConfig& cfg) {
         f << "  \"contrast_theme\": "         << (cfg.contrast_theme ? "true" : "false") << ",\n";
         f << "  \"camo_theme\": "             << cfg.camo_theme << ",\n";
         f << "  \"theme_colors\": \""         << json_escape(cfg.theme_colors) << "\",\n";
+        f << "  \"field_widths\": \""         << json_escape(cfg.field_widths) << "\",\n";
         f << "  \"last_app_mode\": "          << cfg.last_app_mode << ",\n";
         f << "  \"last_system_name\": \""     << json_escape(cfg.last_system_name) << "\",\n";
         // Пороги пишем с максимальной точностью double: 1e-14 и -1e25 должны

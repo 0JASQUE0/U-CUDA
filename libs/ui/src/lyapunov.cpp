@@ -220,11 +220,13 @@ void draw_lle_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
 namespace ucuda::ui_detail {
 void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSession& s, int idx) {
     LSCurveConfig& c = s.curves[idx];
+    // Поля активного конфига: ПКМ — во все конфиги вкладки и сброс к умолчанию.
+    const ConfigFieldScope<LSCurveConfig> cfg_field_scope(model, "LS", s.curves, idx);
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
     model.broadcast_source_tab = BroadcastTab::LS;
     model.broadcast_source_idx = idx;
 
-    ImGui::SetNextItemWidth(kComboW);
+    item_w(kComboW);
     if (InputTextStr("Label", c.label))
         c.label_is_manual = !c.label.empty();   // empty → back to auto
     ImGui::Separator();
@@ -300,7 +302,7 @@ void draw_ls_curve_controls(AppModel& model, LyapunovSpectrumAnalysisSession& s,
     }
 
     // LS (Wolf/Benettin + Gram-Schmidt) (collapsible)
-    if (ImGui::CollapsingHeader("LS (Wolf/Benettin + Gram-Schmidt)##ls_wbgs", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("LS (Wolf/Benettin + Gram-Schmidt)##ls_wbgs", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("eps", c.eps_text, kFieldW);
         InputNumStr("NT",  c.nt_text, kFieldW);
         InputNumStr("vector transient", c.vtr_text, kFieldW);
@@ -608,11 +610,13 @@ void draw_ls_plot(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb,
 namespace ucuda::ui_detail {
 void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int idx) {
     LLECurveConfig& c = s.curves[idx];
+    // Поля активного конфига: ПКМ — во все конфиги вкладки и сброс к умолчанию.
+    const ConfigFieldScope<LLECurveConfig> cfg_field_scope(model, "LLE", s.curves, idx);
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
     model.broadcast_source_tab = BroadcastTab::LLE;
     model.broadcast_source_idx = idx;
 
-    ImGui::SetNextItemWidth(kComboW);
+    item_w(kComboW);
     if (InputTextStr("Label", c.label))
         c.label_is_manual = !c.label.empty();   // empty → back to auto
     ImGui::Separator();
@@ -690,7 +694,7 @@ void draw_lle_curve_controls(AppModel& model, LLEAnalysisSession& s, int idx) {
     }
 
     // LLE (Wolf/Benettin) (collapsible)
-    if (ImGui::CollapsingHeader("LLE (Wolf/Benettin)##lle_wb", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("LLE (Wolf/Benettin)##lle_wb", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("eps", c.eps_text, kFieldW);
         InputNumStr("NT",  c.nt_text, kFieldW);
         InputNumStr("vector transient", c.vtr_text, kFieldW);

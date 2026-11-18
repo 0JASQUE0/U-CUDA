@@ -31,17 +31,43 @@ void draw_resize_handle(const char* id, float& height,
                                float min_h = 40.0f, float max_h = 1200.0f);
 
 
+// Настраиваемая ширина полей (AppSettings::field_widths, хранится в _app_config.json).
+// Ширина общая для всех полей с одним ключом — столбец, а не отдельное поле.
+void set_field_width_store(AppSettings* store);
+[[nodiscard]] float field_width(const char* key, float def);
+// Ширина комбо / поля ввода, в которую целиком влезает содержимое шириной content_w.
+[[nodiscard]] float combo_fit_width(float content_w);
+[[nodiscard]] float input_fit_width(float content_w);
+// Ручка на правом краю ТОЛЬКО ЧТО нарисованного поля: ЛКМ-перетаскивание меняет ширину ключа,
+// ПКМ — подгонка под fit() (если задан), двойной ЛКМ — ширина по умолчанию. Раскладку не
+// сдвигает (ItemAdd без ItemSize), поэтому звать последней — после превью комбо и меню поля.
+void field_width_handle(const char* key, const std::function<float()>& fit = {});
+// Ключ столбца по месту вызова (файл/функция/ширина); kFieldW — общий столбец "fields".
+[[nodiscard]] std::string site_width_key(const char* file, const char* func, float def);
+// Замена ImGui::SetNextItemWidth(def) с ручкой ширины: столбец — место вызова. need — сколько
+// нужно содержимому этого поля (для ПКМ-подгонки), 0 — неизвестно. def <= 0 — без ручки.
+void item_w(float def, float need = 0.0f,
+            const char* file = __builtin_FILE(), const char* func = __builtin_FUNCTION());
+// Ширина комбо, в которое влезает самый длинный пункт (массив строк / строка через '\0').
+[[nodiscard]] float combo_items_need(const char* const* items, int n);
+[[nodiscard]] float combo_items_need(const char* zero_separated);
+
+
 void draw_latex_preview(const char* id, const std::string& src, ImVec2 size);
 
 
 void draw_rhs_preview(const SystemEditor& model);
 
 
-bool InputTextStr(const char* label, std::string& str, float width = 0.0f);
+// Общие поля ввода. При width > 0 у поля есть ручка ширины (столбец — место вызова, его
+// определяют file/func по умолчанию); при width == 0 ширину задают снаружи (item_w).
+bool InputTextStr(const char* label, std::string& str, float width = 0.0f,
+                  const char* file = __builtin_FILE(), const char* func = __builtin_FUNCTION());
 
 
 bool InputTextStrHint(const char* label, std::string& str, const char* hint,
-                             float width = 0.0f);
+                             float width = 0.0f,
+                             const char* file = __builtin_FILE(), const char* func = __builtin_FUNCTION());
 
 [[nodiscard]] std::string auto_axis_name(const std::vector<std::string>& params,
                                    const std::vector<std::string>& vars,
@@ -71,11 +97,13 @@ void refresh_auto_labels(AppModel& model);
 
 bool InputNumStr(const char* label, std::string& str, float width = 0.0f,
                         const std::function<void()>& ctx_menu = {},
-                        bool allow_empty = false);
+                        bool allow_empty = false,
+                        const char* file = __builtin_FILE(), const char* func = __builtin_FUNCTION());
 
 
 bool InputNumStrCommit(const char* label, std::string& text, double& value,
-                              float width = 0.0f);
+                              float width = 0.0f,
+                              const char* file = __builtin_FILE(), const char* func = __builtin_FUNCTION());
 
 
 void do_undo(AppModel& m);
@@ -129,7 +157,8 @@ template <class Cfg>
 int list_digit_step_callback(ImGuiInputTextCallbackData* data) ;
 
 
-bool InputNumListStr(const char* label, std::string& str, float width = 0.0f) ;
+bool InputNumListStr(const char* label, std::string& str, float width = 0.0f,
+                     const char* file = __builtin_FILE(), const char* func = __builtin_FUNCTION());
 
 
 void draw_undo_menu_item(AppModel* m) ;

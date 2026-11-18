@@ -65,14 +65,14 @@ bool draw_scheme_combo(const char* label, std::string& scheme,
     // схемы ОДУ на такой системе не строятся. Скрытые в Settings не предлагаются (выбранная остаётся).
     if (enabled_builtins && !enabled_builtins->empty()
         && (dae_scheme_from_name((*enabled_builtins)[0], nullptr) || (*enabled_builtins)[0] == kBdfSchemeDae)) {
-        ImGui::SetNextItemWidth(kComboW);
+        item_w(kComboW);
         if (ImGui::BeginCombo(label, scheme.c_str())) {
-            ImGui::SeparatorText("DAE");
+            ucuda::ui_detail::block_separator("DAE");
             bool ms_header = false;
             for (const auto& nm : *enabled_builtins) {
                 if (g_scheme_masks && g_scheme_masks->dae_method_hidden(nm) && scheme != nm) continue;
                 if (scheme_is_multistep(nm) && !ms_header) {
-                    ImGui::SeparatorText("multistep");
+                    ucuda::ui_detail::block_separator("multistep");
                     ms_header = true;
                 }
                 if (ImGui::Selectable(nm.c_str(), scheme == nm)) choose(nm);
@@ -98,7 +98,7 @@ bool draw_scheme_combo(const char* label, std::string& scheme,
         for (const auto& n : *enabled_builtins) if (n == m) return true;
         return false;
     };
-    ImGui::SetNextItemWidth(kComboW);
+    item_w(kComboW);
     if (ImGui::BeginCombo(label, wrapper_display_name(scheme).c_str())) {
         // Заголовок порядка печатаем лениво — перед ПЕРВОЙ видимой схемой
         // группы, иначе отфильтрованная группа оставила бы пустую шапку.
@@ -108,7 +108,7 @@ bool draw_scheme_combo(const char* label, std::string& scheme,
             if ((!is_enabled(b.name) || (g_scheme_masks && g_scheme_masks->scheme_hidden(b.name)))
                 && scheme != b.name) continue;
             if (scheme_group_title(b) != shown_group) {
-                ImGui::SeparatorText(scheme_group_title(b).c_str());
+                ucuda::ui_detail::block_separator(scheme_group_title(b).c_str());
                 shown_group = scheme_group_title(b);
             }
             if (ImGui::Selectable(b.name, scheme == b.name)) choose(b.name);
@@ -116,7 +116,7 @@ bool draw_scheme_combo(const char* label, std::string& scheme,
         // Многошаговый BDF 1-5 — свой драйвер, флага scheme_* у него нет: показывается всегда
         // (enabled_builtins_from_record его тоже всегда добавляет), только с адаптивным шагом.
         if (is_enabled(kBdfSchemeOde) || scheme == kBdfSchemeOde) {
-            ImGui::SeparatorText("Multistep (adaptive step only)");
+            ucuda::ui_detail::block_separator("Multistep (adaptive step only)");
             if (ImGui::Selectable(kBdfSchemeOde, scheme == kBdfSchemeOde)) choose(kBdfSchemeOde);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("BDF orders 1-5 with variable step (DASSL form), its own driver.\n"
@@ -129,7 +129,7 @@ bool draw_scheme_combo(const char* label, std::string& scheme,
         bool custom_header = false;
         for (const auto& cs : custom_schemes) {
             if (!cs.enabled && scheme != cs.name) continue;
-            if (!custom_header) { ImGui::SeparatorText("Custom"); custom_header = true; }
+            if (!custom_header) { ucuda::ui_detail::block_separator("Custom"); custom_header = true; }
             if (ImGui::Selectable((cs.name + "##custom").c_str(), scheme == cs.name))
                 choose(cs.name);
         }
@@ -149,7 +149,7 @@ bool draw_scheme_combo(const char* label, std::string& scheme,
                 sorted.push_back(scheme);
         }
         if (!sorted.empty()) {
-            ImGui::SeparatorText("Wrappers");
+            ucuda::ui_detail::block_separator("Wrappers");
             // Порядок sort_wrapper_schemes: список сессии мог приехать из файла
             // в старом порядке добавления. Подзаголовок — на смене группы
             // "тип + опорник".
@@ -255,7 +255,7 @@ void draw_sweep_target_combo(const char* label,
         field_apply_all_menu(bc, which, {}, label,
             encode_sweep_target(par_index, over_var, var_index, over_h));
     };
-    ImGui::SetNextItemWidth(width);
+    item_w(width);
     if (!ImGui::BeginCombo(label, preview.c_str())) { apply_all_menu(); return; }
 
     for (int i = 0; i < (int)params.size(); ++i) {
@@ -454,14 +454,14 @@ void draw_ctrl_library_window(AppModel& m) {
 #endif
             int np = 0;
             const AdaptiveCtrlPreset* pr = adaptive_ctrl_presets(&np);
-            ImGui::SeparatorText("C body presets");
+            ucuda::ui_detail::block_separator("C body presets");
             for (int i = 0; i < np; ++i) {
                 if (pr[i].kind != kUserCtrlBody) continue;
                 if (ImGui::Selectable(pr[i].name)) add(adaptive_ctrl_from_preset(pr[i]));
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", pr[i].tip);
             }
 #ifndef UCUDA_AD_HAIRER_ONLY
-            ImGui::SeparatorText("Soderlind filters");
+            ucuda::ui_detail::block_separator("Soderlind filters");
             for (int i = 0; i < np; ++i) {
                 if (pr[i].kind != kUserCtrlFilter) continue;
                 if (ImGui::Selectable(pr[i].name)) add(adaptive_ctrl_from_preset(pr[i]));
@@ -715,7 +715,7 @@ bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::string&
 
         int nb = 0;
         const AdaptiveCtrlInfo* bi = adaptive_builtin_ctrls(&nb);
-        ImGui::SetNextItemWidth(kComboW);
+        item_w(kComboW);
         if (ImGui::BeginCombo("controller", a.ctrl.c_str())) {
             auto pick = [&](const std::string& name) {
                 if (a.ctrl != name) { a.ctrl = name; a.ctrl_params.clear(); changed = true; }
@@ -725,7 +725,7 @@ bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::string&
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", bi[i].tip);
             }
             const std::vector<std::pair<std::string, std::string>> users = user_ctrl_list();
-            if (!users.empty()) ImGui::SeparatorText("library");
+            if (!users.empty()) ucuda::ui_detail::block_separator("library");
             for (size_t i = 0; i < users.size(); ++i) {
                 ImGui::PushID((int)i);
                 if (ImGui::Selectable(users[i].first.c_str(), a.ctrl == users[i].first)) pick(users[i].first);
@@ -776,7 +776,7 @@ bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::string&
         }
         if ((opts & kAdUiInterp) && a.raw_nodes) {
             const char* items[] = { "node", "parabola", "Hermite by f" };
-            ImGui::SetNextItemWidth(kComboW);
+            item_w(kComboW, combo_items_need(items, IM_ARRAYSIZE(items)));
             changed |= ImGui::Combo("peak interpolation", &a.peak_interp, items, IM_ARRAYSIZE(items));
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("How a peak (in Metrics also a min / max) is placed between step nodes:\n"
@@ -790,7 +790,7 @@ bool draw_adaptive_block(const char* id, AdaptiveSettings& a, const std::string&
             changed |= InputNumStr("max points", a.max_points, kFieldW);
         if (opts & kAdUiRenorm) {
             const char* items[] = { "exactly at k*NT", "first node after NT" };
-            ImGui::SetNextItemWidth(kComboW);
+            item_w(kComboW, combo_items_need(items, IM_ARRAYSIZE(items)));
             changed |= ImGui::Combo("renormalization", &a.lyap_renorm, items, IM_ARRAYSIZE(items));
         }
     }
@@ -819,7 +819,7 @@ bool draw_newton_fields(NewtonSettings& n, float w, const char* id) {
     bool changed = false;
     ImGui::PushID(id);
     int jac_mode = n.full ? 1 : 0;
-    ImGui::SetNextItemWidth(w * 2.0f);
+    item_w(w * 2.0f, combo_items_need("modified (once per step)\0full (every iteration)\0"));
     if (ImGui::Combo("Newton jacobian", &jac_mode, "modified (once per step)\0full (every iteration)\0")) {
         n.full = (jac_mode == 1);
         changed = true;
@@ -856,7 +856,7 @@ bool draw_integration_block(const char* header,
                                    const IntegrationFields& f,
                                    AppModel* bc,
                                    bool is_map) {
-    if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) return false;
+    if (!ucuda::ui_detail::block_header(header, ImGuiTreeNodeFlags_DefaultOpen)) return false;
     bool changed = false;
     auto menu = [&](BroadcastField kind, const char* label, const std::string& v) {
         return [bc, kind, label, &v] { field_apply_all_menu(bc, kind, {}, label, v); };

@@ -1,5 +1,6 @@
 ﻿#include "gui_common.h"
 #include "gui_inputs.h"
+#include "gui_fields.h"
 #include "ucuda/plotting/plot_legend.h"
 // Общие поля ввода: текст, числа, списки, LaTeX-превью, цвета НУ, меню отмены.
 using namespace ucuda::ui_detail;
@@ -169,7 +170,7 @@ void draw_rhs_preview(const SystemEditor& model) {
     const std::string& src =
         (model.mode == InputMode::Plain) ? model.plain_text : model.latex_text;
     if (src.find_first_not_of(" \t\r\n") == std::string::npos) return;
-    if (!ImGui::CollapsingHeader("Kernel form: X[..], a[..]", ImGuiTreeNodeFlags_DefaultOpen))
+    if (!ucuda::ui_detail::block_header("Kernel form: X[..], a[..]", ImGuiTreeNodeFlags_DefaultOpen))
         return;
     const AppModel::RhsPreview& pv = model.rhs_preview();
     if (pv.text.empty()) {
@@ -192,9 +193,286 @@ void draw_rhs_preview(const SystemEditor& model) {
 
 
 namespace ucuda::ui_detail {
-bool InputTextStr(const char* label, std::string& str, float width) {
+static AppSettings* g_width_store = nullptr;
+
+void set_field_width_store(AppSettings* store) { g_width_store = store; }
+
+float field_width(const char* key, float def) {
+    if (!g_width_store) return def;
+    auto it = g_width_store->field_widths.find(key);
+    return it != g_width_store->field_widths.end() ? it->second : def;
+}
+
+float combo_fit_width(float content_w) {
+    return std::ceil(content_w + ImGui::GetStyle().FramePadding.x * 2.0f + ImGui::GetFrameHeight());
+}
+
+float input_fit_width(float content_w) {
+    // +2: курсор ввода в конце строки не должен сдвигать текст.
+    return std::ceil(content_w + ImGui::GetStyle().FramePadding.x * 2.0f + 2.0f);
+}
+
+// Сколько ширины нужно содержимому полей столбца: максимум за этот и прошлый кадр (поля
+// столбца, нарисованные позже, видны по прошлому кадру). По нему работает ПКМ-подгонка.
+static std::map<std::string, float> g_need_cur, g_need_prev;
+static int g_need_frame = -1;
+
+static void need_roll() {
+    const int f = ImGui::GetFrameCount();
+    if (f == g_need_frame) return;
+    g_need_prev = (f == g_need_frame + 1) ? std::move(g_need_cur) : std::map<std::string, float>{};
+    g_need_cur.clear();
+    g_need_frame = f;
+}
+
+static void need_record(const std::string& key, float need) {
+    if (!(need > 0.0f)) return;
+    need_roll();
+    float& v = g_need_cur[key];
+    v = std::max(v, need);
+}
+
+static float need_of(const std::string& key) {
+    need_roll();
+    float w = 0.0f;
+    if (auto it = g_need_cur.find(key); it != g_need_cur.end()) w = it->second;
+    if (auto it = g_need_prev.find(key); it != g_need_prev.end()) w = std::max(w, it->second);
+    return w;
+}
+
+// Сколько нужно ТЕКСТУ полей ввода столбца (не пунктам комбо): если строка перестаёт влезать,
+// столбец на время расширяется под неё и сужается обратно, когда текст укоротили. Заданную
+// пользователем ширину это не трогает.
+static std::map<std::string, float> g_grow_cur, g_grow_prev;
+static int g_grow_frame = -1;
+
+static void grow_roll() {
+    const int f = ImGui::GetFrameCount();
+    if (f == g_grow_frame) return;
+    g_grow_prev = (f == g_grow_frame + 1) ? std::move(g_grow_cur) : std::map<std::string, float>{};
+    g_grow_cur.clear();
+    g_grow_frame = f;
+}
+
+static void grow_record(const std::string& key, float need) {
+    grow_roll();
+    float& v = g_grow_cur[key];
+    v = std::max(v, need);
+}
+
+// Ширина столбца с учётом текста, который в него не влезает. Потолок — 600 px или заданная
+// ширина, если она больше: строка в пару тысяч символов не должна выталкивать подписи за окно.
+static float grown_width(const std::string& key, float w) {
+    grow_roll();
+    float need = 0.0f;
+    if (auto it = g_grow_cur.find(key); it != g_grow_cur.end()) need = it->second;
+    if (auto it = g_grow_prev.find(key); it != g_grow_prev.end()) need = std::max(need, it->second);
+    return need > w ? std::min(need, std::max(w, 600.0f)) : w;
+}
+
+// Текущий блок полей в каждом окне (последний заголовок block_header / block_separator за кадр).
+static std::map<ImGuiID, std::string> g_blocks;
+static int g_blocks_frame = -1;
+
+void set_width_block(const char* label) {
+    if (g_blocks_frame != ImGui::GetFrameCount()) { g_blocks.clear(); g_blocks_frame = ImGui::GetFrameCount(); }
+    g_blocks[ImGui::GetCurrentWindow()->ID] = label ? label : "";
+}
+
+static std::string current_width_block() {
+    if (g_blocks_frame != ImGui::GetFrameCount()) return {};
+    auto it = g_blocks.find(ImGui::GetCurrentWindow()->ID);
+    return it != g_blocks.end() ? it->second : std::string();
+}
+
+// Ключ столбца по месту вызова: файл + функция + ширина по умолчанию + блок (заголовок, под
+// которым поле стоит). Поля одной функции с одинаковой шириной в одном блоке — один столбец
+// (Integration, Initial conditions, Parameters, оси min/max — каждый сам по себе).
+std::string site_width_key(const char* file, const char* func, float def) {
+    std::string f = file ? file : "";
+    const size_t slash = f.find_last_of("/\\");
+    if (slash != std::string::npos) f.erase(0, slash + 1);
+    if (const size_t dot = f.rfind('.'); dot != std::string::npos) f.erase(dot);
+    std::string fn = func ? func : "";
+    // У лямбд MSVC в имени хэш (<lambda_1a2b...>), меняющийся с правками: берём объемлющую функцию.
+    if (const size_t lam = fn.find("::<lambda"); lam != std::string::npos) fn.erase(lam);
+    if (const size_t paren = fn.find('('); paren != std::string::npos) fn.erase(paren);
+    if (const size_t ns = fn.rfind("::"); ns != std::string::npos) fn.erase(0, ns + 2);
+    std::string key = f + '/' + fn + '/' + std::to_string((int)std::lround(def));
+    std::string block = current_width_block();
+    // В ключе — ни ';' ни '=' (формат строки AppConfig::field_widths). Цифры выкидываем: в
+    // заголовке бывают счётчики ("Adaptive step (3 rejected)"), а блок от них меняться не должен.
+    for (char& c : block) if (c == ';' || c == '=') c = '_';
+    block.erase(std::remove_if(block.begin(), block.end(), [](char c) { return c >= '0' && c <= '9'; }),
+                block.end());
+    if (!block.empty()) key += '/' + block;
+    return key;
+}
+
+// Ручка по прямоугольнику поля. id — устойчивый, пока тянут (ширина поля при этом меняется).
+static void width_handle_rect(const std::string& key, ImGuiID id, ImVec2 imin, ImVec2 imax,
+                              const std::function<float()>& fit) {
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    constexpr float kMinW = 24.0f, kMaxW = 2000.0f;
+    // Полоска у правого края поля, в основном в зазоре до следующего поля.
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    const ImRect bb(imax.x - 2.0f, imin.y, imax.x + std::max(3.0f, gap - 1.0f), imax.y);
+    if (!ImGui::ItemAdd(bb, id, nullptr, ImGuiItemFlags_NoNav)) return;
+    bool hovered = false, held = false;
+    ImGui::ButtonBehavior(bb, id, &hovered, &held, ImGuiButtonFlags_PressedOnClick);
+
+    auto& widths = g_width_store->field_widths;
+    auto set_w = [&](float w) {
+        widths[key] = std::clamp(std::round(w), kMinW, kMaxW);
+        g_width_store->field_widths_dirty = true;
+    };
+    static ImGuiID drag_id = 0;
+    static float drag_w0 = 0.0f;
+    const ImGuiIO& io = ImGui::GetIO();
+    if (held) {
+        // Ширина, с которой начали тащить: ширина самого поля (у комбинации переменных она шире
+        // ширины столбца — тогда тащим от неё, а не прыгаем к столбцу).
+        if (drag_id != id) { drag_id = id; drag_w0 = imax.x - imin.x; }
+        // Без сдвига мыши ширину не трогаем: иначе второй щелчок двойного сразу записал бы
+        // ширину обратно после сброса к умолчанию.
+        const float dx = io.MousePos.x - io.MouseClickedPos[ImGuiMouseButton_Left].x;
+        const float w = std::clamp(std::round(drag_w0 + dx), kMinW, kMaxW);
+        auto it = widths.find(key);
+        if (dx != 0.0f && (it == widths.end() || it->second != w)) set_w(w);
+    } else if (drag_id == id) {
+        drag_id = 0;
+    }
+    if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        widths.erase(key);
+        g_width_store->field_widths_dirty = true;
+    }
+    if (hovered && fit && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) set_w(fit());
+
+    if (hovered || held) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        const float x = imax.x + 1.0f;
+        win->DrawList->AddLine(ImVec2(x, imin.y + 1.0f), ImVec2(x, imax.y - 1.0f),
+                               ImGui::GetColorU32(held ? ImGuiCol_SeparatorActive : ImGuiCol_SeparatorHovered),
+                               2.0f);
+        if (!held)
+            ImGui::SetItemTooltip(fit ? "Drag: width of this column\nRight-click: fit to contents\nDouble-click: default width"
+                                      : "Drag: width of this column\nDouble-click: default width");
+    }
+}
+
+void field_width_handle(const char* key, const std::function<float()>& fit) {
+    if (!g_width_store) return;
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    if (win->SkipItems) return;
+    // Id от самого поля: в одной строке бывает несколько полей одного столбца (значения НУ).
+    const ImGuiID item_id = ImGui::GetItemID();
+    const ImGuiID id = ImHashStr(key, 0, item_id ? item_id : win->GetID("##fw"));
+    width_handle_rect(key, id, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), fit);
+}
+
+// Ручка ДО поля: прямоугольник поля предсказываем по курсору (поле встанет туда же) и ширине.
+// Id — номер вхождения столбца в окне за кадр: от положения зависеть нельзя, левые поля того же
+// столбца сдвигают его, пока тянут.
+static float width_before_item(const std::string& key, float def) {
+    const float w = grown_width(key, field_width(key.c_str(), def));
+    if (!g_width_store || def <= 0.0f) return w;
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    if (win->SkipItems) return w;
+    static std::map<ImGuiID, int> occ;
+    static int occ_frame = -1;
+    if (occ_frame != ImGui::GetFrameCount()) { occ.clear(); occ_frame = ImGui::GetFrameCount(); }
+    const ImGuiID base = win->GetID(key.c_str());
+    const int n = occ[base]++;
+    const ImGuiID id = ImHashData(&n, sizeof n, base);
+    const ImVec2 p = win->DC.CursorPos;
+    const ImGuiNextItemData saved = GImGui->NextItemData;   // ItemAdd ручки сбрасывает NextItemData
+    std::function<float()> fit;
+    if (need_of(key) > 0.0f) fit = [key] { return need_of(key); };
+    width_handle_rect(key, id, p, ImVec2(p.x + w, p.y + ImGui::GetFrameHeight()), fit);
+    GImGui->NextItemData = saved;
+    return grown_width(key, field_width(key.c_str(), def));
+}
+
+// Столбец последнего item_w и место, куда встанет его поле: общее поле ввода, нарисованное сразу
+// за item_w, дописывает в этот столбец ширину своего текста (иначе ПКМ было бы не по чему).
+static std::string g_pending_key;
+static ImVec2 g_pending_pos;
+static int g_pending_frame = -1;
+
+void item_w(float def, float need, const char* file, const char* func) {
+    g_pending_frame = -1;
+    if (def <= 0.0f) { ImGui::SetNextItemWidth(def); return; }   // "до края окна" — не столбец
+    const std::string key = site_width_key(file, func, def);
+    need_record(key, need);
+    g_pending_key = key;
+    g_pending_pos = ImGui::GetCursorScreenPos();
+    g_pending_frame = ImGui::GetFrameCount();
+    ImGui::SetNextItemWidth(width_before_item(key, def));
+}
+
+float combo_items_need(const char* const* items, int n) {
+    float w = 0.0f;
+    for (int k = 0; items && k < n; ++k)
+        if (items[k]) w = std::max(w, ImGui::CalcTextSize(items[k]).x);
+    return combo_fit_width(w);
+}
+
+float combo_items_need(const char* zero_separated) {
+    float w = 0.0f;
+    for (const char* p = zero_separated; p && *p; p += std::strlen(p) + 1)
+        w = std::max(w, ImGui::CalcTextSize(p).x);
+    return combo_fit_width(w);
+}
+
+// Ширина для общих полей ввода (InputTextStr, InputNumStr, ...): ручка и запись того, сколько
+// нужно тексту. width <= 0 — ширину задали снаружи (item_w / SetNextItemWidth) или её нет.
+static void helper_width(float width, const std::string& text, const char* file, const char* func) {
+    const float text_need = input_fit_width(ImGui::CalcTextSize(text.c_str()).x);
+    if (width <= 0.0f) {
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        if (g_pending_frame == ImGui::GetFrameCount() && p.x == g_pending_pos.x && p.y == g_pending_pos.y) {
+            need_record(g_pending_key, text_need);
+            grow_record(g_pending_key, text_need);
+            // Ширину item_w уже выставил — по прошлому кадру; текст этого кадра мог стать длиннее.
+            ImGuiNextItemData& nd = GImGui->NextItemData;
+            if ((nd.HasFlags & ImGuiNextItemDataFlags_HasWidth) && nd.Width > 0.0f)
+                nd.Width = grown_width(g_pending_key, nd.Width);
+        }
+        g_pending_frame = -1;
+        return;
+    }
+    g_pending_frame = -1;
+    const std::string key = site_width_key(file, func, width);
+    need_record(key, text_need);
+    grow_record(key, text_need);
+    ImGui::SetNextItemWidth(width_before_item(key, width));
+}
+}
+
+
+namespace ucuda::ui_detail {
+// ПКМ по полю без своего меню: пункты конфигов вкладки и сброс (если поле в активном конфиге).
+static void cfg_field_popup(std::string& str, const char* id_label) {
+    AppModel* m = cfg_field_scope_model(&str);
+    if (!m) return;                                 // поле не из конфига вкладки — меню нечего предложить
+    if (!ImGui::BeginPopupContextItem()) return;   // id — от самого поля
+    // Подпись поля — видимая часть label (до "##"); у безымянных полей её нет.
+    std::string name = id_label ? id_label : "";
+    if (const size_t hh = name.find("##"); hh != std::string::npos) name.erase(hh);
+    if (name.empty()) name = "value";
+    ImGui::TextDisabled("%s = %s", name.c_str(), str.empty() ? "(empty)" : str.c_str());
+    ImGui::Separator();
+    cfg_field_menu_items(&str, name);
+    draw_undo_menu_item(m);
+    ImGui::EndPopup();
+}
+}
+
+
+namespace ucuda::ui_detail {
+bool InputTextStr(const char* label, std::string& str, float width, const char* file, const char* func) {
     std::vector<char>& buf = input_scratch(str, 1024);
-    if (width > 0) ImGui::SetNextItemWidth(width);
+    helper_width(width, str, file, func);
     bool changed = ImGui::InputText(label, buf.data(), buf.size());
     if (changed) str = buf.data();
     return changed;
@@ -204,9 +482,9 @@ bool InputTextStr(const char* label, std::string& str, float width) {
 
 namespace ucuda::ui_detail {
 bool InputTextStrHint(const char* label, std::string& str, const char* hint,
-                             float width) {
+                             float width, const char* file, const char* func) {
     std::vector<char>& buf = input_scratch(str, 1024);
-    if (width > 0) ImGui::SetNextItemWidth(width);
+    helper_width(width, str.empty() ? std::string(hint ? hint : "") : str, file, func);
     bool changed = ImGui::InputTextWithHint(label, hint, buf.data(), buf.size());
     if (changed) str = buf.data();
     return changed;
@@ -332,16 +610,24 @@ namespace ucuda::ui_detail {
 namespace ucuda::ui_detail {
 bool InputNumStr(const char* label, std::string& str, float width,
                         const std::function<void()>& ctx_menu,
-                        bool allow_empty) {
+                        bool allow_empty, const char* file, const char* func) {
     std::vector<char>& buf = input_scratch(str, 1024);
-    if (width > 0) ImGui::SetNextItemWidth(width);
+    helper_width(width, str, file, func);
     // CallbackHistory — ↑/↓ в активном InputText, обрабатываем в digit_step_input_callback.
     // CallbackCharFilter — прежняя замена запятой на точку, тоже в нём.
     bool changed = ImGui::InputText(label, buf.data(), buf.size(),
         ImGuiInputTextFlags_CallbackCharFilter | ImGuiInputTextFlags_CallbackHistory,
         digit_step_input_callback);
     if (changed) str = buf.data();
-    if (ctx_menu) ctx_menu();
+    if (ctx_menu) {
+        // Своё меню поля (рассылка по вкладкам) допишет пункты конфигов вкладки и сброс.
+        std::string* prev = cfg_menu_field();
+        set_cfg_menu_field(&str);
+        ctx_menu();
+        set_cfg_menu_field(prev);
+    } else {
+        cfg_field_popup(str, label);
+    }
 
     // Inline-предупреждение, если содержимое не парсится как число.
     // Default из engine'а (0) всё равно применится, но пользователю
@@ -385,12 +671,13 @@ int list_digit_step_callback(ImGuiInputTextCallbackData* data) {
 
 
 namespace ucuda::ui_detail {
-bool InputNumListStr(const char* label, std::string& str, float width ) {
+bool InputNumListStr(const char* label, std::string& str, float width, const char* file, const char* func) {
     std::vector<char>& buf = input_scratch(str, 1024);
-    if (width > 0) ImGui::SetNextItemWidth(width);
+    helper_width(width, str, file, func);
     const bool changed = ImGui::InputText(label, buf.data(), buf.size(),
         ImGuiInputTextFlags_CallbackHistory, list_digit_step_callback);
     if (changed) str = buf.data();
+    cfg_field_popup(str, label);
     return changed;
 }
 }
@@ -398,9 +685,9 @@ bool InputNumListStr(const char* label, std::string& str, float width ) {
 
 namespace ucuda::ui_detail {
 bool InputNumStrCommit(const char* label, std::string& text, double& value,
-                              float width) {
+                              float width, const char* file, const char* func) {
     std::vector<char>& buf = input_scratch(text, 1024);
-    if (width > 0) ImGui::SetNextItemWidth(width);
+    helper_width(width, text, file, func);
     if (ImGui::InputText(label, buf.data(), buf.size(),
                          ImGuiInputTextFlags_CallbackCharFilter | ImGuiInputTextFlags_CallbackHistory,
                          digit_step_input_callback))

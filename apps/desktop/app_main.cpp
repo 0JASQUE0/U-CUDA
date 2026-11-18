@@ -760,6 +760,7 @@ int main() {
         model.contrast_theme = app_cfg.contrast_theme && app_cfg.dark_theme;
         model.camo_theme = app_cfg.dark_theme ? 0 : app_cfg.camo_theme;
         model.theme_colors = AppSettings::theme_colors_from_string(app_cfg.theme_colors);
+        model.field_widths = AppSettings::field_widths_from_string(app_cfg.field_widths);
 
         // Маски видимости из Settings: какие вкладки показывать в верхнем ряду
         // и какие встроенные схемы предлагать в "Schemes to generate".
