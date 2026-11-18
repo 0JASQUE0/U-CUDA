@@ -220,6 +220,16 @@ template <class Session>
 
 void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     set_field_latex(model.field_latex);
+    set_field_width_store(&model);
+    // Ширины полей пишем, когда перетаскивание закончено, — не на каждом кадре. Read-modify-write:
+    // save_app_config пишет файл целиком.
+    if (model.field_widths_dirty && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        AppConfig cfg;
+        load_app_config(get_exe_dir_with_sep(), cfg);
+        cfg.field_widths = AppSettings::field_widths_to_string(model.field_widths);
+        save_app_config(get_exe_dir_with_sep(), cfg);
+        model.field_widths_dirty = false;
+    }
     set_field_labels(&model.field_labels);
     set_field_library(&lib);
     set_scheme_masks(&model);
@@ -690,7 +700,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         if (cx < after_tabs) cx = after_tabs;
         ImGui::SameLine();
         ImGui::SetCursorPosX(cx);
-        ImGui::SetNextItemWidth(combo_w);
+        item_w(combo_w);
         if (any_in_flight) ImGui::BeginDisabled();
         if (ImGui::BeginCombo("##topsyssel", preview.c_str(), ImGuiComboFlags_HeightLarge)) {
             // Группы по вкладкам Library: ODE, DAE, MAP. ДАУ считает пока только
@@ -706,7 +716,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                     // Ticked off in the Library tab. The active system stays listed
                     // regardless, so the combo never previews a name it can't show.
                     if (model.system_hidden(nm) && model.name != nm) continue;
-                    if (!header) { ImGui::SeparatorText(kLibTabName[group]); header = true; }
+                    if (!header) { ucuda::ui_detail::block_separator(kLibTabName[group]); header = true; }
                     ++listed;
                     if (ImGui::Selectable(nm.c_str(), model.name == nm))
                         apply_system_switch(model, lib, nm);
@@ -1190,7 +1200,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::Separator();
 
             ImGui::TextUnformatted("UI scale:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(220);
+            item_w(220);
             // Применяем НЕ во время drag'а, а на отпускание (IsItemDeactivatedAfterEdit) —
             // иначе UI пересобирается на каждом кадре, виджет уходит из-под курсора.
             static float ui_slider_value = -1.0f;
@@ -1225,7 +1235,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::TextDisabled("On: built-in bitmap ProggyClean (compact, pixel-perfect at 1x/2x/3x).");
 
             float plot_fs = model.plot_font_scale;
-            ImGui::SetNextItemWidth(220);
+            item_w(220);
             if (ImGui::SliderFloat("Plot font size", &plot_fs, 0.5f, 3.0f, "%.2fx")) {
                 set_plot_font_scale(plot_fs);
                 model.plot_font_scale = plot_font_scale();   // клампнутое значение
@@ -1267,7 +1277,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             ImGui::Separator();
             ImGui::Text("Axes");
             int tp = model.tick_precision;
-            ImGui::SetNextItemWidth(220);
+            item_w(220);
             if (ImGui::SliderInt("Tick precision (digits)", &tp, 2, 10)) {
                 model.tick_precision = tp;
                 set_tick_precision(tp);
@@ -1277,7 +1287,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
 
             ImGui::Separator();
             ImGui::Text("Series colours");
-            ImGui::SetNextItemWidth(220);
+            item_w(220);
             if (ImGui::BeginCombo("Default palette", series_palette_name(model.series_palette))) {
                 for (int i = 0; i < kSeriesPaletteCount; ++i) {
                     ImGui::PushID(i);
@@ -1431,7 +1441,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
                 bool first_in_line = true;
                 for (const auto& b : kBuiltinSchemes) {
                     if (b.order != shown_order) {
-                        ImGui::SeparatorText(("Order " + std::to_string(b.order)).c_str());
+                        ucuda::ui_detail::block_separator(("Order " + std::to_string(b.order)).c_str());
                         shown_order   = b.order;
                         first_in_line = true;
                     }

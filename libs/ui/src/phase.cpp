@@ -247,9 +247,9 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     draw_style_toolbar("Custom point style", "featdiag", pr.custom_line_style,
                         [&pr]() {
                             bool ch = false;
-                            ImGui::SetNextItemWidth(150);
+                            item_w(150);
                             ch |= slider_float_typed("Point size##featdiag", &pr.line_width, 0.5f, 25.0f, "%.1f");
-                            ImGui::SetNextItemWidth(150);
+                            item_w(150);
                             ch |= slider_float_typed("Alpha##featdiag",      &pr.alpha,      0.0f, 1.0f, "%.2f");
                             return ch;
                         });
@@ -486,7 +486,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                 // Скрыт в меню карты (Show → Toolbar) вместе с таблицей метрик: карте вся высота.
                 const bool rqa_bar = !plot_toolbar_hidden();
                 toolbar_row([&]() {
-                ImGui::SetNextItemWidth(150);
+                item_w(150);
                 const char* vmnames[] = { "Distance matrix", "Recurrence plot" };
                 ImGui::Combo("##rqvm", &pr.rqa_view_mode, vmnames, IM_ARRAYSIZE(vmnames));
                 ImGui::SameLine();
@@ -514,16 +514,16 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                 // ---------------- параметры ----------------
                 if (ImGui::BeginPopup("rqa_cfg")) {
                     bool ch = false;
-                    ImGui::SeparatorText("Embedding");
+                    ucuda::ui_detail::block_separator("Embedding");
                     const char* snames[] = { "choose source...", "Full state vector", "Delay embedding" };
-                    ImGui::SetNextItemWidth(180);
+                    item_w(180);
                     int si = (int)pr.rqa_source;
                     if (ImGui::Combo("source", &si, snames, IM_ARRAYSIZE(snames))) {
                         pr.rqa_source = (rqa::Source)si; ch = true;
                     }
                     if (pr.rqa_source == rqa::Source::Embedding) {
                         const int nv = (int)s.vars.size();
-                        ImGui::SetNextItemWidth(180);
+                        item_w(180);
                         if (var_combo_begin("variable", s.vars.empty() ? "-" : s.vars[pr.rqa_var < nv ? pr.rqa_var : 0], !s.vars.empty())) {
                             for (int k = 0; k < nv; ++k)
                                 if (var_selectable(s.vars[k], pr.rqa_var == k)) { pr.rqa_var = k; ch = true; }
@@ -534,14 +534,14 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         ch |= InputNumStr("tau (samples)", pr.rqa_tau_text, 100.0f);
                     }
 
-                    ImGui::SeparatorText("Threshold");
+                    ucuda::ui_detail::block_separator("Threshold");
                     const char* nnames[] = { "Euclidean (L2)", "Maximum (Linf)", "Manhattan (L1)" };
-                    ImGui::SetNextItemWidth(180);
+                    item_w(180);
                     int ni = (int)pr.rqa_norm;
                     if (ImGui::Combo("norm", &ni, nnames, IM_ARRAYSIZE(nnames))) { pr.rqa_norm = (rqa::Norm)ni; ch = true; }
                     const char* enames[] = { "absolute", "fraction of max distance",
                                              "fraction of sigma", "target recurrence rate" };
-                    ImGui::SetNextItemWidth(180);
+                    item_w(180);
                     int ei = (int)pr.rqa_eps_mode;
                     if (ImGui::Combo("eps mode", &ei, enames, IM_ARRAYSIZE(enames))) { pr.rqa_eps_mode = (rqa::EpsMode)ei; ch = true; }
                     if (pr.rqa_eps_mode == rqa::EpsMode::Absolute)
@@ -551,7 +551,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     else
                         ch |= InputNumStr("fraction", pr.rqa_eps_frac_text, 100.0f);
 
-                    ImGui::SeparatorText("Colors");
+                    ucuda::ui_detail::block_separator("Colors");
                     // Отдельно от `ch`: цвет — это про отрисовку, пересчитывать из-за него RQA
                     // незачем (и в continuation это был бы лишний кадр GPU на каждый клик).
                     int cmap_idx = (int)projection_views(pr).viewrp->colormap;
@@ -579,14 +579,14 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                             (float)parse_ratio_or(projection_views(pr).viewrp->manual_vmax_text, projection_views(pr).viewrp->manual_vmax);
                     }
 
-                    ImGui::SeparatorText("Lines");
+                    ucuda::ui_detail::block_separator("Lines");
                     ch |= InputNumStr("Theiler window", pr.rqa_theiler_text, 100.0f);
                     hint("Pairs with |i-j| <= w are excluded entirely. For flows this is "
                         "mandatory: without the window, points adjacent in time give false diagonals and inflate DET/LAM.");
                     ch |= InputNumStr("l_min", pr.rqa_lmin_text, 100.0f);
                     ch |= InputNumStr("v_min", pr.rqa_vmin_text, 100.0f);
 
-                    ImGui::SeparatorText("Sampling");
+                    ucuda::ui_detail::block_separator("Sampling");
                     ch |= InputNumStr("RP points (n)", pr.rqa_points_text, 100.0f);
                     hint("Side of the matrix. The trajectory is decimated uniformly to n points; the metrics "
                         "are computed on THE SAME matrix that is drawn. The ceiling is 4096 (4096^2 doubles = "
@@ -618,7 +618,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     // ---------------- метрики ----------------
                     // NaN печатается прочерком, а не нулём: "линий такой длины не нашлось" и
                     // "линии есть, но метрика равна нулю" — разные утверждения.
-                    if (rqa_bar && ImGui::CollapsingHeader("Metrics", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    if (rqa_bar && ucuda::ui_detail::block_header("Metrics", ImGuiTreeNodeFlags_DefaultOpen)) {
                         const rqa::Metrics& M = rq->metrics;
                         struct Row { const char* name; double val; const char* tip; };
                         const Row rows[] = {
@@ -825,9 +825,9 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     draw_style_toolbar("Custom point style", "contdiag", pr.custom_line_style,
                         [&pr]() {
                             bool ch = false;
-                            ImGui::SetNextItemWidth(150);
+                            item_w(150);
                             ch |= slider_float_typed("Point size##contdiag", &pr.line_width, 0.5f, 25.0f, "%.1f");
-                            ImGui::SetNextItemWidth(150);
+                            item_w(150);
                             ch |= slider_float_typed("Alpha##contdiag",      &pr.alpha,      0.0f, 1.0f, "%.2f");
                             return ch;
                         });
@@ -1127,7 +1127,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         ImGui::TextDisabled("%s", s.result.dae_status.c_str());
     const char* step_header = draw_integration ? "Adaptive step statistics##phase_ad" : "Step size##phase_ad";
     if (!s.sys.is_map && (!draw_integration || s.result.adaptive) &&
-        ImGui::CollapsingHeader(step_header, ImGuiTreeNodeFlags_DefaultOpen)) {
+        ucuda::ui_detail::block_header(step_header, ImGuiTreeNodeFlags_DefaultOpen)) {
         // В Custom настройки шага живут в общем конфиге (Integration вкладки) и
         // раздаются всем уровням; здесь они только показываются.
         if (on_reset_defaults) {
@@ -1170,7 +1170,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
 
     // Схемная траектория (фаза 4a). Отдельной секцией, а не ещё одной галкой в ряд:
     // настройки тут про ЖЕЛЕЗО, и путать их с параметрами интегрирования нельзя.
-    if (ImGui::CollapsingHeader("Analog circuit overlay")) {
+    if (ucuda::ui_detail::block_header("Analog circuit overlay")) {
         bool cch = ImGui::Checkbox("Overlay circuit trajectory", &s.circuit_show);
         if (s.circuit_show) {
             cch |= ImGui::Checkbox("Ideal op-amp", &s.circuit_ideal_opamp);
@@ -1234,7 +1234,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         InputNumStr("##cdelay", s.continuation_delay_ms, 70);
         ImGui::SameLine();
         ImGui::Text("Max peaks:"); ImGui::SameLine();
-        ImGui::SetNextItemWidth(90);
+        item_w(90);
         // Правится по Enter/уходу фокуса: иначе, набирая 500000, пользователь
         // на промежуточном "5" обрезал бы накопленный буфер до минимума.
         if (ImGui::InputInt("##ccap", &s.continuation_peaks_cap, 0, 0,
@@ -1269,35 +1269,64 @@ void draw_phase_controls(PhaseAnalysisSession& s,
 
     // параметры (общие на все проекции)
     if (!draw_integration && !s.params.empty()) {
-        ImGui::SeparatorText("Parameters");
+        ucuda::ui_detail::block_separator("Parameters");
         if (ImGui::BeginTable("aparams", 2, ImGuiTableFlags_SizingFixedFit)) {
             draw_param_tree(bc ? &bc->param_groups : nullptr, s.params, [&](const std::string& p) {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0); draw_field_name(p, bc ? &bc->field_labels : nullptr);
                 ImGui::TableSetColumnIndex(1);
                 std::string id = "##ap_" + p;
-                changed |= InputNumStr(id.c_str(), s.param_values[p], 110, [&] {
-                    changed |= field_restore_popup("##ap_restore", bc, BroadcastField::Param, p, s.param_values, s.params);
-                });
+                // Не "changed |= InputNumStr(...)": лямбда меню сама пишет changed, а MSVC читает
+                // левый операнд до вызова — "Restore from library" терял автопересчёт.
+                if (InputNumStr(id.c_str(), s.param_values[p], 110, [&] {
+                    if (field_restore_popup("##ap_restore", bc, BroadcastField::Param, p, s.param_values, s.params))
+                        changed = true;
+                })) changed = true;
             }, true);
             ImGui::EndTable();
         }
     }
 
     // начальные условия (несколько, мультистабильность)
-    ImGui::SeparatorText("Initial conditions");
+    ucuda::ui_detail::block_separator("Initial conditions");
     if (bc) {
         int hidden = 0;
         (void)bc->ic_fields(s.vars, &hidden);
         if (hidden > 0) ImGui::TextDisabled("%d algebraic variables hidden (Settings)", hidden);
     }
+    // Ширины столбцов НУ и проекций — общие для всех строк (field_width_handle): ЛКМ по правому
+    // краю поля тянет ширину, ПКМ подгоняет её под самое широкое содержимое столбца.
+    auto ic_label_fit = [&] {
+        float w = 0.0f;
+        for (const auto& c : s.ic_sets) w = std::max(w, ImGui::CalcTextSize(c.label.c_str()).x);
+        return w;
+    };
+    auto ic_value_fit = [&] {
+        float w = 0.0f;
+        for (const auto& c : s.ic_sets)
+            for (const auto& [k, v] : c.values) w = std::max(w, ImGui::CalcTextSize(v.c_str()).x);
+        return input_fit_width(w);
+    };
+    // Текст перестал влезать — столбец расширяется под него (не выше 600 px), заданная ширина
+    // при этом не меняется: строку укоротили — столбец сузился обратно.
+    // Запас в один символ — как в общих полях (helper_width): иначе введённый символ на кадр не
+    // влезает, и InputText остаётся прокрученным влево в уже расширенном поле.
+    auto grow = [](float w, float need) {
+        need += ImGui::CalcTextSize("0").x;
+        return need > w ? std::min(need, std::max(w, 600.0f)) : w;
+    };
+    const float ic_label_w = grow(field_width("phase.ic_label", 70), input_fit_width(ic_label_fit()));
+    const float ic_value_w = grow(field_width("phase.ic_value", 60), ic_value_fit());
+    const float ic_value_tree_w = grow(field_width("phase.ic_value_tree", 110), ic_value_fit());
     int ic_to_remove = -1;
     for (int i = 0; i < (int)s.ic_sets.size(); ++i) {
         InitialConditionSet& ic = s.ic_sets[i];
         ImGui::PushID(i);
         ImGui::Checkbox("##vis", &ic.visible); ImGui::SameLine();
-        ImGui::SetNextItemWidth(70);
-        InputTextStr("##label", ic.label); ImGui::SameLine();
+        ImGui::SetNextItemWidth(ic_label_w);   // ширину не через аргумент: там своя ручка
+        InputTextStr("##label", ic.label);
+        field_width_handle("phase.ic_label", [&] { return input_fit_width(ic_label_fit()); });
+        ImGui::SameLine();
         const FieldLabels* labels = bc ? &bc->field_labels : nullptr;
         if (bc && !bc->ic_groups.empty()) {
             // С группами НУ (схемы: десятки переменных) — набор раскрывается деревом групп, а не строкой.
@@ -1309,10 +1338,14 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                         ImGui::TableSetColumnIndex(0); draw_field_name(v, labels);
                         ImGui::TableSetColumnIndex(1);
                         std::string id = "##icv_" + v;
-                        changed |= InputNumStr(id.c_str(), ic.values[v], 110, [&] {
-                            changed |= field_restore_popup("##icv_restore", bc, BroadcastField::InitCondition, v,
-                                                           ic.values, s.vars);
-                        });
+                        ImGui::SetNextItemWidth(ic_value_tree_w);
+                        // Не "changed |= InputNumStr(...)": лямбда меню сама пишет changed, а MSVC
+                        // читает левый операнд до вызова — восстановление из библиотеки терялось.
+                        if (InputNumStr(id.c_str(), ic.values[v], 0.0f, [&] {
+                            if (field_restore_popup("##icv_restore", bc, BroadcastField::InitCondition, v,
+                                                    ic.values, s.vars)) changed = true;
+                            field_width_handle("phase.ic_value_tree", ic_value_fit);
+                        })) changed = true;
                     }, true);
                     ImGui::EndTable();
                 }
@@ -1322,10 +1355,13 @@ void draw_phase_controls(PhaseAnalysisSession& s,
             for (const auto& v : bc ? bc->ic_fields(s.vars) : s.vars) {
                 draw_field_name(v, labels); ImGui::SameLine();
                 std::string id = "##icv_" + v;
-                changed |= InputNumStr(id.c_str(), ic.values[v], 60, [&] {
-                    changed |= field_restore_popup("##icv_restore", bc, BroadcastField::InitCondition, v,
-                                                   ic.values, s.vars);
-                }); ImGui::SameLine();
+                ImGui::SetNextItemWidth(ic_value_w);
+                if (InputNumStr(id.c_str(), ic.values[v], 0.0f, [&] {   // см. выше про changed
+                    if (field_restore_popup("##icv_restore", bc, BroadcastField::InitCondition, v,
+                                            ic.values, s.vars)) changed = true;
+                    field_width_handle("phase.ic_value", ic_value_fit);
+                })) changed = true;
+                ImGui::SameLine();
             }
             if (ImGui::SmallButton("X")) ic_to_remove = i;
         }
@@ -1335,16 +1371,44 @@ void draw_phase_controls(PhaseAnalysisSession& s,
     if (ImGui::Button("Add initial condition")) { s.add_ic(); }
 
     // проекции
-    ImGui::SeparatorText("Projections");
+    ucuda::ui_detail::block_separator("Projections");
     int pr_to_remove = -1;
+    auto texts_fit = [](const char* const* v, int n) {
+        float w = 0.0f;
+        for (int k = 0; k < n; ++k) w = std::max(w, ImGui::CalcTextSize(v[k]).x);
+        return combo_fit_width(w);
+    };
+    // Один столбец "переменная" на все комбо переменных: X/Y/Z, var, переменная вложения RQA.
+    const float var_w = field_width("phase.var", 95);
+    auto vars_fit = [&] {
+        float w = 0.0f;
+        for (const auto& v : s.vars) w = std::max(w, var_name_width(v));
+        for (const auto& v : s.observables) w = std::max(w, var_name_width(v));
+        return combo_fit_width(w);
+    };
+    auto var_combo_w = [&](bool is_combination) {
+        return is_combination
+            ? std::max(var_w, combo_fit_width(ImGui::CalcTextSize(combo_var_label(s.vars).c_str()).x))
+            : var_w;
+    };
     for (int i = 0; i < (int)s.projections.size(); ++i) {
         Projection& pr = s.projections[i];
         ImGui::PushID(1000 + i);
         bool x_drawn = false;   // кнопку удаления дерево переменных рисует в своей строке
-        ImGui::SetNextItemWidth(90);
-        InputTextStr("##plabel", pr.label); ImGui::SameLine();
+        {
+            float lw = 0.0f;
+            for (const auto& p : s.projections) lw = std::max(lw, ImGui::CalcTextSize(p.label.c_str()).x);
+            ImGui::SetNextItemWidth(grow(field_width("phase.proj_label", 90), input_fit_width(lw)));
+        }
+        InputTextStr("##plabel", pr.label);
+        field_width_handle("phase.proj_label", [&] {
+            float w = 0.0f;
+            for (const auto& p : s.projections) w = std::max(w, ImGui::CalcTextSize(p.label.c_str()).x);
+            return input_fit_width(w);
+        });
+        ImGui::SameLine();
         // тип проекции
-        ImGui::SetNextItemWidth(110);
+        ImGui::SetNextItemWidth(field_width("phase.proj_type", 110));
         // Порядок обязан совпадать с enum ProjType (тип пишется в сессию как int).
         const char* tnames[] = { "Phase 2D", "Time domain", "Phase 3D", "Feature diagram",
                                  "Recurrence plot", "Continuation diagram", "Step size", "Rejections" };
@@ -1352,15 +1416,18 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         if (ImGui::Combo("##ptype", &t, tnames, IM_ARRAYSIZE(tnames))) {
             pr.type = (ProjType)t; s.fit_request = true;
         }
+        field_width_handle("phase.proj_type", [&] { return texts_fit(tnames, IM_ARRAYSIZE(tnames)); });
         ImGui::SameLine();
 
         if (pr.type == ProjType::Phase2D) {
             ImGui::Text("X:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(95);
+            ImGui::SetNextItemWidth(var_w);
             phase_axis_combo("##px", s, pr.axis_x);
+            field_width_handle("phase.var", vars_fit);
             ImGui::SameLine(); ImGui::Text("Y:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(95);
+            ImGui::SetNextItemWidth(var_w);
             phase_axis_combo("##py", s, pr.axis_y);
+            field_width_handle("phase.var", vars_fit);
         }
         else if (pr.type == ProjType::FeatureDiagram) {
             // Одна переменная: по ней ищутся пики. Оси фиксированы (значение пика /
@@ -1377,7 +1444,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                                  : s.vars[pr.axis_x < nv ? pr.axis_x : 0]);
 
             ImGui::Text("var:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(feat_is_combo ? 170.0f : 95.0f);
+            ImGui::SetNextItemWidth(var_combo_w(feat_is_combo));
             const bool open_pfv = var_combo_begin("##pfv", preview, !feat_is_combo && !s.vars.empty());
             if (open_pfv) {
                 for (int k = 0; k < nv; ++k)
@@ -1390,6 +1457,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                 ImGui::EndCombo();
             }
             var_combo_preview();
+            field_width_handle("phase.var", vars_fit);
             ImGui::SameLine();
             ImGui::TextDisabled("(peak vs interval)");
         }
@@ -1398,7 +1466,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
             // чего строить вектор состояния. Остальные 13 параметров — в самом окне проекции,
             // по кнопке "RQA settings": в строку списка они не влезают и не должны.
             ImGui::Text("IC:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(85);
+            ImGui::SetNextItemWidth(field_width("phase.rqa_ic", 85));
             const char* icprev = (pr.rqa_ic >= 0 && pr.rqa_ic < (int)s.ic_sets.size())
                 ? s.ic_sets[pr.rqa_ic].label.c_str() : "-";
             if (ImGui::BeginCombo("##rqic", icprev)) {
@@ -1408,18 +1476,20 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                     }
                 ImGui::EndCombo();
             }
+            field_width_handle("phase.rqa_ic", [&] { return combo_fit_width(ic_label_fit()); });
             ImGui::SameLine();
             // Порядок обязан совпадать с rqa::Source (пишется в сессию как int). Нулевой пункт —
             // "не выбрано": дефолта у источника нет намеренно, см. комментарий в Projection.
             const char* snames[] = { "choose source...", "Full state vector", "Delay embedding" };
-            ImGui::SetNextItemWidth(140);
+            ImGui::SetNextItemWidth(field_width("phase.rqa_src", 140));
             int si = (int)pr.rqa_source;
             if (ImGui::Combo("##rqsrc", &si, snames, IM_ARRAYSIZE(snames))) {
                 pr.rqa_source = (rqa::Source)si; changed = true;
             }
+            field_width_handle("phase.rqa_src", [&] { return texts_fit(snames, IM_ARRAYSIZE(snames)); });
             if (pr.rqa_source == rqa::Source::Embedding) {
                 ImGui::SameLine(); ImGui::Text("var:"); ImGui::SameLine();
-                ImGui::SetNextItemWidth(95);
+                ImGui::SetNextItemWidth(var_w);
                 const int nv = (int)s.vars.size();
                 if (var_combo_begin("##rqvar", s.vars.empty() ? "-" : s.vars[pr.rqa_var < nv ? pr.rqa_var : 0], !s.vars.empty())) {
                     for (int k = 0; k < nv; ++k)
@@ -1427,18 +1497,22 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                     ImGui::EndCombo();
                 }
                 var_combo_preview();
+                field_width_handle("phase.var", vars_fit);
             }
         }
         else if (pr.type == ProjType::Phase3D) {
             ImGui::Text("X:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(95);
+            ImGui::SetNextItemWidth(var_w);
             phase_axis_combo("##p3x", s, pr.axis_x);
+            field_width_handle("phase.var", vars_fit);
             ImGui::SameLine(); ImGui::Text("Y:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(95);
+            ImGui::SetNextItemWidth(var_w);
             phase_axis_combo("##p3y", s, pr.axis_y);
+            field_width_handle("phase.var", vars_fit);
             ImGui::SameLine(); ImGui::Text("Z:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(95);
+            ImGui::SetNextItemWidth(var_w);
             phase_axis_combo("##p3z", s, pr.axis_z);
+            field_width_handle("phase.var", vars_fit);
         }
         else if (pr.type == ProjType::ContinuationDiagram) {
             const int nv = (int)s.vars.size();
@@ -1449,7 +1523,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                                  : s.vars[pr.axis_x < nv ? pr.axis_x : 0]);
 
             ImGui::Text("var:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(cont_is_combo ? 170.0f : 95.0f);
+            ImGui::SetNextItemWidth(var_combo_w(cont_is_combo));
             const bool open_pcv = var_combo_begin("##pcv", preview, !cont_is_combo && !s.vars.empty());
             if (open_pcv) {
                 for (int k = 0; k < nv; ++k)
@@ -1462,6 +1536,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                 ImGui::EndCombo();
             }
             var_combo_preview();
+            field_width_handle("phase.var", vars_fit);
             ImGui::SameLine();
             ImGui::TextDisabled("(peak vs time)");
         }
@@ -1549,7 +1624,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
     ImGui::Separator();
     // Debug panel: show what kernel/integrator actually computes. Useful for
     // comparing CPU vs GPU runs and catching parsing surprises.
-    if (ImGui::CollapsingHeader("Debug: KRS body & parsed values")) {
+    if (ucuda::ui_detail::block_header("Debug: KRS body & parsed values")) {
         ImGui::TextDisabled("KRS body — what NVRTC compiles for GPU. On CPU the same RHS\n"
                             "is parsed into an AST and interpreted. For CD the CPU and GPU\n"
                             "algorithms differ (see the second panel). Values below are\n"
@@ -1560,7 +1635,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         ImGui::TextDisabled("(rebuilds KRS from the current system/scheme)");
 
         // GPU KRS body (what NVRTC compiles).
-        ImGui::SeparatorText("KRS (GPU, NVRTC)");
+        ucuda::ui_detail::block_separator("KRS (GPU, NVRTC)");
         std::string body_gpu = !s.krs_code.empty() ? s.krs_code
             : !s.krs_error.empty() ? "(empty: " + s.krs_error + ")"
             : std::string("(empty — press Regenerate or change Method)");
@@ -1573,7 +1648,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
         // CPU equivalent: identical to GPU for every scheme — the CPU integrator
         // evaluates the same AST, and the diagonally-implicit ones solve each
         // equation with the same analytic formula (SystemEvaluator::solve_diag_implicit).
-        ImGui::SeparatorText("KRS (CPU equivalent)");
+        ucuda::ui_detail::block_separator("KRS (CPU equivalent)");
         // Кодогенерация — не для каждого кадра: панель открыта, а ImGui
         // перерисовывает её 60 раз в секунду. Кэшируем по паре (схема, тело
         // GPU-KRS): regenerate_krs переписывает krs_code при любой правке
@@ -1601,7 +1676,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
                             "diagonally-implicit schemes solve linear-in-var equations\n"
                             "analytically on both paths and iterate on both where they can't)");
 
-        ImGui::SeparatorText("Parsed inputs (double, %.17g)");
+        ucuda::ui_detail::block_separator("Parsed inputs (double, %.17g)");
         // Панель показывает ИМЕННО то, что увидит движок, поэтому обязана
         // разбирать поля тем же кодом — см. num_parse.h.
         auto parse = [](const std::string& v, double def) { return parse_num(v, def); };
@@ -1735,7 +1810,7 @@ void phase_axis_combo(const char* id, PhaseAnalysisSession& s, int& axis) {
         for (int k = 0; k < (int)s.vars.size(); ++k)
             if (var_selectable(s.vars[(size_t)k], axis == k)) { axis = k; s.fit_request = true; }
         if (!s.observables.empty()) {
-            ImGui::SeparatorText("z (observables)");
+            ucuda::ui_detail::block_separator("z (observables)");
             const int nv = (int)s.vars.size();
             for (int j = 0; j < (int)s.observables.size(); ++j)
                 if (var_selectable(s.observables[(size_t)j], axis == nv + j)) { axis = nv + j; s.fit_request = true; }

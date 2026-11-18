@@ -754,7 +754,7 @@ void dock_layout_menu(int mode) {
                               "every row get the same width and of every column the same height.");
     }
 
-    ImGui::SeparatorText("Saved");
+    ucuda::ui_detail::block_separator("Saved");
     if (g_saved.empty()) ImGui::TextDisabled("(none yet)");
     for (const std::string& name : g_saved) {
         ImGui::PushID(name.c_str());
@@ -774,8 +774,8 @@ void dock_layout_menu(int mode) {
         ImGui::PopID();
     }
 
-    ImGui::SeparatorText("Save current");
-    ImGui::SetNextItemWidth(200);
+    ucuda::ui_detail::block_separator("Save current");
+    item_w(200);
     const bool enter = ImGui::InputTextWithHint("##layout_name", "layout name", g_save_name,
                                                 sizeof(g_save_name), ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::SameLine();

@@ -57,12 +57,12 @@ void draw_dft1d_controls(AppModel& model, SystemLibrary& lib) {
     // is single-select (radio) — each window shows exactly one config's
     // heatmap, same as Bifurcation's colored_1d/mode_2d windows.
     ImGui::Separator();
-    ImGui::SeparatorText("Plot windows");
+    ucuda::ui_detail::block_separator("Plot windows");
     int win_to_remove = -1;
     for (int i = 0; i < (int)model.dft1d_plot_windows.size(); ++i) {
         Dft1DPlotWindow& win = model.dft1d_plot_windows[i];
         ImGui::PushID(win.id);
-        ImGui::SetNextItemWidth(220);
+        item_w(220);
         if (InputTextStr("##wlabel", win.label)) {
             win.label_is_manual = !win.label.empty();   // empty → back to auto
             model.dft1d_plot_windows_dirty = true;
@@ -305,11 +305,13 @@ void draw_dft1d_plot_windows(AppModel& model, SystemLibrary& lib, const GuiCallb
 namespace ucuda::ui_detail {
 void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s, int idx) {
     Dft1DConfig& c = s.configs[idx];
+    // Поля активного конфига: ПКМ — во все конфиги вкладки и сброс к умолчанию.
+    const ConfigFieldScope<Dft1DConfig> cfg_field_scope(model, "DFT", s.configs, idx);
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
     model.broadcast_source_tab = BroadcastTab::Dft1D;
     model.broadcast_source_idx = idx;
 
-    ImGui::SetNextItemWidth(kComboW);
+    item_w(kComboW);
     if (InputTextStr("Label", c.label))
         c.label_is_manual = !c.label.empty();   // empty → back to auto
     ImGui::Separator();
@@ -352,7 +354,7 @@ void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s, int i
     // ----- Resolution Y / Frequency range (обязательные поля для rangesFreq;
     // без auto-режима — частотный диапазон всегда физически осмыслен только
     // когда задан явно, в отличие от colored_1d's Y auto-range). -----
-    if (ImGui::CollapsingHeader("Resolution Y##dft_freq", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("Resolution Y##dft_freq", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("Resolution Y", c.n_freq_text, kFieldW);
         InputNumStr("Freq lo", c.freq_lo_text, kFieldW);
         InputNumStr("Freq hi", c.freq_hi_text, kFieldW);
@@ -361,14 +363,14 @@ void draw_dft1d_diagram_controls(AppModel& model, Dft1DAnalysisSession& s, int i
         // Порядок = window_type (см. cpu_build_window). Дописывать только в
         // конец: значение уходит числом в JSON сессии.
         static const char* windows[] = { "None", "Hanning", "Hamming", "Blackman", "Blackman-Harris" };
-        ImGui::SetNextItemWidth(kComboW);
+        item_w(kComboW, combo_items_need(windows, IM_ARRAYSIZE(windows)));
         ImGui::Combo("Window", &c.window_type, windows, IM_ARRAYSIZE(windows));
     }
 
     // Display mode + normalize
-    if (ImGui::CollapsingHeader("Display##dft_disp", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("Display##dft_disp", ImGuiTreeNodeFlags_DefaultOpen)) {
         static const char* modes[] = { "Power spectrum", "Amplitude", "Phase" };
-        ImGui::SetNextItemWidth(kComboW);
+        item_w(kComboW, combo_items_need(modes, IM_ARRAYSIZE(modes)));
         ImGui::Combo("Mode", &c.display_mode, modes, IM_ARRAYSIZE(modes));
         ImGui::Checkbox("Normalize?", &c.normalize);
         // Шкала и её порог осмысленны только для power/amplitude — на phase (радианы) гасим оба.

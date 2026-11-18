@@ -9,11 +9,13 @@ using namespace ucuda::ui_detail;
 namespace ucuda::ui_detail {
 void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s, int idx) {
     BifurcationDiagramConfig& bd = s.diagrams[idx];
+    // Поля активного конфига: ПКМ — во все конфиги вкладки и сброс к умолчанию.
+    const ConfigFieldScope<BifurcationDiagramConfig> cfg_field_scope(model, "Bifurcation", s.diagrams, idx);
     // Чей конфиг правит эта панель — для ПКМ-рассылки "во все такие же".
     model.broadcast_source_tab = BroadcastTab::Bifurcation;
     model.broadcast_source_idx = idx;
 
-    ImGui::SetNextItemWidth(kComboW);
+    item_w(kComboW);
     if (InputTextStr("Label", bd.label))
         bd.label_is_manual = !bd.label.empty();   // empty → back to auto
     ImGui::Separator();
@@ -124,7 +126,7 @@ void draw_diagram_controls(AppModel& model, BifurcationAnalysisSession& s, int i
     // классической БД. Вкл/выкл — чекбоксом в тулбаре над самим плотом
     // (draw_bifurcation_plot), не здесь. Здесь — только настройки, видны
     // когда режим уже активен.
-    if (bd.colored_1d && ImGui::CollapsingHeader("Colored 1D diagram##bd_c1d", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (bd.colored_1d && ucuda::ui_detail::block_header("Colored 1D diagram##bd_c1d", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::TextDisabled("Toggle this mode from the plot toolbar.");
         InputNumStr("Y resolution", bd.colored_1d_b_text, kFieldW);
         ImGui::TextDisabled("X resolution follows Resolution above.");

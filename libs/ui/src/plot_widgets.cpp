@@ -348,7 +348,7 @@ void draw_view_range_menu(const std::vector<ViewRangeTarget>& targets,
             for (size_t i = 0; i < all.size(); ++i) {
                 if (all[i].group != shown_group) {
                     shown_group = all[i].group;
-                    ImGui::SeparatorText(shown_group.c_str());
+                    ucuda::ui_detail::block_separator(shown_group.c_str());
                 }
                 ImGui::PushID((int)i);
                 bool on = (model->vr_pick[i] == '1');
@@ -406,7 +406,7 @@ namespace ucuda::ui_detail {
 namespace ucuda::ui_detail {
 void draw_label_rename(const char* label_with_id, std::string& label,
                               float width) {
-    ImGui::SetNextItemWidth(width);
+    item_w(width);
     InputTextStr(label_with_id, label);
 }
 }
@@ -575,7 +575,7 @@ void draw_run_and_run_all(const char* popup_id,
         ImGui::TextDisabled("Sequential (one CUDA context).");
         for (size_t g = 0; g < groups.size(); ++g) {
             if (picks[g].empty()) continue;
-            if (groups[g].title) ImGui::SeparatorText(groups[g].title);
+            if (groups[g].title) ucuda::ui_detail::block_separator(groups[g].title);
             for (size_t i = 0; i < picks[g].size(); ++i) {
                 bool v = picks[g][i];
                 const std::string lbl = groups[g].label((int)i) + "###" +
@@ -772,22 +772,22 @@ void draw_line_style_controls(const LineStyleFields& f, const char* sfx, const c
 
     auto contents = [&]() {
         if (*f.custom_line_style) {
-            ImGui::SeparatorText("Line");
-            ImGui::SetNextItemWidth(150);
+            ucuda::ui_detail::block_separator("Line");
+            item_w(150);
             slider_float_typed(("Width##ln" + s).c_str(), f.line_width, 0.1f, 12.0f, "%.2f");
-            ImGui::SetNextItemWidth(150);
+            item_w(150);
             slider_float_typed(("Alpha##ln" + s).c_str(), f.line_alpha, 0.0f, 1.0f, "%.2f");
         }
         if (*f.draw_points) {
-            ImGui::SeparatorText("Points");
-            ImGui::SetNextItemWidth(150);
+            ucuda::ui_detail::block_separator("Points");
+            item_w(150);
             slider_float_typed(("Size##pt" + s).c_str(), f.point_size, 0.5f, 25.0f, "%.1f");
-            ImGui::SetNextItemWidth(150);
+            item_w(150);
             slider_float_typed(("Alpha##pt" + s).c_str(), f.point_alpha, 0.0f, 1.0f, "%.2f");
             // -1 — прежний сплошной пиксель (самый быстрый), дальше формы PointMarker.
             int idx = (*f.point_marker >= 0 && *f.point_marker < kPointMarkerCount) ? *f.point_marker + 1 : 0;
             const char* cur = idx == 0 ? "Pixel" : kPointMarkerNames[idx - 1];
-            ImGui::SetNextItemWidth(150);
+            item_w(150);
             if (ImGui::BeginCombo(("Marker##pt" + s).c_str(), cur)) {
                 for (int m = 0; m <= kPointMarkerCount; ++m) {
                     const char* name = m == 0 ? "Pixel" : kPointMarkerNames[m - 1];
@@ -837,13 +837,13 @@ bool draw_point_style_toolbar(BifurcationDiagramConfig& bd, const char* id_suffi
         [&bd, &sfx]() {
             if (bd.point_marker < 0 || bd.point_marker >= kPointMarkerCount) bd.point_marker = 0;
             bool ch = false;
-            ImGui::SetNextItemWidth(150);
+            item_w(150, combo_items_need(kPointMarkerNames, kPointMarkerCount));
             ch |= ImGui::Combo(("Marker##" + sfx).c_str(), &bd.point_marker,
                                kPointMarkerNames, kPointMarkerCount);
-            ImGui::SetNextItemWidth(150);
+            item_w(150);
             ch |= slider_float_typed(("Point size##" + sfx).c_str(), &bd.point_size,
                                      0.5f, 25.0f, "%.1f");
-            ImGui::SetNextItemWidth(150);
+            item_w(150);
             ch |= slider_float_typed(("Alpha##" + sfx).c_str(), &bd.point_alpha,
                                      0.0f, 1.0f, "%.2f");
             return ch;
@@ -1125,7 +1125,7 @@ bool colormap_combo(const char* label, int* id, float width) {
     const float h = ImGui::GetTextLineHeight();
     const float strip_w = h * 4.0f;
 
-    ImGui::SetNextItemWidth(width);
+    item_w(width);
     // HeightLarge = 20 строк вместо дефолтных 8: набор карт пользователь
     // набирает сам, но и десяток в попапе размером с восемь строк листать
     // неудобно.
@@ -1223,13 +1223,13 @@ bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o) {
     int cmap_idx = (int)hv.colormap;
     auto contents = [&]() {
         if (head) head();
-        ImGui::SeparatorText("Colormap");
+        ucuda::ui_detail::block_separator("Colormap");
         if (colormap_combo("##cmap", &cmap_idx, ImGui::GetFontSize() * 12.0f)) {
             hv.colormap = (HeatmapColormap)cmap_idx;
             if (o.persist_colormap) o.persist_colormap(cmap_idx);
             changed = true;
         }
-        ImGui::SeparatorText("Color scale");
+        ucuda::ui_detail::block_separator("Color scale");
         if (ImGui::Checkbox("Autoscale color", &hv.autoscale)) changed = true;
         if (!hv.autoscale) {
             if (InputNumStr("vmin", hv.manual_vmin_text, 120)) changed = true;
@@ -1238,7 +1238,7 @@ bool draw_heatmap_toolbar(HeatmapView& hv, const HeatmapToolbarOpts& o) {
             hv.manual_vmax = (float)parse_ratio_or(hv.manual_vmax_text, hv.manual_vmax);
         }
         if (o.show_swap) {
-            ImGui::SeparatorText("Axes");
+            ucuda::ui_detail::block_separator("Axes");
             // Swap — вид окна (plot_axis.h): карта берёт его из wp в render().
             hv.swap_axes = wp.swap_axes;
             if (ImGui::Checkbox("Swap axes", &hv.swap_axes)) {
@@ -1303,7 +1303,7 @@ void draw_ls_exponent_picker(HeatmapView& hv, int n_exponents,
         if (on_pick) on_pick(j);
     };
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(100);
+    item_w(100);
     if (ImGui::BeginCombo("Exponent", preview.c_str())) {
         for (int j = 0; j < N; ++j) {
             std::string lbl = "L" + std::to_string(j + 1);
@@ -1379,7 +1379,7 @@ namespace ucuda::ui_detail {
 void draw_csv_output_block(const char* header, const char* checkbox_label,
                                   bool& enabled, const char* path_id, std::string& path,
                                   const char* hint) {
-    if (!ImGui::CollapsingHeader(header)) return;
+    if (!ucuda::ui_detail::block_header(header)) return;
     ImGui::Checkbox(checkbox_label, &enabled);
     InputTextStr(path_id, path);
     ImGui::TextDisabled("%s", hint);
@@ -1561,7 +1561,7 @@ void draw_writable_var_combo(const std::vector<std::string>& vars,
     const std::string preview =
         (writable_var == -1) ? combo_var_label(vars) : vars[writable_var];
 
-    ImGui::SetNextItemWidth(220);
+    item_w(220);
     if (ImGui::BeginCombo(combo_id, preview.c_str())) {
         for (int i = 0; i < N; ++i) {
             bool sel = writable_var == i;

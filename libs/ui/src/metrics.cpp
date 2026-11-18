@@ -51,10 +51,12 @@ const char* signal_metric_tooltip(int m) {
 namespace ucuda::ui_detail {
 void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisSession& s, int idx) {
     SignalMetricsConfig& c = s.configs[idx];
+    // Поля активного конфига: ПКМ — во все конфиги вкладки и сброс к умолчанию.
+    const ConfigFieldScope<SignalMetricsConfig> cfg_field_scope(model, "Metrics", s.configs, idx);
     model.broadcast_source_tab = BroadcastTab::Metrics;
     model.broadcast_source_idx = idx;
 
-    ImGui::SetNextItemWidth(kComboW);
+    item_w(kComboW);
     if (InputTextStr("Label", c.label))
         c.label_is_manual = !c.label.empty();   // empty → back to auto
     ImGui::Separator();
@@ -114,7 +116,7 @@ void draw_metrics_config_controls(AppModel& model, SignalMetricsAnalysisSession&
 
     // Набор метрик. Суммы под все, кроме медианы, почти бесплатны — галки в
     // первую очередь решают, что попадёт в табы графика и в CSV.
-    if (ImGui::CollapsingHeader("Metrics##met_sel", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("Metrics##met_sel", ImGuiTreeNodeFlags_DefaultOpen)) {
         auto box = [&c](int m) {
             ImGui::CheckboxFlags(signal_metric_name(m), &c.metric_mask, 1 << m);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", signal_metric_tooltip(m));

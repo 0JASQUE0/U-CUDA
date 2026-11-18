@@ -30,7 +30,7 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
     ImGui::Spacing();
     ImGui::Text("Name:");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(-1);
+    item_w(-1);
     InputTextStr("##editor_name", buf.name);
     ImGui::Text("Note:");
     InputTextMultilineStr("##editor_note", buf.note, ImVec2(-1, 60));
@@ -55,7 +55,7 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
         {
             AppModel::DaeEditorState& cst = model.dae_editor;
             ImGui::Text("Circuit:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 15.0f);
+            item_w(-ImGui::GetFontSize() * 15.0f);
             InputTextStr("##dae_circuit", buf.circuit_source);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("SPICE netlist (.cir, .net, .sp) or KiCad schematic (.kicad_sch, needs kicad-cli\n"
@@ -190,16 +190,16 @@ void draw_library_editor(AppModel& model, SystemLibrary& lib,
         if (buf.use_aux_funcs)
             InputTextMultilineStr("##dae_funcs", buf.func_defs_text, ImVec2(-1, 110));
         ImGui::Text("Differential variables (x):"); ImGui::SameLine();
-        ImGui::SetNextItemWidth(-1);
+        item_w(-1);
         InputTextStr("##dae_vars", buf.vars_text);
         ImGui::Text("Algebraic variables (z):"); ImGui::SameLine();
-        ImGui::SetNextItemWidth(-1);
+        item_w(-1);
         InputTextStr("##dae_alg", buf.alg_text);
         ImGui::Text("Parameters:"); ImGui::SameLine();
-        ImGui::SetNextItemWidth(-1);
+        item_w(-1);
         InputTextStr("##dae_params", buf.params_text);
         ImGui::Text("Variable indices:"); ImGui::SameLine();
-        ImGui::SetNextItemWidth(-1);
+        item_w(-1);
         InputTextStr("##dae_index", buf.dae_index_text);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Optional, e.g. \"x=1, u=2, lambda=3\" (as nind1/2/3 in RADAU5).\n"

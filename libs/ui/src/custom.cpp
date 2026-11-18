@@ -89,7 +89,7 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
     const auto& vars   = cs.vars;
     const auto& params = cs.params;
     auto& phase  = cs.phase_session;
-    ImGui::SeparatorText("Shared config");
+    ucuda::ui_detail::block_separator("Shared config");
 
     // Scheme combo — mirrors draw_diagram_controls / draw_lle_controls layout, so users get
     // the same picker with built-ins + custom schemes. On change, propagate to Phase (L3 shows
@@ -110,7 +110,7 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
     // typed value shows up in the L1D and L3 panels without waiting for Run. L1D keeps
     // independent transient/computing-time overrides — step is intentionally the ONLY per-L1D
     // field kept in sync with shared.
-    if (ImGui::CollapsingHeader("Integration##custom_int", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("Integration##custom_int", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (!model.is_map)
             if (InputNumStr("h",          c.h_text, kFieldW)) {
                 c.l1d_h_text  = c.h_text;
@@ -155,7 +155,7 @@ void draw_shared_config(AppModel& model, CustomSession& cs,
     // swept on any enabled level (they get their values from the sweep).
     // Non-swept params are also mirrored to phase.param_values so the L3
     // Phase panel Parameters section shows the same live values.
-    if (ImGui::CollapsingHeader("Parameters##custom_par", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("Parameters##custom_par", ImGuiTreeNodeFlags_DefaultOpen)) {
         // All params stay editable — the sweep overwrites swept-axis values at run time anyway,
         // and the manual value is useful for initial-frame edits and non-sweeping levels (L3
         // Phase). Swept params are MARKED with a "(swept)" tag so it is visible at a glance
@@ -475,7 +475,7 @@ void draw_level1d_detail(CustomSession& cs) {
         ImGui::SameLine();
         char fmt[64];
         std::snprintf(fmt, sizeof(fmt), "%.6g", world_from_idx(idx, lo, hi, n_snap, log_scale));
-        ImGui::SetNextItemWidth(240.0f);
+        item_w(240.0f);
         ImGui::SliderScalar(slider_label, ImGuiDataType_S32, &idx,
                             &idx_min, &idx_max, fmt);
         bool released     = ImGui::IsItemDeactivatedAfterEdit();
@@ -594,7 +594,7 @@ void draw_level3_detail(AppModel& model, CustomSession& cs) {
         } else {
             auto& bc = cs.basins_session.configs[0];
             ImGui::TextUnformatted("IC-space X var:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(120.0f);
+            item_w(120.0f);
             if (ImGui::BeginCombo("##bxv",
                 bc.axis_x_var >= 0 && bc.axis_x_var < (int)cs.vars.size()
                     ? cs.vars[bc.axis_x_var].c_str() : "var")) {
@@ -607,7 +607,7 @@ void draw_level3_detail(AppModel& model, CustomSession& cs) {
             InputNumStr("hi##bx", bc.axis_x_hi_text, kFieldW);
 
             ImGui::TextUnformatted("IC-space Y var:"); ImGui::SameLine();
-            ImGui::SetNextItemWidth(120.0f);
+            item_w(120.0f);
             if (ImGui::BeginCombo("##byv",
                 bc.axis_y_var >= 0 && bc.axis_y_var < (int)cs.vars.size()
                     ? cs.vars[bc.axis_y_var].c_str() : "var")) {
@@ -791,7 +791,7 @@ void draw_custom_controls(AppModel& model, SystemLibrary& lib) {
         char header_label[128];
         std::snprintf(header_label, sizeof(header_label), "%s##hdr_%s", title, enable_id);
         ImGui::SetNextItemOpen(default_open, ImGuiCond_FirstUseEver);
-        bool open = ImGui::CollapsingHeader(header_label);
+        bool open = ucuda::ui_detail::block_header(header_label);
         // Status label on the SAME line as the header (rendered AFTER the
         // header so it sits inline).
         ImGui::SameLine();

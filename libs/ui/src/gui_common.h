@@ -153,4 +153,21 @@ static bool apply_session_json(AppModel& model,
     model.session_load_warning.clear();
     return true;
 }
+
+// Блок полей для настраиваемой ширины (item_w, общие поля ввода): заголовок CollapsingHeader /
+// SeparatorText открывает в текущем окне новый блок, и столбцы разных блоков одной функции —
+// например Initial conditions и Parameters — тянутся независимо. Обёртки зовут вместо ImGui.
+void set_width_block(const char* label);
+
+template <class... A>
+inline bool block_header(const char* label, A... args) {
+    const bool open = ImGui::CollapsingHeader(label, args...);
+    set_width_block(label);
+    return open;
+}
+
+inline void block_separator(const char* label) {
+    ImGui::SeparatorText(label);
+    set_width_block(label);
+}
 }

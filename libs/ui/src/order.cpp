@@ -307,7 +307,7 @@ void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Cells on the boundary of the region (a neighbour is\n"
                               "outside it) - the outline.");
-        ImGui::SetNextItemWidth(ImGui::CalcItemWidth());
+        item_w(ImGui::CalcItemWidth());
         ImGui::SliderInt("edge width##stabpref", &win.stab_pref_edge_w, 0, 10, "%d cells",
                          ImGuiSliderFlags_AlwaysClamp);
         if (ImGui::IsItemHovered())
@@ -700,7 +700,7 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
         if (win.palette < 0 || win.palette > kOrderPaletteOkabe)
             win.palette = kOrderPaletteContrast;
         toolbar_row([&win, sfx]() {
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+            item_w(ImGui::GetFontSize() * 9.0f, combo_items_need(kOrderPaletteNames, 3));
             ImGui::Combo(("##pal" + sfx).c_str(), &win.palette,
                          kOrderPaletteNames, 3);
             if (ImGui::IsItemHovered())
@@ -1115,7 +1115,7 @@ void draw_order_errt_window(AppModel& model, OrderPlotWindow& win,
         }
         ImGui::SameLine();
         if (win.palette < 0 || win.palette > kOrderPaletteOkabe) win.palette = kOrderPaletteContrast;
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+        item_w(ImGui::GetFontSize() * 9.0f, combo_items_need(kOrderPaletteNames, 3));
         ImGui::Combo("##palerrt", &win.palette, kOrderPaletteNames, 3);
     });
     if (bar) {
@@ -1374,7 +1374,7 @@ void draw_order_target_combo(const char* label, int& target,
     const int n = (int)names.size();
     int sel = target + 1;                       // -1 (h) -> 0
     if (sel < 0 || sel >= n) sel = 0;
-    ImGui::SetNextItemWidth(kComboW);
+    item_w(kComboW);
     if (ImGui::BeginCombo(label, names[(size_t)sel].c_str())) {
         for (int i = 0; i < n; ++i) {
             if (ImGui::Selectable(names[(size_t)i].c_str(), i == sel)) {
@@ -1396,7 +1396,7 @@ void draw_order_axis_block(const char* id, const char* title,
                                   bool enabled, const char* n_label ) {
     ImGui::PushID(id);
     if (!enabled) ImGui::BeginDisabled();
-    ImGui::SeparatorText(title);
+    ucuda::ui_detail::block_separator(title);
     draw_order_target_combo("sweep over", target, s);
     InputNumStr("from", lo, kFieldW);
     ImGui::SameLine();
@@ -1523,7 +1523,7 @@ void draw_order_steps_hint(const OrderConfig& c, const OrderAnalysisSession& s) 
 namespace ucuda::ui_detail {
 void draw_order_stability_block(AppModel& model, const OrderAnalysisSession& s,
                                        OrderConfig& c) {
-    if (!ImGui::CollapsingHeader("Stability region", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (!ucuda::ui_detail::block_header("Stability region", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
     if ((int)s.vars.size() != 2) {
         ImGui::TextColored(readable_text(ImVec4(1.0f, 0.4f, 0.4f, 1.0f)),
@@ -1616,7 +1616,7 @@ void draw_order_stability_block(AppModel& model, const OrderAnalysisSession& s,
     auto idx_combo = [&](const char* label, int& target) {
         int sel = target - 1;   // a[1] — первый элемент списка
         if (sel < 0 || sel >= (int)item_ptrs.size()) sel = -1;
-        ImGui::SetNextItemWidth(kFieldW + 60.0f);
+        item_w(kFieldW + 60.0f, combo_items_need(item_ptrs.empty() ? nullptr : item_ptrs.data(), (int)item_ptrs.size()));
         if (ImGui::Combo(label, &sel, item_ptrs.empty() ? nullptr : item_ptrs.data(),
                          (int)item_ptrs.size()))
             target = sel + 1;
@@ -1800,6 +1800,8 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
 
     const int idx = s.active_config_index;
     OrderConfig& c = s.configs[(size_t)idx];
+    // Поля активного конфига: ПКМ — во все конфиги вкладки и сброс к умолчанию.
+    const ConfigFieldScope<OrderConfig> cfg_field_scope(model, "Order", s.configs, idx);
 
     // Шапка в три строки: метка; вид расчёта; устройство и точность.
     draw_label_rename("##order_label", c.label, kFieldW);
@@ -1871,7 +1873,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     ImGui::TextDisabled("|"); ImGui::SameLine();
     if (gpu_eff) ImGui::BeginDisabled();
     const char* prec_items[] = { "double", "double-double", "quad-double" };
-    ImGui::SetNextItemWidth(150.0f);
+    item_w(150.0f, combo_items_need(prec_items, IM_ARRAYSIZE(prec_items)));
     ImGui::Combo("precision##ord_prec", &c.cpu_precision, prec_items, IM_ARRAYSIZE(prec_items));
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(
@@ -1931,13 +1933,18 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     ImGui::Separator();
 
     // ---- Интегрирование ----
-    if (ImGui::CollapsingHeader("Integration", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ucuda::ui_detail::block_header("Integration", ImGuiTreeNodeFlags_DefaultOpen)) {
         draw_scheme_combo("scheme", c.scheme, s.custom_schemes, {}, &s.enabled_builtin_schemes,
                           &model, model.is_map, &s.wrapper_schemes);
+        // ПКМ по полю — та же рассылка по вкладкам, что у блока Integration остальных вкладок.
+        auto bmenu = [&model](BroadcastField f, const char* lbl, const std::string& v) {
+            return [&model, f, lbl, &v] { field_apply_all_menu(&model, f, {}, lbl, v); };
+        };
         if (scheme_uses_symmetry(c.scheme, s.custom_schemes))
-            InputNumStr("symmetry s", c.symmetry_s, kFieldW);
+            InputNumStr("symmetry s", c.symmetry_s, kFieldW, bmenu(BroadcastField::SymmetryS, "symmetry s", c.symmetry_s));
         if (scheme_uses_cd_fp_iters(c.scheme)) {
-            InputNumStr("FP iterations n", c.cd_fp_iters, kFieldW);
+            InputNumStr("FP iterations n", c.cd_fp_iters, kFieldW,
+                        bmenu(BroadcastField::CdFpIters, "FP iterations n", c.cd_fp_iters));
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kCdFpItersTip);
         }
         if (scheme_uses_newton(c.scheme))
@@ -1954,15 +1961,17 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                           || (c.two_d && c.axis_y_target == kOrderTargetH));
         if (!model.is_map) {
             if (h_swept) ImGui::BeginDisabled();
-            InputNumStr("h", c.h_text, kFieldW);
+            InputNumStr("h", c.h_text, kFieldW, bmenu(BroadcastField::StepH, "h", c.h_text));
             if (h_swept) ImGui::EndDisabled();
             if (h_swept) {
                 ImGui::SameLine();
                 ImGui::TextDisabled("(swept along the axis)");
             }
         }
-        InputNumStr(model.is_map ? "iterations" : "computing time", c.t_max_text, kFieldW);
-        InputNumStr("max value", c.max_value_text, kFieldW);
+        InputNumStr(model.is_map ? "iterations" : "computing time", c.t_max_text, kFieldW,
+                    bmenu(BroadcastField::TMax, model.is_map ? "iterations" : "computing time", c.t_max_text));
+        InputNumStr("max value", c.max_value_text, kFieldW,
+                    bmenu(BroadcastField::MaxValue, "max value", c.max_value_text));
 
         ImGui::Checkbox("snap h -> t_max/N", &c.snap_steps);
         if (ImGui::IsItemHovered())
@@ -1985,7 +1994,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     }
 
     // ---- Error vs time ----
-    if (errt_mode && ImGui::CollapsingHeader("Error vs time", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (errt_mode && ucuda::ui_detail::block_header("Error vs time", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::TextDisabled("reference:"); ImGui::SameLine();
         ImGui::RadioButton("same scheme, h/2##errtref", &c.errt_ref, kErrTimeRefHalf);
         if (ImGui::IsItemHovered())
@@ -2021,7 +2030,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
                                   pp > 0 ? "" : " (not known for this scheme)");
         }
         const char* norms[] = { "L-inf (max over variables)", "L2 (Euclidean)" };
-        ImGui::SetNextItemWidth(kComboW);
+        item_w(kComboW, combo_items_need(norms, IM_ARRAYSIZE(norms)));
         ImGui::Combo("norm##errt", &c.errt_norm, norms, IM_ARRAYSIZE(norms));
         const double hh = parse_num(c.h_text, 0.01), tt = parse_num(c.t_max_text, 10.0);
         const long long N = order_steps_for_h(hh, tt, c.snap_steps);
@@ -2036,7 +2045,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
 
     // ---- Performance ----
     if (c.calc_kind == kOrderCalcPerf &&
-        ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ucuda::ui_detail::block_header("Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
         InputNumStr("measurements", c.perf_repeats_text, kFieldW);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
@@ -2093,7 +2102,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             // и адаптивного шага ложатся на одну диаграмму (X: E(T) в окне Performance).
             const char* refs_fx[] = { "none", "DOP853 in dd (CPU)", "DOP853 in qd (CPU)" };
             int sel_fx = (c.perf_end_ref == 1 || c.perf_end_ref == 2) ? c.perf_end_ref : 0;
-            ImGui::SetNextItemWidth(kComboW);
+            item_w(kComboW, combo_items_need(refs_fx, IM_ARRAYSIZE(refs_fx)));
             if (ImGui::Combo("reference y*(T)##fixed", &sel_fx, refs_fx, IM_ARRAYSIZE(refs_fx)))
                 c.perf_end_ref = sel_fx;
             if (ImGui::IsItemHovered())
@@ -2109,7 +2118,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
             // Эталон адаптивного шага: y*(T) высокой точности — его единственная ошибка E(T).
             const char* refs[] = { "DOP853 in dd (CPU)", "DOP853 in qd (CPU)" };
             int sel = (c.perf_end_ref == 2) ? 1 : 0;
-            ImGui::SetNextItemWidth(kComboW);
+            item_w(kComboW, combo_items_need(refs, IM_ARRAYSIZE(refs)));
             if (ImGui::Combo("reference y*(T)", &sel, refs, IM_ARRAYSIZE(refs))) c.perf_end_ref = sel + 1;
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(
@@ -2167,7 +2176,7 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     // общий селектор «h + элементы a[]» к ней неприменим: показывать его
     // рядом с настоящими границами значило бы предлагать выбор, которого нет.
     if (c.calc_kind != kOrderCalcStab && c.calc_kind != kOrderCalcErrT &&
-        ImGui::CollapsingHeader("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ucuda::ui_detail::block_header("Sweep", ImGuiTreeNodeFlags_DefaultOpen)) {
         const bool perf_mode = (c.calc_kind == kOrderCalcPerf);
         const bool perf_ad   = perf_mode && c.adaptive.enabled && !s.sys.is_map;
         if (perf_ad)
@@ -2240,18 +2249,18 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     // Ровно та же схема, что у параметрики и DFT1D: окно знает свой вид и
     // список вкладок, чьи кривые в нём лежат.
     ImGui::Separator();
-    ImGui::SeparatorText("Plot windows");
+    ucuda::ui_detail::block_separator("Plot windows");
     int win_to_remove = -1;
     for (int wi = 0; wi < (int)model.order_plot_windows.size(); ++wi) {
         OrderPlotWindow& win = model.order_plot_windows[wi];
         ImGui::PushID(win.id);
-        ImGui::SetNextItemWidth(150);
+        item_w(150);
         if (InputTextStr("##wlabel", win.label)) {
             win.label_is_manual = !win.label.empty();   // пусто -> обратно к автоподписи
             model.order_plot_windows_dirty = true;
         }
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(140);
+        item_w(140);
         int kind = (int)win.kind;
         const char* kind_names[] = { "Order p", "Error", "Order map 2D", "Performance", "Error(t)" };
         if (ImGui::Combo("##wkind", &kind, kind_names, 5)) {
