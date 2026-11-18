@@ -422,23 +422,136 @@ UCUDA_HD inline ucmplx copysign(numb a, ucmplx b) { return ucmplx(copysign(a, b.
 // Вырожденные случаи повторяют прежний getValueByIdx (nPts == 1 -> hi): это то,
 // что ядро реально симулирует. Host-копии возвращали здесь lo и расходились
 // с расчётом на односегментной сетке.
+//
+// Сложение — ЯВНЫЙ fma(t, hi, (1-t)*lo). Ровно в это NVRTC с --fmad=true (умолчание) сжимал
+// прежнюю запись (1-t)*lo + t*hi, а MSVC не сжимает никогда: хост и ядро расходились на 1-2 ulp
+// примерно в трети узлов (замер 2026-11-18: 3565 из 10665, после правки 0 из 24804). Хост
+// восстанавливал по индексу ячейки НЕ то НУ, которое считало ядро, и на фрактальной границе
+// бассейнов портрет уходил в чужой аттрактор. fma округляется один раз и на хосте, и на
+// устройстве, так что от --fmad результат больше не зависит; при --fmad=true узлы ядра не
+// изменились ни на бит.
+template <class T> UCUDA_HD inline T ucuda_node_fma(T a, T b, T c) { return a * b + c; }   // dd/qd
+template <> UCUDA_HD inline double ucuda_node_fma<double>(double a, double b, double c) { return fma(a, b, c); }
+template <> UCUDA_HD inline float  ucuda_node_fma<float>(float a, float b, float c)     { return fmaf(a, b, c); }
+
 UCUDA_HD inline numb ucuda_node_value(int k, int nPts, numb lo, numb hi) {
     if (nPts <= 0) return lo;
     if (nPts == 1) return hi;
     const numb t = (numb)k / (numb)(nPts - 1);
-    return ((numb)1.0 - t) * lo + t * hi;
+    return ucuda_node_fma<numb>(t, hi, ((numb)1.0 - t) * lo);
 }
 
-// Внутренняя лог-арифметика — ВСЕГДА в double, независимо от numb. Дело не в точности, а в
-// согласованности host/device: при numb = float перегрузка log10/pow на host-стороне (MSVC math.h)
-// выбирается double'ная, а в device-коде float'овая, и одна и та же формула давала РАЗНЫЕ значения
-// узла (замерено ~1 float-ulp расхождения). В double-режиме — а это текущий numb — здесь ровно те
-// же операции, что стояли в getValueByIdxLog, и значения не меняются ни на бит. Порядок операций
-// тот же: шаг делится ДО умножения на k.
+// ---------- Детерминированные log10 и 10^x для узлов лог-сеток ----------
+//
+// log10/pow из libdevice (CUDA) и из CRT хоста — разные приближения: IEEE 754 требует точного
+// округления только от + - * / sqrt fma, и на одном и том же аргументе библиотеки законно дают
+// разный последний бит (замер 2026-11-18: pow(10, x) при одинаковом x — 5229 из 24804, log10 —
+// ещё больше). Узел лог-оси, восстановленный на хосте по индексу пикселя (крестик, drill-down,
+// параметр среза, CSV), поэтому не совпадал с тем, при котором ядро считало ячейку.
+// Здесь обе функции собраны только из точно округляемых операций, и результат одинаков на GPU,
+// на хосте и в CPU-DLL схем при любом --fmad. Чтобы NVRTC не сворачивал a*b + c в fma (он делает
+// это и через границу операторов), на устройстве умножения и сложения идут интринсиками
+// __dmul_rn / __dadd_rn, которые не сжимаются; явные fma стоят там, где они нужны алгоритму.
+// Хост-компиляторы проекта сами не сжимают (MSVC /fp:precise; c++ -O2 под x86-64 без -march).
+// Точность — до 1-2 ulp; цена ~100 операций FP64 на узел, узел считается раз на точку сетки.
+UCUDA_HD inline double ucuda_dt_add(double a, double b) {
+#ifdef __CUDA_ARCH__
+    return __dadd_rn(a, b);
+#else
+    return a + b;
+#endif
+}
+UCUDA_HD inline double ucuda_dt_sub(double a, double b) {
+#ifdef __CUDA_ARCH__
+    return __dsub_rn(a, b);
+#else
+    return a - b;
+#endif
+}
+UCUDA_HD inline double ucuda_dt_mul(double a, double b) {
+#ifdef __CUDA_ARCH__
+    return __dmul_rn(a, b);
+#else
+    return a * b;
+#endif
+}
+
+// log10(x) по схеме fdlibm e_log10.c (FreeBSD): x = m*2^k, m в [sqrt(1/2), sqrt(2)), log(m) через
+// s = f/(2+f) и минимаксный полином Lg1..Lg7, перевод в log10 с hi/lo-разбиением 1/ln10 и log10(2).
+// frexp точна и одинакова везде. Не-положительные, inf и NaN уходят в библиотечный log10:
+// узлам они не нужны (границы лог-осей > 0 проверяются до запуска).
+UCUDA_HD inline double ucuda_log10_det(double x) {
+    if (!(x > 0.0) || x > 1.7976931348623157e308) return log10(x);
+    const double ivln10hi  = 0.4342944818781689;      // 0x3fdbcb7b15200000, 32 значащих бита
+    const double ivln10lo  = 2.5082946711645275e-11;  // 0x3dbb9438ca9aadd5
+    const double log10_2hi = 0.30102999566361177;     // 0x3fd34413509f6000, 40 значащих бит
+    const double log10_2lo = 3.694239077158931e-13;   // 0x3d59fef311f12b36
+    const double Lg1 = 0.6666666666666735, Lg2 = 0.3999999999940942, Lg3 = 0.2857142874366239,
+                 Lg4 = 0.22222198432149784, Lg5 = 0.1818357216161805, Lg6 = 0.15313837699209373,
+                 Lg7 = 0.14798198605116586;
+    int e = 0;
+    double m = frexp(x, &e);                               // m в [0.5, 1), точно
+    if (m < 0.70710678118654752440) { m = m + m; e -= 1; } // m в [sqrt(1/2), sqrt(2))
+    const double k    = (double)e;
+    const double f    = m - 1.0;                           // точно (Sterbenz)
+    const double hfsq = ucuda_dt_mul(0.5, ucuda_dt_mul(f, f));
+    const double s    = f / ucuda_dt_add(2.0, f);
+    const double z    = ucuda_dt_mul(s, s);
+    const double w    = ucuda_dt_mul(z, z);
+    const double t1 = ucuda_dt_mul(w, ucuda_dt_add(Lg2, ucuda_dt_mul(w, ucuda_dt_add(Lg4, ucuda_dt_mul(w, Lg6)))));
+    const double t2 = ucuda_dt_mul(z, ucuda_dt_add(Lg1, ucuda_dt_mul(w, ucuda_dt_add(Lg3,
+                          ucuda_dt_mul(w, ucuda_dt_add(Lg5, ucuda_dt_mul(w, Lg7)))))));
+    const double r  = ucuda_dt_mul(s, ucuda_dt_add(hfsq, ucuda_dt_add(t2, t1)));
+    // hi — f - hfsq, урезанный до 21 значащего бита (разбиение Вельткампа вместо обнуления младших
+    // 32 бит у fdlibm): hi*ivln10hi и k*log10_2hi тогда точны.
+    const double h0 = ucuda_dt_sub(f, hfsq);
+    const double c  = ucuda_dt_mul(4294967297.0, h0);      // 2^32 + 1
+    const double hi = ucuda_dt_sub(c, ucuda_dt_sub(c, h0));
+    const double lo = ucuda_dt_add(ucuda_dt_sub(ucuda_dt_sub(f, hi), hfsq), r);
+    const double val_hi = ucuda_dt_mul(hi, ivln10hi);
+    const double y2     = ucuda_dt_mul(k, log10_2hi);
+    double val_lo = ucuda_dt_add(ucuda_dt_add(ucuda_dt_mul(k, log10_2lo),
+                                              ucuda_dt_mul(ucuda_dt_add(lo, hi), ivln10lo)),
+                                 ucuda_dt_mul(lo, ivln10hi));
+    const double sum = ucuda_dt_add(y2, val_hi);
+    val_lo = ucuda_dt_add(val_lo, ucuda_dt_add(ucuda_dt_sub(y2, sum), val_hi));
+    return ucuda_dt_add(val_lo, sum);
+}
+
+// 10^y = 2^n * e^r: y*ln10 в двойной точности (hi + lo, ошибка произведения — через fma),
+// n = round(y*ln10/ln2), r = y*ln10 - n*ln2 (n*ln2hi точно: у ln2hi 32 значащих бита, |n| < 2^11),
+// e^r на |r| <= ~0.35 — ряд Тейлора до r^14 схемой Горнера (остаток < 1e-17), 2^n — ldexp (точно).
+// За пределами диапазона double (переполнение, денормали) — библиотечный pow: узлам не нужно.
+UCUDA_HD inline double ucuda_exp10_det(double y) {
+    if (!(y > -307.0 && y < 308.0)) return pow(10.0, y);
+    if (y == 0.0) return 1.0;
+    const double LN10_HI = 2.302585092994046, LN10_LO = -2.1707562233822494e-16;
+    const double LN2_HI  = 0.6931471803691238;   // 0x3fe62e42fee00000 (fdlibm)
+    const double LN2_LO  = 1.9082149292705877e-10;
+    const double INV_LN2 = 1.4426950408889634;
+    const double t  = ucuda_dt_mul(y, LN10_HI);
+    const double tl = ucuda_dt_add(fma(y, LN10_HI, -t), ucuda_dt_mul(y, LN10_LO));
+    const double n  = floor(ucuda_dt_add(ucuda_dt_mul(t, INV_LN2), 0.5));
+    const double r  = ucuda_dt_add(ucuda_dt_sub(ucuda_dt_sub(t, ucuda_dt_mul(n, LN2_HI)),
+                                                ucuda_dt_mul(n, LN2_LO)), tl);
+    const double c[15] = { 1.0, 1.0, 0.5, 0.16666666666666666, 0.041666666666666664,
+                           0.008333333333333333, 0.001388888888888889, 0.0001984126984126984,
+                           2.48015873015873e-05, 2.7557319223985893e-06, 2.755731922398589e-07,
+                           2.505210838544172e-08, 2.08767569878681e-09, 1.6059043836821613e-10,
+                           1.1470745597729725e-11 };
+    double p = c[14];
+    for (int i = 13; i >= 0; --i) p = ucuda_dt_add(ucuda_dt_mul(p, r), c[i]);
+    return ldexp(p, (int)n);
+}
+
+// Внутренняя лог-арифметика — ВСЕГДА в double, независимо от numb (при numb = float host и device
+// выбирали разные перегрузки log10/pow). Шаг делится ДО умножения на k; сложение — явный fma,
+// ровно то, во что NVRTC с --fmad=true сжимал прежнюю запись l0 + k*step.
 UCUDA_HD inline double ucuda_node_log10_d(int k, int nPts, double lo, double hi) {
-    const double l0 = log10(lo);
+    const double l0 = ucuda_log10_det(lo);
     if (nPts <= 1) return l0;
-    return l0 + ((double)k * ((log10(hi) - l0) / (double)(nPts - 1)));
+    const double step = ucuda_dt_sub(ucuda_log10_det(hi), l0) / (double)(nPts - 1);
+    return fma((double)k, step, l0);
 }
 
 // Лог-сетка, значение В log10-МАСШТАБЕ — в нём работает getValueByIdxLog и в
@@ -450,9 +563,11 @@ UCUDA_HD inline numb ucuda_node_value_log10(int k, int nPts, numb lo, numb hi) {
 // Лог-сетка, значение в исходном масштабе. Требует lo, hi > 0 — проверяется на
 // host-стороне до запуска ядра (при lo <= 0 вызывающий деградирует на линейную
 // сетку, см. grid_snap.h / heatmap_view.cpp).
+// Концы — ровно введённые lo и hi (10^log10(x) возвращает x не всегда), как у линейной сетки.
 UCUDA_HD inline numb ucuda_node_value_log(int k, int nPts, numb lo, numb hi) {
-    if (nPts <= 1) return lo;
-    return (numb)pow(10.0, ucuda_node_log10_d(k, nPts, (double)lo, (double)hi));
+    if (nPts <= 1 || k <= 0) return lo;
+    if (k >= nPts - 1) return hi;
+    return (numb)ucuda_exp10_det(ucuda_node_log10_d(k, nPts, (double)lo, (double)hi));
 }
 
 // Симметричная лог-сетка бассейнов (±log), по мотивам getValueByIdx_forLogBains из легаси
@@ -461,13 +576,19 @@ UCUDA_HD inline numb ucuda_node_value_log(int k, int nPts, numb lo, numb hi) {
 // -hi ... -lo, вторая +lo ... +hi (в легаси шло -lo..-hi, +hi..+lo, и на карте большие |x|
 // оказывались в центре). Требует lo, hi > 0 и чётного nPts >= 4 — проверяется на host-стороне
 // до запуска (run_basins). Дробный kf нужен осям heatmap: мировое значение между узлами.
+// log10/10^x — детерминированные (ucuda_log10_det / ucuda_exp10_det), концы полуосей — ровно ±lo, ±hi.
 UCUDA_HD inline double ucuda_node_symlog_d(double kf, int nPts, double lo, double hi) {
     const int m = nPts / 2;
-    const double l0 = log10(lo), l1 = log10(hi);
     if (m <= 1) return kf < (double)m ? -hi : hi;
+    if (kf == 0.0)                    return -hi;
+    if (kf == (double)(m - 1))        return -lo;
+    if (kf == (double)m)              return lo;
+    if (kf == (double)(2 * m - 1))    return hi;
+    const double l0 = ucuda_log10_det(lo), l1 = ucuda_log10_det(hi);
     if (kf < (double)m)
-        return -pow(10.0, l1 + kf * (l0 - l1) / (double)(m - 1));
-    return pow(10.0, l0 + (kf - (double)m) * (l1 - l0) / (double)(m - 1));
+        return -ucuda_exp10_det(ucuda_dt_add(l1, ucuda_dt_mul(kf, ucuda_dt_sub(l0, l1)) / (double)(m - 1)));
+    return ucuda_exp10_det(ucuda_dt_add(l0, ucuda_dt_mul(ucuda_dt_sub(kf, (double)m), ucuda_dt_sub(l1, l0))
+                                                / (double)(m - 1)));
 }
 
 UCUDA_HD inline numb ucuda_node_value_symlog(int k, int nPts, numb lo, numb hi) {
@@ -492,11 +613,18 @@ UCUDA_HD inline numb ucuda_node_value_cont(int k, int nPts, numb lo, numb hi,
     const numb denom = (numb)(nPts > 1 ? nPts - 1 : 1);
     const numb t = (numb)k / denom;
     if (log_scale) {
-        const double l0 = log10((double)lo), l1 = log10((double)hi);
-        const double td = (double)t;
-        return (numb)pow(10.0, reverse ? (l1 - (l1 - l0) * td) : (l0 + (l1 - l0) * td));
+        // Детерминированные log10/10^x (см. ucuda_log10_det); концы цепочки — ровно lo и hi.
+        if (k <= 0) return reverse ? hi : lo;
+        if (nPts > 1 && k >= nPts - 1) return reverse ? lo : hi;
+        const double l0 = ucuda_log10_det((double)lo), l1 = ucuda_log10_det((double)hi);
+        const double td = (double)t, d = ucuda_dt_sub(l1, l0);
+        return (numb)ucuda_exp10_det(reverse ? fma(-d, td, l1) : fma(d, td, l0));
     }
-    return reverse ? (hi - (hi - lo) * t) : (lo + (hi - lo) * t);
+    // Явные fma — по той же причине, что в ucuda_node_value: NVRTC с --fmad=true сжимал прежнюю
+    // запись ровно в эти fma, MSVC нет, и в ~42% точек оси графиков и CPU-continuation стояли не
+    // в тех значениях, что считало ядро (замер 2026-11-18; после правки 0 из 24804 в обе стороны).
+    const numb d = hi - lo;
+    return reverse ? ucuda_node_fma<numb>(-d, t, hi) : ucuda_node_fma<numb>(d, t, lo);
 }
 
 // Шагов постоянного h на отрезок перенормировки span = NT у LLE/LS: LLEKernelCUDA / LSKernelCUDA

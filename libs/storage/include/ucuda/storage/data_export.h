@@ -9,6 +9,7 @@
 // original Request is gone).
 
 #include "ucuda/domain/export_snapshot.h"
+#include "ucuda/domain/configCUDA.h"   // ucuda_node_value — узел сетки, общий с ядром
 #include <cstddef>
 #include <fstream>
 #include <string>
@@ -54,13 +55,12 @@ void write_bif1d_rows(std::ofstream& out,
                       double param, int npeaks,
                       const double* peaks, const double* times);
 
-// Linear interpolation matching engine-side getValueByIdx_local. Exposed so
-// GUI export can compute the same param value for index i without depending
-// on the engine.
+// Value of linear grid node idx — the kernel's own node (ucuda_node_value, configCUDA.h), so the
+// exported x is bit for bit the parameter the point was computed at. It used to be its own
+// lo + (hi-lo)*idx/(n-1), which differed from the kernel in the last bits (and returned lo, not
+// hi, for a one-point grid).
 inline double param_value_at(std::size_t idx, int n_pts, double lo, double hi) {
-    if (n_pts <= 1) return lo;
-    return lo + (hi - lo) * static_cast<double>(idx) /
-                            static_cast<double>(n_pts - 1);
+    return (double)ucuda_node_value((int)idx, n_pts, (numb)lo, (numb)hi);
 }
 
 // 1D DFT. Engine writes 3 files sharing one path prefix: <path>_config.csv (human-readable

@@ -46,7 +46,7 @@ static void write_curve1d_tail(std::ofstream& out, const Snap& s)
 
 // x точки i — той же функцией, что у графика (sweep_value_at в gui.cpp): цепочка
 // continuation идёт в своём порядке (backward — от hi), лог-шкала — по степеням.
-// Линейный классический свип — прежняя param_value_at, побитово как раньше.
+// Линейный классический свип — param_value_at, тот же узел, что у ядра (ucuda_node_value).
 template <class Snap>
 static double curve1d_x(const Snap& s, int i, int n)
 {

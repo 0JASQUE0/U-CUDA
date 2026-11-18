@@ -916,6 +916,9 @@ struct BasinsResult {
     double axis_y_lo = 0.0, axis_y_hi = 0.0;
     int axis_x_var = 0, axis_y_var = 1;
     bool axis_x_symlog = false, axis_y_symlog = false;   // как в BasinsRequest
+    // Узлы осей НУ, посчитанные ядром (ucudaBasinsAxisNodes), по n_pts на ось: ровно те значения,
+    // с которых стартовали ячейки. Пусто, если ядро их не отдало: тогда — basins_grid_value.
+    std::vector<double> axis_x_nodes, axis_y_nodes;
 
     // Все four-поля размер n_pts² row-major (iy*n + ix):
     std::vector<int>    basin_idx;       // ≥1 = Osc cluster; ≤-1 = FP cluster; 0 = Unbound

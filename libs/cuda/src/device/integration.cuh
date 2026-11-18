@@ -1115,6 +1115,24 @@ __device__ __host__ __forceinline__ numb getValueByIdx_symlog(const int idx, con
 	return ucuda_node_value_symlog(n, nPts, startRange, finishRange);
 }
 
+// Узлы обеих осей НУ бассейнов: out[k] — ось X, out[nPts + k] — ось Y. Те же вызовы, что в
+// ucudaSetupSweepPoint / ucudaSetupSweepPointAd, в том же модуле и с теми же флагами NVRTC,
+// поэтому значения побитово равны НУ, с которых ядро стартовало ячейку. Хост восстанавливает
+// по ним НУ портретов бассейнов: формулой на хосте ±log не повторить (log10/pow у CUDA и
+// у CRT хоста расходятся в последних битах). Ядро крошечное, поэтому не отсекается.
+extern "C" __global__ void ucudaBasinsAxisNodes(const int nPts, const numb* ranges,
+	const int logAxisMask, numb* out)
+{
+	const int k = blockIdx.x * blockDim.x + threadIdx.x;
+	if (k >= nPts) return;
+	for (int i = 0; i < 2; ++i) {
+		const size_t idx = (i == 0) ? (size_t)k : (size_t)k * (size_t)nPts;
+		out[(size_t)i * nPts + k] = ((logAxisMask >> (UCUDA_SYMLOG_SHIFT + i)) & 1)
+			? getValueByIdx_symlog((int)idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i)
+			: getValueByIdx(idx, nPts, ranges[i * 2], ranges[i * 2 + 1], i);
+	}
+}
+
 // Находит пики в интервале [startDataIndex; startDataIndex + amountOfPoints] в "data" массиве
 //peakFinder(data, idx* sizeOfBlock, sizeOfBlock, outPeaks, timeOfPeaks, h);
 
