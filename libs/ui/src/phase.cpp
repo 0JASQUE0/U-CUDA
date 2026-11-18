@@ -1309,7 +1309,12 @@ void draw_phase_controls(PhaseAnalysisSession& s,
     };
     // Текст перестал влезать — столбец расширяется под него (не выше 600 px), заданная ширина
     // при этом не меняется: строку укоротили — столбец сузился обратно.
-    auto grow = [](float w, float need) { return need > w ? std::min(need, std::max(w, 600.0f)) : w; };
+    // Запас в один символ — как в общих полях (helper_width): иначе введённый символ на кадр не
+    // влезает, и InputText остаётся прокрученным влево в уже расширенном поле.
+    auto grow = [](float w, float need) {
+        need += ImGui::CalcTextSize("0").x;
+        return need > w ? std::min(need, std::max(w, 600.0f)) : w;
+    };
     const float ic_label_w = grow(field_width("phase.ic_label", 70), input_fit_width(ic_label_fit()));
     const float ic_value_w = grow(field_width("phase.ic_value", 60), ic_value_fit());
     const float ic_value_tree_w = grow(field_width("phase.ic_value_tree", 110), ic_value_fit());

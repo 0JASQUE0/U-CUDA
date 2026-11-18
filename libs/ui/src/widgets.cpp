@@ -424,15 +424,35 @@ float combo_items_need(const char* zero_separated) {
     return combo_fit_width(w);
 }
 
+// Редактируемое поле, которое расширилось под текст, остаётся прокрученным влево: InputText
+// сдвигает прокрутку, только когда курсор уходит из вида. Если текст теперь влезает целиком —
+// возвращаем прокрутку в ноль. Звать прямо перед InputText, после выставленной ширины.
+static void unscroll_if_fits(const char* label, const std::string& text) {
+    ImGuiContext& g = *GImGui;
+    ImGuiWindow* win = g.CurrentWindow;
+    const ImGuiID id = win->GetID(label);
+    if (g.ActiveId != id) return;
+    ImGuiInputTextState* st = ImGui::GetInputTextState(id);
+    if (!st || st->Scroll.x <= 0.0f) return;
+    const float w = (g.NextItemData.HasFlags & ImGuiNextItemDataFlags_HasWidth) ? g.NextItemData.Width
+                                                                                 : ImGui::CalcItemWidth();
+    if (w <= 0.0f) return;
+    if (input_fit_width(ImGui::CalcTextSize(text.c_str()).x) <= w) st->Scroll.x = 0.0f;
+}
+
 // Ширина для общих полей ввода (InputTextStr, InputNumStr, ...): ручка и запись того, сколько
 // нужно тексту. width <= 0 — ширину задали снаружи (item_w / SetNextItemWidth) или её нет.
 static void helper_width(float width, const std::string& text, const char* file, const char* func) {
     const float text_need = input_fit_width(ImGui::CalcTextSize(text.c_str()).x);
+    // Для автоподстройки — с запасом в один символ: ширина применяется со следующего кадра, и
+    // без запаса введённый символ на кадр не влезал бы, InputText прокручивался влево и так и
+    // оставался прокрученным в уже расширенном поле.
+    const float grow_need = text_need + ImGui::CalcTextSize("0").x;
     if (width <= 0.0f) {
         const ImVec2 p = ImGui::GetCursorScreenPos();
         if (g_pending_frame == ImGui::GetFrameCount() && p.x == g_pending_pos.x && p.y == g_pending_pos.y) {
             need_record(g_pending_key, text_need);
-            grow_record(g_pending_key, text_need);
+            grow_record(g_pending_key, grow_need);
             // Ширину item_w уже выставил — по прошлому кадру; текст этого кадра мог стать длиннее.
             ImGuiNextItemData& nd = GImGui->NextItemData;
             if ((nd.HasFlags & ImGuiNextItemDataFlags_HasWidth) && nd.Width > 0.0f)
@@ -444,7 +464,7 @@ static void helper_width(float width, const std::string& text, const char* file,
     g_pending_frame = -1;
     const std::string key = site_width_key(file, func, width);
     need_record(key, text_need);
-    grow_record(key, text_need);
+    grow_record(key, grow_need);
     ImGui::SetNextItemWidth(width_before_item(key, width));
 }
 }
@@ -473,6 +493,7 @@ namespace ucuda::ui_detail {
 bool InputTextStr(const char* label, std::string& str, float width, const char* file, const char* func) {
     std::vector<char>& buf = input_scratch(str, 1024);
     helper_width(width, str, file, func);
+    unscroll_if_fits(label, str);
     bool changed = ImGui::InputText(label, buf.data(), buf.size());
     if (changed) str = buf.data();
     return changed;
@@ -485,6 +506,7 @@ bool InputTextStrHint(const char* label, std::string& str, const char* hint,
                              float width, const char* file, const char* func) {
     std::vector<char>& buf = input_scratch(str, 1024);
     helper_width(width, str.empty() ? std::string(hint ? hint : "") : str, file, func);
+    unscroll_if_fits(label, str);
     bool changed = ImGui::InputTextWithHint(label, hint, buf.data(), buf.size());
     if (changed) str = buf.data();
     return changed;
@@ -613,6 +635,7 @@ bool InputNumStr(const char* label, std::string& str, float width,
                         bool allow_empty, const char* file, const char* func) {
     std::vector<char>& buf = input_scratch(str, 1024);
     helper_width(width, str, file, func);
+    unscroll_if_fits(label, str);
     // CallbackHistory — ↑/↓ в активном InputText, обрабатываем в digit_step_input_callback.
     // CallbackCharFilter — прежняя замена запятой на точку, тоже в нём.
     bool changed = ImGui::InputText(label, buf.data(), buf.size(),
@@ -674,6 +697,7 @@ namespace ucuda::ui_detail {
 bool InputNumListStr(const char* label, std::string& str, float width, const char* file, const char* func) {
     std::vector<char>& buf = input_scratch(str, 1024);
     helper_width(width, str, file, func);
+    unscroll_if_fits(label, str);
     const bool changed = ImGui::InputText(label, buf.data(), buf.size(),
         ImGuiInputTextFlags_CallbackHistory, list_digit_step_callback);
     if (changed) str = buf.data();
@@ -688,6 +712,7 @@ bool InputNumStrCommit(const char* label, std::string& text, double& value,
                               float width, const char* file, const char* func) {
     std::vector<char>& buf = input_scratch(text, 1024);
     helper_width(width, text, file, func);
+    unscroll_if_fits(label, text);
     if (ImGui::InputText(label, buf.data(), buf.size(),
                          ImGuiInputTextFlags_CallbackCharFilter | ImGuiInputTextFlags_CallbackHistory,
                          digit_step_input_callback))
