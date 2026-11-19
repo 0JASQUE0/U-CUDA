@@ -102,6 +102,35 @@ void register_tests(ImGuiTestEngine* engine) {
         for (const auto& d : ds) IM_CHECK_STR_EQ(d.param_lo_text.c_str(), "31");
     };
 
+    // A right-hand side that does not parse must give the portrait an error, not end the app:
+    // the parser throws on the recompute_async worker, and the exception used to come out of
+    // future.get() in poll() on the GUI thread (Plain lines without "\\": "trailing input at pos N").
+    // Needs a loaded ODE system (Chen).
+    t = IM_REGISTER_TEST(engine, "phase", "unparsable_rhs_no_crash");
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        AppModel* m = app_model();
+        IM_CHECK_NO_RET(m != nullptr);
+        if (!m) return;
+        auto& s = m->phase_session;
+        IM_CHECK_NO_RET(!s.sys.rhs.empty());
+        if (s.sys.rhs.empty()) return;
+        ctx->SetRef("//MainHost");
+        ctx->ItemClick("Phase analysis");
+        ctx->Yield(3);
+        const std::vector<std::string> saved = s.sys.rhs;
+        const bool saved_cont = s.continuation_mode;
+        s.continuation_mode = false;
+        s.sys.rhs[0] = "-y - z y' = x";   // two equations run together, as without "\\"
+        IM_CHECK_NO_RET(s.recompute_async());
+        for (int i = 0; i < 600 && s.in_flight; ++i) ctx->Yield();
+        IM_CHECK_NO_RET(!s.in_flight);
+        ctx->LogInfo("phase error: %s", s.result.error.c_str());
+        IM_CHECK(!s.result.ok);
+        IM_CHECK(s.result.error.find("trailing input") != std::string::npos);
+        s.sys.rhs = saved;
+        s.continuation_mode = saved_cont;
+    };
+
     // Basins -> "Run portraits": the IC of every portrait must be bit for bit the start point the
     // map kernel used for that cell (BasinsResult::axis_*_nodes, computed by the same module).
     // Linear and ±log grids. Also checks that the host node formula now equals the kernel's.

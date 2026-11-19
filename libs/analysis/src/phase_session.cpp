@@ -350,7 +350,7 @@ bool run_adaptive_phase(const PhaseRunInputs& in, int dim, int N,
 namespace ucuda::analysis_detail {
 
 
-AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
+static AnalysisResult compute_phase_portrait_unchecked(const PhaseRunInputs& in) {
     AnalysisResult result;
     auto _t0 = std::chrono::high_resolution_clock::now();
 
@@ -751,6 +751,24 @@ AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
         result.error = "recompute: " + std::to_string(_ms) + " ms";
 
     return result;
+}
+
+// The right-hand side is parsed here, on the worker thread of recompute_async. A system that
+// does not parse (Plain lines without "\\" separators: "trailing input at pos N") used to throw
+// out of the future into poll() on the GUI thread and terminate the app. Now it is the
+// portrait's error, shown like any other.
+AnalysisResult compute_phase_portrait(const PhaseRunInputs& in) {
+    try {
+        return compute_phase_portrait_unchecked(in);
+    } catch (const std::exception& e) {
+        AnalysisResult r;
+        r.error = e.what();
+        return r;
+    } catch (...) {
+        AnalysisResult r;
+        r.error = "phase portrait failed";
+        return r;
+    }
 }
 }
 
