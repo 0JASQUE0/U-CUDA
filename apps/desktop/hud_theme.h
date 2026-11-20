@@ -16,13 +16,20 @@ struct ImGuiStyle;
 
 namespace hud_theme {
 
+// Варианты движка: Cyan HUD, Cyan HUD Light и Dark Side (чёрно-красная тема:
+// вместо сотового поля — сцена из hud_sith.cpp, рамки те же, но красные).
+// Sith2 — Dark Side II: та же сцена, но зелёный калибр станции и синие молнии.
+// Jedi — Light Side: светлая голубая, сцена из hud_jedi.cpp.
+enum class Variant { Cyan, CyanLight, Sith, Sith2, Jedi };
+inline bool is_sith(Variant v) { return v == Variant::Sith || v == Variant::Sith2; }
+inline bool is_light(Variant v) { return v == Variant::CyanLight || v == Variant::Jedi; }
+
 // Поправки стиля поверх палитры темы: нулевые скругления, рамки у полей.
-// light — светлый вариант (Cyan HUD Light).
-void apply_style(ImGuiStyle& st, bool light);
+void apply_style(ImGuiStyle& st, Variant v);
 
 // Самый тёмный и самый светлый цвет поля под окнами (RGB 0..1) — для
 // проверки контраста текста над полупрозрачной вуалью окна.
-void backdrop_extremes(bool light, float out[2][3]);
+void backdrop_extremes(Variant v, float out[2][3]);
 
 class Painter {
 public:
@@ -39,7 +46,7 @@ public:
     // анимация плавно замедляется (мелкие шаги между кадрами не дёргаются), а
     // на долгом расчёте останавливается совсем; после расчёта разгоняется.
     // show_note — выводить шутку про CUDAynamics (только на вкладке Settings).
-    void inject(ImDrawData* dd, float scale, double time, bool computing, bool show_note, bool light);
+    void inject(ImDrawData* dd, float scale, double time, bool computing, bool show_note, Variant v);
     // До ImGui::DestroyContext (деструктор ImDrawList читает данные контекста).
     void release();
 

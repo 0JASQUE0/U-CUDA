@@ -1,4 +1,6 @@
 #include "hud_theme.h"
+#include "hud_sith.h"
+#include "hud_jedi.h"
 
 #include "imgui.h"
 #include "imgui_internal.h"   // GImGui->Windows, ImGuiWindow
@@ -26,7 +28,18 @@ const Look kDarkLook  = { ImVec4(0.0f, 229.0f / 255.0f, 1.0f, 1), ImVec4(0.80f, 
                           ImVec4(1 / 255.0f, 4 / 255.0f, 7 / 255.0f, 1), IM_COL32(0, 0, 0, 60) };
 const Look kLightLook = { ImVec4(0.0f, 0.50f, 0.64f, 1), ImVec4(0.0f, 0.36f, 0.48f, 1),
                           ImVec4(0.91f, 0.965f, 0.98f, 1), 0 };   // светлая — без развёртки
+// Dark Side: чистый красный без синего канала, раскалённое оранжево-красное
+// ядро (белое ядро делало красный розовым), основа чёрная с тёплым оттенком.
+const Look kSithLook  = { ImVec4(0.88f, 0.0f, 0.0f, 1), ImVec4(1.0f, 0.44f, 0.31f, 1),
+                          ImVec4(4 / 255.0f, 1 / 255.0f, 0.0f, 1), IM_COL32(0, 0, 0, 55) };
+// Light Side: голубой акцент и основа цвета неба.
+const Look kJediLook  = { ImVec4(0.10f, 0.45f, 0.85f, 1), ImVec4(0.00f, 0.30f, 0.66f, 1),
+                          ImVec4(0.86f, 0.93f, 1.00f, 1), 0 };
 const Look* g_look = &kDarkLook;
+
+const Look& look_of(Variant v) {
+    return v == Variant::CyanLight ? kLightLook : v == Variant::Jedi ? kJediLook : is_sith(v) ? kSithLook : kDarkLook;
+}
 
 inline ImU32 with_alpha(ImVec4 c, float a) {
     c.w = std::clamp(a, 0.0f, 1.0f);
@@ -110,16 +123,21 @@ bool wants_backdrop(const ImGuiWindow* w) {
 
 } // namespace
 
-void apply_style(ImGuiStyle& st, bool light) {
+void apply_style(ImGuiStyle& st, Variant v) {
+    const bool light = is_light(v), sith = is_sith(v), jedi = v == Variant::Jedi;
     st.WindowRounding = st.ChildRounding = st.FrameRounding = st.PopupRounding = 0.0f;
     st.ScrollbarRounding = st.GrabRounding = st.TabRounding = 0.0f;
     st.WindowBorderSize = 1.0f;
     st.FrameBorderSize  = 1.0f;
     st.PopupBorderSize  = 1.0f;
-    const ImVec4 a = light ? kLightLook.accent : kDarkLook.accent;
+    const ImVec4 a = look_of(v).accent;
     auto acc = [&](float alpha) { return ImVec4(a.x, a.y, a.z, alpha); };
-    // Галочка и активный бегунок: на тёмном — почти белые, на светлом — темнее акцента.
-    const ImVec4 strong = light ? ImVec4(0.00f, 0.32f, 0.42f, 1.0f) : ImVec4(0.65f, 1.00f, 1.00f, 1.0f);
+    // Галочка и активный бегунок: на тёмном — почти белые (у Dark Side —
+    // раскалённо-красные), на светлом — темнее акцента.
+    const ImVec4 strong = jedi  ? ImVec4(0.00f, 0.26f, 0.62f, 1.0f)
+                        : light ? ImVec4(0.00f, 0.32f, 0.42f, 1.0f)
+                        : sith  ? ImVec4(1.00f, 0.30f, 0.16f, 1.0f)
+                                : ImVec4(0.65f, 1.00f, 1.00f, 1.0f);
     ImVec4* c = st.Colors;
     c[ImGuiCol_Border]           = acc(light ? 0.45f : 0.35f);
     c[ImGuiCol_BorderShadow]     = ImVec4(0, 0, 0, 0);
@@ -130,7 +148,10 @@ void apply_style(ImGuiStyle& st, bool light) {
     c[ImGuiCol_SliderGrab]       = acc(0.85f);
     c[ImGuiCol_SliderGrabActive] = strong;
     c[ImGuiCol_TabSelectedOverline] = acc(1.00f);
-    c[ImGuiCol_TitleBgActive]    = light ? ImVec4(0.66f, 0.87f, 0.92f, 1.00f) : ImVec4(0.00f, 0.20f, 0.26f, 1.00f);
+    c[ImGuiCol_TitleBgActive]    = jedi  ? ImVec4(0.68f, 0.82f, 0.97f, 1.00f)
+                                 : light ? ImVec4(0.66f, 0.87f, 0.92f, 1.00f)
+                                 : sith  ? ImVec4(0.17f, 0.012f, 0.00f, 1.00f)
+                                         : ImVec4(0.00f, 0.20f, 0.26f, 1.00f);
     c[ImGuiCol_PlotLines]        = acc(1.00f);
     c[ImGuiCol_PlotHistogram]    = acc(0.85f);
     c[ImGuiCol_TextSelectedBg]   = acc(light ? 0.25f : 0.30f);
@@ -138,14 +159,16 @@ void apply_style(ImGuiStyle& st, bool light) {
     c[ImGuiCol_NavCursor]        = acc(1.00f);
 }
 
-void backdrop_extremes(bool light, float out[2][3]) {
+void backdrop_extremes(Variant v, float out[2][3]) {
     // Самое тёмное и самое светлое место поля под вуалью окна: основа и
-    // яркая сота у ядра (линия с заливкой ~35 % цвета подсветки).
-    const Look& l = light ? kLightLook : kDarkLook;
+    // яркая сота у ядра (линия с заливкой ~35 % цвета подсветки). У Dark Side
+    // самое светлое — ореол клинка или луча, примерно половина акцента.
+    const Look& l = look_of(v);
+    const float k_hi = is_sith(v) ? 0.65f : v == Variant::Jedi ? 0.55f : 0.35f;
     for (int k = 0; k < 3; ++k) {
         const float b = (&l.base.x)[k], a = (&l.accent.x)[k];
         out[0][k] = b;
-        out[1][k] = b + (a - b) * 0.35f;
+        out[1][k] = b + (a - b) * k_hi;
     }
 }
 
@@ -173,8 +196,9 @@ ImDrawList* Painter::next_list(ImDrawData* dd) {
     return dl;
 }
 
-void Painter::inject(ImDrawData* dd, float sc, double time, bool computing, bool show_note, bool light) {
-    g_look = light ? &kLightLook : &kDarkLook;
+void Painter::inject(ImDrawData* dd, float sc, double time, bool computing, bool show_note, Variant v) {
+    g_look = &look_of(v);
+    const bool sith = is_sith(v);
     // Часы анимации. Скорость: 1 без расчёта, 0.3 в первые секунды расчёта,
     // 0 дальше; к цели подтягивается экспоненциально (~0.6 с), без скачков.
     {
@@ -266,6 +290,11 @@ void Painter::inject(ImDrawData* dd, float sc, double time, bool computing, bool
         dl->PushClipRect(a, b, true);
         dl->AddRectFilled(a, b, base_col());
 
+        if (sith) {
+            paint_sith_scene(dl, ImGui::GetMainViewport(), a, b, sc, t, glow, v == Variant::Sith2);
+        } else if (v == Variant::Jedi) {
+            paint_jedi_scene(dl, ImGui::GetMainViewport(), a, b, sc, t, glow);
+        } else {
         for (const Core& k : cores) {
             const float r = 240.0f * sc * k.s;
             dl->AddImage(glow, ImVec2(k.c.x - r, k.c.y - r), ImVec2(k.c.x + r, k.c.y + r),
@@ -329,7 +358,7 @@ void Painter::inject(ImDrawData* dd, float sc, double time, bool computing, bool
             dl->AddImage(glow, ImVec2(k.c.x - gr, k.c.y - gr), ImVec2(k.c.x + gr, k.c.y + gr),
                          ImVec2(0, 0), ImVec2(1, 1), ice(0.55f));
         }
-
+        }   // сотовое поле Cyan HUD
 
         // Строки развёртки ЭЛТ — только по фону, под содержимым окна: поверх
         // графиков, текста и полей ввода они мешали.
@@ -357,7 +386,7 @@ void Painter::inject(ImDrawData* dd, float sc, double time, bool computing, bool
 
         // Срезанные углы: левый верхний всегда, правый нижний — если там нет
         // уголка изменения размера (пристыкованное окно или NoResize).
-        const float ch = 7.0f * sc;
+        const float ch = (sith ? 12.0f : 7.0f) * sc;   // у Dark Side срезы острее
         const ImU32 edge = cyan(focused ? 0.95f : 0.45f);
         dl->AddTriangleFilled(a, ImVec2(a.x + ch, a.y), ImVec2(a.x, a.y + ch), base_col());
         dl->AddLine(ImVec2(a.x + ch, a.y + 0.5f), ImVec2(a.x + 0.5f, a.y + ch), edge, th);

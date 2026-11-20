@@ -141,7 +141,34 @@ static const CamoPalette kCamoPalettes[AppSettings::kCamoCount] = {
       {0.93f, 0.975f, 0.985f, 0.45f}, {0.95f, 0.985f, 0.995f}, {0.02f, 0.13f, 0.19f},
       {0.88f, 0.95f, 0.97f}, {0.36f, 0.80f, 0.88f}, {0.22f, 0.66f, 0.76f},
       {0.80f, 0.92f, 0.95f}, {0.97f, 0.99f, 1.00f} },
+    // Dark Side: почти чёрная основа с тёплым оттенком, чистый красный акцент
+    // без синей составляющей (с ней красный уходил в розовый), светлый тёплый
+    // текст. Под окнами — сцена из hud_sith.cpp.
+    { nullptr, false,
+      {0.016f, 0.004f, 0.002f, 0.32f}, {0.050f, 0.012f, 0.008f}, {0.91f, 0.86f, 0.84f},
+      {0.090f, 0.020f, 0.015f}, {0.62f, 0.00f, 0.00f}, {0.40f, 0.00f, 0.00f},
+      {0.060f, 0.010f, 0.005f}, {0.016f, 0.004f, 0.000f} },
+    // Dark Side II: та же палитра; в сцене зелёный главный калибр и синие молнии.
+    { nullptr, false,
+      {0.016f, 0.004f, 0.002f, 0.32f}, {0.050f, 0.012f, 0.008f}, {0.91f, 0.86f, 0.84f},
+      {0.090f, 0.020f, 0.015f}, {0.62f, 0.00f, 0.00f}, {0.40f, 0.00f, 0.00f},
+      {0.060f, 0.010f, 0.005f}, {0.016f, 0.004f, 0.000f} },
+    // Light Side: светло-голубая основа, тёмно-синий текст, голубые кнопки
+    // (тёмный текст на них читается). Под окнами — сцена из hud_jedi.cpp.
+    { nullptr, true,
+      {0.93f, 0.965f, 1.00f, 0.32f}, {0.94f, 0.97f, 1.00f}, {0.03f, 0.10f, 0.24f},
+      {0.88f, 0.93f, 0.99f}, {0.52f, 0.74f, 0.97f}, {0.36f, 0.60f, 0.92f},
+      {0.80f, 0.89f, 0.98f}, {0.97f, 0.985f, 1.00f} },
 };
+
+// Вариант HUD-движка для номера темы (вызывать только для is_hud_theme).
+static hud_theme::Variant hud_variant(int camo) {
+    return camo == AppSettings::kCamoHudLight ? hud_theme::Variant::CyanLight
+         : camo == AppSettings::kCamoSith     ? hud_theme::Variant::Sith
+         : camo == AppSettings::kCamoSith2    ? hud_theme::Variant::Sith2
+         : camo == AppSettings::kCamoJedi     ? hud_theme::Variant::Jedi
+                                              : hud_theme::Variant::Cyan;
+}
 
 // Самый тёмный и самый светлый цвет узора камуфляжа (2-й и 98-й перцентили
 // яркости): по ним проверяется контраст текста над полупрозрачной вуалью.
@@ -882,7 +909,7 @@ int main(int argc, char** argv) {
             // Без файла текстуры — процедурный фон (Cyan HUD), вуаль та же.
             apply_camo_palette(c, *pal, camo_tex[camo] != 0 || !pal->texture);
             if (AppSettings::is_hud_theme(camo))
-                hud_theme::apply_style(st, camo == AppSettings::kCamoHudLight);
+                hud_theme::apply_style(st, hud_variant(camo));
         }
         if (contrast) {
             // High Contrast: фон окон чисто чёрный, текст белый, рамки у всех
@@ -980,7 +1007,7 @@ int main(int argc, char** argv) {
         {
             float backs[2][3] = { { 0.1f, 0.1f, 0.12f }, { 0.1f, 0.1f, 0.12f } };
             if (pal && AppSettings::is_hud_theme(camo))
-                hud_theme::backdrop_extremes(camo == AppSettings::kCamoHudLight, backs);
+                hud_theme::backdrop_extremes(hud_variant(camo), backs);
             else if (pal && camo_tex[camo] != 0 && camo_ext[camo].valid)
                 std::memcpy(backs, camo_ext[camo].c, sizeof(backs));
             enforce_text_contrast(c, backs, 2);
@@ -1157,7 +1184,7 @@ int main(int argc, char** argv) {
         if (hud_on)
             hud_painter.inject(ImGui::GetDrawData(), applied_ui_scale, ImGui::GetTime(), compute_in_flight,
                                model.app_mode == AppModel::AppMode::Settings,
-                               model.camo_theme == AppSettings::kCamoHudLight);
+                               hud_variant(model.camo_theme));
         else if (!model.dark_theme && model.camo_theme > AppSettings::kCamoNone &&
             model.camo_theme < AppSettings::kCamoCount && camo_tex[model.camo_theme] != 0)
             inject_window_backdrops(ImGui::GetDrawData(), camo_tex[model.camo_theme],
