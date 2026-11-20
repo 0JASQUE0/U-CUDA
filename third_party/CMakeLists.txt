@@ -19,9 +19,27 @@ if(NOT TARGET glfw)
         GIT_TAG a74efa0d5628b74adc0426af4c5710e287fa7c2c)
     FetchContent_MakeAvailable(glfw)
 endif()
+set(ucuda_imgui_widgets ${imgui_SOURCE_DIR}/imgui_widgets.cpp)
+if(U_CUDA_UI_TESTS)
+    # BeginCombo reports no label to the Test Engine (InputText, Checkbox and the rest do), so UI
+    # scripts could not find combos by label. The UI test build compiles a copy of imgui_widgets.cpp
+    # with that one hook added; the downloaded source and every other build stay untouched.
+    file(READ ${imgui_SOURCE_DIR}/imgui_widgets.cpp ucuda_widgets_src)
+    set(ucuda_combo_anchor "    bool popup_open = IsPopupOpen(popup_id, ImGuiPopupFlags_None);\n    if (pressed && !popup_open)")
+    string(FIND "${ucuda_widgets_src}" "${ucuda_combo_anchor}" ucuda_combo_at)
+    if(ucuda_combo_at EQUAL -1)
+        message(FATAL_ERROR "imgui_widgets.cpp changed: BeginCombo anchor for the Test Engine label hook not found")
+    endif()
+    string(REPLACE "${ucuda_combo_anchor}"
+        "    bool popup_open = IsPopupOpen(popup_id, ImGuiPopupFlags_None);\n    IMGUI_TEST_ENGINE_ITEM_INFO(id, label, g.LastItemData.StatusFlags | ImGuiItemStatusFlags_Openable | (popup_open ? ImGuiItemStatusFlags_Opened : 0)); // U-CUDA UI tests\n    if (pressed && !popup_open)"
+        ucuda_widgets_src "${ucuda_widgets_src}")
+    set(ucuda_imgui_widgets ${CMAKE_CURRENT_BINARY_DIR}/imgui_widgets_te.cpp)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/imgui_widgets_te.cpp.in "${ucuda_widgets_src}")
+    configure_file(${CMAKE_CURRENT_BINARY_DIR}/imgui_widgets_te.cpp.in ${ucuda_imgui_widgets} COPYONLY)
+endif()
 add_library(ucuda_gui_dependencies STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp ${imgui_SOURCE_DIR}/imgui_draw.cpp
-    ${imgui_SOURCE_DIR}/imgui_tables.cpp ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp ${ucuda_imgui_widgets}
     ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
     ${implot_SOURCE_DIR}/implot.cpp ${implot_SOURCE_DIR}/implot_items.cpp

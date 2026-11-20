@@ -849,6 +849,13 @@ void Plot2DView::render(PlotRenderer& renderer,
     std::snprintf(id_buf, sizeof(id_buf), "##plot_%d", owner_id);
     ImGui::InvisibleButton(id_buf, ImVec2((float)plot_w, (float)plot_h),
         ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    if (plot_probe_enabled()) {   // UI tests: data -> screen of this frame's view (plot_axis.h)
+        const float pw = (float)plot_w, ph = (float)plot_h;
+        plot_probe_note(ImGui::GetItemID(), [=](double x, double y) {
+            return ImVec2(img_pos.x + (float)((XS(x) - sx0) / (sx1 - sx0)) * pw,
+                          img_pos.y + (float)((sy1 - YS(y)) / (sy1 - sy0)) * ph);
+        });
+    }
     bool plot_h_ov = ImGui::IsItemHovered();
     bool plot_a = ImGui::IsItemActive();
     bool plot_dbl = plot_h_ov && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);

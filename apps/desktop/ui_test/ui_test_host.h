@@ -34,6 +34,12 @@ void bind_app(AppModel* model, SystemLibrary* library);
 AppModel*      app_model();
 SystemLibrary* app_library();
 
+// Native file dialogs would block the engine. In UI test mode app_main routes every dialog here:
+// it returns the next answer queued by the script command `file_dialog` ("" = cancel), and a
+// dialog with nothing queued is cancelled and logged instead of opening.
+void queue_file_dialog(const std::string& path);
+std::string file_dialog(const char* kind);
+
 void configure_window(GLFWwindow* window);   // fixed size instead of maximize
 void start();                                // after ImGui context + backends
 void draw_windows();                         // inside the frame, after draw_gui

@@ -412,3 +412,13 @@ void request_plot_screenshot(ImVec2 min, ImVec2 max);
 // RGB-поля меню цвета серии в plot_view_2d.cpp. Иначе второму пришлось бы
 // копировать колбэк целиком.
 int digit_step_input_callback(ImGuiInputTextCallbackData* data);
+
+// UI test probe. The plot area of every Plot2DView and HeatmapView is an InvisibleButton
+// ("##plot_<id>", "##hm_plot_<id>"). While the probe is on, render() records, under that item's
+// ImGui ID, how the current view maps data coordinates (x along the horizontal axis, y along the
+// vertical one, as the tick labels read) to screen pixels. UI scripts use it to click, drag and
+// zoom at data coordinates (apps/desktop/ui_test). Off by default: plain runs pay one bool check.
+void plot_probe_enable(bool on);
+bool plot_probe_enabled();
+void plot_probe_note(ImGuiID plot_item, std::function<ImVec2(double x, double y)> to_screen);
+bool plot_probe_to_screen(ImGuiID plot_item, double x, double y, ImVec2* screen);

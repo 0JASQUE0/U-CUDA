@@ -1,0 +1,260 @@
+# Demo_1: a new chaotic system from a paper, added and analysed on every tab of U-CUDA.
+#
+# System: J. Lu, G. Chen. A new chaotic attractor coined.
+#         Int. J. Bifurcation and Chaos 12(3), 659-661 (2002).
+#   x' = a (y - x),   y' = -x z + c y,   z' = x y - b z
+#   a = 36, b = 3, c = 20: the chaotic attractor of the paper.
+#
+# On every tab the windows are arranged with Layout first, then the computations run,
+# with a 5 s pause after each one.
+#
+# Steps: Library (new system) -> Phase analysis (2D, 3D, time domain) -> Parametric (bifurcation
+# diagram, LLE, Lyapunov spectrum, metrics over c) -> Basins (x-y plane) -> Tree (2D map over
+# (c, b), slices along X and Y, phase portrait and basins at the cursor; the cursor is moved to
+# four points of the 2D bifurcation diagram, each one recomputes the slices and the basins).
+#
+# Run from the repository root after apps\desktop\ui_test\scripts\build.ps1 (1920x1080, watchable speed):
+#   & apps\desktop\ui_test\scripts\run.ps1 -Script apps\desktop\ui_test\scenarios\Demo_1.uit `
+#       -Fresh -Speed normal -Extra '--ui-size','1920x1080' -TimeoutSec 1800
+# -Speed fast runs the same steps without the visible mouse. Screenshots of every step:
+# %TEMP%\ucb-ui-out\Demo_1. The system goes to the isolated test library, never to U-CUDA/library.
+ref //MainHost
+# mouse movement and typing twice the engine's default speed (visible with -Speed normal)
+pace 2
+yield 10
+
+# ---------- 1. Library: add the system ----------
+log "1. Library: add the Lu system"
+click Library
+yield 5
+click "*>>ODE"
+yield 3
+click "*>>Add new system"
+yield 5
+input "//ODE###Editor>>##editor_name" "Lu system (Lu, Chen 2002)"
+set_text "//ODE###Editor>>##editor_note" "J. Lu, G. Chen. A new chaotic attractor coined. Int. J. Bifurcation and Chaos 12(3), 659-661 (2002). Chaotic attractor at a=36, b=3, c=20."
+click "//ODE###Editor>>Plain"
+yield 3
+set_text "//ODE###Editor>>##plain" "x' = a*(y - x) \\\\\ny' = -x*z + c*y \\\\\nz' = x*y - b*z"
+input "//ODE###Editor>>##vars_text" "x, y, z"
+input "//ODE###Editor>>##params_text" "a, b, c"
+yield 3
+check "//ODE###Editor>>RK4"
+check "//ODE###Editor>>CD"
+yield 3
+screenshot 01_library_system.png
+click "//ODE###Editor>>Parameters"
+yield 5
+click "//ODE###Editor>>Refresh from system"
+yield 5
+input "//ODE###Editor>>##step_h" 0.005
+input "//ODE###Editor>>##ic_x" -3
+input "//ODE###Editor>>##ic_y" 2
+input "//ODE###Editor>>##ic_z" 20
+input "//ODE###Editor>>##val_a" 36
+input "//ODE###Editor>>##val_b" 3
+input "//ODE###Editor>>##val_c" 20
+yield 3
+screenshot 02_library_parameters.png
+click "//ODE###Editor>>Save"
+yield 15
+select 0x7BF9F62D "Lu system (Lu, Chen 2002)"
+yield 15
+
+# ---------- 2. Phase analysis: x-z portrait, 3D portrait, time domain ----------
+log "2. Phase analysis"
+click "Phase analysis"
+yield 10
+select "//Controls>>##method" RK4
+input "//Controls>>##st" 500
+input "//Controls>>##ssk" 500
+input "//Controls>>##dec" 2
+select "//Controls>>##px@1" x
+select "//Controls>>##py@1" z
+click "//Controls>>Add projection"
+yield 5
+select "//Controls>>##ptype@2" "Phase 3D"
+yield 3
+click "//Controls>>Add projection"
+yield 5
+select "//Controls>>##ptype@3" "Time domain"
+yield 3
+click "//MainHost>>Layout"
+yield 3
+click "//$FOCUSED>>Grid"
+yield 15
+expect_no_overlap
+click "//Controls>>Recompute*"
+wait_idle 300
+sleep 5
+screenshot 03_phase.png
+
+# ---------- 3. Parametric: bifurcation diagram, LLE, spectrum and metrics over c ----------
+log "3. Parametric: sweep c in [12, 30]"
+click Parametric
+yield 10
+click "//MainHost>>Layout"
+yield 3
+click "//$FOCUSED>>Grid"
+yield 15
+expect_no_overlap
+click "*>>Bifurcation"
+yield 5
+select "//Parametric Controls>>Scheme" RK4
+select "//Parametric Controls>>Sweep" c
+input "//Parametric Controls>>Param lo" 12
+input "//Parametric Controls>>Param hi" 30
+input "//Parametric Controls>>Resolution" 600
+input "//Parametric Controls>>computing time" 500
+input "//Parametric Controls>>transient time" 500
+input "//Parametric Controls>>decimator" 2
+click "//Parametric Controls>>Run (Ctrl+R)"
+wait_idle 300
+sleep 5
+click "*>>LLE"
+yield 5
+select "//Parametric Controls>>Scheme" RK4
+select "//Parametric Controls>>Sweep" c
+input "//Parametric Controls>>Param lo" 12
+input "//Parametric Controls>>Param hi" 30
+input "//Parametric Controls>>Resolution" 300
+input "//Parametric Controls>>computing time" 500
+input "//Parametric Controls>>transient time" 500
+click "//Parametric Controls>>Run (Ctrl+R)"
+wait_idle 300
+sleep 5
+click "*>>LS"
+yield 5
+select "//Parametric Controls>>Scheme" RK4
+select "//Parametric Controls>>Sweep" c
+input "//Parametric Controls>>Param lo" 12
+input "//Parametric Controls>>Param hi" 30
+input "//Parametric Controls>>Resolution" 300
+input "//Parametric Controls>>computing time" 500
+input "//Parametric Controls>>transient time" 500
+click "//Parametric Controls>>Run (Ctrl+R)"
+wait_idle 300
+sleep 5
+click "*>>Metrics"
+yield 5
+select "//Parametric Controls>>Scheme" RK4
+select "//Parametric Controls>>Sweep" c
+input "//Parametric Controls>>Param lo" 12
+input "//Parametric Controls>>Param hi" 30
+input "//Parametric Controls>>Resolution" 300
+input "//Parametric Controls>>computing time" 500
+input "//Parametric Controls>>transient time" 500
+input "//Parametric Controls>>decimator" 2
+click "//Parametric Controls>>Run (Ctrl+R)"
+wait_idle 300
+sleep 5
+screenshot 04_parametric.png
+
+# ---------- 4. Basins: x-y plane of initial conditions at c = 12.5 (two stable equilibria) ----------
+log "4. Basins at c = 12.5"
+click Basins
+yield 10
+click "//MainHost>>Layout"
+yield 3
+click "//$FOCUSED>>Grid"
+yield 15
+expect_no_overlap
+select "//Basins Controls>>Scheme" RK4
+select "//Basins Controls>>Axis X (IC)" x
+input "//Basins Controls>>X lo" -30
+input "//Basins Controls>>X hi" 30
+select "//Basins Controls>>Axis Y (IC)" y
+input "//Basins Controls>>Y lo" -30
+input "//Basins Controls>>Y hi" 30
+input "//Basins Controls>>Resolution" 300
+input "//Basins Controls>>computing time" 500
+input "//Basins Controls>>transient time" 500
+input "//Basins Controls>>decimator" 2
+# parameter c of the Basins tab (the third field of its Parameters section)
+input 0x7A80EA9C 12.5
+# phase portraits of the basins are recomputed automatically after every run
+open "//Basins Controls>>Phase portraits*"
+check "//Basins Controls>>Autorun"
+click "//Basins Controls>>Run (Ctrl+R)"
+wait_idle 600
+sleep 5
+screenshot 05_basins.png
+
+# ---------- 5. Tree: 2D map over (c, b), slices and basins at the cursor ----------
+log "5. Tree: region c in [12, 30], b in [1, 5]"
+click Tree
+yield 15
+# slice along Y (its bifurcation diagram is already in the template): switch it on
+click "*>>Tree Controls*>>off"
+yield 5
+# point: basins next to the phase portrait
+click "*>>Tree Controls*>>+@5"
+yield 5
+click "//$FOCUSED>>Basins"
+yield 5
+# system: scheme
+click "*>>Tree Controls*>>System"
+yield 5
+select "*>>Tree Controls*>>Scheme" RK4
+input "*>>Tree Controls*>>computing time" 500
+input "*>>Tree Controls*>>transient time" 500
+input "*>>Tree Controls*>>decimator" 2
+yield 3
+# region: c along X, b along Y
+click "*>>Tree Controls*>>Region 2D"
+yield 5
+select "*>>Tree Controls*>>##ax" c
+input "*>>Tree Controls*>>lo##ax" 12
+input "*>>Tree Controls*>>hi##ax" 30
+select "*>>Tree Controls*>>##ay" b
+input "*>>Tree Controls*>>lo##ay" 1
+input "*>>Tree Controls*>>hi##ay" 5
+input "*>>Tree Controls*>>Resolution" 150
+yield 3
+# basins at the cursor: x-y plane
+click "*>>Tree Controls*>>Basins"
+yield 5
+select "*>>Tree Controls*>>Axis X (IC)" x
+input "*>>Tree Controls*>>X lo" -30
+input "*>>Tree Controls*>>X hi" 30
+select "*>>Tree Controls*>>Axis Y (IC)" y
+input "*>>Tree Controls*>>Y lo" -30
+input "*>>Tree Controls*>>Y hi" 30
+input "*>>Tree Controls*>>Resolution" 150
+yield 3
+click "//MainHost>>Layout"
+yield 3
+click "//$FOCUSED>>Grid"
+yield 10
+# the two 1D slices in one column: along X (c) on top, along Y (b) below
+dock "*>>Bifurcation 1D###tree_9*" "*>>Bifurcation 1D###tree_7*" down
+yield 10
+expect_no_overlap
+click "*>>Tree Controls*>>Run"
+wait_idle 900
+sleep 5
+screenshot 06_tree.png
+
+# Four points on the 2D bifurcation diagram (middle button = the cursor of the region).
+# Each click recomputes the slices, the phase portrait and the basins at that (c, b).
+log "5a. point c=20, b=3 (the attractor of the paper)"
+plot_click "*>>Bifurcation 2D>>##hm_plot_*" 20 3 middle
+wait_idle 600
+sleep 5
+screenshot 07_point_c20_b3.png
+log "5b. point c=12.5, b=3"
+plot_click "*>>Bifurcation 2D>>##hm_plot_*" 12.5 3 middle
+wait_idle 600
+sleep 5
+screenshot 08_point_c12.5_b3.png
+log "5c. point c=26, b=2"
+plot_click "*>>Bifurcation 2D>>##hm_plot_*" 26 2 middle
+wait_idle 600
+sleep 5
+screenshot 09_point_c26_b2.png
+log "5d. point c=16, b=4.5"
+plot_click "*>>Bifurcation 2D>>##hm_plot_*" 16 4.5 middle
+wait_idle 600
+sleep 5
+screenshot 10_point_c16_b4.5.png
+log "Demo_1 done"

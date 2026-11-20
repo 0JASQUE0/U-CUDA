@@ -1616,3 +1616,21 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
         plot_text(dl, ImVec2(pos.x - ts.x - 4, px_center(py) - ts.y * 0.5f), col_text, lbl.c_str());
     }
 }
+namespace {
+bool g_plot_probe_on = false;
+std::map<ImGuiID, std::function<ImVec2(double, double)>> g_plot_probe;
+}
+
+void plot_probe_enable(bool on) { g_plot_probe_on = on; if (!on) g_plot_probe.clear(); }
+bool plot_probe_enabled() { return g_plot_probe_on; }
+
+void plot_probe_note(ImGuiID plot_item, std::function<ImVec2(double x, double y)> to_screen) {
+    if (g_plot_probe_on) g_plot_probe[plot_item] = std::move(to_screen);
+}
+
+bool plot_probe_to_screen(ImGuiID plot_item, double x, double y, ImVec2* screen) {
+    const auto it = g_plot_probe.find(plot_item);
+    if (it == g_plot_probe.end()) return false;
+    *screen = it->second(x, y);
+    return true;
+}
