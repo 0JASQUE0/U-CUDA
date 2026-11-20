@@ -65,6 +65,10 @@ std::vector<double> neural_source_samples(const NeuralSource& s, int variable, s
 NeuralConfig neural_task_config(const NeuralConfig& c);
 // Классификация: класс каждой попытки (номер в task.classes). Бросает, если попыток мало для разбиения.
 std::vector<int> neural_class_labels(const NeuralConfig& c);
+// Validates only presentation fields so the controls can report errors without preparing a run.
+void neural_validate_dataset_presentation(const NeuralConfig& c);
+// Test sample indices contributing to one off-diagonal cell of the completed run.
+std::vector<size_t> neural_classification_errors(const NeuralTaskResult& task, int instance, int truth, int prediction);
 // Обучение выхода по готовому расчёту. c из neural_task_config, r его запрос.
 NeuralTaskResult neural_task_evaluate(const NeuralConfig& c, const NeuralRequest& r, const NeuralResult& res);
 struct NeuralBatchClassification {

@@ -1149,6 +1149,22 @@ static ClassSteps class_steps(const NeuralConfig& c) {
     return s;
 }
 
+static long long class_input_hold(const NeuralConfig& c, const ClassSteps& s) {
+    const long long hold = task_hold(c);
+    if (s.rest % hold != 0 || s.stim % hold != 0)
+        throw std::runtime_error("the rest and the stimulus must be multiples of the input sample time");
+    if (c.task.dataset && c.task.dataset_frames > 1 && s.stim / hold != c.task.dataset_frames)
+        throw std::runtime_error("the stimulus duration must equal the frame count times the input sample time");
+    return hold;
+}
+
+void neural_validate_dataset_presentation(const NeuralConfig& c) {
+    if (c.task.dataset && (c.task.dataset_frames < 1 || c.task.dataset->channels.empty() ||
+            c.task.dataset->channels.size() % (size_t)c.task.dataset_frames != 0))
+        throw std::runtime_error("the dataset width must be divisible by the frame count");
+    class_input_hold(c, class_steps(c));
+}
+
 static NeuralConfig class_config(const NeuralConfig& c) {
     NeuralConfig o = c;
     const NeuralTask& t = c.task;
@@ -1192,8 +1208,7 @@ static NeuralConfig class_config(const NeuralConfig& c) {
     const ClassSteps s = class_steps(c);
     const std::vector<int> labels = neural_class_labels(c);
     const ReadoutSplit sp = class_split(c);
-    const long long hold = task_hold(c);
-    if (s.rest % hold != 0 || s.stim % hold != 0) throw std::runtime_error("the rest and the stimulus must be multiples of the input sample time");
+    const long long hold = class_input_hold(c, s);
     const bool spike = c.schedule == NeuralSchedule::Spike;
     const int M = (std::max)(1, int_or(t.features_text, 1000));
     const auto& saved = c.classifier;
@@ -1488,6 +1503,29 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
     out.instances = nInst;
     out.points = (int)T;
     for (size_t i = sp.test0; i < sp.test1; ++i) out.truth.push_back((double)labels[i]);
+    if (t.dataset) {
+        Fnv test_key;
+        const size_t width = t.dataset->channels.size();
+        const auto add_text = [&test_key](const std::string& text) {
+            test_key.add(text.size());
+            for (unsigned char ch : text) test_key.add(ch);
+        };
+        test_key.add(width);
+        for (const auto& channel : t.dataset->channels) add_text(channel);
+        for (size_t i = 0; i < t.dataset->samples.size(); ++i) {
+            const auto& sample = t.dataset->samples[i];
+            if (sample.split != NeuralDatasetSplit::Test) continue;
+            out.test_sample_ids.push_back(sample.id);
+            add_text(sample.id);
+            add_text(sample.label);
+            for (size_t q = 0; q < width; ++q) {
+                uint64_t bits;
+                std::memcpy(&bits, &t.dataset->values[i * width + q], sizeof bits);
+                test_key.add(bits);
+            }
+        }
+        out.external_test_key = hex64(test_key.h);
+    }
     std::vector<size_t> share((size_t)C, 0);
     for (size_t i = sp.test0; i < sp.test1; ++i) ++share[(size_t)labels[i]];
     out.chance = (double)*std::max_element(share.begin(), share.end()) / (double)T;
@@ -2146,12 +2184,12 @@ std::vector<NeuralResultView> neural_result_views(const NeuralConfig& c) {
     const auto& r = c.result;
     const auto& task = c.task_result;
     if (!r.ok) return views;
-    if (!r.spike_count.empty()) { views.push_back(View::Activity); views.push_back(View::SpikeStatistics); }
     if (!task.test.empty() && !task.names.empty()) {
         views.push_back(View::Readout);
         if (task.forecast && task.names.size() >= 2 && task.points >= 2 && task.truth.size() == task.predicted.size())
             views.push_back(View::ForecastPhase);
     }
+    if (!r.spike_count.empty()) { views.push_back(View::Activity); views.push_back(View::SpikeStatistics); }
     if (!r.means.empty()) views.push_back(View::Means);
     if (!r.traces.empty()) views.push_back(View::Nodes);
     if (!r.order.empty() || !r.spread.empty()) views.push_back(View::Synchronisation);
@@ -2161,6 +2199,19 @@ std::vector<NeuralResultView> neural_result_views(const NeuralConfig& c) {
     if (!c.sweep_values.empty() && (!c.pop_rate.empty() || !c.sweep_order.empty() || !c.sweep_spread.empty()
                                     || !c.sweep_lyap.empty() || !task.test.empty())) views.push_back(View::Sweep);
     return views;
+}
+
+std::vector<size_t> neural_classification_errors(const NeuralTaskResult& task, int instance, int truth, int prediction) {
+    const size_t points = task.test_sample_ids.size();
+    if (!points || task.truth.size() != points || instance < 0 ||
+        (size_t)instance >= task.predicted.size() / points || truth == prediction)
+        return {};
+    std::vector<size_t> rows;
+    const size_t first = (size_t)instance * points;
+    for (size_t i = 0; i < points; ++i)
+        if (task.truth[i] == truth && task.predicted[first + i] == prediction)
+            rows.push_back(i);
+    return rows;
 }
 
 NeuralBinnedRates neural_population_rates(const NeuralConfig& c, int instance, double requested_bin) {
@@ -2589,6 +2640,7 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
                 auto& ctx = out.context;
                 ctx.settings_key = settings_key;
                 ctx.label = snap.label;
+                ctx.seed = std::to_string(int_or(snap.seed_text, 1));
                 ctx.variables = v;
                 ctx.device_state = snap.device.state_name;
                 ctx.sweep = snap.sweep; ctx.sweep2 = snap.sweep2;
