@@ -508,7 +508,7 @@ void HeatmapView::render(PlotRenderer& renderer,
     // -hi..-lo, вторая +lo..+hi. Дробный индекс отрицательного значения — по первой половине,
     // положительного — по второй; ноль сетке не принадлежит и ставится на стык половин.
     auto symlog_ok = [](int n, double lo, double hi) { return lo > 0.0 && hi > 0.0 && n >= 4; };
-    auto vis_pos = [&symlog_ok](double v, int n, double lo, double hi, int kind, double step) {
+    auto vis_pos = [symlog_ok](double v, int n, double lo, double hi, int kind, double step) {
         if (kind == 2 && symlog_ok(n, lo, hi) && std::isfinite(v)) {
             const int m = n / 2;
             const double l0 = std::log10(lo), l1 = std::log10(hi);
@@ -683,6 +683,15 @@ void HeatmapView::render(PlotRenderer& renderer,
     std::snprintf(id_buf, sizeof(id_buf), "##hm_plot_%d", owner_id);
     ImGui::InvisibleButton(id_buf, ImVec2((float)plot_w, (float)plot_h),
                            ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    if (plot_probe_enabled()) {   // UI tests: data -> screen of this frame's view (plot_axis.h)
+        const float pw = (float)plot_w, ph = (float)plot_h;
+        plot_probe_note(ImGui::GetItemID(), [=](double x, double y) {
+            const double vx = vis_pos(x, nx, param_lo_x, param_hi_x, vis_log_x, step_x);
+            const double vy = vis_pos(y, ny, param_lo_y, param_hi_y, vis_log_y, step_y);
+            return ImVec2(img_pos.x + (float)((vx - evis_x0) / (evis_x1 - evis_x0)) * pw,
+                          img_pos.y + (float)((evis_y1 - vy) / (evis_y1 - evis_y0)) * ph);
+        });
+    }
     bool plot_hov = ImGui::IsItemHovered();
     bool plot_dbl = plot_hov && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
 

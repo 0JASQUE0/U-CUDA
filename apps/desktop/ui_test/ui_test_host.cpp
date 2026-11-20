@@ -13,9 +13,12 @@
 #include "imgui_te_utils.h"
 #include "imgui_capture_tool.h"
 
+#include "ucuda/plotting/plot_axis.h"   // plot_probe_enable
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <vector>
 
@@ -152,6 +155,23 @@ bool parse_args(int argc, char** argv) {
 const Options& options() { return g_opt; }
 bool active() { return g_opt.enabled; }
 
+namespace { std::deque<std::string> g_dialog_answers; }
+
+void queue_file_dialog(const std::string& path) { g_dialog_answers.push_back(path); }
+
+std::string file_dialog(const char* kind) {
+    std::string out;
+    if (g_dialog_answers.empty()) {
+        std::printf("[ui]   file dialog (%s): nothing queued, cancelled\n", kind);
+    } else {
+        out = g_dialog_answers.front();
+        g_dialog_answers.pop_front();
+        std::printf("[ui]   file dialog (%s) -> \"%s\"\n", kind, out.empty() ? "<cancel>" : out.c_str());
+    }
+    std::fflush(stdout);
+    return out;
+}
+
 void bind_app(AppModel* model, SystemLibrary* library) { g_model = model; g_library = library; }
 AppModel*      app_model()   { return g_model; }
 SystemLibrary* app_library() { return g_library; }
@@ -159,11 +179,21 @@ SystemLibrary* app_library() { return g_library; }
 void configure_window(GLFWwindow* window) {
     g_window = window;
     glfwRestoreWindow(window);
+    // A size that does not fit the screen with a frame and title bar (1920x1080 on a 1080p
+    // monitor) is clamped by Windows: drop the frame and put the window at the top-left corner.
+    int x = 40, y = 40;
+    if (GLFWmonitor* mon = glfwGetPrimaryMonitor())
+        if (const GLFWvidmode* vm = glfwGetVideoMode(mon))
+            if (g_opt.width + 80 > vm->width || g_opt.height + 80 > vm->height) {
+                glfwSetWindowAttrib(window, GLFW_DECORATED, GLFW_FALSE);
+                x = 0; y = 0;
+            }
     glfwSetWindowSize(window, g_opt.width, g_opt.height);
-    glfwSetWindowPos(window, 40, 40);
+    glfwSetWindowPos(window, x, y);
 }
 
 void start() {
+    plot_probe_enable(true);   // plots record data -> screen, for plot_click and friends
     g_engine = ImGuiTestEngine_CreateContext();
     ImGuiTestEngineIO& io = ImGuiTestEngine_GetIO(g_engine);
     io.ConfigVerboseLevel        = ImGuiTestVerboseLevel_Info;

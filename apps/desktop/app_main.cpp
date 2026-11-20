@@ -669,6 +669,18 @@ int main(int argc, char** argv) {
     cb.pick_save_file_netlist = pick_save_netlist_file_win;
     cb.pick_open_file_text = pick_open_text_file_win;
     cb.pick_open_file_circuit = pick_open_circuit_file_win;
+#ifdef UCUDA_UI_TESTS
+    if (ui_test::active()) {
+        // A native dialog would block the Test Engine: scripted answers instead (file_dialog).
+        // The clipboard stays inside ImGui, so tests never overwrite the user's clipboard.
+        cb.pick_image_file        = [] { return ui_test::file_dialog("open image"); };
+        cb.pick_save_file_csv     = [] { return ui_test::file_dialog("save csv"); };
+        cb.pick_save_file_netlist = [] { return ui_test::file_dialog("save netlist"); };
+        cb.pick_open_file_text    = [] { return ui_test::file_dialog("open text"); };
+        cb.pick_open_file_circuit = [] { return ui_test::file_dialog("open circuit"); };
+        cb.set_clipboard_text     = [](const std::string& s) { ImGui::SetClipboardText(s.c_str()); };
+    }
+#endif
 
     // Право-клик "Copy image to clipboard" на любой диаграмме стекается
     // сюда (см. plot_axis.h set_screenshot_request_sink).
@@ -1167,6 +1179,13 @@ int main(int argc, char** argv) {
                 model.pending_screenshot.frames_left--;
             } else {
                 const auto& ps = model.pending_screenshot;
+#ifdef UCUDA_UI_TESTS
+                if (ui_test::active()) {   // the user's clipboard is not touched by tests
+                    std::printf("[ui]   image to clipboard @(%.0f,%.0f)-(%.0f,%.0f) (skipped in test mode)\n",
+                                ps.min_x, ps.min_y, ps.max_x, ps.max_y);
+                    model.pending_screenshot.active = false;
+                } else
+#endif
                 copy_framebuffer_rect_to_clipboard(
                     (int)ps.min_x, (int)ps.min_y, (int)ps.max_x, (int)ps.max_y);
                 model.pending_screenshot.active = false;

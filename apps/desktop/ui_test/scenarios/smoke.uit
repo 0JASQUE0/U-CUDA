@@ -1,0 +1,23 @@
+# Smoke check: tabs switch, the Settings tab draws, a screenshot is taken.
+# Run: & apps\desktop\ui_test\scripts\run.ps1 -Script apps\desktop\ui_test\scenarios\smoke.uit -Fresh
+ref //MainHost
+yield 5
+windows
+dump //MainHost 1
+
+click "Phase analysis"
+yield 3
+expect_mode Analysis
+screenshot phase.png
+
+click Parametric
+yield 3
+expect_mode Parametric
+
+click Settings
+yield 3
+expect_mode Settings
+screenshot settings.png
+
+click Library
+expect_mode Library

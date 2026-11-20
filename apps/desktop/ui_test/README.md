@@ -23,6 +23,35 @@ $cm = "C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\Co
 
 The exe and its runtime (kernels, library template, DLLs) end up in `$env:TEMP\ucb-ui\bin\Release`.
 
+The same in one step, with the CMake of the installed Visual Studio found through `vswhere`
+(`UCUDA_CMAKE` overrides it), from any directory:
+
+```powershell
+& apps\desktop\ui_test\scripts\build.ps1            # -Reconfigure after CMakeLists changes
+& apps\desktop\ui_test\scripts\run.ps1 -Script apps\desktop\ui_test\scenarios\smoke.uit -Fresh
+```
+
+`run.ps1` starts the UI-test exe, waits (`-TimeoutSec`, default 900), prints the command echo, errors
+and the summary, and leaves `log.txt`, `results.xml` and the screenshots in `-Out` (default
+`$env:TEMP\ucb-ui-out\<scenario>`). Options: `-Fresh`, `-Speed fast|normal|cinematic`,
+`-Test <filter>`, `-Extra '--ui-size','1920x1080'`.
+
+## Scenarios
+
+`scenarios/` holds ready scripts:
+- `smoke.uit`: tabs switch, screenshots.
+- `Demo_1.uit`: a demonstration of the whole interface. It adds the Lu system (J. Lu, G. Chen, IJBC 12(3),
+  2002) to the library, analyses it on Phase analysis, Parametric and Basins, builds a 2D map over
+  (c, b) on Tree and moves the cursor to four points of the 2D bifurcation diagram, each one
+  recomputing the slices along X and Y and the basins. Every tab is arranged with Layout before its
+  computations, with a 5 s pause after each. To show it:
+
+```powershell
+& apps\desktop\ui_test\scripts\run.ps1 -Script apps\desktop\ui_test\scenarios\Demo_1.uit -Fresh -Speed normal -Extra '--ui-size','1920x1080' -TimeoutSec 3000
+```
+
+It needs a monitor of at least 1920x1080 for that window size, and takes a few minutes on a desktop GPU.
+
 ## Run
 
 ```
@@ -38,7 +67,7 @@ U-CUDA.exe --ui-show                                       # interactive Test En
 | `--ui-test <filter>` | queue compiled tests; `all`, or the engine's filter: comma list of name substrings, `^name` prefix, `-name` exclude |
 | `--ui-script <file>` | run a command script as test `script/<file name>` |
 | `--ui-out <dir>` | screenshots (relative names) and `results.xml` (JUnit), default `ui_out` |
-| `--ui-size WxH` | window size, default 1600x900 |
+| `--ui-size WxH` | window size, default 1600x900; a size that does not fit the screen with a frame (1920x1080 on a 1080p monitor) opens frameless at the top-left corner |
 | `--ui-speed fast\|normal\|cinematic` | fast teleports the mouse and skips delays |
 | `--ui-fresh` | delete `_app_config.json` and `imgui.ini` next to the exe and re-copy the isolated library (default layout and settings) |
 | `--ui-keep` | do not exit after the queue is done |
@@ -62,7 +91,21 @@ A reference is an ImGui ID path, the same one the code builds with `Begin`, `Pus
 - `Phase analysis`: relative to the current `ref` (scripts start with `ref //MainHost`);
 - `**/Run`: wildcard, `Run` at any depth under the current ref;
 - `0x1A2B3C4D`: an item ID taken from `dump` output;
-- a label `Run##bif` must be written with its `##` suffix. Window names include their `##` part too.
+- a label `Run##bif` must be written with its `##` suffix. Window names include their `##` part too;
+- `SCOPE>>LABEL`: **label search**, accepted by every command that takes an item. The first item under
+  SCOPE, at any depth and in its child windows, whose label is LABEL: either the full label
+  (`Run##bif`) or its visible part (`Run`). A trailing `*` makes LABEL a prefix
+  (`"//Controls>>Recompute*"`, `"*>>Bif N=100*"`). SCOPE `*` searches every window, and also
+  matches docked windows by name, which selects their dock tab (`click "*>>Bifurcation 2D"`).
+  Items clipped out of view have no label yet, so when nothing matches, the scope's windows are
+  scrolled page by page. This reaches fields under `PushID`, tab items and combos, which ID paths miss.
+  SCOPE may itself be a window found by name: `"*>>Tree Controls*>>Basins"` (the label is the part
+  after the last `>>`). `LABEL@N` picks the N-th match in drawing order among same-labelled items
+  (`"//Controls>>##ptype@2"`: the type combo of the second projection). Tab items (`BeginTabItem`)
+  report no label to the engine; they are matched by the tab names of the visible tab bars
+  (`click "//ODE###Editor>>Parameters"`, `click "*>>LLE"`).
+  Labels to the right of a field are the field's own label (`"//Parametric Controls>>Resolution"`).
+  A caption drawn as separate text to the left (`Step h:` before `##sh`) is not, so use the `##` name.
 
 Child windows have mangled names. Use `windows all` to see them, or use the ID from `dump`.
 Docked windows keep their own name (`//Controls`). An open combo is a popup window `//##Combo_00`.
@@ -78,7 +121,22 @@ and `\"` escapes a quote inside them.
 | Command | Action |
 |---|---|
 | `ref R` | set the base for relative references |
-| `click R` / `rclick R` / `dclick R` / `hover R` | mouse on item |
+| `click R [MODS]` / `rclick` / `mclick` / `dclick`, `hover R` | mouse on item; MODS = `Ctrl`, `Shift+Alt`, ... held during the click |
+| `select R ITEM` | open combo R and pick the entry labelled ITEM (label search in the popup, scrolls long lists) |
+| `set_text R TEXT` | replace a field's whole text without Enter (multiline editors); `\n` in quotes is a newline |
+| `click_at R FX FY [BTN] [MODS]`, `dclick_at`, `hover_at R FX FY` | mouse at a fraction (0..1 from top-left) of item R; BTN `left`/`right`/`middle` |
+| `drag_at R FX0 FY0 FX1 FY1 [BTN] [MODS]`, `wheel_at R FX FY DY [MODS]` | drag / wheel inside item R (3D plots: rotate, zoom) |
+| `plot_click R X Y [BTN] [MODS]`, `plot_dclick`, `plot_hover R X Y` | mouse at DATA coordinates of a 2D plot or heatmap area R (`##plot_N`, `##hm_plot_N`) |
+| `plot_drag R X0 Y0 X1 Y1 [BTN] [MODS]`, `plot_wheel R X Y DY [MODS]` | pan (LMB), rect-zoom (RMB), crosshair (MMB / Shift+LMB), zoom (wheel) at data coordinates |
+| `plots [W]` | list plot areas (2D, heatmap, 3D) under W, default every window |
+| `dock W TARGET [left\|right\|up\|down]`, `window_close W`, `window_collapse W`, `window_expand W` | window helpers; these, `focus`, `resize` and `scroll_y` take W as a path or `"*>>Name"` (window name matched like a label: app windows renumber their `##id` when a sibling closes) |
+| `pace F` | mouse movement and typing F times faster than the defaults (600 px/s, 20 chars/s) at `-Speed normal`/`cinematic` |
+| `key_down CHORD` / `key_up CHORD` | hold / release keys across several commands |
+| `file_dialog PATH\|cancel` | answer for the next native file dialog (relative PATH = under `--ui-out`) |
+| `expect_no_overlap` | fail if floating (undocked) windows overlap; arrange with `click "//MainHost>>Layout"`, then `click "//$FOCUSED>>Grid"` (or Tabs/Columns/Rows) |
+| `expect_file PATH` | file exists and is not empty (relative = under `--ui-out`) |
+| `clipboard`, `expect_clipboard TEXT` | the app's clipboard (kept inside ImGui in test mode) |
+| `expect_label R TEXT`, `expect_enabled R` / `expect_disabled R` | label (same matching as label search) / disabled state |
 | `check R` / `uncheck R` | set checkbox / checkable menu item |
 | `open R` / `close R` | tree node, collapsing header, menu |
 | `input R TEXT` | click a field, replace its text with TEXT, press Enter |
@@ -90,7 +148,7 @@ and `\"` escapes a quote inside them.
 | `scroll_y W v`, `scroll_to R` | scroll a window / scroll an item into view |
 | `mouse_void` | move the mouse to the bottom-right corner of the viewport (MainHost covers it all, so there is no empty space) |
 | `popup_close` / `popup_close_all` | close the top popup / all popups (`key Escape` also closes the top non-modal popup, see `draw_gui`) |
-| `find W PREFIX` | print the first item under W whose label starts with PREFIX |
+| `find W PREFIX` | print every item under W (`*` = all windows) whose label starts with PREFIX |
 | `click_prefix W PREFIX` / `rclick_prefix W PREFIX` | click it: for labels with counters, e.g. `"Reset to default (0)"` |
 | `yield [N]` | let N frames pass |
 | `sleep SEC` | wait real time (frames keep running) |
@@ -110,11 +168,22 @@ and `\"` escapes a quote inside them.
 The script stops at the first failing command. The engine log names that line.
 With both `--ui-script` and `--ui-test`, the script runs first, so it can prepare the state (load a system).
 
-Tab items (`BeginTabItem`) and fields under a `PushID` scope are not found by plain or `**/` label paths,
-and their labels in `dump` are empty. Address fields by the ID from `dump` (`dump W 3` shows nested items).
-For tabs whose label encodes state, write a compiled test.
+Tab items (`BeginTabItem`) and fields under a `PushID` scope are not found by plain or `**/` paths:
+use a label reference (`W>>label`) or the ID from `dump` (`dump W 3` shows nested items).
 
-Native file dialogs (Open/Save/image pickers) block the app. Scripts must not click buttons that open them.
+**Plots.** Every 2D plot and heatmap records how its current view maps data to screen (`plot_probe_*`
+in `plot_axis.h`, on only in test mode), so `plot_*` commands take the numbers shown on the axes,
+log and inverted axes included. Typical gestures: `plot_click` with `right` opens the plot menu
+(Export data, axes), `plot_dclick` fits, `plot_wheel` zooms, `plot_drag ... right` zooms to a rectangle,
+`plot_click ... left Shift` or `middle` sets a crosshair / picks a point where the tab supports it.
+3D plots have no data mapping: use `drag_at` / `wheel_at` with fractions.
+
+**Dialogs and clipboard.** In test mode no native file dialog opens: each one takes the next
+`file_dialog` answer, or is cancelled and logged when none is queued. Text copied by the app stays in
+ImGui's clipboard, and "Copy image to clipboard" is logged instead of performed.
+
+The UI test build compiles a copy of `imgui_widgets.cpp` with a Test Engine label hook added to
+`BeginCombo` (`third_party/CMakeLists.txt`); without it combos have no label for the engine.
 
 ## Compiled tests
 
