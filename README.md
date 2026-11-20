@@ -20,6 +20,7 @@ U-CUDA analyzes nonlinear dynamical systems. It parses ODEs, generates numerical
 | Change packaged files | [resources/README.md](resources/README.md) and [cmake/README.md](cmake/README.md) |
 | Add or run checks | [tests/README.md](tests/README.md) |
 | Configure VS Code | [.vscode/README.md](.vscode/README.md) |
+| Build and run under WSL2 | [WSL.md](WSL.md) |
 
 Every documented directory also has an `AGENTS.md` with short, scoped rules for coding agents. The nearest file applies in addition to the root [AGENTS.md](AGENTS.md).
 
@@ -31,6 +32,7 @@ Every documented directory also has an `AGENTS.md` with short, scoped rules for 
 | Windows tests | same | `cmake --preset windows` | `cmake --build --preset windows-release` |
 | Linux Debug | GCC 15, nvcc with GCC host | `cmake --preset linux-debug` | `cmake --build --preset linux-debug` |
 | Linux Release | GCC 15, nvcc with GCC host | `cmake --preset linux-release` | `cmake --build --preset linux-release` |
+| WSL2 (Ubuntu) | system GCC, CUDA in `/usr/local/cuda` | `cmake --preset linux-wsl` | `cmake --build --preset linux-wsl` — see [WSL.md](WSL.md) |
 
 CUDA Toolkit is required in every configuration. The classic Visual Studio solution (`U-CUDA/U-CUDA.vcxproj`) builds without CMake: the exe and its runtime land in `x64\Release\`, GUI libraries come from the vcpkg manifest. CMake builds the test suite, Linux and the headless configuration. The `vcxproj_sync` test keeps both build definitions on the same library sources. Commands are in [SETUP.md](SETUP.md).
 

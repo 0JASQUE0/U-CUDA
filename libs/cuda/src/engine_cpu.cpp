@@ -1362,9 +1362,16 @@ bool nvrtc_compile_ptx(int cc_major, int cc_minor,
     std::string cuda_include_opt;
     {
         char buf[4096];
+#ifdef _WIN32
         unsigned long nlen = env_value("CUDA_PATH", buf, 4096);
         if (nlen > 0 && nlen < 4096)
             cuda_include_opt = std::string("-I") + std::string(buf, nlen) + "\\include";
+#else
+        // POSIX: CUDA_PATH is optional; fall back to the toolkit found by CMake.
+        (void)buf;
+        const std::string inc = platform::cuda_include_dir();
+        if (!inc.empty()) cuda_include_opt = "-I" + inc;
+#endif
     }
     if (cuda_include_opt.empty()) {
         err = "the CUDA_PATH environment variable is not set - NVRTC will not find math_constants.h "
