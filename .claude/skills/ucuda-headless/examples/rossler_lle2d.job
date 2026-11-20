@@ -1,0 +1,22 @@
+# Рёсслер: карта старшего показателя Ляпунова по (a, c), CD
+task   = lle2d
+scheme = CD
+s      = 0.5
+vars   = x, y, z
+params = a, b, c
+rhs    = -y - z
+rhs    = x + a*y
+rhs    = b + z*(x - c)
+values = 0.2, 0.2, 5.7
+ic     = 1, 1, 0
+h      = 0.01
+transient = 500
+tmax   = 500
+nt     = 1
+eps    = 1e-6
+sweep   = a
+range   = 0.05, 0.4
+sweep_y = c
+range_y = 2, 12
+n      = 128
+out    = rossler_lle2d

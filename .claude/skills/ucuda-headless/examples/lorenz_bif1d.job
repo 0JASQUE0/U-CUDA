@@ -1,0 +1,18 @@
+# Лоренц: бифуркационная диаграмма по rho (максимумы z), RK4
+task   = bif1d
+scheme = RK4
+vars   = x, y, z
+params = sigma, rho, beta
+rhs    = sigma*(y - x)
+rhs    = x*(rho - z) - y
+rhs    = x*y - beta*z
+values = 10, 28, 8/3
+ic     = 0.2, 0.2, 0.2
+h      = 0.01
+transient = 500
+tmax   = 200
+sweep  = rho
+range  = 20, 200
+n      = 1000
+out_var = z
+out    = lorenz_bif1d      # префикс выходных файлов (относительно текущего каталога)
