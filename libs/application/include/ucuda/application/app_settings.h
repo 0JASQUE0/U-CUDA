@@ -121,11 +121,15 @@ struct AppSettings {
     // Камуфляжные темы: приглушённый узор под окнами (resources/themes/*.ppm) и
     // палитра в его цветах. 0 — нет, 1 Multicam, 2 DPM, 3 DDPM, 4 Flora (ВСР-98), 5 Flecktarn,
     // 6 Cyan HUD (вместо текстуры — анимированное сотовое поле, рисуется в app_main),
-    // 7 Cyan HUD Light (то же поле в светлых тонах).
+    // 7 Cyan HUD Light (то же поле в светлых тонах), 8 Dark Side (чёрно-красная:
+    // звёзды, клинки, боевая станция, крейсеры, молнии; тот же движок HUD),
+    // 9 Dark Side II (то же, но калибр станции зелёный, молнии синие, корабли серые),
+    // 10 Light Side (светлая голубая: небо, планета, звенья истребителей, синий клинок).
     // Пишется вместе с dark_theme = false, так что старая сборка откроет их как Light.
+    // Новые темы — только в конец: номер темы хранится в конфиге.
     enum CamoTheme { kCamoNone = 0, kCamoMulticam, kCamoDpm, kCamoDdpm, kCamoFlora, kCamoFlecktarn,
-                     kCamoHud, kCamoHudLight, kCamoCount };
-    static bool is_hud_theme(int camo) { return camo == kCamoHud || camo == kCamoHudLight; }
+                     kCamoHud, kCamoHudLight, kCamoSith, kCamoSith2, kCamoJedi, kCamoCount };
+    static bool is_hud_theme(int camo) { return camo == kCamoHud || camo == kCamoHudLight || camo == kCamoSith || camo == kCamoSith2 || camo == kCamoJedi; }
     int camo_theme = kCamoNone;
 
     // Пользовательские основные цвета темы (Settings -> Theme colors). Накладываются

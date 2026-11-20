@@ -1,4 +1,4 @@
-set(ucuda_desktop_sources app_main.cpp hud_theme.cpp)
+set(ucuda_desktop_sources app_main.cpp hud_theme.cpp hud_sith.cpp hud_jedi.cpp)
 if(WIN32)
     list(APPEND ucuda_desktop_sources "${PROJECT_SOURCE_DIR}/resources/windows/U-CUDA.rc")
 endif()

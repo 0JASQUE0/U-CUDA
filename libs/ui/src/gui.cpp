@@ -1342,6 +1342,12 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
             if (ImGui::RadioButton("Cyan HUD", &theme_idx, 2 + AppSettings::kCamoHud)) theme_changed = true;
             ImGui::SameLine();
             if (ImGui::RadioButton("Cyan HUD Light", &theme_idx, 2 + AppSettings::kCamoHudLight)) theme_changed = true;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Dark Side", &theme_idx, 2 + AppSettings::kCamoSith)) theme_changed = true;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Dark Side II", &theme_idx, 2 + AppSettings::kCamoSith2)) theme_changed = true;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Light Side", &theme_idx, 2 + AppSettings::kCamoJedi)) theme_changed = true;
             if (theme_changed) {
                 model.dark_theme     = (theme_idx == 0 || theme_idx == 2);
                 model.contrast_theme = (theme_idx == 2);
