@@ -390,8 +390,8 @@ void register_tests(ImGuiTestEngine* engine) {
         ctx->LogInfo("[throttle] Neural: %s", why(m->neural_session).c_str());
         using clk = std::chrono::steady_clock;
         struct Job { const char* name; std::function<bool()> start; };
+        // Phase analysis is the one tab whose job does not throttle rendering (live portrait).
         std::vector<Job> jobs = {
-            { "Phase",       [&] { return m->phase_session.recompute_async(); } },
             { "Bifurcation", [&] { return m->run_bifurcation(0); } },
             { "LLE",         [&] { return m->run_lle(0); } },
             { "LS",          [&] { return m->run_ls(0); } },

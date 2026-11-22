@@ -199,16 +199,21 @@ ImDrawList* Painter::next_list(ImDrawData* dd) {
 void Painter::inject(ImDrawData* dd, float sc, double time, bool computing, bool show_note, Variant v) {
     g_look = &look_of(v);
     const bool sith = is_sith(v);
-    // Часы анимации. Скорость: 1 без расчёта, 0.3 в первые секунды расчёта,
-    // 0 дальше; к цели подтягивается экспоненциально (~0.6 с), без скачков.
+    // Часы анимации. С началом расчёта скорость линейно падает до нуля за 1 с
+    // и анимация стоит до конца расчёта (кадры при этом идут — 10 в секунду, —
+    // прогресс и секундомер обновляются). После расчёта скорость возвращается к 1
+    // экспоненциально (~0.6 с), без скачков.
     {
         const double dt = last_time_ < 0.0 ? 0.0 : std::clamp(time - last_time_, 0.0, 0.5);
         last_time_ = time;
         if (computing && compute_start_ < 0.0) compute_start_ = time;
         if (!computing) compute_start_ = -1.0;
-        const float target = !computing ? 1.0f : (time - compute_start_ < 6.0 ? 0.3f : 0.0f);
-        speed_ += (target - speed_) * (1.0f - (float)std::exp(-dt / 0.6));
-        if (speed_ < 0.002f && target == 0.0f) speed_ = 0.0f;
+        if (computing) {
+            const float ramp = 1.0f - (float)(time - compute_start_) / 1.0f;
+            speed_ = std::clamp(std::min(speed_, ramp), 0.0f, 1.0f);
+        } else {
+            speed_ += (1.0f - speed_) * (1.0f - (float)std::exp(-dt / 0.6));
+        }
         anim_time_ = std::fmod(anim_time_ + dt * speed_, 3600.0);
     }
     if (!dd || dd->CmdListsCount == 0 || sc <= 0.0f) return;

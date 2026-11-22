@@ -1113,29 +1113,27 @@ int main(int argc, char** argv) {
         // и разметка запуска; замер 2026-11-18). Поэтому список теперь один —
         // AppModel::any_gpu_job_in_flight (все вкладки, включая Phase, Order,
         // Network, Neural и портреты бассейнов), его же берёт выбор системы.
-        const bool compute_in_flight = model.any_gpu_job_in_flight();
-        // During heavy compute throttle the main loop: glfwWaitEventsTimeout
-        // blocks the thread up to 100 ms unless an input event arrives. Drops
-        // render rate from ~60 FPS to ~10 FPS, freeing GPU and CPU for CUDA
-        // work. Empirically captures most of the win; lower rates (500 ms /
-        // 2 FPS) save only ~1 s extra on a 90 s job and make the progress bar
-        // visibly jerky.
-        // Одного glfwWaitEventsTimeout(0.1) мало: любое событие ввода будит
-        // поток досрочно, и при движении мыши окно снова рисовало десятки
-        // кадров в секунду, отнимая GPU у расчёта. Поэтому ждём до конца
-        // 100-мс окна, сколько бы событий ни пришло. События не теряются —
-        // GLFW-колбэки кладут их в очередь ImGui, и следующий кадр их
-        // обработает (клик по Cancel срабатывает за 1–2 кадра, ≤ 0.2 с).
-        if (compute_in_flight) {
+        // Единственное исключение — вкладка Phase analysis: её портрет смотрят
+        // вживую, поэтому её расчёт частоту кадров не роняет.
+        const bool throttle_render = model.any_gpu_job_in_flight(/*include_phase=*/false);
+        // Во время расчёта окно рисует ровно 10 кадров в секунду: этого хватает
+        // прогрессу и секундомеру, а GPU и CPU остаются расчёту (60 FPS отнимали
+        // заметную долю; 2 FPS выигрывают лишь ~1 с на 90-секундном расчёте и
+        // дёргают прогресс). Ждём до конца 100-мс интервала, сколько бы событий
+        // ни пришло: одного glfwWaitEventsTimeout(0.1) мало — любое событие
+        // будит поток досрочно, и при движении мыши окно снова рисовало десятки
+        // кадров в секунду. События не теряются: GLFW-колбэки кладут их в
+        // очередь ImGui, и следующий кадр их обработает (Cancel срабатывает за
+        // 1–2 кадра). Анимация темы при этом за 1 с останавливается сама
+        // (hud_theme::Painter::inject).
+        if (throttle_render) {
             const double deadline = last_frame_time + 0.1;
             for (double now = glfwGetTime();
                  now < deadline && !glfwWindowShouldClose(window);
                  now = glfwGetTime())
                 glfwWaitEventsTimeout(deadline - now);
-            glfwPollEvents();
-        } else {
-            glfwPollEvents();
         }
+        glfwPollEvents();
         last_frame_time = glfwGetTime();
 
         // Применяем масштаб/шрифт ДО NewFrame — иначе пересоздание fonts texture
@@ -1197,7 +1195,9 @@ int main(int argc, char** argv) {
 
         ImGui::Render();
         if (hud_on)
-            hud_painter.inject(ImGui::GetDrawData(), applied_ui_scale, ImGui::GetTime(), compute_in_flight,
+            // throttle_render, а не compute_in_flight: на Phase analysis (в том
+            // числе в бесконечном Continuation) анимация темы не останавливается.
+            hud_painter.inject(ImGui::GetDrawData(), applied_ui_scale, ImGui::GetTime(), throttle_render,
                                model.app_mode == AppModel::AppMode::Settings,
                                hud_variant(model.camo_theme));
         else if (!model.dark_theme && model.camo_theme > AppSettings::kCamoNone &&
