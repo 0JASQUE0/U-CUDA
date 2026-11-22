@@ -1098,6 +1098,7 @@ int main(int argc, char** argv) {
         apply_theme(scale);
     };
 
+    double last_frame_time = glfwGetTime();
     while (!glfwWindowShouldClose(window)) {
         // Все сессии, чей счёт идёт на GPU. Custom-вкладка держит свои расчёты
         // в ОТДЕЛЬНЫХ под-сессиях (custom_session.bif_session и т.д.), а не в
@@ -1118,10 +1119,24 @@ int main(int argc, char** argv) {
         // render rate from ~60 FPS to ~10 FPS, freeing GPU and CPU for CUDA
         // work. Empirically captures most of the win; lower rates (500 ms /
         // 2 FPS) save only ~1 s extra on a 90 s job and make the progress bar
-        // visibly jerky. Cancel button reacts immediately (input events wake
-        // the thread).
-        if (compute_in_flight) glfwWaitEventsTimeout(0.1);
-        else                   glfwPollEvents();
+        // visibly jerky.
+        // Одного glfwWaitEventsTimeout(0.1) мало: любое событие ввода будит
+        // поток досрочно, и при движении мыши окно снова рисовало десятки
+        // кадров в секунду, отнимая GPU у расчёта. Поэтому ждём до конца
+        // 100-мс окна, сколько бы событий ни пришло. События не теряются —
+        // GLFW-колбэки кладут их в очередь ImGui, и следующий кадр их
+        // обработает (клик по Cancel срабатывает за 1–2 кадра, ≤ 0.2 с).
+        if (compute_in_flight) {
+            const double deadline = last_frame_time + 0.1;
+            for (double now = glfwGetTime();
+                 now < deadline && !glfwWindowShouldClose(window);
+                 now = glfwGetTime())
+                glfwWaitEventsTimeout(deadline - now);
+            glfwPollEvents();
+        } else {
+            glfwPollEvents();
+        }
+        last_frame_time = glfwGetTime();
 
         // Применяем масштаб/шрифт ДО NewFrame — иначе пересоздание fonts texture
         // в середине кадра валит RenderDrawData.
