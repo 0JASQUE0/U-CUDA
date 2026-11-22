@@ -26,8 +26,10 @@ struct Request {
     std::string name;
     bool        state_done = false;   // Apply: состояние вкладки уже восстановлено
     int         delay      = 0;       // Apply: кадров до раскладки (ждём новые окна)
+    ImGuiID     target     = 0;
 };
 Request     g_req;
+std::unordered_map<ImGuiID, Request> g_target_requests;
 std::string g_status;            // итог последнего действия — строка в меню
 char        g_save_name[128] = "";
 int         g_list_mode = -1;    // для какой вкладки собран g_saved
@@ -282,7 +284,11 @@ struct Matcher {
             r = pick([&](const std::string& w) { return id_of(w) == id_of(saved); });
         if (r.empty() && tree_windows) {
             const auto tree_key = [](const std::string& name) {
-                return name.substr(0, name.rfind("_sys_"));
+                const auto id = id_of(name);
+                const auto& key = id.empty() ? name : id;
+                const auto system = key.rfind("_sys_");
+                const auto tab = key.rfind("_tab_", system);
+                return key.substr(0, std::min(tab, system));
             };
             r = pick([&](const std::string& w) { return tree_key(w) == tree_key(saved); });
         }
@@ -305,6 +311,7 @@ struct BuildCtx {
     int missing = 0;
     int created = 0;
     ImGuiID first_leaf = 0;
+    std::vector<std::string> matched;
 };
 
 void build(ImGuiID node, ImVec2 size, const LNode& t, BuildCtx& c) {
@@ -336,7 +343,19 @@ void build(ImGuiID node, ImVec2 size, const LNode& t, BuildCtx& c) {
     if (t.selected >= 0 && t.selected < (int)order.size() && order.size() > 1)
         std::rotate(order.begin() + t.selected, order.begin() + t.selected + 1, order.end());
     for (size_t i : order) {
-        std::string w = c.m.take(t.windows[i]);
+        const bool has_descriptor = c.factory && c.factory->resolve &&
+                                    i < t.objects.size() && !t.objects[i].empty();
+        std::string w;
+        if (has_descriptor) {
+            w = c.factory->resolve(t.objects[i]);
+            if (!w.empty()) {
+                const auto existing = std::find(c.m.avail.begin(), c.m.avail.end(), w);
+                if (existing != c.m.avail.end()) c.m.avail.erase(existing);
+                else ++c.created;
+            }
+        } else {
+            w = c.m.take(t.windows[i]);
+        }
         // Окна нет — создаём его объект по сохранённым настройкам. Окно появится со
         // следующего кадра; DockBuilderDockWindow запоминает узел и для ещё не созданного.
         if (w.empty() && c.factory && c.factory->create && i < t.objects.size() && !t.objects[i].empty()) {
@@ -344,6 +363,7 @@ void build(ImGuiID node, ImVec2 size, const LNode& t, BuildCtx& c) {
             if (!w.empty()) ++c.created;
         }
         if (w.empty()) { ++c.missing; continue; }
+        c.matched.push_back(w);
         // Вид окна — по имени окна этой вкладки (у созданного окна его ещё нет, настройки ждут).
         if (i < t.prefs.size()) plot_window_prefs_from_string(w, t.prefs[i]);
         ImGui::DockBuilderDockWindow(w.c_str(), node);
@@ -731,8 +751,11 @@ void dock_keep_split_ratios(ImGuiID dock_id, const char* fixed_window) {
 
 // ---------------------------------------------------------------- API
 
-void dock_layout_request(int mode, int preset) {
-    g_req = Request{ mode, ReqKind::Preset, preset, {} };
+void dock_layout_request(int mode, int preset, ImGuiID target) {
+    Request r{ mode, ReqKind::Preset, preset, {} };
+    r.target = target;
+    if (target) g_target_requests[target] = std::move(r);
+    else g_req = std::move(r);
 }
 
 void dock_layout_request_saved(int mode, const std::string& name, int delay_frames) {
@@ -740,14 +763,24 @@ void dock_layout_request_saved(int mode, const std::string& name, int delay_fram
     g_req.delay = delay_frames;
 }
 
-bool dock_layout_has_request(int mode) { return g_req.mode == mode && g_req.kind != ReqKind::None; }
+bool dock_layout_has_request(int mode, ImGuiID target) {
+    return (target && g_target_requests.count(target)) ||
+           (g_req.mode == mode && g_req.kind != ReqKind::None);
+}
 
-void dock_layout_menu(int mode) {
+void dock_layout_forget_target(ImGuiID target) { g_target_requests.erase(target); }
+
+void dock_layout_menu(int mode, ImGuiID target) {
     if (ImGui::IsWindowAppearing() || g_list_mode != mode) refresh_saved(mode);
+    const auto request = [target](Request r) {
+        r.target = target;
+        if (target) g_target_requests[target] = std::move(r);
+        else g_req = std::move(r);
+    };
 
     for (int p = 0; p < kDockPresetCount; ++p) {
         if (ImGui::MenuItem(kPresetNames[p]))
-            g_req = Request{ mode, ReqKind::Preset, p, {} };
+            request(Request{ mode, ReqKind::Preset, p, {} });
         if (p == kDockGrid && ImGui::IsItemHovered())
             ImGui::SetTooltip("From Tabs, Rows or Columns: lays the windows out in a grid.\n"
                               "From any other arrangement: windows stay where they are, cells of\n"
@@ -759,7 +792,7 @@ void dock_layout_menu(int mode) {
     for (const std::string& name : g_saved) {
         ImGui::PushID(name.c_str());
         if (has_file(mode, name)) {
-            if (ImGui::SmallButton("x")) g_req = Request{ mode, ReqKind::Remove, -1, name };
+            if (ImGui::SmallButton("x")) request(Request{ mode, ReqKind::Remove, -1, name });
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete this layout");
         } else {
             // Встроенная раскладка: удалять нечего, место под крестик держим для ровного списка.
@@ -770,7 +803,7 @@ void dock_layout_menu(int mode) {
                 ImGui::SetTooltip("Built-in layout. Save one under the same name to replace it.");
         }
         ImGui::SameLine();
-        if (ImGui::MenuItem(name.c_str())) g_req = Request{ mode, ReqKind::Apply, -1, name };
+        if (ImGui::MenuItem(name.c_str())) request(Request{ mode, ReqKind::Apply, -1, name });
         ImGui::PopID();
     }
 
@@ -783,7 +816,7 @@ void dock_layout_menu(int mode) {
     const bool exists = std::find(g_saved.begin(), g_saved.end(), nm) != g_saved.end();
     ImGui::BeginDisabled(nm.empty());
     if ((ImGui::Button(exists ? "Overwrite" : "Save") || enter) && !nm.empty())
-        g_req = Request{ mode, ReqKind::Save, -1, nm };
+        request(Request{ mode, ReqKind::Save, -1, nm });
     ImGui::EndDisabled();
     ImGui::TextDisabled("Files: layouts\\%s\\*.layout next to the exe", mode_dir(mode));
     if (!g_status.empty()) ImGui::TextWrapped("%s", g_status.c_str());
@@ -791,10 +824,13 @@ void dock_layout_menu(int mode) {
 
 void dock_layout_process(int mode, ImGuiID dock_id, ImVec2 size, const char* side_window,
                          const std::vector<ImGuiWindow*>& wins, const DockWindowFactory* factory) {
-    if (g_req.mode != mode || g_req.kind == ReqKind::None) return;
-    if (g_req.delay > 0) { --g_req.delay; return; }
-    Request r = g_req;
-    g_req = {};
+    const auto target = g_target_requests.find(dock_id);
+    auto& pending = target == g_target_requests.end() ? g_req : target->second;
+    if (pending.mode != mode || pending.kind == ReqKind::None) return;
+    if (pending.delay > 0) { --pending.delay; return; }
+    Request r = std::move(pending);
+    if (target == g_target_requests.end()) g_req = {};
+    else g_target_requests.erase(target);
     ImGuiDockNode* root = ImGui::DockBuilderGetNode(dock_id);
     // Раскладку меняет код (Grid, пресет, сохранённая раскладка): запомненные доли разрезов
     // (dock_keep_split_ratios) устарели. Иначе вложенный разрез, чью длину изменил Grid, считался
@@ -856,7 +892,8 @@ void dock_layout_process(int mode, ImGuiID dock_id, ImVec2 size, const char* sid
             if (!state.empty() && factory->load_state(state)) {
                 r.state_done = true;
                 r.delay = 2;
-                g_req = r;
+                if (r.target) g_target_requests[r.target] = std::move(r);
+                else g_req = std::move(r);
                 break;
             }
         }
@@ -874,7 +911,7 @@ void dock_layout_process(int mode, ImGuiID dock_id, ImVec2 size, const char* sid
         ImGui::DockBuilderSetNodeSize(dock_id, size);
         BuildCtx c{ m, factory };
         build(dock_id, size, *tree, c);
-        if (factory && factory->apply_unmatched) {
+        if (factory && factory->apply_matched) {
             auto side = std::find_if(m.avail.begin(), m.avail.end(), [side_window](const std::string& w) {
                 return side_window && w == side_window;
             });
@@ -882,7 +919,7 @@ void dock_layout_process(int mode, ImGuiID dock_id, ImVec2 size, const char* sid
                 ImGui::DockBuilderDockWindow(side->c_str(), c.first_leaf ? c.first_leaf : dock_id);
                 m.avail.erase(side);
             }
-            factory->apply_unmatched(m.avail);
+            factory->apply_matched(c.matched);
         } else {
             for (const std::string& w : m.avail)
                 ImGui::DockBuilderDockWindow(w.c_str(), c.first_leaf ? c.first_leaf : dock_id);

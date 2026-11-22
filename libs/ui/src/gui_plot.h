@@ -161,7 +161,7 @@ bool draw_style_toolbar(const char* label, const char* id_suffix,
 void toolbar_row(const std::function<void()>& items);
 
 
-void draw_proj_line_style(Projection& pr, const char* sfx, const char* points_tip);
+void draw_proj_line_style(Projection& pr, Plot2DView& view, const char* sfx, const char* points_tip);
 
 // SliderFloat для меню стиля (толщина, альфа, размер точек): по ПКМ, как и по Ctrl+клику,
 // превращается в поле ввода числа; введённое прижимается к [lo, hi].

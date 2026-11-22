@@ -18,14 +18,15 @@ namespace ucuda::ui_detail {
 enum DockLayoutPreset { kDockTabs = 0, kDockColumns, kDockRows, kDockGrid, kDockPresetCount };
 
 // Тело всплывающего меню кнопки Layout для вкладки mode (AppModel::AppMode).
-void dock_layout_menu(int mode);
+void dock_layout_menu(int mode, ImGuiID target = 0);
 
 // Запросить встроенный пресет из кода (например, Tabs для вкладки без раскладки).
-void dock_layout_request(int mode, int preset);
+void dock_layout_request(int mode, int preset, ImGuiID target = 0);
 // Запросить сохранённую (или встроенную, например Custom "Default") раскладку по имени.
 // delay_frames — подождать, пока вкладка создаст свои окна (первый показ вкладки).
 void dock_layout_request_saved(int mode, const std::string& name, int delay_frames = 0);
-bool dock_layout_has_request(int mode);
+bool dock_layout_has_request(int mode, ImGuiID target = 0);
+void dock_layout_forget_target(ImGuiID target);
 
 // Окна-объекты вкладки (проекции, окна Parametric / DFT1D / Order): раскладка хранит их
 // настройки и при применении создаёт недостающие.
@@ -39,9 +40,10 @@ struct DockWindowFactory {
     // поменялось, — тогда раскладка ставится через пару кадров, когда окна появятся.
     std::function<std::string()> save_state;
     std::function<bool(const std::string&)> load_state;
-    // Tree: окна существующих узлов, включая выключенные предыдущей раскладкой.
+    // Tree: all known windows in this workspace, including hidden copies.
     std::function<std::vector<std::string>()> available_windows;
-    std::function<void(const std::vector<std::string>&)> apply_unmatched;
+    std::function<std::string(const std::string& descriptor)> resolve;
+    std::function<void(const std::vector<std::string>&)> apply_matched;
 };
 
 // В точке, где вкладка подаёт свой dockspace (до ImGui::DockSpace): выполнить запрос вкладки

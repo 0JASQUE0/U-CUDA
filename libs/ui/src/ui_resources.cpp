@@ -5,9 +5,9 @@ std::vector<std::function<void()>>& ui_resource_deleters() {
     static std::vector<std::function<void()>> deleters;
     return deleters;
 }
-using ProjectionCache = std::map<std::uint64_t, ProjectionViews>;
-ProjectionViews& projection_views(const Projection& projection) {
-    auto& view = ui_resource<ProjectionCache, 2000>()[projection.runtime_id];
+using ProjectionCache = std::map<std::pair<std::uint64_t, int>, ProjectionViews>;
+ProjectionViews& projection_views(const Projection& projection, int workspace_owner) {
+    auto& view = ui_resource<ProjectionCache, 2000>()[{projection.runtime_id, workspace_owner}];
     view.last_frame = ImGui::GetFrameCount();
     return view;
 }

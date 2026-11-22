@@ -936,7 +936,7 @@ void draw_basins_phase_windows(AppModel& model, BasinsAnalysisSession& s, int ci
                                const std::string& title_suffix, int owner_id_delta,
                                const ProjHookFn& before_begin, const ProjHookFn& after_begin,
                                std::optional<unsigned> plot_owner_id,
-                               const ProjVisibilityFn& visible) {
+                               const ProjVisibilityFn& visible, const ProjHookFn& on_close_copy) {
     s.ensure_phase_slots();
     if (ci < 0 || ci >= (int)s.configs.size()) return;
     BasinsConfig&    c  = s.configs[(size_t)ci];
@@ -986,7 +986,7 @@ void draw_basins_phase_windows(AppModel& model, BasinsAnalysisSession& s, int ci
 
     const size_t n_before = sl.phase.projections.size();
     draw_projection_windows(sl.phase, cb, before_begin, after_begin, title_suffix, owner_id_delta,
-                            style_fn, clust, visible);
+                            style_fn, clust, visible, on_close_copy);
     // Окно могли закрыть крестиком — список окон изменился, надо сохранить.
     if (sl.phase.projections.size() != n_before) s.phase_settings_dirty = true;
 }

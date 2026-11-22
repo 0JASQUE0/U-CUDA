@@ -814,6 +814,11 @@ std::map<std::string, PlotWindowPrefs>& window_prefs() {
     return m;
 }
 
+std::string window_prefs_key(const std::string& name) {
+    const auto id = name.find("###tree_");
+    return id == std::string::npos ? name : name.substr(id);
+}
+
 int g_window_scope = -1;   // вкладка приложения текущего кадра (plot_set_window_scope)
 
 bool prefs_default(const PlotWindowPrefs& p) {
@@ -832,7 +837,7 @@ void* prefs_read_open(ImGuiContext*, ImGuiSettingsHandler*, const char* name) {
         legend_recent_colors().clear();
         return &legend_recent_colors();
     }
-    return &window_prefs()[name];
+    return &window_prefs()[window_prefs_key(name)];
 }
 
 void prefs_read_line(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line) {
@@ -998,7 +1003,7 @@ PlotWindowPrefs& plot_window_prefs_current() {
         fallback = PlotWindowPrefs{};
         return fallback;
     }
-    PlotWindowPrefs& p = window_prefs()[w->Name];
+    PlotWindowPrefs& p = window_prefs()[window_prefs_key(w->Name)];
     p.scope = g_window_scope;
     return p;
 }
@@ -1026,7 +1031,7 @@ constexpr PrefsField kPrefsFields[] = {
 }
 
 std::string plot_window_prefs_to_string(const std::string& window_name) {
-    const auto it = window_prefs().find(window_name);
+    const auto it = window_prefs().find(window_prefs_key(window_name));
     const PlotWindowPrefs p = it != window_prefs().end() ? it->second : PlotWindowPrefs{};
     std::string out;
     for (const PrefsField& f : kPrefsFields) {
@@ -1038,7 +1043,7 @@ std::string plot_window_prefs_to_string(const std::string& window_name) {
 
 void plot_window_prefs_from_string(const std::string& window_name, const std::string& s) {
     if (s.empty()) return;
-    PlotWindowPrefs& p = window_prefs()[window_name];
+    PlotWindowPrefs& p = window_prefs()[window_prefs_key(window_name)];
     for (const PrefsField& f : kPrefsFields) {
         const std::string pat = std::string(f.key) + "=";
         size_t pos = 0;

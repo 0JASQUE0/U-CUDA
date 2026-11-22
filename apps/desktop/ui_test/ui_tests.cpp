@@ -210,6 +210,44 @@ void register_tests(ImGuiTestEngine* engine) {
         c.axis_x_symlog = c.axis_y_symlog = false;
     };
 
+    t = IM_REGISTER_TEST(engine, "tree", "phase_projection_style");
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        AppModel* m = app_model();
+        IM_CHECK(m != nullptr);
+        ctx->SetRef("//MainHost");
+        ctx->ItemClick("Tree");
+        ctx->Yield(5);
+
+        auto& tree = m->tree_session;
+        IM_CHECK(!tree.tree.nodes.empty());
+        const int point = tree.add_node(tree.tree.nodes.front().id, TreeNodeKind::Point);
+        const int leaf = tree.add_node(point, TreeNodeKind::Phase);
+        IM_CHECK(leaf != 0);
+        auto& phase = *tree.leaves.at(leaf).phase;
+        IM_CHECK(!phase.projections.empty());
+        auto& projection = phase.projections.front();
+        projection.type = ProjType::Phase2D;
+        projection.axis_x = 0;
+        projection.axis_y = 1;
+        projection.label = "Tree phase style regression";
+        IM_CHECK(tree.show_leaf_window(leaf));
+
+        const int tab = tree.tree.active_tab().id;
+        const std::string suffix = (tab == 1 ? "" : "_tab_" + std::to_string(tab))
+            + (m->loaded_name.empty() ? "" : "_sys_" + m->loaded_name);
+        const std::string window = "//" + projection.label + "##proj0_g" +
+            std::to_string(phase.layout_generation) + "_tree" + std::to_string(leaf) + suffix;
+        ctx->Yield(3);
+        ctx->WindowFocus(window.c_str());
+
+        phase.result.trajectories = {{{0.0, 0.0}, {1.0, 1.0}, {2.0, 0.0}}};
+        phase.result.ok = true;
+        ++phase.data_generation;
+        ctx->Yield(3);
+        IM_CHECK(ctx->WindowInfo(window.c_str()).Window != nullptr);
+        IM_CHECK(m->remove_tree_node(point));
+    };
+
     // Diagnostic: the same basins config computed by a Tree leaf and by the Basins tab, twice each
     // (the first run includes NVRTC). Logs wall time, frame count and frame time while running;
     // the engine prints its own compile/sim/DBSCAN split.

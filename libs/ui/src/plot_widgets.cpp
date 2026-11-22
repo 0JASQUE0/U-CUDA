@@ -817,9 +817,9 @@ void draw_line_style_controls(const LineStyleFields& f, const char* sfx, const c
     }
 }
 
-void draw_proj_line_style(Projection& pr, const char* sfx, const char* points_tip) {
+void draw_proj_line_style(Projection& pr, Plot2DView& view, const char* sfx, const char* points_tip) {
     draw_proj_style_controls(pr, sfx, points_tip);
-    apply_line_style(*projection_views(pr).view2d, proj_style_fields(pr));
+    apply_line_style(view, proj_style_fields(pr));
 }
 }
 

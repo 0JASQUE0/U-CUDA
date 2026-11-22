@@ -21,7 +21,8 @@ void draw_basins_phase_windows(AppModel& model, BasinsAnalysisSession& s, int ci
                                const std::string& title_suffix, int owner_id_delta,
                                const ProjHookFn& before_begin = {}, const ProjHookFn& after_begin = {},
                                std::optional<unsigned> plot_owner_id = std::nullopt,
-                               const ProjVisibilityFn& visible = {});
+                               const ProjVisibilityFn& visible = {},
+                               const ProjHookFn& on_close_copy = {});
 
 
 void basins_phase_tick(AppModel& model);

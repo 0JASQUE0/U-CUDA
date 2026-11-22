@@ -63,6 +63,14 @@ struct TreeSession {
     // --- Структура ---
     // Новый узел последним ребёнком parent; возвращает id или 0. slice_dir — для Slice1D.
     int  add_node(int parent, TreeNodeKind kind, int slice_dir = 0);
+    int  ensure_layout_leaf(const std::vector<TreeLayoutNode>& path);
+    [[nodiscard]] bool workspace_window_visible(int id, const std::string& key, bool available = true) const;
+    [[nodiscard]] bool leaf_window_visible(int id, int view = 0) const;
+    bool show_leaf_window(int id, int view = 0);
+    // Restore the primary view if hidden. Otherwise append another view of the same result.
+    // Returns the view index, or -1 if the leaf cannot create an extra view.
+    int open_or_add_leaf_window(int id);
+    bool remove_extra_view(int id, int view);
     // Копия поддерева сразу после оригинала; возвращает id копии или 0.
     int  duplicate_node(int id);
     // Удалить поддерево (не корень). Возвращает false, если что-то из него считается.
@@ -74,6 +82,8 @@ struct TreeSession {
     // --- Расчёт ---
     // Эффективный контекст листа: System + ближайший регион + срез + точка, с пинами.
     [[nodiscard]] CustomTabSharedConfig effective_shared(int leaf_id) const;
+    [[nodiscard]] std::string sweep_axis_label(const EffectiveSweep& axis) const;
+    [[nodiscard]] std::string sweep_window_label(int leaf_id) const;
     // Подпись входов листа (без значений осей, по которым он сам свипует).
     [[nodiscard]] std::string leaf_signature(int leaf_id) const;
     [[nodiscard]] bool leaf_dirty(int leaf_id) const;

@@ -227,7 +227,7 @@ yield 3
 click "//$FOCUSED>>Grid"
 yield 10
 # the two 1D slices in one column: along X (c) on top, along Y (b) below
-dock "*>>Bifurcation 1D###tree_9*" "*>>Bifurcation 1D###tree_7*" down
+dock "*>>Bif 1D: b (Y)" "*>>Bif 1D: c (X)" down
 yield 10
 expect_no_overlap
 click "*>>Tree Controls*>>Run"
@@ -238,22 +238,22 @@ screenshot 06_tree.png
 # Four points on the 2D bifurcation diagram (middle button = the cursor of the region).
 # Each click recomputes the slices, the phase portrait and the basins at that (c, b).
 log "5a. point c=20, b=3 (the attractor of the paper)"
-plot_click "*>>Bifurcation 2D>>##hm_plot_*" 20 3 middle
+plot_click "*>>Bif 2D: X: c, Y: b>>##hm_plot_*" 20 3 middle
 wait_idle 600
 sleep 5
 screenshot 07_point_c20_b3.png
 log "5b. point c=12.5, b=3"
-plot_click "*>>Bifurcation 2D>>##hm_plot_*" 12.5 3 middle
+plot_click "*>>Bif 2D: X: c, Y: b>>##hm_plot_*" 12.5 3 middle
 wait_idle 600
 sleep 5
 screenshot 08_point_c12.5_b3.png
 log "5c. point c=26, b=2"
-plot_click "*>>Bifurcation 2D>>##hm_plot_*" 26 2 middle
+plot_click "*>>Bif 2D: X: c, Y: b>>##hm_plot_*" 26 2 middle
 wait_idle 600
 sleep 5
 screenshot 09_point_c26_b2.png
 log "5d. point c=16, b=4.5"
-plot_click "*>>Bifurcation 2D>>##hm_plot_*" 16 4.5 middle
+plot_click "*>>Bif 2D: X: c, Y: b>>##hm_plot_*" 16 4.5 middle
 wait_idle 600
 sleep 5
 screenshot 10_point_c16_b4.5.png
