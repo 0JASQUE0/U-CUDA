@@ -1,0 +1,16 @@
+{
+  "excludes": [
+    "U-CUDA/library",
+    "third_party",
+    ".claude",
+    ".codex",
+    "vcpkg_installed",
+    "x64",
+    ".venv",
+    "tests/baselines",
+    "tests/fixtures/library",
+    ".vscode",
+    "graphify-out"
+  ],
+  "gitignore": true
+}

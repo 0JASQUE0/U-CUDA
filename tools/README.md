@@ -2,6 +2,16 @@
 
 Tools are auxiliary programs that are not linked into C++ targets. Currently [ocr](ocr/README.md) contains the optional Python recognition server and its pinned environment. Runtime packaging copies the server beside executables; Python packages are installed separately.
 
+## Code graph (graphify)
+
+`graphify-out/` holds the repository code graph (`graph.json`, `GRAPH_REPORT.md`, `graph.html`) and is committed. After any change to the project structure (files added, moved or deleted, new modules), rebuild it and commit it together with that change:
+
+```
+%USERPROFILE%\.graphify-venv\Scripts\python.exe tools/graphify_update.py
+```
+
+The rebuild is structural (AST only, no LLM) and incremental through `graphify-out/cache/`, which stays local together with the interpreter path.
+
 ## Fixed MNIST pilot
 
 Download the four gzip IDX archives from the [CVDF mirror](https://github.com/cvdfoundation/mnist#download)

@@ -1,0 +1,2018 @@
+{
+  "CMakePresets.json": {
+    "mtime": 1793622894.5055194,
+    "seen": 1795362819.4201415,
+    "ast_hash": "95d6c061d9e7715eaa2fc30e0e6ce721",
+    "semantic_hash": "95d6c061d9e7715eaa2fc30e0e6ce721"
+  },
+  "U-CUDA.sln": {
+    "mtime": 1793657143.1902928,
+    "seen": 1795362819.4201415,
+    "ast_hash": "ef92f695fe5c89daf1aecf4c45ee6641",
+    "semantic_hash": "ef92f695fe5c89daf1aecf4c45ee6641"
+  },
+  "U-CUDA/pch.cpp": {
+    "mtime": 1794488289.9889188,
+    "seen": 1795362819.4201415,
+    "ast_hash": "03f77023882d1d533863a6c3606438a4",
+    "semantic_hash": "03f77023882d1d533863a6c3606438a4"
+  },
+  "U-CUDA/pch.h": {
+    "mtime": 1794488289.9899156,
+    "seen": 1795362819.4201415,
+    "ast_hash": "550f12d2a62cd3740a93dc48bcf6b06d",
+    "semantic_hash": "550f12d2a62cd3740a93dc48bcf6b06d"
+  },
+  "apps/desktop/app_main.cpp": {
+    "mtime": 1795186651.5287135,
+    "seen": 1795362819.4201415,
+    "ast_hash": "fd48f706129b0b770a0d58492fc84911",
+    "semantic_hash": "fd48f706129b0b770a0d58492fc84911"
+  },
+  "apps/desktop/hud_jedi.cpp": {
+    "mtime": 1795186715.1895506,
+    "seen": 1795362819.4201415,
+    "ast_hash": "3061267bab02a71ce4517bc7b8b932a0",
+    "semantic_hash": "3061267bab02a71ce4517bc7b8b932a0"
+  },
+  "apps/desktop/hud_jedi.h": {
+    "mtime": 1795186271.9540894,
+    "seen": 1795362819.4201415,
+    "ast_hash": "6a29b8ccdab3306c8869c1f84639f4df",
+    "semantic_hash": "6a29b8ccdab3306c8869c1f84639f4df"
+  },
+  "apps/desktop/hud_scene.h": {
+    "mtime": 1795186263.7234154,
+    "seen": 1795362819.4201415,
+    "ast_hash": "cadd284e0fcb524306a5d8a8335a6e50",
+    "semantic_hash": "cadd284e0fcb524306a5d8a8335a6e50"
+  },
+  "apps/desktop/hud_sith.cpp": {
+    "mtime": 1795186263.9069593,
+    "seen": 1795362819.4201415,
+    "ast_hash": "b06709a49fb7e8748ffcc2bd7515dbd6",
+    "semantic_hash": "b06709a49fb7e8748ffcc2bd7515dbd6"
+  },
+  "apps/desktop/hud_sith.h": {
+    "mtime": 1795184968.1968718,
+    "seen": 1795362819.4201415,
+    "ast_hash": "b6f10d1aa04bd53e6b34e6bfe9ba55aa",
+    "semantic_hash": "b6f10d1aa04bd53e6b34e6bfe9ba55aa"
+  },
+  "apps/desktop/hud_theme.cpp": {
+    "mtime": 1795186406.626649,
+    "seen": 1795362819.4201415,
+    "ast_hash": "1d3ba1e7e0db9fdd37618f36f73f9716",
+    "semantic_hash": "1d3ba1e7e0db9fdd37618f36f73f9716"
+  },
+  "apps/desktop/hud_theme.h": {
+    "mtime": 1795186385.400449,
+    "seen": 1795362819.4201415,
+    "ast_hash": "75fa5c315f7c3732061f144fdf04fad7",
+    "semantic_hash": "75fa5c315f7c3732061f144fdf04fad7"
+  },
+  "apps/desktop/ui_test/scripts/build.ps1": {
+    "mtime": 1795172720.9568408,
+    "seen": 1795362819.4201415,
+    "ast_hash": "df4b1cbba3e9af7090871a9f0102a207",
+    "semantic_hash": "df4b1cbba3e9af7090871a9f0102a207"
+  },
+  "apps/desktop/ui_test/scripts/run.ps1": {
+    "mtime": 1795172720.9568408,
+    "seen": 1795362819.4201415,
+    "ast_hash": "430c6daa5cb9122fea30a6249e84c633",
+    "semantic_hash": "430c6daa5cb9122fea30a6249e84c633"
+  },
+  "apps/desktop/ui_test/ui_test_host.cpp": {
+    "mtime": 1795172720.9578383,
+    "seen": 1795362819.4201415,
+    "ast_hash": "31ce6ce07b8e1ff51945a4914e1d02a1",
+    "semantic_hash": "31ce6ce07b8e1ff51945a4914e1d02a1"
+  },
+  "apps/desktop/ui_test/ui_test_host.h": {
+    "mtime": 1795172720.9578383,
+    "seen": 1795362819.4201415,
+    "ast_hash": "432393c721430ef47c78b4965eafd7b4",
+    "semantic_hash": "432393c721430ef47c78b4965eafd7b4"
+  },
+  "apps/desktop/ui_test/ui_test_modes.h": {
+    "mtime": 1795017740.7689815,
+    "seen": 1795362819.4201415,
+    "ast_hash": "5821808f84a573c7fbf4f0cc0fe0d8dc",
+    "semantic_hash": "5821808f84a573c7fbf4f0cc0fe0d8dc"
+  },
+  "apps/desktop/ui_test/ui_test_script.cpp": {
+    "mtime": 1795172720.9588356,
+    "seen": 1795362819.4201415,
+    "ast_hash": "8cea299127afc7bf3ddc97c8bc5be75a",
+    "semantic_hash": "8cea299127afc7bf3ddc97c8bc5be75a"
+  },
+  "apps/desktop/ui_test/ui_tests.cpp": {
+    "mtime": 1795362772.6034398,
+    "seen": 1795362819.4201415,
+    "ast_hash": "2e9890584d754f459e91706b2891664a",
+    "semantic_hash": "2e9890584d754f459e91706b2891664a"
+  },
+  "apps/desktop/ui_test/ui_tests_sweep.cpp": {
+    "mtime": 1795034990.7283275,
+    "seen": 1795362819.4201415,
+    "ast_hash": "695f198478dd09a9896d50ebdcddf3e9",
+    "semantic_hash": "695f198478dd09a9896d50ebdcddf3e9"
+  },
+  "apps/neural_batch/main.cpp": {
+    "mtime": 1794574499.0485635,
+    "seen": 1795362819.4201415,
+    "ast_hash": "45aab0a813f6aca8b765d8ff121ab21a",
+    "semantic_hash": "45aab0a813f6aca8b765d8ff121ab21a"
+  },
+  "libs/analysis/include/ucuda/analysis/analysis_session.h": {
+    "mtime": 1793658528.5577438,
+    "seen": 1795362819.4201415,
+    "ast_hash": "930cc7b6f3c06a4a612d1f365a7172ae",
+    "semantic_hash": "930cc7b6f3c06a4a612d1f365a7172ae"
+  },
+  "libs/analysis/include/ucuda/analysis/custom_session.h": {
+    "mtime": 1794774876.2756848,
+    "seen": 1795362819.4201415,
+    "ast_hash": "cb46228fe76fee2193af919f9a804438",
+    "semantic_hash": "cb46228fe76fee2193af919f9a804438"
+  },
+  "libs/analysis/include/ucuda/analysis/network_session.h": {
+    "mtime": 1793658528.558741,
+    "seen": 1795362819.4201415,
+    "ast_hash": "d5ed3f79a1adef553fcc9a13abf4e56c",
+    "semantic_hash": "d5ed3f79a1adef553fcc9a13abf4e56c"
+  },
+  "libs/analysis/include/ucuda/analysis/neural_session.h": {
+    "mtime": 1795172328.958712,
+    "seen": 1795362819.4201415,
+    "ast_hash": "6f902ca046953a189606660ec0b025ad",
+    "semantic_hash": "6f902ca046953a189606660ec0b025ad"
+  },
+  "libs/analysis/include/ucuda/analysis/order_session.h": {
+    "mtime": 1794928835.2709153,
+    "seen": 1795362819.4201415,
+    "ast_hash": "513db2912dd8fe8665f81e7ee78bc104",
+    "semantic_hash": "513db2912dd8fe8665f81e7ee78bc104"
+  },
+  "libs/analysis/include/ucuda/analysis/tree_session.h": {
+    "mtime": 1795362772.603844,
+    "seen": 1795362819.4201415,
+    "ast_hash": "69d8bdf130d7ecb5014a4995d745cf60",
+    "semantic_hash": "69d8bdf130d7ecb5014a4995d745cf60"
+  },
+  "libs/analysis/src/basins_session.cpp": {
+    "mtime": 1795034990.7295735,
+    "seen": 1795362819.4201415,
+    "ast_hash": "2512ac312f7e4a827b8f6834f8fb32c6",
+    "semantic_hash": "2512ac312f7e4a827b8f6834f8fb32c6"
+  },
+  "libs/analysis/src/bifurcation_session.cpp": {
+    "mtime": 1793622894.5164917,
+    "seen": 1795362819.4201415,
+    "ast_hash": "efce867f5c80bd9385ef5df00ef7996f",
+    "semantic_hash": "efce867f5c80bd9385ef5df00ef7996f"
+  },
+  "libs/analysis/src/custom_session.cpp": {
+    "mtime": 1794774876.2756848,
+    "seen": 1795362819.4201415,
+    "ast_hash": "7b533c9296bbaec95348a01b4937e872",
+    "semantic_hash": "7b533c9296bbaec95348a01b4937e872"
+  },
+  "libs/analysis/src/dft_session.cpp": {
+    "mtime": 1793622894.5174892,
+    "seen": 1795362819.4201415,
+    "ast_hash": "152094e7545d711c04b52df815b964ca",
+    "semantic_hash": "152094e7545d711c04b52df815b964ca"
+  },
+  "libs/analysis/src/fastsync_session.cpp": {
+    "mtime": 1793622894.5174892,
+    "seen": 1795362819.4201415,
+    "ast_hash": "8ee6b25b36b3409c55ee1d242c2fdeb4",
+    "semantic_hash": "8ee6b25b36b3409c55ee1d242c2fdeb4"
+  },
+  "libs/analysis/src/lle_session.cpp": {
+    "mtime": 1793622894.5174892,
+    "seen": 1795362819.4201415,
+    "ast_hash": "06e8ef4d93eef50c50f9f531d3d3578d",
+    "semantic_hash": "06e8ef4d93eef50c50f9f531d3d3578d"
+  },
+  "libs/analysis/src/ls_session.cpp": {
+    "mtime": 1793622894.518486,
+    "seen": 1795362819.4201415,
+    "ast_hash": "d208d016c2f325053fda0f79aca32b5a",
+    "semantic_hash": "d208d016c2f325053fda0f79aca32b5a"
+  },
+  "libs/analysis/src/metrics_session.cpp": {
+    "mtime": 1793622894.518486,
+    "seen": 1795362819.4201415,
+    "ast_hash": "e841e894a6145df9d9536f8ed7fa8079",
+    "semantic_hash": "e841e894a6145df9d9536f8ed7fa8079"
+  },
+  "libs/analysis/src/network_session.cpp": {
+    "mtime": 1793658528.559739,
+    "seen": 1795362819.4201415,
+    "ast_hash": "e0e91efd543fa69a71e915facc48d20e",
+    "semantic_hash": "e0e91efd543fa69a71e915facc48d20e"
+  },
+  "libs/analysis/src/neural_session.cpp": {
+    "mtime": 1795172328.9597096,
+    "seen": 1795362819.4201415,
+    "ast_hash": "ad08b192bea118f27a71fc47ca31c2d7",
+    "semantic_hash": "ad08b192bea118f27a71fc47ca31c2d7"
+  },
+  "libs/analysis/src/order_session.cpp": {
+    "mtime": 1794928835.271912,
+    "seen": 1795362819.4201415,
+    "ast_hash": "4731b74d08dc6b00aa7470519e95cb37",
+    "semantic_hash": "4731b74d08dc6b00aa7470519e95cb37"
+  },
+  "libs/analysis/src/phase_session.cpp": {
+    "mtime": 1795172720.959833,
+    "seen": 1795362819.4201415,
+    "ast_hash": "317b4502bfdac8a6141a1421e7947541",
+    "semantic_hash": "317b4502bfdac8a6141a1421e7947541"
+  },
+  "libs/analysis/src/session_helpers.cpp": {
+    "mtime": 1794430477.8070552,
+    "seen": 1795362819.4201415,
+    "ast_hash": "548e6121d9a1c3bcca93e69a8cb6871e",
+    "semantic_hash": "548e6121d9a1c3bcca93e69a8cb6871e"
+  },
+  "libs/analysis/src/session_internal.h": {
+    "mtime": 1794430477.8080525,
+    "seen": 1795362819.4201415,
+    "ast_hash": "23d285614aff57669f4a4a6b537505f5",
+    "semantic_hash": "23d285614aff57669f4a4a6b537505f5"
+  },
+  "libs/analysis/src/tree_session.cpp": {
+    "mtime": 1795362772.603844,
+    "seen": 1795362819.4201415,
+    "ast_hash": "54bfb18931975c86b6a3ec8cf5ca1aed",
+    "semantic_hash": "54bfb18931975c86b6a3ec8cf5ca1aed"
+  },
+  "libs/application/include/ucuda/application/app_model.h": {
+    "mtime": 1795034990.7319508,
+    "seen": 1795362819.4201415,
+    "ast_hash": "b9e64aa2b3aa4ec11fe95cadbf189e83",
+    "semantic_hash": "b9e64aa2b3aa4ec11fe95cadbf189e83"
+  },
+  "libs/application/include/ucuda/application/app_settings.h": {
+    "mtime": 1795186385.2407365,
+    "seen": 1795362819.4201415,
+    "ast_hash": "1a88a271fa7fe19f93437ae9473943ca",
+    "semantic_hash": "1a88a271fa7fe19f93437ae9473943ca"
+  },
+  "libs/application/include/ucuda/application/compute_services.h": {
+    "mtime": 1793658528.5617337,
+    "seen": 1795362819.4201415,
+    "ast_hash": "fa58c680cb9ae647ad05256fcb658ec3",
+    "semantic_hash": "fa58c680cb9ae647ad05256fcb658ec3"
+  },
+  "libs/application/include/ucuda/application/prewarm_watch.h": {
+    "mtime": 1793632607.718993,
+    "seen": 1795362819.4201415,
+    "ast_hash": "f5c0522f1d6e7b9692f282136c5f8e29",
+    "semantic_hash": "f5c0522f1d6e7b9692f282136c5f8e29"
+  },
+  "libs/application/include/ucuda/application/session_persistence.h": {
+    "mtime": 1794774876.2799037,
+    "seen": 1795362819.4201415,
+    "ast_hash": "837f779f5494bc92f63e3449c8cae10d",
+    "semantic_hash": "837f779f5494bc92f63e3449c8cae10d"
+  },
+  "libs/application/include/ucuda/application/system_editor.h": {
+    "mtime": 1793640606.6639295,
+    "seen": 1795362819.4201415,
+    "ast_hash": "174e16f651bcdccab5556bfc4b127722",
+    "semantic_hash": "174e16f651bcdccab5556bfc4b127722"
+  },
+  "libs/application/include/ucuda/application/time_estimate.h": {
+    "mtime": 1793658528.5627322,
+    "seen": 1795362819.4201415,
+    "ast_hash": "61c72c1c7eff4847ffb43bb4c2768f8e",
+    "semantic_hash": "61c72c1c7eff4847ffb43bb4c2768f8e"
+  },
+  "libs/application/src/app_broadcast.cpp": {
+    "mtime": 1793640606.6649258,
+    "seen": 1795362819.4201415,
+    "ast_hash": "caa10f2cfa583909812230ed4d10e5bf",
+    "semantic_hash": "caa10f2cfa583909812230ed4d10e5bf"
+  },
+  "libs/application/src/app_model.cpp": {
+    "mtime": 1794774876.2799037,
+    "seen": 1795362819.4201415,
+    "ast_hash": "74f5c469f8ae8cf6bdc4352274560cf9",
+    "semantic_hash": "74f5c469f8ae8cf6bdc4352274560cf9"
+  },
+  "libs/application/src/app_plot_windows.cpp": {
+    "mtime": 1794928835.2729025,
+    "seen": 1795362819.4201415,
+    "ast_hash": "4cb7828e8d32c84eaee187f55dc88659",
+    "semantic_hash": "4cb7828e8d32c84eaee187f55dc88659"
+  },
+  "libs/application/src/app_queues.cpp": {
+    "mtime": 1795034990.7319508,
+    "seen": 1795362819.4201415,
+    "ast_hash": "c9ff163f1575a9e62ab0b8c5ed01cbd3",
+    "semantic_hash": "c9ff163f1575a9e62ab0b8c5ed01cbd3"
+  },
+  "libs/application/src/app_settings.cpp": {
+    "mtime": 1793640606.6669207,
+    "seen": 1795362819.4201415,
+    "ast_hash": "77c5d1038212300e25d9eb0daf443f85",
+    "semantic_hash": "77c5d1038212300e25d9eb0daf443f85"
+  },
+  "libs/application/src/compute_services.cpp": {
+    "mtime": 1793658528.5637286,
+    "seen": 1795362819.4201415,
+    "ast_hash": "5895fb46994461a70cbed9e5e71e72de",
+    "semantic_hash": "5895fb46994461a70cbed9e5e71e72de"
+  },
+  "libs/application/src/system_editor.cpp": {
+    "mtime": 1793640606.6679175,
+    "seen": 1795362819.4201415,
+    "ast_hash": "1f87b91404c62e15d3c73ffb9e131567",
+    "semantic_hash": "1f87b91404c62e15d3c73ffb9e131567"
+  },
+  "libs/application/src/tick.cpp": {
+    "mtime": 1794774876.2843206,
+    "seen": 1795362819.4201415,
+    "ast_hash": "0641ca2278609ab516b552b3aaf12776",
+    "semantic_hash": "0641ca2278609ab516b552b3aaf12776"
+  },
+  "libs/cuda/include/ucuda/cuda/circuit_nvrtc.h": {
+    "mtime": 1793622894.5253642,
+    "seen": 1795362819.4201415,
+    "ast_hash": "d78b85ea3a1eb0443739d67de0f07fd7",
+    "semantic_hash": "d78b85ea3a1eb0443739d67de0f07fd7"
+  },
+  "libs/cuda/include/ucuda/cuda/cudaLibrary.cuh": {
+    "mtime": 1793622894.5253642,
+    "seen": 1795362819.4201415,
+    "ast_hash": "488bdf6f6125678704c7f6eab339e668",
+    "semantic_hash": "488bdf6f6125678704c7f6eab339e668"
+  },
+  "libs/cuda/include/ucuda/cuda/cudaMacros.cuh": {
+    "mtime": 1793657143.197271,
+    "seen": 1795362819.4201415,
+    "ast_hash": "3144b2ce5afa38a56575844463070172",
+    "semantic_hash": "3144b2ce5afa38a56575844463070172"
+  },
+  "libs/cuda/include/ucuda/cuda/nvrtc_engine.h": {
+    "mtime": 1794430477.8100479,
+    "seen": 1795362819.4201415,
+    "ast_hash": "76b1a3f232e35e9d539453b1c7f7cfbf",
+    "semantic_hash": "76b1a3f232e35e9d539453b1c7f7cfbf"
+  },
+  "libs/cuda/include/ucuda/cuda/parametric_engine.h": {
+    "mtime": 1793658528.5637286,
+    "seen": 1795362819.4201415,
+    "ast_hash": "2f636028abe8eb461d784ab06df53153",
+    "semantic_hash": "2f636028abe8eb461d784ab06df53153"
+  },
+  "libs/cuda/include/ucuda/cuda/phase_portrait_nvrtc.h": {
+    "mtime": 1794430477.8100479,
+    "seen": 1795362819.4201415,
+    "ast_hash": "f1993b69be6194a846999288d4f9e44f",
+    "semantic_hash": "f1993b69be6194a846999288d4f9e44f"
+  },
+  "libs/cuda/include/ucuda/cuda/rqa.h": {
+    "mtime": 1793658528.5637286,
+    "seen": 1795362819.4201415,
+    "ast_hash": "c678de76b50ddaae3b17af4b86b98de0",
+    "semantic_hash": "c678de76b50ddaae3b17af4b86b98de0"
+  },
+  "libs/cuda/include/ucuda/cuda/runtime_settings.h": {
+    "mtime": 1793622894.527362,
+    "seen": 1795362819.4201415,
+    "ast_hash": "7cba59b3ba1e17dfd65c4a9e4a3556d1",
+    "semantic_hash": "7cba59b3ba1e17dfd65c4a9e4a3556d1"
+  },
+  "libs/cuda/src/circuit_nvrtc.cpp": {
+    "mtime": 1793658528.5647268,
+    "seen": 1795362819.4201415,
+    "ast_hash": "0233389e0bc0769829410ec1a3e4672b",
+    "semantic_hash": "0233389e0bc0769829410ec1a3e4672b"
+  },
+  "libs/cuda/src/cudaLibrary.cu": {
+    "mtime": 1793622894.527362,
+    "seen": 1795362819.4201415,
+    "ast_hash": "38fdb94157dfd53298a87e9bd72c12cb",
+    "semantic_hash": "38fdb94157dfd53298a87e9bd72c12cb"
+  },
+  "libs/cuda/src/device/clustering.cuh": {
+    "mtime": 1793622894.5283592,
+    "seen": 1795362819.4201415,
+    "ast_hash": "5eb18ffa3dc8ca2800510d0de97e30e8",
+    "semantic_hash": "5eb18ffa3dc8ca2800510d0de97e30e8"
+  },
+  "libs/cuda/src/device/fastsync.cuh": {
+    "mtime": 1793622894.5283592,
+    "seen": 1795362819.4201415,
+    "ast_hash": "2ff3def9546d0513e95432ff0f03daaf",
+    "semantic_hash": "2ff3def9546d0513e95432ff0f03daaf"
+  },
+  "libs/cuda/src/device/integration.cuh": {
+    "mtime": 1795034990.7347336,
+    "seen": 1795362819.4201415,
+    "ast_hash": "f988546c03f733e2e3429b907429106e",
+    "semantic_hash": "f988546c03f733e2e3429b907429106e"
+  },
+  "libs/cuda/src/device/models.cuh": {
+    "mtime": 1793622894.529357,
+    "seen": 1795362819.4201415,
+    "ast_hash": "1f2eccac17fb63d93647e3419f258ece",
+    "semantic_hash": "1f2eccac17fb63d93647e3419f258ece"
+  },
+  "libs/cuda/src/device/peaks.cuh": {
+    "mtime": 1793657143.198267,
+    "seen": 1795362819.4201415,
+    "ast_hash": "c5ced674d98593471315a8adc336e724",
+    "semantic_hash": "c5ced674d98593471315a8adc336e724"
+  },
+  "libs/cuda/src/engine_basins.cpp": {
+    "mtime": 1795034990.7357867,
+    "seen": 1795362819.4201415,
+    "ast_hash": "7a192e9ba4883cfef2e04ea57a220249",
+    "semantic_hash": "7a192e9ba4883cfef2e04ea57a220249"
+  },
+  "libs/cuda/src/engine_bifurcation.cpp": {
+    "mtime": 1793622894.531351,
+    "seen": 1795362819.4201415,
+    "ast_hash": "6f981b483eb1fe01572621c09b2059e5",
+    "semantic_hash": "6f981b483eb1fe01572621c09b2059e5"
+  },
+  "libs/cuda/src/engine_cpu.cpp": {
+    "mtime": 1793622894.531351,
+    "seen": 1795362819.4201415,
+    "ast_hash": "4d56c7abf7fd707a74b1304936278900",
+    "semantic_hash": "4d56c7abf7fd707a74b1304936278900"
+  },
+  "libs/cuda/src/engine_dft.cpp": {
+    "mtime": 1793622894.5323489,
+    "seen": 1795362819.4201415,
+    "ast_hash": "7f188cdebe58556d1acc4a2e2ea29b0f",
+    "semantic_hash": "7f188cdebe58556d1acc4a2e2ea29b0f"
+  },
+  "libs/cuda/src/engine_fastsync.cpp": {
+    "mtime": 1793622894.5353405,
+    "seen": 1795362819.4201415,
+    "ast_hash": "d6a19e7e14fbf10c37a19b57a3f34e74",
+    "semantic_hash": "d6a19e7e14fbf10c37a19b57a3f34e74"
+  },
+  "libs/cuda/src/engine_helpers.h": {
+    "mtime": 1793622894.5353405,
+    "seen": 1795362819.4201415,
+    "ast_hash": "3f37c17575c2bef96d95567d09be3bbd",
+    "semantic_hash": "3f37c17575c2bef96d95567d09be3bbd"
+  },
+  "libs/cuda/src/engine_impl.h": {
+    "mtime": 1794225676.7988038,
+    "seen": 1795362819.4201415,
+    "ast_hash": "6fd2af4432d023d501eea4803dc3c9d1",
+    "semantic_hash": "6fd2af4432d023d501eea4803dc3c9d1"
+  },
+  "libs/cuda/src/engine_lle.cpp": {
+    "mtime": 1793622894.5363371,
+    "seen": 1795362819.4201415,
+    "ast_hash": "ae3f289211b617b64617410ad233bf0b",
+    "semantic_hash": "ae3f289211b617b64617410ad233bf0b"
+  },
+  "libs/cuda/src/engine_ls.cpp": {
+    "mtime": 1793640606.6709125,
+    "seen": 1795362819.4201415,
+    "ast_hash": "fb8e6294921e6ad99358b05e96bd113f",
+    "semantic_hash": "fb8e6294921e6ad99358b05e96bd113f"
+  },
+  "libs/cuda/src/engine_metrics.cpp": {
+    "mtime": 1793640606.671908,
+    "seen": 1795362819.4201415,
+    "ast_hash": "a95cdfeef520ca3af70a8e79c5d9d780",
+    "semantic_hash": "a95cdfeef520ca3af70a8e79c5d9d780"
+  },
+  "libs/cuda/src/engine_network.cpp": {
+    "mtime": 1793640606.6729054,
+    "seen": 1795362819.4201415,
+    "ast_hash": "bd29ed3ffe596655441ef8b6b468d212",
+    "semantic_hash": "bd29ed3ffe596655441ef8b6b468d212"
+  },
+  "libs/cuda/src/engine_neural.cpp": {
+    "mtime": 1794574499.064184,
+    "seen": 1795362819.4201415,
+    "ast_hash": "3244b8cc2ae161936f90255624fd0714",
+    "semantic_hash": "3244b8cc2ae161936f90255624fd0714"
+  },
+  "libs/cuda/src/engine_order.cpp": {
+    "mtime": 1793640606.6729054,
+    "seen": 1795362819.4201415,
+    "ast_hash": "729735b5b628433c18735b9f2c8c5095",
+    "semantic_hash": "729735b5b628433c18735b9f2c8c5095"
+  },
+  "libs/cuda/src/engine_results.cpp": {
+    "mtime": 1793622894.5373352,
+    "seen": 1795362819.4201415,
+    "ast_hash": "8189ad4335fcdf6f814a0e914f871e7c",
+    "semantic_hash": "8189ad4335fcdf6f814a0e914f871e7c"
+  },
+  "libs/cuda/src/engine_runtime.cpp": {
+    "mtime": 1793640606.6749017,
+    "seen": 1795362819.4201415,
+    "ast_hash": "cd449a80f4f668c06010629a537129d9",
+    "semantic_hash": "cd449a80f4f668c06010629a537129d9"
+  },
+  "libs/cuda/src/host_rqa.cu": {
+    "mtime": 1793658528.5657227,
+    "seen": 1795362819.4201415,
+    "ast_hash": "9a93bbbe18ff0e4ec26b113e637d1514",
+    "semantic_hash": "9a93bbbe18ff0e4ec26b113e637d1514"
+  },
+  "libs/cuda/src/module_lru.h": {
+    "mtime": 1793622894.5413246,
+    "seen": 1795362819.4201415,
+    "ast_hash": "75c9efcea1dc16dab50cbc7be1a6c5e2",
+    "semantic_hash": "75c9efcea1dc16dab50cbc7be1a6c5e2"
+  },
+  "libs/cuda/src/nvrtc_engine.cpp": {
+    "mtime": 1794430477.8110456,
+    "seen": 1795362819.4201415,
+    "ast_hash": "6714860f8a7bba73d72fc5007d0f01b5",
+    "semantic_hash": "6714860f8a7bba73d72fc5007d0f01b5"
+  },
+  "libs/cuda/src/parametric_engine.cpp": {
+    "mtime": 1793658528.5657227,
+    "seen": 1795362819.4201415,
+    "ast_hash": "73cc90114fc776d1916b186742c7eb4a",
+    "semantic_hash": "73cc90114fc776d1916b186742c7eb4a"
+  },
+  "libs/cuda/src/perf_warmup.h": {
+    "mtime": 1793622894.5423212,
+    "seen": 1795362819.4201415,
+    "ast_hash": "6157435ad630bdfcde0d6b6ebfc69d65",
+    "semantic_hash": "6157435ad630bdfcde0d6b6ebfc69d65"
+  },
+  "libs/cuda/src/phase_portrait_nvrtc.cpp": {
+    "mtime": 1794430477.8110456,
+    "seen": 1795362819.4201415,
+    "ast_hash": "24835c4503639c50414cf980acab9710",
+    "semantic_hash": "24835c4503639c50414cf980acab9710"
+  },
+  "libs/cuda/src/runtime_settings.cpp": {
+    "mtime": 1793622894.5423212,
+    "seen": 1795362819.4201415,
+    "ast_hash": "f1482a060d6351456c09bc125221c90a",
+    "semantic_hash": "f1482a060d6351456c09bc125221c90a"
+  },
+  "libs/domain/include/ucuda/domain/adaptive_settings.h": {
+    "mtime": 1793622894.5433197,
+    "seen": 1795362819.4201415,
+    "ast_hash": "c05def5694ca046bc986466461a8471c",
+    "semantic_hash": "c05def5694ca046bc986466461a8471c"
+  },
+  "libs/domain/include/ucuda/domain/analysis_session.h": {
+    "mtime": 1794430477.8120422,
+    "seen": 1795362819.4201415,
+    "ast_hash": "1ff04468a4fd523c602add01de67d6f8",
+    "semantic_hash": "1ff04468a4fd523c602add01de67d6f8"
+  },
+  "libs/domain/include/ucuda/domain/analysis_tree.h": {
+    "mtime": 1795362772.603844,
+    "seen": 1795362819.4201415,
+    "ast_hash": "1088ad4828ef24ea92c7aa0f96501633",
+    "semantic_hash": "1088ad4828ef24ea92c7aa0f96501633"
+  },
+  "libs/domain/include/ucuda/domain/analysis_types.h": {
+    "mtime": 1795034990.7367854,
+    "seen": 1795362819.4201415,
+    "ast_hash": "8c689eaadc1a5447824a0bd4874221a6",
+    "semantic_hash": "8c689eaadc1a5447824a0bd4874221a6"
+  },
+  "libs/domain/include/ucuda/domain/circuit_solver.h": {
+    "mtime": 1793658528.5677178,
+    "seen": 1795362819.4201415,
+    "ast_hash": "93254054ba76eb70bcbd638ce615dbf6",
+    "semantic_hash": "93254054ba76eb70bcbd638ce615dbf6"
+  },
+  "libs/domain/include/ucuda/domain/circuit_synth.h": {
+    "mtime": 1793658528.5687149,
+    "seen": 1795362819.4201415,
+    "ast_hash": "7f7c92ccb2f565c22a561614b29a682e",
+    "semantic_hash": "7f7c92ccb2f565c22a561614b29a682e"
+  },
+  "libs/domain/include/ucuda/domain/configCUDA.h": {
+    "mtime": 1795034990.7384822,
+    "seen": 1795362819.4201415,
+    "ast_hash": "87200a17a5581c3492a360d0fbc9aaef",
+    "semantic_hash": "87200a17a5581c3492a360d0fbc9aaef"
+  },
+  "libs/domain/include/ucuda/domain/custom_session.h": {
+    "mtime": 1794486555.4926515,
+    "seen": 1795362819.4201415,
+    "ast_hash": "30a26e13644063daca2085517b939ff6",
+    "semantic_hash": "30a26e13644063daca2085517b939ff6"
+  },
+  "libs/domain/include/ucuda/domain/export_snapshot.h": {
+    "mtime": 1793622894.5463345,
+    "seen": 1795362819.4201415,
+    "ast_hash": "cff22d6274316e091437e1638c690b9a",
+    "semantic_hash": "cff22d6274316e091437e1638c690b9a"
+  },
+  "libs/domain/include/ucuda/domain/grid_snap.h": {
+    "mtime": 1793622894.5463345,
+    "seen": 1795362819.4201415,
+    "ast_hash": "3b8d6ace579823660c150b75071eac13",
+    "semantic_hash": "3b8d6ace579823660c150b75071eac13"
+  },
+  "libs/domain/include/ucuda/domain/network_session.h": {
+    "mtime": 1793658528.5697117,
+    "seen": 1795362819.4201415,
+    "ast_hash": "b1f99c307bd1653b4891e342203ce9d6",
+    "semantic_hash": "b1f99c307bd1653b4891e342203ce9d6"
+  },
+  "libs/domain/include/ucuda/domain/neural_dataset.h": {
+    "mtime": 1794574499.064184,
+    "seen": 1795362819.4201415,
+    "ast_hash": "c174f9594b8f2a45c5663d3c13df295c",
+    "semantic_hash": "c174f9594b8f2a45c5663d3c13df295c"
+  },
+  "libs/domain/include/ucuda/domain/neural_session.h": {
+    "mtime": 1795172328.960707,
+    "seen": 1795362819.4201415,
+    "ast_hash": "119fde61c61c5ad15fba664808e48ddb",
+    "semantic_hash": "119fde61c61c5ad15fba664808e48ddb"
+  },
+  "libs/domain/include/ucuda/domain/neural_types.h": {
+    "mtime": 1794574499.064184,
+    "seen": 1795362819.4201415,
+    "ast_hash": "4323beabddec3c7d078b2fcd8d3a21a5",
+    "semantic_hash": "4323beabddec3c7d078b2fcd8d3a21a5"
+  },
+  "libs/domain/include/ucuda/domain/num_parse.h": {
+    "mtime": 1793622894.5473342,
+    "seen": 1795362819.4201415,
+    "ast_hash": "e03cb84fde22e737ec50ce95bfca9af5",
+    "semantic_hash": "e03cb84fde22e737ec50ce95bfca9af5"
+  },
+  "libs/domain/include/ucuda/domain/order_session.h": {
+    "mtime": 1794928835.2748964,
+    "seen": 1795362819.4201415,
+    "ast_hash": "6e40bd225da390f33bd1da10eb4caf17",
+    "semantic_hash": "6e40bd225da390f33bd1da10eb4caf17"
+  },
+  "libs/domain/include/ucuda/domain/param_groups.h": {
+    "mtime": 1793640606.6758976,
+    "seen": 1795362819.4201415,
+    "ast_hash": "4e06973ecccb8b23869c29e21860591a",
+    "semantic_hash": "4e06973ecccb8b23869c29e21860591a"
+  },
+  "libs/domain/include/ucuda/domain/plot_window.h": {
+    "mtime": 1794928835.2748964,
+    "seen": 1795362819.4201415,
+    "ast_hash": "89733423f0ea5188260f9ba6445a52ce",
+    "semantic_hash": "89733423f0ea5188260f9ba6445a52ce"
+  },
+  "libs/domain/include/ucuda/domain/rqa.h": {
+    "mtime": 1793658528.5707097,
+    "seen": 1795362819.4201415,
+    "ast_hash": "efa4383a3a49d0826e5dd9b620a2b096",
+    "semantic_hash": "efa4383a3a49d0826e5dd9b620a2b096"
+  },
+  "libs/domain/include/ucuda/domain/sparse_lu.h": {
+    "mtime": 1793622894.5483315,
+    "seen": 1795362819.4201415,
+    "ast_hash": "7b45ae41a5ebb9bc8ec6d093cc23d023",
+    "semantic_hash": "7b45ae41a5ebb9bc8ec6d093cc23d023"
+  },
+  "libs/domain/include/ucuda/domain/system.h": {
+    "mtime": 1793622894.5483315,
+    "seen": 1795362819.4201415,
+    "ast_hash": "db0cc0acd2b2866ae6d8da1f7ba3cf06",
+    "semantic_hash": "db0cc0acd2b2866ae6d8da1f7ba3cf06"
+  },
+  "libs/domain/include/ucuda/domain/system_record.h": {
+    "mtime": 1793622894.5493286,
+    "seen": 1795362819.4201415,
+    "ast_hash": "ffb6d23d967167296449a68b92cb1d04",
+    "semantic_hash": "ffb6d23d967167296449a68b92cb1d04"
+  },
+  "libs/domain/include/ucuda/domain/traj_work.h": {
+    "mtime": 1793622894.5493286,
+    "seen": 1795362819.4201415,
+    "ast_hash": "892cf802f5532dad54207c04d54634c3",
+    "semantic_hash": "892cf802f5532dad54207c04d54634c3"
+  },
+  "libs/domain/src/analysis_tree.cpp": {
+    "mtime": 1795362772.603844,
+    "seen": 1795362819.4201415,
+    "ast_hash": "eecb97cdfa7ba9460170deeab1723c12",
+    "semantic_hash": "eecb97cdfa7ba9460170deeab1723c12"
+  },
+  "libs/domain/src/session_defaults.cpp": {
+    "mtime": 1793622894.5493286,
+    "seen": 1795362819.4201415,
+    "ast_hash": "91025f090f19f3e6d51f9f8783410e82",
+    "semantic_hash": "91025f090f19f3e6d51f9f8783410e82"
+  },
+  "libs/equations/include/ucuda/equations/adaptive_params.h": {
+    "mtime": 1793622894.550326,
+    "seen": 1795362819.4201415,
+    "ast_hash": "9dcc3d4c9079698e1f7a2c54c17cd312",
+    "semantic_hash": "9dcc3d4c9079698e1f7a2c54c17cd312"
+  },
+  "libs/equations/include/ucuda/equations/codegen.hpp": {
+    "mtime": 1793622894.550326,
+    "seen": 1795362819.4201415,
+    "ast_hash": "a64d1c56f5c1ae077934697619824ba8",
+    "semantic_hash": "a64d1c56f5c1ae077934697619824ba8"
+  },
+  "libs/equations/include/ucuda/equations/dae_devices.h": {
+    "mtime": 1793622894.5513232,
+    "seen": 1795362819.4201415,
+    "ast_hash": "6584e5b5a69fefaec92e39c75abac726",
+    "semantic_hash": "6584e5b5a69fefaec92e39c75abac726"
+  },
+  "libs/equations/include/ucuda/equations/dae_ir.h": {
+    "mtime": 1793622894.5513232,
+    "seen": 1795362819.4201415,
+    "ast_hash": "729c2f2228358b0e2c305df138a7ce1c",
+    "semantic_hash": "729c2f2228358b0e2c305df138a7ce1c"
+  },
+  "libs/equations/include/ucuda/equations/krs_prep.h": {
+    "mtime": 1793622894.5513232,
+    "seen": 1795362819.4201415,
+    "ast_hash": "e4c6354369ec3e647e791c3c5388cc3c",
+    "semantic_hash": "e4c6354369ec3e647e791c3c5388cc3c"
+  },
+  "libs/equations/include/ucuda/equations/sysparse.hpp": {
+    "mtime": 1793622894.5513232,
+    "seen": 1795362819.4201415,
+    "ast_hash": "df61f6485941d050edf95157a84f86fc",
+    "semantic_hash": "df61f6485941d050edf95157a84f86fc"
+  },
+  "libs/equations/src/adaptive_codegen.cpp": {
+    "mtime": 1793622894.5523207,
+    "seen": 1795362819.4201415,
+    "ast_hash": "c34e5132662ca9d659d150ad090b779e",
+    "semantic_hash": "c34e5132662ca9d659d150ad090b779e"
+  },
+  "libs/equations/src/codegen.cpp": {
+    "mtime": 1793622894.5523207,
+    "seen": 1795362819.4201415,
+    "ast_hash": "3e117997044810bc1ace50ee4db48279",
+    "semantic_hash": "3e117997044810bc1ace50ee4db48279"
+  },
+  "libs/equations/src/dae_devices.cpp": {
+    "mtime": 1793622894.5533178,
+    "seen": 1795362819.4201415,
+    "ast_hash": "ff271fa87829baa911093599fd3c9874",
+    "semantic_hash": "ff271fa87829baa911093599fd3c9874"
+  },
+  "libs/equations/src/expression_internal.h": {
+    "mtime": 1793622894.5533178,
+    "seen": 1795362819.4201415,
+    "ast_hash": "8609921d41f03bac1185a8e58e877984",
+    "semantic_hash": "8609921d41f03bac1185a8e58e877984"
+  },
+  "libs/equations/src/expression_parser.cpp": {
+    "mtime": 1793622894.554315,
+    "seen": 1795362819.4201415,
+    "ast_hash": "1fecf5aabce03788cd1244c56297a2e6",
+    "semantic_hash": "1fecf5aabce03788cd1244c56297a2e6"
+  },
+  "libs/equations/src/scheme_codegen.cpp": {
+    "mtime": 1793622894.555267,
+    "seen": 1795362819.4201415,
+    "ast_hash": "605c1a1347beeed99c526fbac4e688ef",
+    "semantic_hash": "605c1a1347beeed99c526fbac4e688ef"
+  },
+  "libs/equations/src/sysparse.cpp": {
+    "mtime": 1793622894.555267,
+    "seen": 1795362819.4201415,
+    "ast_hash": "79e76bb2e66b29aaeb71ff268355b02f",
+    "semantic_hash": "79e76bb2e66b29aaeb71ff268355b02f"
+  },
+  "libs/equations/src/system_evaluator.cpp": {
+    "mtime": 1793622894.5561342,
+    "seen": 1795362819.4201415,
+    "ast_hash": "718cb4dc1178de0259899c8991f6259f",
+    "semantic_hash": "718cb4dc1178de0259899c8991f6259f"
+  },
+  "libs/numerics/include/ucuda/numerics/circuit_codegen.h": {
+    "mtime": 1793658528.5707097,
+    "seen": 1795362819.4201415,
+    "ast_hash": "27587723bcaa28b05e9aeedb8e4904e5",
+    "semantic_hash": "27587723bcaa28b05e9aeedb8e4904e5"
+  },
+  "libs/numerics/include/ucuda/numerics/circuit_netlist.h": {
+    "mtime": 1793622894.557165,
+    "seen": 1795362819.4201415,
+    "ast_hash": "8fb9b489411366b344faa6f5a8fcd08b",
+    "semantic_hash": "8fb9b489411366b344faa6f5a8fcd08b"
+  },
+  "libs/numerics/include/ucuda/numerics/circuit_solver.h": {
+    "mtime": 1793658528.5707097,
+    "seen": 1795362819.4201415,
+    "ast_hash": "8d3b9be627e5b25db4ddf79cffb0762a",
+    "semantic_hash": "8d3b9be627e5b25db4ddf79cffb0762a"
+  },
+  "libs/numerics/include/ucuda/numerics/circuit_synth.h": {
+    "mtime": 1793658528.571707,
+    "seen": 1795362819.4201415,
+    "ast_hash": "56f2fe626db8dea05165e24eb59c2f3a",
+    "semantic_hash": "56f2fe626db8dea05165e24eb59c2f3a"
+  },
+  "libs/numerics/include/ucuda/numerics/integrator.h": {
+    "mtime": 1793622894.557165,
+    "seen": 1795362819.4201415,
+    "ast_hash": "87b3a5f0ab2c1b55510dc74d41ea6fbf",
+    "semantic_hash": "87b3a5f0ab2c1b55510dc74d41ea6fbf"
+  },
+  "libs/numerics/include/ucuda/numerics/kicad_import.h": {
+    "mtime": 1793622894.5581317,
+    "seen": 1795362819.4203763,
+    "ast_hash": "664618b0b74811732d5bdb84241516f6",
+    "semantic_hash": "664618b0b74811732d5bdb84241516f6"
+  },
+  "libs/numerics/include/ucuda/numerics/krs_cpu.h": {
+    "mtime": 1793622894.5581317,
+    "seen": 1795362819.4203763,
+    "ast_hash": "cd24689bc008ccb1bec94d402d1afd7a",
+    "semantic_hash": "cd24689bc008ccb1bec94d402d1afd7a"
+  },
+  "libs/numerics/include/ucuda/numerics/multistep_bdf.h": {
+    "mtime": 1793622894.5581317,
+    "seen": 1795362819.4203763,
+    "ast_hash": "ea58c1756bacfaf021515de7d4038619",
+    "semantic_hash": "ea58c1756bacfaf021515de7d4038619"
+  },
+  "libs/numerics/include/ucuda/numerics/neural_readout.h": {
+    "mtime": 1794225676.8027916,
+    "seen": 1795362819.4203763,
+    "ast_hash": "6fb9857b500239588791bb93aa789f96",
+    "semantic_hash": "6fb9857b500239588791bb93aa789f96"
+  },
+  "libs/numerics/include/ucuda/numerics/spice_parse.h": {
+    "mtime": 1793622894.5591547,
+    "seen": 1795362819.4203763,
+    "ast_hash": "222486a7a7fd847e4d2d3ebe7acb22e4",
+    "semantic_hash": "222486a7a7fd847e4d2d3ebe7acb22e4"
+  },
+  "libs/numerics/src/circuit_codegen.cpp": {
+    "mtime": 1793658528.571707,
+    "seen": 1795362819.4203763,
+    "ast_hash": "571f5ac5a966ac42a618df15223c9bd3",
+    "semantic_hash": "571f5ac5a966ac42a618df15223c9bd3"
+  },
+  "libs/numerics/src/circuit_emit.cpp": {
+    "mtime": 1793622894.5591547,
+    "seen": 1795362819.4203763,
+    "ast_hash": "33907168dec6c61c542c15cae043b9b5",
+    "semantic_hash": "33907168dec6c61c542c15cae043b9b5"
+  },
+  "libs/numerics/src/circuit_netlist.cpp": {
+    "mtime": 1793622894.5601263,
+    "seen": 1795362819.4203763,
+    "ast_hash": "f9f4d1b17be479e015f66e23a762c41e",
+    "semantic_hash": "f9f4d1b17be479e015f66e23a762c41e"
+  },
+  "libs/numerics/src/circuit_solver.cpp": {
+    "mtime": 1793658528.571707,
+    "seen": 1795362819.4203763,
+    "ast_hash": "7841f977c9318e61d22e71edde229b03",
+    "semantic_hash": "7841f977c9318e61d22e71edde229b03"
+  },
+  "libs/numerics/src/circuit_synth.cpp": {
+    "mtime": 1793658528.5727053,
+    "seen": 1795362819.4203763,
+    "ast_hash": "5b862eaabd6ff3841f7677b6fc99e8a5",
+    "semantic_hash": "5b862eaabd6ff3841f7677b6fc99e8a5"
+  },
+  "libs/numerics/src/integrator.cpp": {
+    "mtime": 1793622894.5614264,
+    "seen": 1795362819.4203763,
+    "ast_hash": "ba496fe123611d9a40e2f0123b606993",
+    "semantic_hash": "ba496fe123611d9a40e2f0123b606993"
+  },
+  "libs/numerics/src/kicad_import.cpp": {
+    "mtime": 1793622894.5614264,
+    "seen": 1795362819.4203763,
+    "ast_hash": "8e9b08bb5b78632892a936ef582a5e8f",
+    "semantic_hash": "8e9b08bb5b78632892a936ef582a5e8f"
+  },
+  "libs/numerics/src/krs_cpu.cpp": {
+    "mtime": 1793622894.5619452,
+    "seen": 1795362819.4203763,
+    "ast_hash": "4c932eaf6bdb420f1c2c7899ac8c1c1e",
+    "semantic_hash": "4c932eaf6bdb420f1c2c7899ac8c1c1e"
+  },
+  "libs/numerics/src/spice_parse.cpp": {
+    "mtime": 1793622894.5631084,
+    "seen": 1795362819.4203763,
+    "ast_hash": "dec56ead78681f4b3c38590ca5e18e98",
+    "semantic_hash": "dec56ead78681f4b3c38590ca5e18e98"
+  },
+  "libs/ocr/include/ucuda/ocr/ocr_client_win.h": {
+    "mtime": 1793622894.56481,
+    "seen": 1795362819.4203763,
+    "ast_hash": "f6f98bc4768a6e6706f629598d83e97c",
+    "semantic_hash": "f6f98bc4768a6e6706f629598d83e97c"
+  },
+  "libs/ocr/src/ocr_client_win.cpp": {
+    "mtime": 1793622894.56532,
+    "seen": 1795362819.4203763,
+    "ast_hash": "623beef90b979c8cbb5468b516199c07",
+    "semantic_hash": "623beef90b979c8cbb5468b516199c07"
+  },
+  "libs/platform/include/ucuda/platform/image_source.h": {
+    "mtime": 1793622894.5663965,
+    "seen": 1795362819.4203763,
+    "ast_hash": "8340de4117afd819e1f3ad24952702fb",
+    "semantic_hash": "8340de4117afd819e1f3ad24952702fb"
+  },
+  "libs/platform/include/ucuda/platform/platform_paths.h": {
+    "mtime": 1793622894.5663965,
+    "seen": 1795362819.4203763,
+    "ast_hash": "5bc30d97719d29817cb3a080871d6d4c",
+    "semantic_hash": "5bc30d97719d29817cb3a080871d6d4c"
+  },
+  "libs/platform/include/ucuda/platform/platform_posix.h": {
+    "mtime": 1793622894.5669074,
+    "seen": 1795362819.4203763,
+    "ast_hash": "2b2a035ab64af84b025f2a8129264e8e",
+    "semantic_hash": "2b2a035ab64af84b025f2a8129264e8e"
+  },
+  "libs/platform/src/image_source.cpp": {
+    "mtime": 1793622894.5674143,
+    "seen": 1795362819.4203763,
+    "ast_hash": "4cb214bf8cb3bbdf9c4c68068aa33ba6",
+    "semantic_hash": "4cb214bf8cb3bbdf9c4c68068aa33ba6"
+  },
+  "libs/plotting/include/ucuda/plotting/colormap_slancm_data.h": {
+    "mtime": 1793622894.571512,
+    "seen": 1795362819.4203763,
+    "ast_hash": "6e84bb2128ed3bbed9fc06fcf1a8f043",
+    "semantic_hash": "6e84bb2128ed3bbed9fc06fcf1a8f043"
+  },
+  "libs/plotting/include/ucuda/plotting/digit_input.h": {
+    "mtime": 1793622894.572024,
+    "seen": 1795362819.4203763,
+    "ast_hash": "749718c261b79691c7465aa5f0af2070",
+    "semantic_hash": "749718c261b79691c7465aa5f0af2070"
+  },
+  "libs/plotting/include/ucuda/plotting/gpu_line_series.h": {
+    "mtime": 1793622894.572024,
+    "seen": 1795362819.4203763,
+    "ast_hash": "b7d83be7b3c7a8ac50a8ae2594ecaa5f",
+    "semantic_hash": "b7d83be7b3c7a8ac50a8ae2594ecaa5f"
+  },
+  "libs/plotting/include/ucuda/plotting/gpu_line_series_3d.h": {
+    "mtime": 1793622894.572024,
+    "seen": 1795362819.4203763,
+    "ast_hash": "a087a66921596711b46b7dd2450a6588",
+    "semantic_hash": "a087a66921596711b46b7dd2450a6588"
+  },
+  "libs/plotting/include/ucuda/plotting/heatmap_view.h": {
+    "mtime": 1794844827.8619113,
+    "seen": 1795362819.4203763,
+    "ast_hash": "6a01d91e297599783dca5c0a6c659977",
+    "semantic_hash": "6a01d91e297599783dca5c0a6c659977"
+  },
+  "libs/plotting/include/ucuda/plotting/plot_axis.h": {
+    "mtime": 1795172720.959833,
+    "seen": 1795362819.4203763,
+    "ast_hash": "d4f8ad91f1c67d433fc7685cfb02dfcb",
+    "semantic_hash": "d4f8ad91f1c67d433fc7685cfb02dfcb"
+  },
+  "libs/plotting/include/ucuda/plotting/plot_camera_3d.h": {
+    "mtime": 1793622894.572532,
+    "seen": 1795362819.4203763,
+    "ast_hash": "ebc5de1b6a2b6e5f6da523deaac65c2c",
+    "semantic_hash": "ebc5de1b6a2b6e5f6da523deaac65c2c"
+  },
+  "libs/plotting/include/ucuda/plotting/plot_legend.h": {
+    "mtime": 1794430477.8140368,
+    "seen": 1795362819.4203763,
+    "ast_hash": "a54112bc41c3b1919dac731e20f2c01d",
+    "semantic_hash": "a54112bc41c3b1919dac731e20f2c01d"
+  },
+  "libs/plotting/include/ucuda/plotting/plot_renderer.h": {
+    "mtime": 1794928835.2758937,
+    "seen": 1795362819.4203763,
+    "ast_hash": "58c01f526b434a3a9dda307fa6a34e52",
+    "semantic_hash": "58c01f526b434a3a9dda307fa6a34e52"
+  },
+  "libs/plotting/include/ucuda/plotting/plot_view_2d.h": {
+    "mtime": 1794928835.2770097,
+    "seen": 1795362819.4203763,
+    "ast_hash": "6181f6bf71e83837802be0fa967db68a",
+    "semantic_hash": "6181f6bf71e83837802be0fa967db68a"
+  },
+  "libs/plotting/include/ucuda/plotting/plot_view_3d.h": {
+    "mtime": 1794421858.5358453,
+    "seen": 1795362819.4203763,
+    "ast_hash": "96fbf3e6eca4116895837f82d20e1e28",
+    "semantic_hash": "96fbf3e6eca4116895837f82d20e1e28"
+  },
+  "libs/plotting/include/ucuda/plotting/screenshot.h": {
+    "mtime": 1793622894.5735266,
+    "seen": 1795362819.4203763,
+    "ast_hash": "480e4880521f2084dd330f6a1b750d68",
+    "semantic_hash": "480e4880521f2084dd330f6a1b750d68"
+  },
+  "libs/plotting/src/digit_input.cpp": {
+    "mtime": 1793622894.5745244,
+    "seen": 1795362819.4203763,
+    "ast_hash": "9d9a64d1019e7eba1c1cc81435d435ec",
+    "semantic_hash": "9d9a64d1019e7eba1c1cc81435d435ec"
+  },
+  "libs/plotting/src/gpu_line_series.cpp": {
+    "mtime": 1793622894.5745244,
+    "seen": 1795362819.4203763,
+    "ast_hash": "316a423548cb086b5fa4a0b6cf2890b2",
+    "semantic_hash": "316a423548cb086b5fa4a0b6cf2890b2"
+  },
+  "libs/plotting/src/gpu_line_series_3d.cpp": {
+    "mtime": 1793622894.5745244,
+    "seen": 1795362819.4203763,
+    "ast_hash": "cd78487aae68367b6fb97ea151518a40",
+    "semantic_hash": "cd78487aae68367b6fb97ea151518a40"
+  },
+  "libs/plotting/src/heatmap_view.cpp": {
+    "mtime": 1795172720.9608302,
+    "seen": 1795362819.4203763,
+    "ast_hash": "a97bac198b5f57f0d8f72ddf41027565",
+    "semantic_hash": "a97bac198b5f57f0d8f72ddf41027565"
+  },
+  "libs/plotting/src/plot_axis.cpp": {
+    "mtime": 1795362772.603844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "90436477b9abe584a357197e3c021c65",
+    "semantic_hash": "90436477b9abe584a357197e3c021c65"
+  },
+  "libs/plotting/src/plot_camera_3d.cpp": {
+    "mtime": 1793622894.5755215,
+    "seen": 1795362819.4203763,
+    "ast_hash": "7ba65d28bc4ed098c2a43a2626f45ff8",
+    "semantic_hash": "7ba65d28bc4ed098c2a43a2626f45ff8"
+  },
+  "libs/plotting/src/plot_legend.cpp": {
+    "mtime": 1794574208.3655329,
+    "seen": 1795362819.4203763,
+    "ast_hash": "7a2b739f4c3afd2447572cd495f230cd",
+    "semantic_hash": "7a2b739f4c3afd2447572cd495f230cd"
+  },
+  "libs/plotting/src/plot_renderer.cpp": {
+    "mtime": 1794928835.279004,
+    "seen": 1795362819.4203763,
+    "ast_hash": "69fee00fd16d058c06ee5c9c52e5481c",
+    "semantic_hash": "69fee00fd16d058c06ee5c9c52e5481c"
+  },
+  "libs/plotting/src/plot_view_2d.cpp": {
+    "mtime": 1795172720.9618275,
+    "seen": 1795362819.4203763,
+    "ast_hash": "5b11887db0d33279a74cf3a0b0f3cef3",
+    "semantic_hash": "5b11887db0d33279a74cf3a0b0f3cef3"
+  },
+  "libs/plotting/src/plot_view_3d.cpp": {
+    "mtime": 1794584447.4137187,
+    "seen": 1795362819.4203763,
+    "ast_hash": "09a7c61c9a7e7964bbb9279cb079fe8e",
+    "semantic_hash": "09a7c61c9a7e7964bbb9279cb079fe8e"
+  },
+  "libs/plotting/src/screenshot.cpp": {
+    "mtime": 1793622894.5770562,
+    "seen": 1795362819.4203763,
+    "ast_hash": "8042a9d212afdc37ac2c4037c7321c7f",
+    "semantic_hash": "8042a9d212afdc37ac2c4037c7321c7f"
+  },
+  "libs/storage/include/ucuda/storage/app_config.h": {
+    "mtime": 1795008777.6825376,
+    "seen": 1795362819.4203763,
+    "ast_hash": "7504132665066f45954fb7b7b75cf34c",
+    "semantic_hash": "7504132665066f45954fb7b7b75cf34c"
+  },
+  "libs/storage/include/ucuda/storage/data_export.h": {
+    "mtime": 1795034990.7395978,
+    "seen": 1795362819.4203763,
+    "ast_hash": "8ff7151bf94194ab0d5efc62d5028ce3",
+    "semantic_hash": "8ff7151bf94194ab0d5efc62d5028ce3"
+  },
+  "libs/storage/include/ucuda/storage/neural_dataset_io.h": {
+    "mtime": 1794574499.0692413,
+    "seen": 1795362819.4203763,
+    "ast_hash": "819298ca4a302b59dd0b652ec8eb6bd1",
+    "semantic_hash": "819298ca4a302b59dd0b652ec8eb6bd1"
+  },
+  "libs/storage/include/ucuda/storage/session_io.h": {
+    "mtime": 1794774876.2879908,
+    "seen": 1795362819.4203763,
+    "ast_hash": "df87704de19bc496c50e5d08754dd679",
+    "semantic_hash": "df87704de19bc496c50e5d08754dd679"
+  },
+  "libs/storage/include/ucuda/storage/system_library.h": {
+    "mtime": 1793622894.5790527,
+    "seen": 1795362819.4203763,
+    "ast_hash": "6a71867363b6572c8be198ef79e28ec6",
+    "semantic_hash": "6a71867363b6572c8be198ef79e28ec6"
+  },
+  "libs/storage/src/app_config.cpp": {
+    "mtime": 1795008777.6831844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "30cef9c4a6ec66bf16c9442f991abad2",
+    "semantic_hash": "30cef9c4a6ec66bf16c9442f991abad2"
+  },
+  "libs/storage/src/data_export.cpp": {
+    "mtime": 1795034990.740713,
+    "seen": 1795362819.4203763,
+    "ast_hash": "78f0fb354a9389f007a4ffe4e0316a6f",
+    "semantic_hash": "78f0fb354a9389f007a4ffe4e0316a6f"
+  },
+  "libs/storage/src/neural_dataset_io.cpp": {
+    "mtime": 1794574499.0692413,
+    "seen": 1795362819.4203763,
+    "ast_hash": "c8d56205f2e1c3919d4e3936cd4385c4",
+    "semantic_hash": "c8d56205f2e1c3919d4e3936cd4385c4"
+  },
+  "libs/storage/src/session_basins.cpp": {
+    "mtime": 1793622894.5800502,
+    "seen": 1795362819.4203763,
+    "ast_hash": "0db9a08625c78e72ea7dc880878a1619",
+    "semantic_hash": "0db9a08625c78e72ea7dc880878a1619"
+  },
+  "libs/storage/src/session_custom.cpp": {
+    "mtime": 1794486555.4895308,
+    "seen": 1795362819.4203763,
+    "ast_hash": "67641d694a9a5ea0af4848f6bc4c16e0",
+    "semantic_hash": "67641d694a9a5ea0af4848f6bc4c16e0"
+  },
+  "libs/storage/src/session_dft1d.cpp": {
+    "mtime": 1793622894.5810475,
+    "seen": 1795362819.4203763,
+    "ast_hash": "ce7e07a6e540eb75cf2b10c88ce125b9",
+    "semantic_hash": "ce7e07a6e540eb75cf2b10c88ce125b9"
+  },
+  "libs/storage/src/session_dft1d_windows.cpp": {
+    "mtime": 1793622894.5810475,
+    "seen": 1795362819.4203763,
+    "ast_hash": "748d00cbeb9db5d350db0f99595a62a0",
+    "semantic_hash": "748d00cbeb9db5d350db0f99595a62a0"
+  },
+  "libs/storage/src/session_fastsync.cpp": {
+    "mtime": 1793622894.5810475,
+    "seen": 1795362819.4203763,
+    "ast_hash": "c226713928bafbd3af9349154149c14d",
+    "semantic_hash": "c226713928bafbd3af9349154149c14d"
+  },
+  "libs/storage/src/session_json.cpp": {
+    "mtime": 1794488289.9978921,
+    "seen": 1795362819.4203763,
+    "ast_hash": "706507e88a153f493905dad772299b52",
+    "semantic_hash": "706507e88a153f493905dad772299b52"
+  },
+  "libs/storage/src/session_json_internal.h": {
+    "mtime": 1794488289.9988923,
+    "seen": 1795362819.4203763,
+    "ast_hash": "e00a874b2b13296220bf08560a53f7ba",
+    "semantic_hash": "e00a874b2b13296220bf08560a53f7ba"
+  },
+  "libs/storage/src/session_lle.cpp": {
+    "mtime": 1793622894.5820448,
+    "seen": 1795362819.4203763,
+    "ast_hash": "f261c3a5b612360a3f105a201ec187ac",
+    "semantic_hash": "f261c3a5b612360a3f105a201ec187ac"
+  },
+  "libs/storage/src/session_ls.cpp": {
+    "mtime": 1793622894.5820448,
+    "seen": 1795362819.4203763,
+    "ast_hash": "4176c4af0573fd9c5e92f6bb56ff43cd",
+    "semantic_hash": "4176c4af0573fd9c5e92f6bb56ff43cd"
+  },
+  "libs/storage/src/session_metrics.cpp": {
+    "mtime": 1793622894.5830421,
+    "seen": 1795362819.4203763,
+    "ast_hash": "6d8dbe0632c48af08c48521ff55fffeb",
+    "semantic_hash": "6d8dbe0632c48af08c48521ff55fffeb"
+  },
+  "libs/storage/src/session_network.cpp": {
+    "mtime": 1793622894.5830421,
+    "seen": 1795362819.4203763,
+    "ast_hash": "77cee563f6da6f6eb992a919a83bdc09",
+    "semantic_hash": "77cee563f6da6f6eb992a919a83bdc09"
+  },
+  "libs/storage/src/session_neural.cpp": {
+    "mtime": 1794574499.0702474,
+    "seen": 1795362819.4203763,
+    "ast_hash": "c72ba705f05400a2ab21180004ab7177",
+    "semantic_hash": "c72ba705f05400a2ab21180004ab7177"
+  },
+  "libs/storage/src/session_order.cpp": {
+    "mtime": 1794928835.2809987,
+    "seen": 1795362819.4203763,
+    "ast_hash": "98bffe6e54d18a7ed1905a81da6da06e",
+    "semantic_hash": "98bffe6e54d18a7ed1905a81da6da06e"
+  },
+  "libs/storage/src/session_parametric.cpp": {
+    "mtime": 1793622894.5840394,
+    "seen": 1795362819.4203763,
+    "ast_hash": "9ac8502cf2548c025044927a8ac0edf2",
+    "semantic_hash": "9ac8502cf2548c025044927a8ac0edf2"
+  },
+  "libs/storage/src/session_parametric_windows.cpp": {
+    "mtime": 1793622894.5840394,
+    "seen": 1795362819.4203763,
+    "ast_hash": "e3012b3d8bdb091c3e3d1579b872991a",
+    "semantic_hash": "e3012b3d8bdb091c3e3d1579b872991a"
+  },
+  "libs/storage/src/session_phase.cpp": {
+    "mtime": 1794421858.540831,
+    "seen": 1795362819.4203763,
+    "ast_hash": "dc4bd84f6ed5ff80536ba9426c614f26",
+    "semantic_hash": "dc4bd84f6ed5ff80536ba9426c614f26"
+  },
+  "libs/storage/src/session_tree.cpp": {
+    "mtime": 1795362772.603844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "035db4c9b5329b3613cb473e0c9ba89f",
+    "semantic_hash": "035db4c9b5329b3613cb473e0c9ba89f"
+  },
+  "libs/storage/src/system_library.cpp": {
+    "mtime": 1793622894.585037,
+    "seen": 1795362819.4203763,
+    "ast_hash": "97c068d615e9e125ed242c8ba62e999c",
+    "semantic_hash": "97c068d615e9e125ed242c8ba62e999c"
+  },
+  "libs/ui/include/ucuda/ui/gui.h": {
+    "mtime": 1793622894.5863085,
+    "seen": 1795362819.4203763,
+    "ast_hash": "8c05f3f5482dd5881ae52fc70d42a487",
+    "semantic_hash": "8c05f3f5482dd5881ae52fc70d42a487"
+  },
+  "libs/ui/include/ucuda/ui/gui_tree_state.h": {
+    "mtime": 1793622894.5863085,
+    "seen": 1795362819.4203763,
+    "ast_hash": "ab0b932570323b31bfdd365e11896ab7",
+    "semantic_hash": "ab0b932570323b31bfdd365e11896ab7"
+  },
+  "libs/ui/src/basins.cpp": {
+    "mtime": 1795362772.603844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "dcfa80a5befa0dc9e0f1f862a5b23020",
+    "semantic_hash": "dcfa80a5befa0dc9e0f1f862a5b23020"
+  },
+  "libs/ui/src/bifurcation.cpp": {
+    "mtime": 1795008777.6831844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "9ef364bf7e8432669744a6c34e50068e",
+    "semantic_hash": "9ef364bf7e8432669744a6c34e50068e"
+  },
+  "libs/ui/src/custom.cpp": {
+    "mtime": 1795008777.6831844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "1ae6ada160564c8b75151aaa200df8ed",
+    "semantic_hash": "1ae6ada160564c8b75151aaa200df8ed"
+  },
+  "libs/ui/src/dft.cpp": {
+    "mtime": 1795008777.6831844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "9bb2ed347dafd354ee95fc511fdf8f5c",
+    "semantic_hash": "9bb2ed347dafd354ee95fc511fdf8f5c"
+  },
+  "libs/ui/src/dock_layout.cpp": {
+    "mtime": 1795362772.6076202,
+    "seen": 1795362819.4203763,
+    "ast_hash": "1081b8dde3e21482d30ab4fc88ee5046",
+    "semantic_hash": "1081b8dde3e21482d30ab4fc88ee5046"
+  },
+  "libs/ui/src/dock_layout.h": {
+    "mtime": 1795362772.608039,
+    "seen": 1795362819.4203763,
+    "ast_hash": "e345282b4c863992cd1ac4adfed7d7ff",
+    "semantic_hash": "e345282b4c863992cd1ac4adfed7d7ff"
+  },
+  "libs/ui/src/fastsync.cpp": {
+    "mtime": 1795034990.742214,
+    "seen": 1795362819.4203763,
+    "ast_hash": "bc1a333c278865a97a5a070cba8525b1",
+    "semantic_hash": "bc1a333c278865a97a5a070cba8525b1"
+  },
+  "libs/ui/src/field_names.cpp": {
+    "mtime": 1795017740.7846103,
+    "seen": 1795362819.4203763,
+    "ast_hash": "8dbdd4cbfe68a7cf15a31715ed19b513",
+    "semantic_hash": "8dbdd4cbfe68a7cf15a31715ed19b513"
+  },
+  "libs/ui/src/gui.cpp": {
+    "mtime": 1795362772.6085937,
+    "seen": 1795362819.4203763,
+    "ast_hash": "0871c14d1c0911d8c0eb7226661c8dd3",
+    "semantic_hash": "0871c14d1c0911d8c0eb7226661c8dd3"
+  },
+  "libs/ui/src/gui_common.h": {
+    "mtime": 1795008777.6831844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "549b0c4f1cb32b1a85b55d90fba6d804",
+    "semantic_hash": "549b0c4f1cb32b1a85b55d90fba6d804"
+  },
+  "libs/ui/src/gui_fields.h": {
+    "mtime": 1795008777.6831844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "99231c58dc3c207f758cf8462c930261",
+    "semantic_hash": "99231c58dc3c207f758cf8462c930261"
+  },
+  "libs/ui/src/gui_inputs.h": {
+    "mtime": 1795008777.6831844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "b96a49bde252ffa79149d5ff74a04238",
+    "semantic_hash": "b96a49bde252ffa79149d5ff74a04238"
+  },
+  "libs/ui/src/gui_integration.h": {
+    "mtime": 1793651909.2393408,
+    "seen": 1795362819.4203763,
+    "ast_hash": "ac8f87f60ae7d373696905e366e36f52",
+    "semantic_hash": "ac8f87f60ae7d373696905e366e36f52"
+  },
+  "libs/ui/src/gui_plot.h": {
+    "mtime": 1795362772.609591,
+    "seen": 1795362819.4203763,
+    "ast_hash": "06f440aeb9577ef2bb3e1d4adf24de83",
+    "semantic_hash": "06f440aeb9577ef2bb3e1d4adf24de83"
+  },
+  "libs/ui/src/integration_widgets.cpp": {
+    "mtime": 1795008777.6831844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "c8625d43e2951f18bbf66012e1169155",
+    "semantic_hash": "c8625d43e2951f18bbf66012e1169155"
+  },
+  "libs/ui/src/library.cpp": {
+    "mtime": 1795008777.6831844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "094d173ce8fde934b9ed5eb678aaa27b",
+    "semantic_hash": "094d173ce8fde934b9ed5eb678aaa27b"
+  },
+  "libs/ui/src/library_list.cpp": {
+    "mtime": 1794843511.3821454,
+    "seen": 1795362819.4203763,
+    "ast_hash": "72437db4f2290de6d0ab5bba31cb46e0",
+    "semantic_hash": "72437db4f2290de6d0ab5bba31cb46e0"
+  },
+  "libs/ui/src/lyapunov.cpp": {
+    "mtime": 1795008777.6831844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "0f8704962d4986a63b017661908aa0ae",
+    "semantic_hash": "0f8704962d4986a63b017661908aa0ae"
+  },
+  "libs/ui/src/metrics.cpp": {
+    "mtime": 1795008777.6831844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "4f1797020ec717139b83feff3ae48767",
+    "semantic_hash": "4f1797020ec717139b83feff3ae48767"
+  },
+  "libs/ui/src/network.cpp": {
+    "mtime": 1795008777.6831844,
+    "seen": 1795362819.4203763,
+    "ast_hash": "d8c2d6cbd7590656f4916f8a1417da6c",
+    "semantic_hash": "d8c2d6cbd7590656f4916f8a1417da6c"
+  },
+  "libs/ui/src/neural.cpp": {
+    "mtime": 1795172328.9636989,
+    "seen": 1795362819.4203763,
+    "ast_hash": "8488a533f902b313f04cc6c21b1fe0f7",
+    "semantic_hash": "8488a533f902b313f04cc6c21b1fe0f7"
+  },
+  "libs/ui/src/order.cpp": {
+    "mtime": 1795008777.6947243,
+    "seen": 1795362819.4203763,
+    "ast_hash": "6f3e464d916d50a82fb194558039c323",
+    "semantic_hash": "6f3e464d916d50a82fb194558039c323"
+  },
+  "libs/ui/src/parametric_windows.cpp": {
+    "mtime": 1795008777.6947243,
+    "seen": 1795362819.4203763,
+    "ast_hash": "773684246124c8beaa26d6dd0de674b3",
+    "semantic_hash": "773684246124c8beaa26d6dd0de674b3"
+  },
+  "libs/ui/src/phase.cpp": {
+    "mtime": 1795362772.609591,
+    "seen": 1795362819.4203763,
+    "ast_hash": "ed88086d8b6c987174bf400e1a48d788",
+    "semantic_hash": "ed88086d8b6c987174bf400e1a48d788"
+  },
+  "libs/ui/src/plot_widgets.cpp": {
+    "mtime": 1795362772.612217,
+    "seen": 1795362819.4203763,
+    "ast_hash": "9b2cde1e5fd1e32b7ce2b2210ecb1eb5",
+    "semantic_hash": "9b2cde1e5fd1e32b7ce2b2210ecb1eb5"
+  },
+  "libs/ui/src/system_tab.cpp": {
+    "mtime": 1795008777.6947243,
+    "seen": 1795362819.4203763,
+    "ast_hash": "3caf773f60b1547530945100909fd812",
+    "semantic_hash": "3caf773f60b1547530945100909fd812"
+  },
+  "libs/ui/src/tab_basins.h": {
+    "mtime": 1795362772.612217,
+    "seen": 1795362819.4203763,
+    "ast_hash": "4057f48118a7a1922171bf9f98ee5a22",
+    "semantic_hash": "4057f48118a7a1922171bf9f98ee5a22"
+  },
+  "libs/ui/src/tab_custom.h": {
+    "mtime": 1793651909.2733705,
+    "seen": 1795362819.4203763,
+    "ast_hash": "38d7995ad74e8adf93c5d3a6cffb2885",
+    "semantic_hash": "38d7995ad74e8adf93c5d3a6cffb2885"
+  },
+  "libs/ui/src/tab_dft.h": {
+    "mtime": 1793651909.2744482,
+    "seen": 1795362819.4203763,
+    "ast_hash": "154226e27f526b6f27343d04529d9d56",
+    "semantic_hash": "154226e27f526b6f27343d04529d9d56"
+  },
+  "libs/ui/src/tab_fastsync.h": {
+    "mtime": 1793651909.2749531,
+    "seen": 1795362819.4203763,
+    "ast_hash": "f5b6bdc6345edb545b1c6a2706d751d7",
+    "semantic_hash": "f5b6bdc6345edb545b1c6a2706d751d7"
+  },
+  "libs/ui/src/tab_library.h": {
+    "mtime": 1793651909.2759564,
+    "seen": 1795362819.4203763,
+    "ast_hash": "568fcbc14e60541af3b8da873f1e700a",
+    "semantic_hash": "568fcbc14e60541af3b8da873f1e700a"
+  },
+  "libs/ui/src/tab_network.h": {
+    "mtime": 1793651909.2759564,
+    "seen": 1795362819.4203763,
+    "ast_hash": "17c8f690885cdb513a1b5314dd98359d",
+    "semantic_hash": "17c8f690885cdb513a1b5314dd98359d"
+  },
+  "libs/ui/src/tab_neural.h": {
+    "mtime": 1794421858.5488098,
+    "seen": 1795362819.4203763,
+    "ast_hash": "766f7fd44ec187c88491c17ea3bb059b",
+    "semantic_hash": "766f7fd44ec187c88491c17ea3bb059b"
+  },
+  "libs/ui/src/tab_order.h": {
+    "mtime": 1794928835.2849882,
+    "seen": 1795362819.4203763,
+    "ast_hash": "e83587ee2e6b7d7d706750c8a5f1ba5b",
+    "semantic_hash": "e83587ee2e6b7d7d706750c8a5f1ba5b"
+  },
+  "libs/ui/src/tab_parametric.h": {
+    "mtime": 1794843511.3821454,
+    "seen": 1795362819.4203763,
+    "ast_hash": "2fb062bf8e8e08b902f2f45a7635212f",
+    "semantic_hash": "2fb062bf8e8e08b902f2f45a7635212f"
+  },
+  "libs/ui/src/tab_phase.h": {
+    "mtime": 1795362772.612217,
+    "seen": 1795362819.4203763,
+    "ast_hash": "38dcb26ee10a9be3ac6a388ade54b42f",
+    "semantic_hash": "38dcb26ee10a9be3ac6a388ade54b42f"
+  },
+  "libs/ui/src/tab_system.h": {
+    "mtime": 1793651909.2789462,
+    "seen": 1795362819.4203763,
+    "ast_hash": "6cb3cb09920021ad5fdf3d996c59f6d1",
+    "semantic_hash": "6cb3cb09920021ad5fdf3d996c59f6d1"
+  },
+  "libs/ui/src/tab_tree.h": {
+    "mtime": 1795362772.612217,
+    "seen": 1795362819.4203763,
+    "ast_hash": "8d40913103bc7977a06aff758510ed99",
+    "semantic_hash": "8d40913103bc7977a06aff758510ed99"
+  },
+  "libs/ui/src/tree_tab.cpp": {
+    "mtime": 1795362772.612217,
+    "seen": 1795362819.4203763,
+    "ast_hash": "1b94ef1869af7f9068e04b9bd6fa1a24",
+    "semantic_hash": "1b94ef1869af7f9068e04b9bd6fa1a24"
+  },
+  "libs/ui/src/tree_tab_windows.cpp": {
+    "mtime": 1795362772.612217,
+    "seen": 1795362819.4203763,
+    "ast_hash": "35fdbae0f6766ebba8f4ab65c854ff4c",
+    "semantic_hash": "35fdbae0f6766ebba8f4ab65c854ff4c"
+  },
+  "libs/ui/src/ui_resources.cpp": {
+    "mtime": 1795362772.612217,
+    "seen": 1795362819.4203763,
+    "ast_hash": "b9c0f938c98eb2fcf82812c9e369178e",
+    "semantic_hash": "b9c0f938c98eb2fcf82812c9e369178e"
+  },
+  "libs/ui/src/ui_resources.h": {
+    "mtime": 1795362772.612217,
+    "seen": 1795362819.4203763,
+    "ast_hash": "45b6e2c1915ed862e15ac64db85a7820",
+    "semantic_hash": "45b6e2c1915ed862e15ac64db85a7820"
+  },
+  "libs/ui/src/widgets.cpp": {
+    "mtime": 1795034990.7450702,
+    "seen": 1795362819.4203763,
+    "ast_hash": "c26ee1a3ca5d1eac8c35a8f0040f44c0",
+    "semantic_hash": "c26ee1a3ca5d1eac8c35a8f0040f44c0"
+  },
+  "libs/ui/src/workspace.cpp": {
+    "mtime": 1794843511.3821454,
+    "seen": 1795362819.4203763,
+    "ast_hash": "09de836f29faefe7e99bce25ede01e10",
+    "semantic_hash": "09de836f29faefe7e99bce25ede01e10"
+  },
+  "resources/kernels/adaptive_part.cu": {
+    "mtime": 1793622894.6029885,
+    "seen": 1795362819.4203763,
+    "ast_hash": "455779f3d274fbf872a1f5d075f2819a",
+    "semantic_hash": "455779f3d274fbf872a1f5d075f2819a"
+  },
+  "resources/kernels/basins.template.cu": {
+    "mtime": 1793622894.6029885,
+    "seen": 1795362819.4203763,
+    "ast_hash": "af64001290fc532534e00646ba42a25d",
+    "semantic_hash": "af64001290fc532534e00646ba42a25d"
+  },
+  "resources/kernels/bifurcation1d.template.cu": {
+    "mtime": 1793622894.6029885,
+    "seen": 1795362819.4203763,
+    "ast_hash": "0d40dc05d159a808ee196436914f3ea7",
+    "semantic_hash": "0d40dc05d159a808ee196436914f3ea7"
+  },
+  "resources/kernels/bifurcation1d_cont.template.cu": {
+    "mtime": 1793622894.6029885,
+    "seen": 1795362819.4203763,
+    "ast_hash": "6585f9f8532e8a9cb688d7afa5a27869",
+    "semantic_hash": "6585f9f8532e8a9cb688d7afa5a27869"
+  },
+  "resources/kernels/bifurcation2d.template.cu": {
+    "mtime": 1793622894.6029885,
+    "seen": 1795362819.4203763,
+    "ast_hash": "2e8417304fad9a2368163e47eb2a7072",
+    "semantic_hash": "2e8417304fad9a2368163e47eb2a7072"
+  },
+  "resources/kernels/circuit.template.cu": {
+    "mtime": 1793622894.603986,
+    "seen": 1795362819.4203763,
+    "ast_hash": "9a7a78d2650015deb64288cd37cf58c2",
+    "semantic_hash": "9a7a78d2650015deb64288cd37cf58c2"
+  },
+  "resources/kernels/dft1d_cont.template.cu": {
+    "mtime": 1793622894.603986,
+    "seen": 1795362819.4203763,
+    "ast_hash": "56c6b864668c4d8efda3406dd67145fd",
+    "semantic_hash": "56c6b864668c4d8efda3406dd67145fd"
+  },
+  "resources/kernels/dft1d_hsweep.template.cu": {
+    "mtime": 1793622894.603986,
+    "seen": 1795362819.4203763,
+    "ast_hash": "cc5bd49193e068ddb9136184762b56f7",
+    "semantic_hash": "cc5bd49193e068ddb9136184762b56f7"
+  },
+  "resources/kernels/fastsync_attr.template.cu": {
+    "mtime": 1793622894.6049833,
+    "seen": 1795362819.4203763,
+    "ast_hash": "a13783202298b96418f2321a616481a7",
+    "semantic_hash": "a13783202298b96418f2321a616481a7"
+  },
+  "resources/kernels/fastsync_grid.template.cu": {
+    "mtime": 1793622894.6049833,
+    "seen": 1795362819.4203763,
+    "ast_hash": "49332a927ee65119af0ee2235eb99f4b",
+    "semantic_hash": "49332a927ee65119af0ee2235eb99f4b"
+  },
+  "resources/kernels/lle1d.template.cu": {
+    "mtime": 1793622894.6049833,
+    "seen": 1795362819.4203763,
+    "ast_hash": "7ffa83993eaa04ae27cbba44067e9edd",
+    "semantic_hash": "7ffa83993eaa04ae27cbba44067e9edd"
+  },
+  "resources/kernels/lle1d_cont.template.cu": {
+    "mtime": 1793622894.6049833,
+    "seen": 1795362819.4203763,
+    "ast_hash": "cb03b7aee38817459746049be83cc90c",
+    "semantic_hash": "cb03b7aee38817459746049be83cc90c"
+  },
+  "resources/kernels/lle2d.template.cu": {
+    "mtime": 1793622894.6049833,
+    "seen": 1795362819.4203763,
+    "ast_hash": "8fea3776ee43af45e4d57a62d2271ddb",
+    "semantic_hash": "8fea3776ee43af45e4d57a62d2271ddb"
+  },
+  "resources/kernels/ls1d.template.cu": {
+    "mtime": 1793622894.6049833,
+    "seen": 1795362819.4203763,
+    "ast_hash": "9751adbcf18f605e995c7242399e9958",
+    "semantic_hash": "9751adbcf18f605e995c7242399e9958"
+  },
+  "resources/kernels/ls1d_cont.template.cu": {
+    "mtime": 1793622894.6059806,
+    "seen": 1795362819.4203763,
+    "ast_hash": "5c95383fb4fb290ed1d42992690b9f2d",
+    "semantic_hash": "5c95383fb4fb290ed1d42992690b9f2d"
+  },
+  "resources/kernels/ls2d.template.cu": {
+    "mtime": 1793622894.6059806,
+    "seen": 1795362819.4203763,
+    "ast_hash": "6deeee6d3642b2061a404aa5989aaf92",
+    "semantic_hash": "6deeee6d3642b2061a404aa5989aaf92"
+  },
+  "resources/kernels/lyapunov_adaptive_part.cu": {
+    "mtime": 1793622894.6059806,
+    "seen": 1795362819.4203763,
+    "ast_hash": "303b368e568e179e57aa87c49456cccf",
+    "semantic_hash": "303b368e568e179e57aa87c49456cccf"
+  },
+  "resources/kernels/metrics_adaptive_part.cu": {
+    "mtime": 1793622894.6059806,
+    "seen": 1795362819.4203763,
+    "ast_hash": "f0bd50a5bb0465e1c8931d8e365c8c91",
+    "semantic_hash": "f0bd50a5bb0465e1c8931d8e365c8c91"
+  },
+  "resources/kernels/network.template.cu": {
+    "mtime": 1793622894.60698,
+    "seen": 1795362819.4203763,
+    "ast_hash": "50c67dff89319a4695cce6919d215678",
+    "semantic_hash": "50c67dff89319a4695cce6919d215678"
+  },
+  "resources/kernels/neural.template.cu": {
+    "mtime": 1794225676.805775,
+    "seen": 1795362819.4203763,
+    "ast_hash": "fb556691ee2c8b677c50531e6c04115d",
+    "semantic_hash": "fb556691ee2c8b677c50531e6c04115d"
+  },
+  "resources/kernels/order.template.cu": {
+    "mtime": 1793622894.60698,
+    "seen": 1795362819.4203763,
+    "ast_hash": "97720fcd41bac911147eb6f9228bb480",
+    "semantic_hash": "97720fcd41bac911147eb6f9228bb480"
+  },
+  "resources/kernels/signal_metrics.template.cu": {
+    "mtime": 1793622894.6079755,
+    "seen": 1795362819.4203763,
+    "ast_hash": "b4d9ce072d65e9c002fc3a268836519d",
+    "semantic_hash": "b4d9ce072d65e9c002fc3a268836519d"
+  },
+  "resources/kernels/ucuda_adaptive.cuh": {
+    "mtime": 1793622894.6079755,
+    "seen": 1795362819.4203763,
+    "ast_hash": "d8880277e9440622fa732edb64d8f6bc",
+    "semantic_hash": "d8880277e9440622fa732edb64d8f6bc"
+  },
+  "resources/kernels/ucuda_bdf.cuh": {
+    "mtime": 1793622894.608999,
+    "seen": 1795362819.4203763,
+    "ast_hash": "ae66612447b986509a690340ee624bf1",
+    "semantic_hash": "ae66612447b986509a690340ee624bf1"
+  },
+  "resources/kernels/ucuda_hp.h": {
+    "mtime": 1793622894.608999,
+    "seen": 1795362819.4203763,
+    "ast_hash": "d625651f45c243d179610fe61c671e62",
+    "semantic_hash": "d625651f45c243d179610fe61c671e62"
+  },
+  "resources/library_template/Azar/system.json": {
+    "mtime": 1793622894.608999,
+    "seen": 1795362819.4203763,
+    "ast_hash": "47083ed609a02cefb211ff949e20ac4e",
+    "semantic_hash": "47083ed609a02cefb211ff949e20ac4e"
+  },
+  "resources/library_template/BoSang/sessions/_last.json": {
+    "mtime": 1793622894.60997,
+    "seen": 1795362819.4203763,
+    "ast_hash": "04f78ea8bf81efac9d3cc318d08b0ffb",
+    "semantic_hash": "04f78ea8bf81efac9d3cc318d08b0ffb"
+  },
+  "resources/library_template/BoSang/system.json": {
+    "mtime": 1793622894.60997,
+    "seen": 1795362819.4203763,
+    "ast_hash": "f7cc9e9dee1c527eb0a87d9bb592ca6d",
+    "semantic_hash": "f7cc9e9dee1c527eb0a87d9bb592ca6d"
+  },
+  "resources/library_template/CaseA/sessions/_last.json": {
+    "mtime": 1793622894.60997,
+    "seen": 1795362819.4203763,
+    "ast_hash": "c638ea02748c32146e8d5710b97191e2",
+    "semantic_hash": "c638ea02748c32146e8d5710b97191e2"
+  },
+  "resources/library_template/CaseA/system.json": {
+    "mtime": 1793622894.60997,
+    "seen": 1795362819.4203763,
+    "ast_hash": "d327292454d544d7d345f73e7766ece6",
+    "semantic_hash": "d327292454d544d7d345f73e7766ece6"
+  },
+  "resources/library_template/Chen/sessions/_last.json": {
+    "mtime": 1793622894.6109674,
+    "seen": 1795362819.4203763,
+    "ast_hash": "fc97c5a9fcf562475d89b2dc8f5c7834",
+    "semantic_hash": "fc97c5a9fcf562475d89b2dc8f5c7834"
+  },
+  "resources/library_template/Chen/system.json": {
+    "mtime": 1793622894.6109674,
+    "seen": 1795362819.4203763,
+    "ast_hash": "da88caaef782951556a8e5c3fb921160",
+    "semantic_hash": "da88caaef782951556a8e5c3fb921160"
+  },
+  "resources/library_template/Lorenz/sessions/Base.json": {
+    "mtime": 1793622894.6109674,
+    "seen": 1795362819.4203763,
+    "ast_hash": "f44b797be5fcf2170dd7e1100013f8ab",
+    "semantic_hash": "f44b797be5fcf2170dd7e1100013f8ab"
+  },
+  "resources/library_template/Lorenz/sessions/Base2.json": {
+    "mtime": 1793622894.6109674,
+    "seen": 1795362819.4203763,
+    "ast_hash": "2f1f3ec185db29fc70fe62ebb98065fb",
+    "semantic_hash": "2f1f3ec185db29fc70fe62ebb98065fb"
+  },
+  "resources/library_template/Lorenz/sessions/_last.json": {
+    "mtime": 1793622894.6119647,
+    "seen": 1795362819.4203763,
+    "ast_hash": "e6291fb9f6989c69f3debfd61511f3a4",
+    "semantic_hash": "e6291fb9f6989c69f3debfd61511f3a4"
+  },
+  "resources/library_template/Lorenz/system.json": {
+    "mtime": 1793622894.6119647,
+    "seen": 1795362819.4203763,
+    "ast_hash": "b330ed6476da04fe34feb4e2191c68c3",
+    "semantic_hash": "b330ed6476da04fe34feb4e2191c68c3"
+  },
+  "resources/library_template/Rossler/system.json": {
+    "mtime": 1793622894.6119647,
+    "seen": 1795362819.4203763,
+    "ast_hash": "b64f6462ee1e77e20b7a5273b8b7a822",
+    "semantic_hash": "b64f6462ee1e77e20b7a5273b8b7a822"
+  },
+  "setup.ps1": {
+    "mtime": 1793622894.612962,
+    "seen": 1795362819.4203763,
+    "ast_hash": "ae09f124f12e6ec19180c116c60af8fb",
+    "semantic_hash": "ae09f124f12e6ec19180c116c60af8fb"
+  },
+  "tests/adaptive_test.cpp": {
+    "mtime": 1793658528.5752733,
+    "seen": 1795362819.4203763,
+    "ast_hash": "9ed81233861c449e08ebd96c9c286738",
+    "semantic_hash": "9ed81233861c449e08ebd96c9c286738"
+  },
+  "tests/architecture_test.cpp": {
+    "mtime": 1793657143.2032537,
+    "seen": 1795362819.4203763,
+    "ast_hash": "90ccf93e44f31fd5935793f780362f63",
+    "semantic_hash": "90ccf93e44f31fd5935793f780362f63"
+  },
+  "tests/artifacts_test.cpp": {
+    "mtime": 1793622894.6149566,
+    "seen": 1795362819.4203763,
+    "ast_hash": "6d1604d57271ac25a57c582a079194fd",
+    "semantic_hash": "6d1604d57271ac25a57c582a079194fd"
+  },
+  "tests/dae_gtest.cpp": {
+    "mtime": 1793622895.3901966,
+    "seen": 1795362819.4203763,
+    "ast_hash": "3ab76872f414fa74564d3012215bac44",
+    "semantic_hash": "3ab76872f414fa74564d3012215bac44"
+  },
+  "tests/fixtures/gen_lorenz_reference.py": {
+    "mtime": 1790007462.987067,
+    "seen": 1795362819.4203763,
+    "ast_hash": "4ebe387fc38bdeb8ce4d7fdcbfc8ae24",
+    "semantic_hash": "4ebe387fc38bdeb8ce4d7fdcbfc8ae24"
+  },
+  "tests/fixtures/lorenz_reference_invariants.json": {
+    "mtime": 1790007462.9879606,
+    "seen": 1795362819.4203763,
+    "ast_hash": "606bce3ac2fc253fc1f6fe3170ab5c59",
+    "semantic_hash": "606bce3ac2fc253fc1f6fe3170ab5c59"
+  },
+  "tests/gpu_smoke.cpp": {
+    "mtime": 1795034990.7463439,
+    "seen": 1795362819.4203763,
+    "ast_hash": "abddc00b9a360ba4b0b347a31d61adc1",
+    "semantic_hash": "abddc00b9a360ba4b0b347a31d61adc1"
+  },
+  "tests/neural_classifier_test.cpp": {
+    "mtime": 1795172328.9648433,
+    "seen": 1795362819.4203763,
+    "ast_hash": "178db0f74c576c68dd248b06b27a999b",
+    "semantic_hash": "178db0f74c576c68dd248b06b27a999b"
+  },
+  "tests/neural_cuba_test.cpp": {
+    "mtime": 1794421858.5518012,
+    "seen": 1795362819.4203763,
+    "ast_hash": "4a3905d4d219111749723fc77305faae",
+    "semantic_hash": "4a3905d4d219111749723fc77305faae"
+  },
+  "tests/neural_forecast_test.cpp": {
+    "mtime": 1794574499.0702474,
+    "seen": 1795362819.4203763,
+    "ast_hash": "3381b565272796d348896f952ca54251",
+    "semantic_hash": "3381b565272796d348896f952ca54251"
+  },
+  "tests/neural_results_test.cpp": {
+    "mtime": 1794421858.5518012,
+    "seen": 1795362819.4203763,
+    "ast_hash": "307e719da1bd365b8a1cea858c90d66e",
+    "semantic_hash": "307e719da1bd365b8a1cea858c90d66e"
+  },
+  "tests/parity/compare.cpp": {
+    "mtime": 1793622895.3921728,
+    "seen": 1795362819.4203763,
+    "ast_hash": "7bf0147ef65c0efc010f69e1d20274f2",
+    "semantic_hash": "7bf0147ef65c0efc010f69e1d20274f2"
+  },
+  "tests/parity/compare.h": {
+    "mtime": 1793622895.39317,
+    "seen": 1795362819.4203763,
+    "ast_hash": "c51e2868f1023b4c78af99fce4f900f0",
+    "semantic_hash": "c51e2868f1023b4c78af99fce4f900f0"
+  },
+  "tests/parity/compare_test.cpp": {
+    "mtime": 1793622895.39317,
+    "seen": 1795362819.4203763,
+    "ast_hash": "b58b90de35aa19b15376de965f7d131f",
+    "semantic_hash": "b58b90de35aa19b15376de965f7d131f"
+  },
+  "tests/parity/measure.ps1": {
+    "mtime": 1793622895.39317,
+    "seen": 1795362819.4203763,
+    "ast_hash": "c226ebc50ee96ba98d8816459d7cc69b",
+    "semantic_hash": "c226ebc50ee96ba98d8816459d7cc69b"
+  },
+  "tests/parity/observations.cpp": {
+    "mtime": 1793658528.5752733,
+    "seen": 1795362819.4203763,
+    "ast_hash": "419d032ffda49b0d923f63d80c98378f",
+    "semantic_hash": "419d032ffda49b0d923f63d80c98378f"
+  },
+  "tests/parity/platform_paths.h": {
+    "mtime": 1793622895.39317,
+    "seen": 1795362819.4203763,
+    "ast_hash": "67cd3185b228825a1126f6d3e06d5fb2",
+    "semantic_hash": "67cd3185b228825a1126f6d3e06d5fb2"
+  },
+  "tests/parity/run.ps1": {
+    "mtime": 1793622895.3941674,
+    "seen": 1795362819.4203763,
+    "ast_hash": "64af594dd96464c1a279e3f140a0e891",
+    "semantic_hash": "64af594dd96464c1a279e3f140a0e891"
+  },
+  "tests/performance_benchmark.cpp": {
+    "mtime": 1793622895.3941674,
+    "seen": 1795362819.4203763,
+    "ast_hash": "59b4caea2c3a48a39695666c27582dd3",
+    "semantic_hash": "59b4caea2c3a48a39695666c27582dd3"
+  },
+  "tests/platform_test.cpp": {
+    "mtime": 1793396109.4890113,
+    "seen": 1795362819.4203763,
+    "ast_hash": "e26a9f1348845ea6af0e5ece9df6ad12",
+    "semantic_hash": "e26a9f1348845ea6af0e5ece9df6ad12"
+  },
+  "tests/regression_main.cpp": {
+    "mtime": 1793622895.3941674,
+    "seen": 1795362819.4203763,
+    "ast_hash": "25a7e7a894d122c7df53cb297968a249",
+    "semantic_hash": "25a7e7a894d122c7df53cb297968a249"
+  },
+  "tests/regression_test.cpp": {
+    "mtime": 1794928835.2870853,
+    "seen": 1795362819.4203763,
+    "ast_hash": "e6f24fd39ebdf7682935275a878f017b",
+    "semantic_hash": "e6f24fd39ebdf7682935275a878f017b"
+  },
+  "tests/support/analysis_workloads.h": {
+    "mtime": 1793622895.395165,
+    "seen": 1795362819.4203763,
+    "ast_hash": "e737e5d087eef6ca0af049aa80f23789",
+    "semantic_hash": "e737e5d087eef6ca0af049aa80f23789"
+  },
+  "tests/support/artifacts.h": {
+    "mtime": 1793622895.395165,
+    "seen": 1795362819.4203763,
+    "ast_hash": "a4892855b60ef5cabe00d8c98cbcfb2b",
+    "semantic_hash": "a4892855b60ef5cabe00d8c98cbcfb2b"
+  },
+  "tests/support/builtin_cases.h": {
+    "mtime": 1793622895.395165,
+    "seen": 1795362819.4203763,
+    "ast_hash": "a02adbc1f684411d8fb560d46ac15279",
+    "semantic_hash": "a02adbc1f684411d8fb560d46ac15279"
+  },
+  "tests/support/process.h": {
+    "mtime": 1793622895.395165,
+    "seen": 1795362819.4203763,
+    "ast_hash": "71169b15e7236f9c1407687bab3c0d62",
+    "semantic_hash": "71169b15e7236f9c1407687bab3c0d62"
+  },
+  "tests/support/solver_workloads.h": {
+    "mtime": 1793622895.395165,
+    "seen": 1795362819.4203763,
+    "ast_hash": "8d3ecc58ee73a6c7d1e13d62ba9d6c16",
+    "semantic_hash": "8d3ecc58ee73a6c7d1e13d62ba9d6c16"
+  },
+  "tests/test_config.json": {
+    "mtime": 1793622895.395165,
+    "seen": 1795362819.4203763,
+    "ast_hash": "a4e6c4049607f52672c77fc1cdc47af1",
+    "semantic_hash": "a4e6c4049607f52672c77fc1cdc47af1"
+  },
+  "tests/test_tool.cpp": {
+    "mtime": 1793622895.396162,
+    "seen": 1795362819.4203763,
+    "ast_hash": "4372c673b2639ba19545878d79f3e503",
+    "semantic_hash": "4372c673b2639ba19545878d79f3e503"
+  },
+  "tests/tree_test.cpp": {
+    "mtime": 1795362772.616274,
+    "seen": 1795362819.4203763,
+    "ast_hash": "5fdf27f6f1597fb81859c24e567c5f90",
+    "semantic_hash": "5fdf27f6f1597fb81859c24e567c5f90"
+  },
+  "tests/u-cuda/dae_test.cpp": {
+    "mtime": 1793622895.398157,
+    "seen": 1795362819.4203763,
+    "ast_hash": "8ed191ea2ac483936f25feb69b5455cc",
+    "semantic_hash": "8ed191ea2ac483936f25feb69b5455cc"
+  },
+  "tests/u-cuda/kicad_test.cpp": {
+    "mtime": 1793622895.402146,
+    "seen": 1795362819.4203763,
+    "ast_hash": "1b744ea3471508f99b19c69c753076bf",
+    "semantic_hash": "1b744ea3471508f99b19c69c753076bf"
+  },
+  "tests/u-cuda/krs_cpu_test.cpp": {
+    "mtime": 1793622895.402146,
+    "seen": 1795362819.4203763,
+    "ast_hash": "e40f1b18ecf34208ec5114194cd5f9e9",
+    "semantic_hash": "e40f1b18ecf34208ec5114194cd5f9e9"
+  },
+  "tests/u-cuda/library_test.cpp": {
+    "mtime": 1793622895.402146,
+    "seen": 1795362819.4203763,
+    "ast_hash": "ecc1c64b6eda3a843d4208a030bd2abc",
+    "semantic_hash": "ecc1c64b6eda3a843d4208a030bd2abc"
+  },
+  "tests/u-cuda/network_fixtures.h": {
+    "mtime": 1793622895.402146,
+    "seen": 1795362819.4203763,
+    "ast_hash": "797ee6f917550cae59dba1194a06a621",
+    "semantic_hash": "797ee6f917550cae59dba1194a06a621"
+  },
+  "tests/u-cuda/network_test.cpp": {
+    "mtime": 1793622895.402146,
+    "seen": 1795362819.4203763,
+    "ast_hash": "afcf9835c214bb02f8cae35f1ab6b2f6",
+    "semantic_hash": "afcf9835c214bb02f8cae35f1ab6b2f6"
+  },
+  "tests/u-cuda/prune_test.cpp": {
+    "mtime": 1793622895.4031434,
+    "seen": 1795362819.4203763,
+    "ast_hash": "f803805634c3a9551a5398dfb75594d8",
+    "semantic_hash": "f803805634c3a9551a5398dfb75594d8"
+  },
+  "tests/u-cuda/sessions_test.cpp": {
+    "mtime": 1794774876.304952,
+    "seen": 1795362819.4203763,
+    "ast_hash": "5a1032c24f1e611baa00e05bd7934383",
+    "semantic_hash": "5a1032c24f1e611baa00e05bd7934383"
+  },
+  "tests/u-cuda/spice_test.cpp": {
+    "mtime": 1793658528.57627,
+    "seen": 1795362819.4203763,
+    "ast_hash": "c10501bdf23ae4ad974cbc5e8191bcbe",
+    "semantic_hash": "c10501bdf23ae4ad974cbc5e8191bcbe"
+  },
+  "tests/u-cuda/tabs_test.cpp": {
+    "mtime": 1793622895.4041407,
+    "seen": 1795362819.4203763,
+    "ast_hash": "59977385c5096b14525c48bf9b07e0bb",
+    "semantic_hash": "59977385c5096b14525c48bf9b07e0bb"
+  },
+  "tests/u-cuda/test_util.h": {
+    "mtime": 1793622895.4041407,
+    "seen": 1795362819.4203763,
+    "ast_hash": "7bd8703aa47bc74d0eb08b0393cb4108",
+    "semantic_hash": "7bd8703aa47bc74d0eb08b0393cb4108"
+  },
+  "tools/graphify_update.py": {
+    "mtime": 1795362797.5392199,
+    "seen": 1795362819.4203763,
+    "ast_hash": "40a5dae72602b4ea09724fc5cec731fc",
+    "semantic_hash": "40a5dae72602b4ea09724fc5cec731fc"
+  },
+  "tools/mnist_subset.py": {
+    "mtime": 1794574499.0702474,
+    "seen": 1795362819.4203763,
+    "ast_hash": "17c3070292a7eb2fc2cb666fa6d7da4a",
+    "semantic_hash": "17c3070292a7eb2fc2cb666fa6d7da4a"
+  },
+  "tools/ocr/ocr_server.py": {
+    "mtime": 1793622895.4081302,
+    "seen": 1795362819.4203763,
+    "ast_hash": "c7d2e7eab512535f93a8b891ad3f268c",
+    "semantic_hash": "c7d2e7eab512535f93a8b891ad3f268c"
+  },
+  "vcpkg.json": {
+    "mtime": 1781733096.7366886,
+    "seen": 1795362819.4203763,
+    "ast_hash": "2425946fe82452c5ddb6502fc14a3720",
+    "semantic_hash": "2425946fe82452c5ddb6502fc14a3720"
+  }
+}
