@@ -1,12 +1,54 @@
 #include "ucuda/plotting/plot_view_3d.h"
+#include "imgui_internal.h"   // ImGui::MarkIniSettingsDirty (масштаб осей пишется в imgui.ini)
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 
+void Plot3DView::effective_scale(float aspect, float out[3]) const {
+    out[0] = out[1] = out[2] = 1.0f;
+    float b[6];
+    if (fit_axes_to_window && series_cache_.bbox(b[0], b[1], b[2], b[3], b[4], b[5])) {
+        // z — на высоту поля, x и y — на его ширину. Вырожденная ось (плоский портрет) остаётся 1.
+        const float len[3] = { aspect, aspect, 1.0f };
+        for (int i = 0; i < 3; ++i) {
+            const float range = b[2 * i + 1] - b[2 * i];
+            if (range > 1e-20f) out[i] = len[i] / range;
+        }
+        // Общий множитель не важен (ортографическая камера), но держим мир около единиц:
+        // нормируем на масштаб z, чтобы смена размеров окна не уводила дистанцию камеры.
+        const float ref = out[2];
+        for (int i = 0; i < 3; ++i) out[i] /= ref;
+    }
+    for (int i = 0; i < 3; ++i) out[i] *= axis_scale[i] > 0.0f ? axis_scale[i] : 1.0f;
+}
+
 void Plot3DView::do_autofit() {
     float xmn, xmx, ymn, ymx, zmn, zmx;
     if (series_cache_.bbox(xmn, xmx, ymn, ymx, zmn, zmx)) {
-        camera.fit_to_bbox(xmn, xmx, ymn, ymx, zmn, zmx);
+        // Камера живёт в масштабированном мире — подгоняем по масштабированному bbox.
+        effective_scale(aspect_, scale_);
+        camera.fit_to_bbox(xmn * scale_[0], xmx * scale_[0], ymn * scale_[1], ymx * scale_[1],
+                           zmn * scale_[2], zmx * scale_[2]);
+        if (fit_axes_to_window) {
+            // fit_to_bbox берёт расстояние по диагонали с запасом и не знает формы окна — в
+            // широком поле растянутый портрет остался бы мелким. Ортографическая проекция
+            // линейна по 1/distance: проецируем углы bbox при distance = 1 и берём наибольшую
+            // NDC-координату — это и есть нужное расстояние (плюс 8 % поля).
+            camera.aspect = aspect_;
+            const float keep = camera.distance;
+            camera.distance = 1.0f;
+            float m[16];
+            camera.build_mvp(m);
+            const float b[6] = { xmn * scale_[0], xmx * scale_[0], ymn * scale_[1],
+                                 ymx * scale_[1], zmn * scale_[2], zmx * scale_[2] };
+            float need = 0.0f;
+            for (int k = 0; k < 8; ++k) {
+                const float x = b[0 + (k & 1)], y = b[2 + ((k >> 1) & 1)], z = b[4 + ((k >> 2) & 1)];
+                need = (std::max)(need, std::fabs(m[0] * x + m[4] * y + m[8] * z + m[12]));
+                need = (std::max)(need, std::fabs(m[1] * x + m[5] * y + m[9] * z + m[13]));
+            }
+            camera.distance = need > 1e-12f ? need * 1.08f : keep;
+        }
         view_valid = true;
     }
 }
@@ -55,6 +97,11 @@ void Plot3DView::render(PlotRenderer& renderer,
     PlotWindowPrefs& wp = plot_window_prefs_current();
     const bool axes_on   = show_axes && wp.axes3d;
     const bool legend_on = show_legend && wp.legend;
+    // Масштаб осей хранится на окно (imgui.ini). Переключили режим (меню этого или другого
+    // кадра, загрузка ini) — заново вписываем портрет.
+    if (fit_axes_to_window != wp.fit3d) view_valid = false;
+    fit_axes_to_window = wp.fit3d;
+    for (int i = 0; i < 3; ++i) axis_scale[i] = wp.scale3d[i];
 
     // 1. Пересобираем кэш
     if (data_generation != series_generation) {
@@ -79,9 +126,30 @@ void Plot3DView::render(PlotRenderer& renderer,
         return loc && glob;
         };
 
+    // Размер поля нужен до автофита: от его соотношения сторон зависит масштаб осей.
+    const float margin = wp.fit_pane ? plot_compact_margin() : 4.0f;
+    int plot_w = (std::max)(64, (int)(avail_size.x - margin * 2));
+    int plot_h = (std::max)(64, (int)(avail_size.y - margin * 2));
+    // Окно растянули при «Fit axes to window» — заново вписываем портрет (если автофит не
+    // выключен: тогда пользовательский вид не трогаем, только масштаб осей ниже).
+    const float aspect_now = (float)plot_w / (float)plot_h;
+    if (fit_axes_to_window && auto_fit && aspect_now != aspect_) view_valid = false;
+    aspect_ = aspect_now;
+
     // 2. Автофит. Запрос вызывающего (новые данные, смена осей) — только при auto_fit; первый
     // кадр и «Auto fit» из меню / двойной клик (view_valid = false) — всегда.
     if (!view_valid || (fit_request && auto_fit)) do_autofit();
+    // Масштаб осей поменялся (окно растянули, новые данные, множитель в меню) — переносим
+    // точку взгляда камеры в новый масштаб, чтобы вид не уезжал с портрета.
+    {
+        float s[3];
+        effective_scale(aspect_, s);
+        for (int i = 0; i < 3; ++i)
+            if (s[i] != scale_[i]) {
+                camera.target[i] *= s[i] / scale_[i];
+                scale_[i] = s[i];
+            }
+    }
 
     // Цвет серии: пользовательский (меню легенды) поверх цвета вызывающего, альфа — его.
     auto series_color = [&](const PlotSeriesInput3D& s) -> ImVec4 {
@@ -92,10 +160,7 @@ void Plot3DView::render(PlotRenderer& renderer,
 
     // 3. Отступы и размеры (3D не нужен margin под подписи осей, они лежат внутри -
     //    но небольшой зазор от краёв оставляем, чтобы рамка ImGui не сливалась с полем)
-    // Fit to pane — узкое поле, как у 2D и карт; без него — прежний зазор.
-    const float margin = wp.fit_pane ? plot_compact_margin() : 4.0f;
-    int plot_w = (std::max)(64, (int)(avail_size.x - margin * 2));
-    int plot_h = (std::max)(64, (int)(avail_size.y - margin * 2));
+    // Fit to pane — узкое поле, как у 2D и карт; без него — прежний зазор (размеры — выше).
 
     ImGui::Dummy(avail_size);
     ImVec2 img_pos = ImVec2(block_origin.x + margin, block_origin.y + margin);
@@ -106,6 +171,10 @@ void Plot3DView::render(PlotRenderer& renderer,
     camera.aspect = (float)plot_w / (float)plot_h;
     float mvp[16];
     camera.build_mvp(mvp);
+    // Масштаб осей — справа: MVP · diag(sx, sy, sz). Дальше всё (оси, подписи, OIT-глубина)
+    // идёт в координатах данных через этот же mvp.
+    for (int i = 0; i < 3; ++i)
+        for (int r = 0; r < 4; ++r) mvp[i * 4 + r] *= scale_[i];
 
     float bgc[4];
     plot_bg_color(bgc[0], bgc[1], bgc[2], bgc[3]);
@@ -358,6 +427,29 @@ void Plot3DView::render(PlotRenderer& renderer,
             ImGui::SetTooltip("On: every recompute fits the view to the data.\n"
                               "Off: the view stays where you left it; Auto fit above and\n"
                               "a double click still fit it.");
+        if (ImGui::BeginMenu("Axis scale")) {
+            bool changed = ImGui::MenuItem("Fit axes to window", nullptr, &wp.fit3d);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("On: the z range fills the window height, x and y fill its width.\n"
+                                  "Off: all axes in data units (true proportions).");
+            const char* names[3] = { x_name.c_str(), y_name.c_str(), z_name.c_str() };
+            for (int i = 0; i < 3; ++i) {
+                ImGui::PushID(i);
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+                changed |= ImGui::DragFloat(names[i][0] ? names[i] : "axis", &wp.scale3d[i], 0.01f, 0.01f,
+                                            100.0f, "x %.2f",
+                                            ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+                ImGui::PopID();
+            }
+            if (ImGui::MenuItem("Reset scale")) {
+                wp.scale3d[0] = wp.scale3d[1] = wp.scale3d[2] = 1.0f;
+                wp.fit3d = false;
+                view_valid = false;
+                changed = true;
+            }
+            if (changed) ImGui::MarkIniSettingsDirty();
+            ImGui::EndMenu();
+        }
         ImGui::Separator();
         // Легенда и оси — галки окна (сохраняются в imgui.ini); show_legend / show_axes вида —
         // разрешение вызывающего.

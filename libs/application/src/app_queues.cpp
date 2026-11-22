@@ -612,8 +612,8 @@ bool basins_portraits_in_flight(const BasinsAnalysisSession& s) {
 }
 }
 
-bool AppModel::any_gpu_job_in_flight() const {
-    if (phase_session.in_flight || bifurcation_session.in_flight || lle_session.in_flight ||
+bool AppModel::any_gpu_job_in_flight(bool include_phase) const {
+    if ((include_phase && phase_session.in_flight) || bifurcation_session.in_flight || lle_session.in_flight ||
         ls_session.in_flight || metrics_session.in_flight || dft1d_session.in_flight ||
         basins_session.in_flight || fastsync_session.in_flight || order_session.in_flight ||
         network_session.in_flight || neural_session.in_flight ||

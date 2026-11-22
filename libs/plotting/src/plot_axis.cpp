@@ -820,6 +820,7 @@ bool prefs_default(const PlotWindowPrefs& p) {
     return p.toolbar && p.legend && p.x_label && p.x_ticks && p.y_label && p.y_ticks &&
            p.colorbar && p.axes3d && !p.smooth && !p.swap_axes && !p.invert_x && !p.invert_y &&
            !p.fit_pane && p.grid && p.grid_on_top &&
+           !p.fit3d && p.scale3d[0] == 1.0f && p.scale3d[1] == 1.0f && p.scale3d[2] == 1.0f &&
            p.series_colors.empty();
 }
 
@@ -859,6 +860,11 @@ void prefs_read_line(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const ch
     else if (std::sscanf(line, "FitPane=%d", &v) == 1)  p.fit_pane = v != 0;
     else if (std::sscanf(line, "Grid=%d", &v) == 1)     p.grid     = v != 0;
     else if (std::sscanf(line, "GridTop=%d", &v) == 1)  p.grid_on_top = v != 0;
+    else if (std::sscanf(line, "Fit3D=%d", &v) == 1)    p.fit3d    = v != 0;
+    else if (std::sscanf(line, "Scale3D=%f,%f,%f", &p.scale3d[0], &p.scale3d[1], &p.scale3d[2]) == 3) {
+        for (float& s : p.scale3d)
+            if (!(s >= 0.01f && s <= 100.0f)) s = 1.0f;   // битое значение — по умолчанию
+    }
     else {
         // Color=r,g,b,a,<подпись серии> — подпись последней: в ней могут быть запятые.
         float r, g, b, a;
@@ -880,6 +886,9 @@ void prefs_write_all(ImGuiContext*, ImGuiSettingsHandler*, ImGuiTextBuffer* out)
                      (int)p.y_label, (int)p.y_ticks, (int)p.colorbar, (int)p.axes3d,
                      (int)p.smooth, (int)p.swap_axes, (int)p.invert_x, (int)p.invert_y,
                      (int)p.fit_pane, (int)p.grid, (int)p.grid_on_top);
+        if (p.fit3d || p.scale3d[0] != 1.0f || p.scale3d[1] != 1.0f || p.scale3d[2] != 1.0f)
+            out->appendf("Fit3D=%d\nScale3D=%.4g,%.4g,%.4g\n", (int)p.fit3d,
+                         p.scale3d[0], p.scale3d[1], p.scale3d[2]);
         for (const auto& [label, c] : p.series_colors) {
             if (label.find('\n') != std::string::npos) continue;   // строка ini — одна строка
             out->appendf("Color=%.4f,%.4f,%.4f,%.4f,%s\n", c.x, c.y, c.z, c.w, label.c_str());
