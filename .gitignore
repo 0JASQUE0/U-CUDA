@@ -80,8 +80,12 @@ ocr_error.log
 # Локальные документы проекта (в git не идут)
 /docs/
 
-# Граф кода graphify (кэш и отчёты, пересобирается)
-graphify-out/
+# Граф кода graphify: граф и отчёты в репозитории (tools/graphify_update.py),
+# кэш извлечения и путь к локальному интерпретатору — нет
+graphify-out/cache/
+graphify-out/.graphify_python
+graphify-out/.graphify_root
+U-CUDA/graphify-out/
 
 # Эталонная траектория фикстуры: 425 КБ, воспроизводится побитово
 # генератором tests/fixtures/gen_lorenz_reference.py, поэтому в репозитории
