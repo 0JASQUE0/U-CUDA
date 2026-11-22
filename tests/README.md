@@ -166,6 +166,10 @@ of mismatched graphs, class order, features, inputs and trial settings. The
 LIF case compares individual trials against the combined run by spike step
 and neuron, to check reset at the boundaries.
 
+Both modes also compare classifier ridge scores with a closed-form solution.
+The GPU mode covers both matrix shapes, compares against the CPU fit, and
+checks rejection of invalid dimensions and a cancelled request.
+
 ```powershell
 cmake --build --preset windows-release --target neural_classifier_test
 ctest --preset windows-release -R '^neural_classifier_(cpu|gpu)$'
