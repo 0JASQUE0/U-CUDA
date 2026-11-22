@@ -66,6 +66,14 @@ public:
     // перерасчёт и смена данных вид не трогают; «Auto fit» из меню и двойной клик работают всегда.
     bool auto_fit = true;
 
+    // Масштаб по переменным состояния (меню «Axis scale»). Без fit_axes_to_window оси в единицах
+    // данных (узкий по x, y аттрактор в широком окне остаётся узким); с ним — диапазон z
+    // растягивается на высоту, x и y — на ширину окна (по его соотношению сторон). Поверх —
+    // ручные множители по каждой оси. Данные не трогаются: масштаб входит в MVP.
+    // Источник — PlotWindowPrefs::fit3d / scale3d окна (imgui.ini); здесь копия на кадр.
+    bool  fit_axes_to_window = false;
+    float axis_scale[3] = { 1.0f, 1.0f, 1.0f };
+
     // Пользовательские цвета серий — PlotWindowPrefs::series_colors окна (plot_axis.h), см.
     // Plot2DView.
 
@@ -102,6 +110,10 @@ private:
     GpuLineSeriesSet3D series_cache_;
     GpuLineSeriesSet3D axis_cache_; // 3 линии: X, Y, Z (по 2 точки каждая)
     float axis_bbox_[6] = { 0,0,0,0,0,0 }; // bbox, по которому собран axis_cache_
+    float scale_[3] = { 1.0f, 1.0f, 1.0f }; // действующий масштаб осей (последний кадр)
+    float aspect_ = 1.0f;                   // соотношение сторон поля последнего кадра
+    // Действующий масштаб осей при данном соотношении сторон поля (fit_axes_to_window × axis_scale).
+    void effective_scale(float aspect, float out[3]) const;
     std::string legend_color_target_;      // подпись серии в меню цвета (живёт между кадрами)
 
     void do_autofit();

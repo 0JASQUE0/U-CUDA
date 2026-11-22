@@ -313,6 +313,9 @@ struct PlotWindowPrefs {
     // Сетка 2D-диаграммы (Plot2DView): показывать ли её и поверх данных или под ними.
     bool grid = true;
     bool grid_on_top = true;
+    // Масштаб осей 3D-сцены (Plot3DView, меню «Axis scale»): вписать оси в окно и множители x, y, z.
+    bool  fit3d = false;
+    float scale3d[3] = { 1.0f, 1.0f, 1.0f };
     // Цвета серий из меню легенды (ПКМ по квадрату -> legend_color_popup). Ключ — подпись серии,
     // а не индекс (серии сдвигаются, цвет должен остаться на своей кривой); альфа — от вызывающего.
     std::map<std::string, ImVec4> series_colors;
