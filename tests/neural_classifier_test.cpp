@@ -1,4 +1,5 @@
 ﻿#include "ucuda/analysis/neural_session.h"
+#include "ucuda/cuda/neural_ridge.h"
 #include "ucuda/cuda/parametric_engine.h"
 #include "ucuda/platform/platform_paths.h"
 #include "ucuda/storage/session_io.h"
@@ -22,6 +23,51 @@ std::string exe_dir() { return platform::executable_dir(); }
 namespace {
 void require(bool pass, const std::string& message) {
     if (!pass) throw std::runtime_error(message);
+}
+
+void ridge_accuracy(bool gpu) {
+    const ReadoutSplit split{1, 5, 6, 8, 8, 10};
+    const std::vector<double> lambdas{1e-6, 0.1, 1.0};
+    const double signal[] = {1000, -1, 1, -1, 1, -1000, -2, 2, -3, 3};
+    std::vector<double> targets(20);
+    for (size_t row = 0; row < 10; ++row) targets[2 * row + (signal[row] > 0)] = 1.0;
+
+    // Four training rows exercise both the primal and dual systems.
+    for (int columns : {2, 8}) {
+        std::vector<double> features(10 * columns, 4.0);
+        for (size_t row = 0; row < 10; ++row) {
+            features[row * columns] = signal[row];
+            if (row >= split.val0) features[row * columns + 1] = 1000.0;
+        }
+        const auto cpu = readout_fit(features, targets, columns, 2, split, lambdas, true);
+        const auto fitted = gpu ? neural_ridge_gpu(features, targets, columns, 2, split, lambdas) : cpu;
+        require(fitted.lambda == std::vector<double>{1.0, 1.0} && fitted.val_accuracy == 1.0,
+                "classifier ridge did not prefer the larger lambda on an accuracy tie");
+        require(fitted.mean[0] == 0.0 && fitted.scale[0] == 1.0 && fitted.mean[1] == 4.0 && std::isinf(fitted.scale[1]),
+                "ridge feature normalization used samples outside training or retained a silent feature");
+        const auto scores = readout_predict(fitted, features, split.test0, split.test1);
+        const auto reference = readout_predict(cpu, features, split.test0, split.test1);
+        const double expected[] = {1.25, -0.25, -0.25, 1.25};
+        for (size_t i = 0; i < scores.size(); ++i)
+            require(std::abs(scores[i] - expected[i]) < 1e-12 && std::abs(scores[i] - reference[i]) < 1e-12,
+                    "ridge score differs from the analytic and CPU references");
+        require(readout_argmax(scores, 2) == std::vector<int>{0, 1}, "ridge test classes differed");
+    }
+
+    if (gpu) {
+        const auto expect_failure = [&](const std::vector<double>& features, const std::atomic<bool>* cancel, const char* reason) {
+            try {
+                neural_ridge_gpu(features, targets, 2, 2, split, lambdas, cancel);
+            } catch (const std::runtime_error& e) {
+                require(std::string(e.what()).find(reason) != std::string::npos, e.what());
+                return;
+            }
+            throw std::runtime_error("GPU ridge accepted an invalid or cancelled training request");
+        };
+        expect_failure({}, nullptr, "dimensions or split");
+        const std::atomic<bool> cancelled{true};
+        expect_failure(std::vector<double>(20), &cancelled, "was stopped");
+    }
 }
 
 struct TempReadout {
@@ -612,8 +658,10 @@ int main(int argc, char** argv) {
         legacy_and_normalisation();
         dataset_csv();
         external_trial_grid();
+        ridge_accuracy(false);
         if (cpu) return 0;
         if (cuInit(0) != CUDA_SUCCESS) { std::cout << "No CUDA device; classifier replay skipped\n"; return 77; }
+        ridge_accuracy(true);
         ParametricEngine engine;
         replay(false, engine);
         replay(true, engine);

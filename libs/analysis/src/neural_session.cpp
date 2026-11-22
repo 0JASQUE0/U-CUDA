@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <unordered_set>
 #include <array>
+#include "ucuda/cuda/neural_ridge.h"
 #include "ucuda/numerics/neural_readout.h"
 
 namespace {
@@ -1566,7 +1567,7 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
                     throw std::runtime_error("the feature columns differ from the saved classifier");
                 m.M = saved.M; m.K = saved.K; m.mean = saved.mean; m.scale = saved.scale; m.w = saved.w;
             } else {
-                m = readout_fit(feature_rows, Y, columns, C, sp, lambdas, true);
+                m = neural_ridge_gpu(feature_rows, Y, columns, C, sp, lambdas, r.cancel.get());
                 out.val[(size_t)q] = m.val_accuracy;
                 out.lambda[(size_t)q] = m.lambda[0];
             }
@@ -1586,7 +1587,7 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
                 saved.lambda = std::move(m.lambda); saved.val = out.val; saved.test = out.test;
             }
         } catch (const std::exception& e) {
-            if (nInst == 1) throw;
+            if (nInst == 1 || (r.cancel && r.cancel->load(std::memory_order_relaxed))) throw;
             if (out.note.empty()) out.note = "network " + std::to_string(q) + ": " + e.what();
         }
     }
@@ -1613,10 +1614,13 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
             }
     }
     try {
-        const ReadoutModel m = readout_fit(G, Y, D, C, sp, lambdas, true);
+        const ReadoutModel m = neural_ridge_gpu(G, Y, D, C, sp, lambdas, r.cancel.get());
         out.delay_test = { score(m, G, nullptr, nullptr) };
         out.delay_length = D;
-    } catch (const std::exception&) {}
+    } catch (const std::exception& e) {
+        if (r.cancel && r.cancel->load(std::memory_order_relaxed)) throw;
+        if (out.note.empty()) out.note = std::string("raw-input ridge control failed: ") + e.what();
+    }
     return out;
 }
 
@@ -2676,6 +2680,8 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
             // Обучение выхода идёт после удачного расчёта, его отказ не должен выглядеть успехом.
             out.result.ok = false;
             out.result.error = e.what();
+            if (snap.task.kind == NeuralTaskKind::Classification && cancel->load(std::memory_order_relaxed))
+                out.result.cancelled = true;
         }
         return out;
     });

@@ -285,6 +285,9 @@
     <ClCompile Include="..\libs\cuda\src\engine_runtime.cpp">
       <Filter>libs\cuda\src</Filter>
     </ClCompile>
+    <ClCompile Include="..\libs\cuda\src\neural_ridge.cpp">
+      <Filter>libs\cuda\src</Filter>
+    </ClCompile>
     <ClCompile Include="..\libs\cuda\src\nvrtc_engine.cpp">
       <Filter>libs\cuda\src</Filter>
     </ClCompile>
@@ -638,6 +641,9 @@
       <Filter>libs\cuda\include</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\cuda\include\ucuda\cuda\cudaMacros.cuh">
+      <Filter>libs\cuda\include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\libs\cuda\include\ucuda\cuda\neural_ridge.h">
       <Filter>libs\cuda\include</Filter>
     </ClInclude>
     <ClInclude Include="..\libs\cuda\include\ucuda\cuda\nvrtc_engine.h">

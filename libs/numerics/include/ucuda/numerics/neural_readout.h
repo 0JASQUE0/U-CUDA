@@ -154,6 +154,52 @@ inline void cholesky_solve(const std::vector<double>& L, size_t n, double* b) {
         b[i] = s / L[i * n + i];
     }
 }
+inline void feature_normalization(const std::vector<double>& F, size_t first, size_t n, ReadoutModel& r) {
+    const size_t Ms = (size_t)r.M;
+    r.mean.assign(Ms, 0.0); r.scale.assign(Ms, 1.0);
+    parallel_for(Ms, [&](size_t i) {
+        double m = 0.0, v = 0.0;
+        for (size_t t = 0; t < n; ++t) m += F[(first + t) * Ms + i];
+        m /= (double)n;
+        for (size_t t = 0; t < n; ++t) { const double d = F[(first + t) * Ms + i] - m; v += d * d; }
+        r.mean[i] = m;
+        r.scale[i] = std::sqrt(v / (double)n);
+    });
+    // Редкий на обучении признак не должен раздуваться стандартизацией: хвост спада старого спайка дал бы масштаб 1e-22, и новый спайк
+    // на тесте взорвал бы выход. Поэтому масштаб не ниже сотой доли типичного, а совсем молчащий признак выпадает.
+    std::vector<double> sorted(r.scale);
+    std::nth_element(sorted.begin(), sorted.begin() + (std::ptrdiff_t)(Ms / 2), sorted.end());
+    const double floor_scale = 0.01 * sorted[Ms / 2];
+    const double top = *std::max_element(r.scale.begin(), r.scale.end());
+    for (double& scale : r.scale)
+        scale = scale > 1e-9 * top ? (std::max)(scale, floor_scale) : std::numeric_limits<double>::infinity();
+}
+
+inline std::vector<double> target_means(const std::vector<double>& Y, size_t first, size_t n, size_t Ks) {
+    std::vector<double> ymean(Ks, 0.0);
+    for (size_t k = 0; k < Ks; ++k) {
+        for (size_t t = 0; t < n; ++t) ymean[k] += Y[(first + t) * Ks + k];
+        ymean[k] /= (double)n;
+    }
+    return ymean;
+}
+
+inline void consider_classifier(ReadoutModel& r, const ReadoutModel& c, const std::vector<double>& Y,
+                                const ReadoutSplit& s, double lam, const std::vector<double>& p) {
+    const size_t Ks = (size_t)r.K;
+    const std::vector<int> cls = readout_argmax(p, r.K);
+    size_t right = 0;
+    for (size_t t = 0; t < cls.size(); ++t) right += Y[(s.val0 + t) * Ks + (size_t)cls[t]] > 0.5;
+    const double acc = (double)right / (double)cls.size();
+    if (acc >= r.val_accuracy) {
+        r.val_accuracy = acc;
+        r.w = c.w;
+        for (size_t k = 0; k < Ks; ++k) {
+            r.lambda[k] = lam;
+            r.val_nrmse[k] = readout_nrmse(Y.data() + s.val0 * Ks + k, p.data() + k, Ks, s.val1 - s.val0);
+        }
+    }
+}
 }  // namespace readout_detail
 
 // Вес на цель берётся при лучшем по валидации lambda. Обучение видит только train: и среднее, и масштаб, и матрицу.
@@ -165,29 +211,15 @@ inline ReadoutModel readout_fit(const std::vector<double>& F, const std::vector<
     const size_t Ms = (size_t)M, Ks = (size_t)K, n = s.train1 - s.train0;
     ReadoutModel r;
     r.M = M; r.K = K;
-    r.mean.assign(Ms, 0.0); r.scale.assign(Ms, 1.0);
+    readout_detail::feature_normalization(F, s.train0, n, r);
     std::vector<double> X(n * Ms);   // по столбцам: скалярные произведения идут подряд
     readout_detail::parallel_for(Ms, [&](size_t i) {
-        double m = 0.0, v = 0.0;
-        for (size_t t = 0; t < n; ++t) m += F[(s.train0 + t) * Ms + i];
-        m /= (double)n;
-        for (size_t t = 0; t < n; ++t) { const double d = F[(s.train0 + t) * Ms + i] - m; v += d * d; }
-        r.mean[i] = m;
-        r.scale[i] = std::sqrt(v / (double)n);
-    });
-    // Редкий на обучении признак не должен раздуваться стандартизацией: хвост спада старого спайка дал бы масштаб 1e-22, и новый спайк
-    // на тесте взорвал бы выход. Поэтому масштаб не ниже сотой доли типичного, а совсем молчащий признак выпадает.
-    std::vector<double> sorted(r.scale);
-    std::nth_element(sorted.begin(), sorted.begin() + (std::ptrdiff_t)(Ms / 2), sorted.end());
-    const double floor_scale = 0.01 * sorted[Ms / 2];
-    const double top = *std::max_element(r.scale.begin(), r.scale.end());
-    readout_detail::parallel_for(Ms, [&](size_t i) {
         double* col = X.data() + i * n;
-        const bool silent = !(r.scale[i] > 1e-9 * top);
-        r.scale[i] = silent ? std::numeric_limits<double>::infinity() : (std::max)(r.scale[i], floor_scale);
+        const bool silent = std::isinf(r.scale[i]);
         for (size_t t = 0; t < n; ++t) col[t] = silent ? 0.0 : (F[(s.train0 + t) * Ms + i] - r.mean[i]) / r.scale[i];
     });
-    std::vector<double> G(Ms * Ms), b(Ms * Ks), ymean(Ks, 0.0);
+    std::vector<double> G(Ms * Ms), b(Ms * Ks);
+    const auto ymean = readout_detail::target_means(Y, s.train0, n, Ks);
     readout_detail::parallel_for(Ms, [&](size_t i) {
         const double* a = X.data() + i * n;
         for (size_t j = 0; j <= i; ++j) {
@@ -197,10 +229,6 @@ inline ReadoutModel readout_fit(const std::vector<double>& F, const std::vector<
             G[i * Ms + j] = sum / (double)n;
         }
     });
-    for (size_t k = 0; k < Ks; ++k) {
-        for (size_t t = 0; t < n; ++t) ymean[k] += Y[(s.train0 + t) * Ks + k];
-        ymean[k] /= (double)n;
-    }
     readout_detail::parallel_for(Ms, [&](size_t i) {
         for (size_t k = 0; k < Ks; ++k) {
             double sum = 0.0;
@@ -226,18 +254,7 @@ inline ReadoutModel readout_fit(const std::vector<double>& F, const std::vector<
         }
         const std::vector<double> p = readout_predict(c, F, s.val0, s.val1);
         if (classify) {
-            const std::vector<int> cls = readout_argmax(p, K);
-            size_t right = 0;
-            for (size_t t = 0; t < cls.size(); ++t) right += Y[(s.val0 + t) * Ks + (size_t)cls[t]] > 0.5;
-            const double acc = (double)right / (double)cls.size();
-            if (acc >= r.val_accuracy) {
-                r.val_accuracy = acc;
-                r.w = c.w;
-                for (size_t k = 0; k < Ks; ++k) {
-                    r.lambda[k] = lam;
-                    r.val_nrmse[k] = readout_nrmse(Y.data() + s.val0 * Ks + k, p.data() + k, Ks, s.val1 - s.val0);
-                }
-            }
+            readout_detail::consider_classifier(r, c, Y, s, lam, p);
             continue;
         }
         for (size_t k = 0; k < Ks; ++k) {

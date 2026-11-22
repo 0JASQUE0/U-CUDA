@@ -14,12 +14,13 @@ ucuda_library(cuda
     src/engine_results.cpp
     src/engine_runtime.cpp
     src/host_rqa.cu
+    src/neural_ridge.cpp
     src/nvrtc_engine.cpp
     src/parametric_engine.cpp
     src/phase_portrait_nvrtc.cpp
     src/runtime_settings.cpp
 )
-target_link_libraries(ucuda_cuda PUBLIC ucuda::domain ucuda::numerics PRIVATE ucuda::platform ucuda_export_format CUDA::cudart CUDA::cuda_driver CUDA::nvrtc Threads::Threads)
+target_link_libraries(ucuda_cuda PUBLIC ucuda::domain ucuda::numerics PRIVATE ucuda::platform ucuda_export_format CUDA::cudart CUDA::cuda_driver CUDA::nvrtc CUDA::cublas CUDA::cusolver Threads::Threads)
 target_include_directories(ucuda_cuda PRIVATE "${PROJECT_SOURCE_DIR}/libs/cuda/include/ucuda/cuda")
 if(MSVC)
     target_link_options(ucuda_cuda INTERFACE /NODEFAULTLIB:LIBCMT)

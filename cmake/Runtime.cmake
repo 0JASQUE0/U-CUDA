@@ -18,6 +18,7 @@ function(ucuda_runtime target)
             "${CUDAToolkit_BIN_DIR}/x64/cudart64*.dll" "${CUDAToolkit_BIN_DIR}/x64/nvrtc64*.dll" "${CUDAToolkit_BIN_DIR}/x64/nvrtc-builtins64*.dll")
         list(FILTER cuda_runtime_dlls EXCLUDE REGEX "\\.alt\\.dll$")
         add_custom_command(TARGET ${target} POST_BUILD COMMAND ${CMAKE_COMMAND}
+            "-Dcuda_bin=${CUDAToolkit_BIN_DIR}"
             "-Druntime_dlls=$<TARGET_RUNTIME_DLLS:${target}>;${cuda_runtime_dlls}"
             "-Ddestination=$<TARGET_FILE_DIR:${target}>"
             -P "${PROJECT_SOURCE_DIR}/cmake/CopyRuntimeDlls.cmake" VERBATIM)
