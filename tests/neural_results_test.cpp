@@ -90,6 +90,7 @@ void availability_and_key() {
 void wait_for_run(NeuralSession& s) {
     require(s.run_future.wait_for(std::chrono::seconds(45)) == std::future_status::ready, "timed out waiting for Neural");
     require(s.poll(), "Neural poll did not finish");
+    require(!s.progress_phase_token && !s.progress_token, "finished Neural run retained its progress state");
 }
 
 void result_provenance() {
@@ -105,11 +106,15 @@ void result_provenance() {
 
     const auto key = model.neural_result_settings_key(0);
     require(model.run_neural(0), "could not start Neural run");
+    const auto first_phase = s.progress_phase_token;
+    require(first_phase != nullptr, "Neural run did not publish a progress phase");
     auto& first = s.configs[0];
     first.schedule = NeuralSchedule::Spike;
     first.populations[0].name = "After edit";
     wait_for_run(s);
     require(first.last_run_ok, "original Neural run failed");
+    require(first_phase->load() == NeuralRunPhase::Finalizing && !neural_phase_has_step_progress(first_phase->load()),
+            "completed simulation still advertises step progress during result finalization");
     require(first.result_context.settings_key == key && first.result_context.populations == std::vector<std::string>{"Before edit"},
             "run used editable labels or settings");
     require(model.neural_result_settings_key(0) != key && has(first, NeuralResultView::Means) && !has(first, NeuralResultView::Activity),
@@ -123,6 +128,7 @@ void result_provenance() {
 
     model.enqueue_neural(1);
     require(model.start_next_in_neural_queue(), "queue did not start");
+    require(s.progress_phase_token && s.progress_phase_token != first_phase, "queued Neural run reused the previous progress state");
     wait_for_run(s);
     const auto& second = s.configs[1];
     require(second.last_run_ok && second.result_context.settings_key == model.neural_result_settings_key(1)

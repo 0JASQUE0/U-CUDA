@@ -1436,7 +1436,12 @@ static std::vector<double> task_delays(const NeuralRequest& r, int channel, size
 
 // Классификация: строка признаков на попытку, точка b стимула даёт столбцы i * B + b.
 static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralRequest& r, const NeuralResult& res,
-                                       const std::vector<double>* batched = nullptr) {
+                                       const std::vector<double>* batched = nullptr,
+                                       std::atomic<NeuralRunPhase>* phase = nullptr) {
+    const auto stage = [phase](NeuralRunPhase value) {
+        if (phase) phase->store(value, std::memory_order_release);
+    };
+    stage(NeuralRunPhase::Features);
     const NeuralTask& t = c.task;
     NeuralTaskResult out;
     out.classify = true;
@@ -1553,6 +1558,7 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
             if (nInst > 1 && q < (int)res.instance_stop.size() && res.instance_stop[(size_t)q] >= 0) throw std::runtime_error("the network diverged");
             std::vector<double> F;
             std::vector<int> nodes;
+            stage(NeuralRunPhase::Features);
             const int M = batched ? (int)r.observe.nodes.size() : features(q, F, nodes);
             if (batched) nodes = r.observe.nodes;
             const auto& feature_rows = batched ? *batched : F;
@@ -1567,10 +1573,12 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
                     throw std::runtime_error("the feature columns differ from the saved classifier");
                 m.M = saved.M; m.K = saved.K; m.mean = saved.mean; m.scale = saved.scale; m.w = saved.w;
             } else {
+                stage(NeuralRunPhase::Training);
                 m = neural_ridge_gpu(feature_rows, Y, columns, C, sp, lambdas, r.cancel.get());
                 out.val[(size_t)q] = m.val_accuracy;
                 out.lambda[(size_t)q] = m.lambda[0];
             }
+            stage(NeuralRunPhase::Classifying);
             out.test[(size_t)q] = score(m, feature_rows, out.predicted.data() + (size_t)q * T, out.confusion.data() + (size_t)q * C * C);
             if (!out.applied && !c.sweep.enabled && nInst == 1) {
                 auto& saved = out.model;
@@ -1592,6 +1600,7 @@ static NeuralTaskResult class_evaluate(const NeuralConfig& c, const NeuralReques
         }
     }
     if (out.applied) return out;
+    stage(NeuralRunPhase::Baseline);
     // Простая модель: тот же ridge на самих отсчётах стимула, до 50 равномерно; канал класса у всех сетей свипа общий.
     const long long hold = r.input.hold_steps, stim_rows = s.stim / hold;
     const int D = t.dataset ? (int)t.dataset->channels.size() : (int)(std::min)(stim_rows, 50LL);
@@ -2521,6 +2530,7 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
     if (!resume || !snap.checkpoint_from_result) snap.result = NeuralResult{};
     cancel_token = std::make_shared<std::atomic<bool>>(false);
     progress_token = std::make_shared<std::atomic<float>>(0.0f);
+    progress_phase_token = std::make_shared<std::atomic<NeuralRunPhase>>(NeuralRunPhase::Preparing);
     in_flight = true;
     running_config_index = config_idx;
     compute_start_time = std::chrono::steady_clock::now();
@@ -2528,8 +2538,18 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
     // Граф на 10 млн дуг строится секунды: всё это в рабочем потоке, а не в кадре.
     run_future = std::async(std::launch::async,
         [&engine, snap = std::move(snap), sys_copy = sys, cs = custom_schemes, v = vars, q = params, resume, settings_key = std::move(settings_key),
-         cancel = cancel_token, progress = progress_token]() {
+         cancel = cancel_token, progress = progress_token, phase = progress_phase_token]() {
         NeuralOutcome out;
+        const auto stage = [&](NeuralRunPhase value) {
+            if (neural_phase_has_step_progress(value)) progress->store(0.0f, std::memory_order_relaxed);
+            phase->store(value, std::memory_order_release);
+        };
+        const auto evaluate = [&](const NeuralConfig& conf, const NeuralRequest& req, const NeuralResult& result) {
+            if (conf.task.kind == NeuralTaskKind::Classification)
+                return class_evaluate(conf, req, result, nullptr, phase.get());
+            stage(NeuralRunPhase::Readout);
+            return neural_task_evaluate(conf, req, result);
+        };
         try {
             const auto t0 = std::chrono::steady_clock::now();
             const NeuralConfig job = neural_task_config(snap);
@@ -2566,8 +2586,11 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
             // Прогноз продолжает первый прогон с его конца: снимок нужен всегда, а не только по флажку.
             const bool keep = plan.request.keep_checkpoint;
             if (forecast) plan.request.keep_checkpoint = true;
+            stage(NeuralRunPhase::Simulating);
             out.result = engine.run_neural(plan.request);
+            stage(NeuralRunPhase::Finalizing);
             if (forecast && out.result.ok) {
+                stage(NeuralRunPhase::Training);
                 NeuralConfig longer = job;
                 const double h = plan.request.h;
                 const long long steps = std::llround(plan.request.t_max / h) + (long long)int_or(job.task.forecast_length_text, 500) * plan.request.pre_scaller;
@@ -2578,7 +2601,9 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
                 p2.request.resume = out.result.checkpoint;
                 p2.request.keep_checkpoint = keep;
                 neural_forecast_prepare(job, plan.request, out.result, p2.request, out.task_result);
+                stage(NeuralRunPhase::Forecast);
                 NeuralResult r2 = engine.run_neural(p2.request);
+                stage(NeuralRunPhase::Finalizing);
                 if (r2.ok) {
                     neural_forecast_finish(r2, out.task_result);
                     neural_merge_resumed(out.result, r2);
@@ -2615,24 +2640,28 @@ bool NeuralSession::run_async(ParametricEngine& engine, int config_idx, bool res
                 }
             }
             if (out.result.ok && job.task.enabled && !forecast) {
-                out.task_result = neural_task_evaluate(job, plan.request, out.result);
+                out.task_result = evaluate(job, plan.request, out.result);
                 if (!out.task_result.applied) out.task_result.model.graph_hash = plan.hash;
                 if (job.task.control_k0) {
+                    stage(NeuralRunPhase::Preparing);
                     // Та же сеть, тот же вход и те же узлы, только K = 0: разница с основным прогоном это вклад рекуррентных связей.
                     NeuralConfig zero = job;
                     zero.coupling_text = "0";
                     NeuralPlan p0 = neural_plan(sys_copy, cs, v, q, zero);
                     p0.request.cancel = cancel; p0.request.progress = progress;
+                    stage(NeuralRunPhase::Control);
                     const NeuralResult r0 = engine.run_neural(p0.request);
+                    stage(NeuralRunPhase::Finalizing);
                     if (r0.cancelled) out.task_result.note = "the K = 0 control was stopped";
                     else if (!r0.ok) out.task_result.note = "the K = 0 control failed: " + r0.error;
                     else {
-                        const NeuralTaskResult t0 = neural_task_evaluate(zero, p0.request, r0);
+                        const NeuralTaskResult t0 = evaluate(zero, p0.request, r0);
                         out.task_result.control_test = t0.test;
                         out.task_result.control_val = t0.val;
                     }
                 }
             }
+            stage(NeuralRunPhase::Finalizing);
             out.sweep_values = std::move(plan.sweep_values);
             out.sweep2_values = std::move(plan.sweep2_values);
             out.sweep_lyap = out.result.lyapunov;
@@ -2696,7 +2725,7 @@ bool NeuralSession::poll() {
     if (!in_flight) return false;
     if (!run_future.valid()) {
         in_flight = false; running_config_index = -1;
-        cancel_token.reset(); progress_token.reset();
+        cancel_token.reset(); progress_token.reset(); progress_phase_token.reset();
         return false;
     }
     if (run_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
@@ -2758,5 +2787,6 @@ bool NeuralSession::poll() {
     running_config_index = -1;
     cancel_token.reset();
     progress_token.reset();
+    progress_phase_token.reset();
     return true;
 }

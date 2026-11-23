@@ -2045,7 +2045,7 @@ void draw_neural_results(AppModel& model) {
     if (available.empty()) { ImGui::TextDisabled("No results for this experiment. Press Run in Neural Controls."); return; }
     ImGui::TextUnformatted(ctx.label.c_str());
     if (ctx.settings_key != model.neural_result_settings_key(idx) || ctx.mixed_settings)
-        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.3f, 1.0f)), "Previous settings — showing the last successful result.");
+        ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.3f, 1.0f)), "Showing the last successful result with its previous settings.");
     if (ctx.partial_history) ImGui::TextDisabled("Continued from a checkpoint; the earlier recording is unavailable.");
     if (r.spikes_dropped > 0)
         ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.3f, 1.0f)), "Spike log incomplete: %lld events omitted. Raster and binned rates are partial.", r.spikes_dropped);

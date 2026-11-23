@@ -8,6 +8,15 @@
 #include <future>
 #include <memory>
 
+enum class NeuralRunPhase {
+    Preparing, Simulating, Features, Training, Classifying, Baseline,
+    Readout, Forecast, Control, Finalizing
+};
+
+constexpr bool neural_phase_has_step_progress(NeuralRunPhase phase) {
+    return phase == NeuralRunPhase::Simulating || phase == NeuralRunPhase::Forecast || phase == NeuralRunPhase::Control;
+}
+
 // Сессия = сохраняемое состояние (NeuralState, domain) + выполнение: future, отмена, прогресс,
 // запуск и опрос. Сериализация (storage) видит только NeuralState.
 struct NeuralSession : NeuralState {
@@ -16,6 +25,7 @@ struct NeuralSession : NeuralState {
     std::chrono::steady_clock::time_point compute_start_time;
     std::shared_ptr<std::atomic<bool>>  cancel_token;
     std::shared_ptr<std::atomic<float>> progress_token;
+    std::shared_ptr<std::atomic<NeuralRunPhase>> progress_phase_token;
     std::chrono::steady_clock::time_point last_run_completed_at;
     int result_serial = 0; // unique among configurations, even after deletion/reordering
     NeuralSession() = default;
