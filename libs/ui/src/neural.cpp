@@ -567,6 +567,11 @@ static void draw_neural_forecast(NeuralConfig& c) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("0 = chosen on the validation part by the error one sample ahead.\n"
                           "That choice is often too small for a stable closed loop: try 1e-4 .. 1e-1 by hand.");
+    ImGui::Checkbox("square every second feature node", &t.square_half);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The readout sees x^2 instead of x at feature nodes 2, 4, 6, ... (Pathak et al., 2018).\n"
+                          "A quadratic term the linear readout lacks: Lorenz needs x*y for its z.\n"
+                          "Training and the closed loop use the same features.");
     InputNumStr("Lyapunov exponent of the source", t.lyapunov_text, kFieldW);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Optional, in the time of the source (Lorenz 28, 10, 8/3: 0.906). Shows the valid time in Lyapunov times.");

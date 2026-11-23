@@ -567,7 +567,12 @@ extern "C" __global__ void neuralFeedbackKernel(const NeuralFeedbackArgs A) {
     if (k >= A.K) return;
     const double* w = A.w + (size_t)k * (A.M + 1);
     double s = 0.0;
-    for (int i = threadIdx.x; i < A.M; i += blockDim.x) s += w[i] * (double)A.row[A.cols[i]];
+    // Столбец ~c (отрицательный) = квадрат столбца c: признаки x^2 у части узлов.
+    for (int i = threadIdx.x; i < A.M; i += blockDim.x) {
+        const int c = A.cols[i];
+        const double x = (double)A.row[c < 0 ? ~c : c];
+        s += w[i] * (c < 0 ? x * x : x);
+    }
     part[threadIdx.x] = s;
     __syncthreads();
     for (int half = blockDim.x / 2; half > 0; half >>= 1) {

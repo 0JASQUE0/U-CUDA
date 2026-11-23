@@ -393,6 +393,7 @@ static void write_neural_config(std::ostringstream& o, const NeuralConfig& c, bo
             o << ",\"forecast_threshold\":"; jstr(o, c.task.forecast_threshold_text);
             o << ",\"lambda\":"; jstr(o, c.task.lambda_text);
             o << ",\"lyapunov\":"; jstr(o, c.task.lyapunov_text);
+            if (c.task.square_half) o << ",\"square_half\":true";
         }
         if (c.task.kind == NeuralTaskKind::Classification) {
             o << ",\"kind\":\"classification\",\"classes\":";
@@ -642,6 +643,7 @@ static bool read_neural_field(JP& p, NeuralConfig& c, const std::string& key) {
                 else if (k == "forecast_threshold") c.task.forecast_threshold_text = p.str();
                 else if (k == "lambda") c.task.lambda_text = p.str();
                 else if (k == "lyapunov") c.task.lyapunov_text = p.str();
+                else if (k == "square_half") c.task.square_half = p.boolean();
                 else if (k == "control_k0") c.task.control_k0 = p.boolean();
                 else if (k == "classes") c.task.classes = jarr_read<int>(p, [&p]() { return std::stoi(p.str_or_num()); });
                 else if (k == "bins") c.task.bins_text = p.str();

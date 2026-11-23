@@ -926,7 +926,8 @@ NeuralResult ParametricEngine::Impl::run_neural(const NeuralRequest& req) {
             if (skipSteps != 0 || (long long)req.pre_scaller != in.hold_steps) return fail("a closed-loop readout needs no transient and the record on the input samples");
             if (nInst != 1) return fail("a closed-loop readout drives one network");
             if (fbM < 1 || fbK < 1 || fb.w.size() != (size_t)fbK * (size_t)(fbM + 1)) return fail("bad closed-loop readout");
-            for (int col : fb.cols) if (col < 0 || (size_t)col >= (size_t)nSel * (size_t)nVars) return fail("a closed-loop feature is not in the record");
+            // Столбец ~c = квадрат столбца c.
+            for (int col : fb.cols) if ((size_t)(col < 0 ? ~col : col) >= (size_t)nSel * (size_t)nVars) return fail("a closed-loop feature is not in the record");
             for (int ch : fb.channels) if (ch < 0 || ch >= in.channels) return fail("a closed-loop channel is out of range");
         }
         if (closedLyap) {
