@@ -1277,6 +1277,20 @@ static void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, P
                               && task.nvar_error.size() == (size_t)task.points;
     enum { kFcTrue, kFcNet, kFcAr, kFcNvar, kFcThreshold };
     std::vector<int> forecastKinds;
+    // Пара каналов фазового портрета. По умолчанию первый и третий: у Лоренца x-z даёт привычную «бабочку».
+    int phaseX = 0, phaseY = 1;
+    if (phase && task.names.size() >= 2) {
+        const int columns = (int)task.names.size();
+        if (vs.phase_x < 0 || vs.phase_x >= columns) vs.phase_x = 0;
+        if (vs.phase_y < 0 || vs.phase_y >= columns) vs.phase_y = columns >= 3 ? 2 : 1;
+        const std::vector<const char*> items = c_str_list(task.names);
+        item_w(90.0f, combo_items_need(items.data(), columns));
+        ImGui::Combo("x##forecast_phase", &vs.phase_x, items.data(), columns);
+        ImGui::SameLine();
+        item_w(90.0f, combo_items_need(items.data(), columns));
+        ImGui::Combo("y##forecast_phase", &vs.phase_y, items.data(), columns);
+        phaseX = vs.phase_x; phaseY = vs.phase_y;
+    }
     if (readout && !forecastError && !phase && !task.names.empty() && !task.by_delay) {
         std::vector<std::string> labels = task.names;
         const std::vector<const char*> items = c_str_list(labels);
@@ -1384,13 +1398,26 @@ static void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, P
             yname = delayMemory ? "r^2" : "accuracy";
         }
         else if (phase) {
+            // Те же кривые и цвета, что в окне Forecast: истина, сеть, авторегрессия, NVAR.
             const int columns = (int)task.names.size();
             if (columns < 2 || task.truth.size() != (size_t)columns * task.points || task.predicted.size() != task.truth.size()) empty = none;
             else {
-                curves = 2; points = task.points;
-                series_xof = [&task, columns](int k, int p) { return (k == 0 ? task.truth : task.predicted)[(size_t)p * columns]; };
-                yof = [&task, columns](int k, int p) { return (k == 0 ? task.truth : task.predicted)[(size_t)p * columns + 1]; };
-                yname = task.names[1];
+                forecastKinds = { kFcTrue, kFcNet };
+                if (forecastAr) forecastKinds.push_back(kFcAr);
+                if (forecastNvar) forecastKinds.push_back(kFcNvar);
+                curves = (int)forecastKinds.size(); points = task.points;
+                const int px = phaseX, py = phaseY;
+                const auto column = [&task, kinds = forecastKinds](int k) -> const std::vector<double>& {
+                    switch (kinds[(size_t)k]) {
+                    case kFcTrue: return task.truth;
+                    case kFcNet:  return task.predicted;
+                    case kFcAr:   return task.ar_predicted;
+                    default:      return task.nvar_predicted;
+                    }
+                };
+                series_xof = [column, columns, px](int k, int p) { return column(k)[(size_t)p * columns + px]; };
+                yof = [column, columns, py](int k, int p) { return column(k)[(size_t)p * columns + py]; };
+                yname = task.names[(size_t)py];
             }
         }
         else if (task.forecast) {
@@ -1539,7 +1566,7 @@ static void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, P
     static int generation[kNeuralWindowCount] = {};
     std::vector<std::vector<double>>& bufs = buffers[what];
     const PlotKey key = {epoch, c.data_generation, vs.series_var, vs.instance, vs.sync_kind, vs.sweep_kind,
-                         curves, readout || readoutSweep ? vs.readout_target : 0, rate_bin};
+                         curves, phase ? 1000 + phaseX * 64 + phaseY : readout || readoutSweep ? vs.readout_target : 0, rate_bin};
     const bool fresh = filled[what] != key || (int)bufs.size() != curves;
     if (fresh) {
         bufs.assign((size_t)curves, {});
@@ -1587,7 +1614,7 @@ static void draw_neural_series_window(AppModel& model, PlotRenderer& renderer, P
         }
         series.push_back(si);
     }
-    view.x_axis.name = byValue ? neural_sweep_name(ctx.sweep.kind) : phase ? task.names[0] : readout && task.by_delay ? "delay d, samples" : "t";
+    view.x_axis.name = byValue ? neural_sweep_name(ctx.sweep.kind) : phase ? (task.names.empty() ? std::string() : task.names[(size_t)(std::min)(phaseX, (int)task.names.size() - 1)]) : readout && task.by_delay ? "delay d, samples" : "t";
     view.y_axis.name = yname;
     if (longest == 0 && !raster) {
         ImGui::TextDisabled(readoutSweep ? "No network gave a readout: see the note in Neural Controls."
