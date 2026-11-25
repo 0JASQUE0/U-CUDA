@@ -620,6 +620,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             mix(s.points_override); mix(s.point_marker); mix(s.point_size_px);
             mix(s.values != nullptr); mix(s.segment_order != nullptr);
             mix(s.points); mix(s.n_points);
+            mix(s.dash_period_px); mix(s.dash_on_px);
         }
         mix(point_alpha); mix(point_size_px); mix(point_marker);
         mix(points_mode); mix(points_with_lines); mix(imdraw_lines); mix(gpu_thick_lines);
@@ -637,7 +638,9 @@ void Plot2DView::render(PlotRenderer& renderer,
         // Непрозрачная линия (альфа × покрытие ≥ 1): наложения не видны, и многослойный разбор
         // с прореживанием на CPU — пустая трата. Капсулы одним проходом прямо из VBO; это и путь
         // по умолчанию (1 px, альфа 1), и continuation, где данные меняются каждый кадр.
-        if (color[3] * std::min(width, 1.0f) >= 0.999f &&
+        // Пунктир живёт только в ломаной (ему нужна длина дуги в px) — мимо капсул.
+        const bool dashed = si && si->dash_period_px > 0.0f;
+        if (!dashed && color[3] * std::min(width, 1.0f) >= 0.999f &&
             renderer.draw_line_capsules_2d(g.vbo, g.point_count, mvp, color, width))
             return;
         if (si && si->points && si->n_points == g.point_count) {
@@ -690,7 +693,8 @@ void Plot2DView::render(PlotRenderer& renderer,
                 }
                 if (open) close_strip();
             }
-            if (renderer.draw_polyline_2d(lc.xys, lc.first, lc.count, mvp, color, width)) return;
+            if (renderer.draw_polyline_2d(lc.xys, lc.first, lc.count, mvp, color, width,
+                                          si->dash_period_px, si->dash_on_px)) return;
         }
         renderer.draw_line_thick_2d(g.vbo, g.point_count, mvp, color, width);
     };

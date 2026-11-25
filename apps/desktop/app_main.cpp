@@ -633,11 +633,27 @@ static void set_clipboard_win(const std::string& text) {
     glfwSetClipboardString(nullptr, text.c_str());
 }
 
+#ifdef _WIN32
+// Щелчок мышью в консоли включает выделение QuickEdit, и пока оно висит, Windows
+// останавливает всякую запись процесса в консоль. printf главного потока (журнал
+// расчётов в AppModel::tick) тогда ждёт, и окно перестаёт отвечать.
+// Флаг сбрасывается только вместе с ENABLE_EXTENDED_FLAGS.
+static void disable_console_quick_edit() {
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    if (in == INVALID_HANDLE_VALUE || in == nullptr || !GetConsoleMode(in, &mode)) return;   // нет консоли
+    SetConsoleMode(in, (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS);
+}
+#endif
+
 int main(int argc, char** argv) {
 #ifdef UCUDA_UI_TESTS
     ui_test::parse_args(argc, argv);   // --ui-*: runs before the config is read (--ui-fresh)
 #else
     (void)argc; (void)argv;
+#endif
+#ifdef _WIN32
+    disable_console_quick_edit();
 #endif
     // ocr_server.py, kernels\ и NVRTC-заголовки копируются рядом с exe в
     // Post-Build Event. library\ живёт по другой схеме: baseline лежит в

@@ -114,6 +114,7 @@ struct NeuralViewState {
     bool map_log = true; // разброс в log10: он меняется на 7 порядков
     std::string rate_bin_text = "0";   // окно Population Rate, 0 = авто
     int readout_target = 0;            // цель выхода в окнах Neural Readout, Neural Sweep и Neural Map
+    int phase_x = 0, phase_y = -1;     // каналы фазового портрета прогноза; -1 = третий (x-z у Лоренца) или второй
 };
 
 struct NetworkViewState {

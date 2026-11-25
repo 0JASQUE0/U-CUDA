@@ -214,6 +214,17 @@ bool export_errt(const ErrTimeResult& res, const OrderSnapshot& snap, const std:
 bool export_stability(const StabilityResult& res, const OrderSnapshot& snap,
                       const std::string& path);
 
+// Границы областей из окна «Stability bounds»: одна ломаная — одна группа
+// строк "tab,scheme,boundary,tolerance,line,sigma,omega". line — номер ломаной
+// внутри границы (с нуля); между ломаными разрывов-NaN в файле нет.
+// xy — точки ломаных подряд, разделитель — пара NaN (как в stability_contour).
+struct StabBoundExport {
+    std::string tab, scheme, boundary;   // boundary: "stability" / "preference"
+    double tolerance = 0.0;              // у "stability" не печатается
+    const std::vector<double>* xy = nullptr;
+};
+bool export_stability_bounds(const std::vector<StabBoundExport>& items, const std::string& path);
+
 // Phase / TimeSeries — there is no engine-side CSV; the format is defined
 // fresh here. <path>_config.csv carries scheme + params + ICs + integration
 // settings; <path> carries one row per step, ALL initial conditions side by

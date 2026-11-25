@@ -1922,7 +1922,14 @@ void neural_forecast_prepare(const NeuralConfig& c, const NeuralRequest& r1, con
     const size_t nSel = res1.observed.size();
     if (nSel < 1 || res1.traces.size() < (S + 1) * nSel) throw std::runtime_error("the record has no features");
     const int M = (int)nSel;
-    const std::vector<double>& F = res1.traces;
+    // Квадраты у каждого второго признака (нечётные номера): ядро обратной связи узнаёт их по столбцу ~i.
+    std::vector<double> squared;
+    if (t.square_half) {
+        squared.assign(res1.traces.begin(), res1.traces.begin() + (std::ptrdiff_t)((S + 1) * nSel));
+        for (size_t p = 0; p <= S; ++p)
+            for (size_t i = 1; i < nSel; i += 2) { double& v = squared[p * nSel + i]; v *= v; }
+    }
+    const std::vector<double>& F = t.square_half ? squared : res1.traces;
     for (size_t i = 0; i < nSel; ++i) if (!std::isfinite(F[S * nSel + i])) throw std::runtime_error("the network diverged before the forecast");
     std::vector<double> Y(S * K);
     for (size_t p = 0; p < S; ++p)
@@ -1975,6 +1982,7 @@ void neural_forecast_prepare(const NeuralConfig& c, const NeuralRequest& r1, con
     fb.from_row = (long long)S + 1;
     fb.cols.resize((size_t)M);
     std::iota(fb.cols.begin(), fb.cols.end(), 0);
+    if (t.square_half) for (int i = 1; i < M; i += 2) fb.cols[(size_t)i] = ~i;
     fb.channels = chans;
     fb.w.assign(K * (size_t)(M + 1), 0.0);
     for (size_t k = 0; k < K; ++k) {

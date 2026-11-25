@@ -141,9 +141,10 @@ public:
     // Перекрытие участков, близких по дуге (стык, излом), — одно покрытие, далёких (кривая
     // прошла по себе дальше gap px по дуге) — второе: полупрозрачная линия темнеет только там.
     // false — программ нет (вызывающий берёт draw_line_thick_2d).
+    // dash_period_px > 0 — пунктир по длине дуги: штрих dash_on_px, затем пробел до периода.
     bool draw_polyline_2d(const std::vector<float>& xys, const std::vector<int>& first,
         const std::vector<int>& count, const float mvp[16], const float color[4],
-        float line_width);
+        float line_width, float dash_period_px = 0.0f, float dash_on_px = 0.0f);
 
     // Рисует 2D-точки (vbo с float[2] на вершину) через GL_POINTS; этим же путём рисуются точки
     // 1D-бифуркационных диаграмм. marker < 0 — старый путь: сплошной квадрат, GL-состояние не

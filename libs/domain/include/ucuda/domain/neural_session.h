@@ -154,6 +154,7 @@ struct NeuralTask {
     std::string forecast_threshold_text = "0.5"; // Forecast: порог ошибки для времени верного прогноза
     std::string lambda_text = "0";               // Forecast: lambda ridge, 0 = по валидации
     std::string lyapunov_text = "0";             // Forecast: старший показатель источника, 0 = неизвестен
+    bool square_half = false;                    // Forecast: у каждого второго узла-признака выход видит x^2 (Pathak и др., 2018)
     int source = 0;
     std::vector<int> targets;              // переменные источника
     std::string horizon_text = "0";        // на сколько отсчётов вперёд, 0 = наблюдатель

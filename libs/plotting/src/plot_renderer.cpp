@@ -347,15 +347,24 @@ noperspective in vec2 g_local;
 flat in float g_len;
 flat in float g_s0;
 uniform float u_thickness_px;
+uniform vec2  u_dash;   // (период, штрих) в px длины дуги; период <= 0 — сплошная
+float arc_s() { return g_s0 + clamp(g_local.x, 0.0, g_len); }
+// Пунктир — по длине дуги, а не по отрезку: штрихи идут ровно через изломы и не
+// зависят от того, как прорежены точки. Край штриха сглажен на пиксель.
+float dash_cov() {
+    if (u_dash.x <= 0.0) return 1.0;
+    float m = mod(arc_s(), u_dash.x);
+    float d = (m < u_dash.y) ? min(m, u_dash.y - m) : -min(m - u_dash.y, u_dash.x - m);
+    return clamp(0.5 + d, 0.0, 1.0);
+}
 float capsule_cov() {
     float along = g_local.x;
     float dist = abs(g_local.y);
     if (along < 0.0)        dist = length(g_local);
     else if (along > g_len) dist = length(vec2(along - g_len, g_local.y));
     float w = max(u_thickness_px, 1.0);
-    return clamp(0.5 * w + 0.5 - dist, 0.0, 1.0) * min(u_thickness_px, 1.0);
+    return clamp(0.5 * w + 0.5 - dist, 0.0, 1.0) * min(u_thickness_px, 1.0) * dash_cov();
 }
-float arc_s() { return g_s0 + clamp(g_local.x, 0.0, g_len); }
 )"
 
 // Слой j: s_min_j — наименьшая длина дуги среди фрагментов дальше s_min_{j-1} + gap1 (первый
@@ -1387,7 +1396,8 @@ bool PlotRenderer::draw_line_capsules_2d(GLuint vbo, int point_count, const floa
 }
 
 bool PlotRenderer::draw_polyline_2d(const std::vector<float>& xys, const std::vector<int>& first,
-    const std::vector<int>& count, const float mvp[16], const float color[4], float line_width) {
+    const std::vector<int>& count, const float mvp[16], const float color[4], float line_width,
+    float dash_period_px, float dash_on_px) {
     if (!prog_pl_smin_ || !prog_pl_cluster_ || !prog_pl_compose_ || !prog_pl_trans_) return false;
     if (first.empty() || xys.size() < 6) return true;   // ни одного отрезка — рисовать нечего
     if (!ensure_polyline_aux(fbo_w_, fbo_h_)) return false;
@@ -1455,6 +1465,7 @@ bool PlotRenderer::draw_polyline_2d(const std::vector<float>& xys, const std::ve
         glUniformMatrix4fv(glGetUniformLocation(prog, "u_mvp"), 1, GL_FALSE, mvp);
         glUniform2f(glGetUniformLocation(prog, "u_viewport"), (float)fbo_w_, (float)fbo_h_);
         glUniform1f(glGetUniformLocation(prog, "u_thickness_px"), line_width);
+        glUniform2f(glGetUniformLocation(prog, "u_dash"), dash_period_px, dash_on_px);
     };
     auto use_quad_prog = [&](GLuint prog) {
         glUseProgram(prog);

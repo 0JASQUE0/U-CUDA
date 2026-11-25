@@ -86,6 +86,11 @@ struct PlotSeriesInput {
     const double* point_tags      = nullptr;
     int           point_tag_count = 0;
 
+    // Пунктир линии в px экрана: период и длина штриха; период 0 — сплошная. Работает на
+    // GL-ломаной (draw_polyline_2d): обычная линия или imdraw_lines + gpu_thick_lines.
+    float dash_period_px = 0.0f;
+    float dash_on_px     = 0.0f;
+
     // Positive width draws filled bars from zero. Each point is (bin center, height).
     double bar_width = 0.0;
     // Finite X coordinates in monotonic order (ascending or descending).

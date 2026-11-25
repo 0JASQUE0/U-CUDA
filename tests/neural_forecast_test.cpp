@@ -179,6 +179,21 @@ void check_closed_loop_lyapunov(ParametricEngine& engine) {
             for (size_t j = 0; j < plain.feedback_rows.size(); ++j)
                 require(std::abs(plain.feedback_rows[j] - gain * std::pow(multiplier, (double)j)) < 1e-10,
                         "linear closed-loop signal disagrees with the exact sample map");
+            // Столбец ~0: выход видит x^2, отсчёт x_{j+1} = x_j + dt * g * x_j^2 точен, вход постоянен внутри отсчёта.
+            {
+                const double g2 = 0.05;
+                NeuralRequest sq = req;
+                sq.feedback = {3, {~0}, {1}, {g2, 0}};
+                const NeuralResult quad = engine.run_neural(sq);
+                require(quad.ok && !quad.diverged && quad.feedback_rows.size() == 30, "squared feedback: " + quad.error);
+                double x = 1.0;
+                for (size_t j = 0; j < quad.feedback_rows.size(); ++j) {
+                    const double want = g2 * x * x;
+                    require(std::abs(quad.feedback_rows[j] - want) < 1e-10 * (std::max)(1.0, want),
+                            "squared closed-loop feature disagrees with the exact sample map");
+                    x += dt * want;
+                }
+            }
             req.lyapunov.enabled = true;
             req.lyapunov.eps = 1e-5;
             req.lyapunov.interval = 0.5;
