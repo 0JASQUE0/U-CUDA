@@ -4,6 +4,8 @@
 #include "gui_fields.h"
 #include "gui_plot.h"
 #include "tab_order.h"
+#include "ucuda/domain/stability_contour.h"
+#include <tuple>
 using namespace ucuda::ui_detail;
 
 
@@ -34,6 +36,7 @@ const char* order_window_kind_name(OrderPlotWindow::Kind k) {
         case OrderPlotWindow::Kind::Map:   return "Map 2D";
         case OrderPlotWindow::Kind::Perf:  return "Performance";
         case OrderPlotWindow::Kind::ErrT:  return "Error(t)";
+        case OrderPlotWindow::Kind::Bounds: return "Stability bounds";
     }
     return "Order";
 }
@@ -44,6 +47,7 @@ bool order_member_fits(const OrderConfig& c, OrderPlotWindow::Kind k) {
     switch (k) {
         case OrderPlotWindow::Kind::Perf: return c.calc_kind == kOrderCalcPerf;
         case OrderPlotWindow::Kind::ErrT: return c.calc_kind == kOrderCalcErrT;
+        case OrderPlotWindow::Kind::Bounds: return c.calc_kind == kOrderCalcStab;
         case OrderPlotWindow::Kind::Map:  return c.calc_kind == kOrderCalcStab
                                               || (c.calc_kind == kOrderCalcOrder && c.two_d);
         default:                          return c.calc_kind == kOrderCalcOrder && !c.two_d;
@@ -201,6 +205,39 @@ void draw_order_export_items(AppModel& model, const OrderPlotWindow& win,
                                     const GuiCallbacks& cb, bool busy) {
     const OrderAnalysisSession& s = model.order_session;
     const bool perf = (win.kind == OrderPlotWindow::Kind::Perf);
+    if (win.kind == OrderPlotWindow::Kind::Bounds) {
+        // Сами линии окна: те границы, что сейчас выбраны в "show", всех членов.
+        if (ImGui::MenuItem("Export boundaries...", nullptr, false, !busy) && cb.pick_save_file_csv) {
+            const std::string path = cb.pick_save_file_csv();
+            if (!path.empty()) {
+                std::vector<StabilityContour> keep;
+                keep.reserve(win.members.size() * 2);
+                std::vector<data_export::StabBoundExport> items;
+                for (int mi : win.members) {
+                    if (mi < 0 || mi >= (int)s.configs.size()) continue;
+                    const OrderConfig& c = s.configs[(size_t)mi];
+                    if (c.calc_kind != kOrderCalcStab || !c.stab_last_run_ok) continue;
+                    const double tol = parse_num(c.stab_pref_tol_text, 1.0);
+                    for (int which = 0; which < 2; ++which) {
+                        if (win.bound_which != 2 && win.bound_which != which) continue;
+                        keep.push_back(stability_contour(c.stab_result, which, tol));
+                        data_export::StabBoundExport e;
+                        e.tab = c.label;
+                        e.scheme = c.scheme;
+                        e.boundary = which == kStabBoundPreference ? "preference" : "stability";
+                        e.tolerance = tol;
+                        items.push_back(e);
+                    }
+                }
+                for (size_t k = 0; k < items.size(); ++k) items[k].xy = &keep[k].xy;
+                data_export::export_stability_bounds(items, path);
+            }
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The lines of this window as CSV: tab, scheme, boundary, tolerance,\n"
+                              "line, sigma, omega - ready to redraw in MATLAB or pgfplots.");
+        ImGui::Separator();
+    }
     for (int mi : win.members) {
         if (mi < 0 || mi >= (int)s.configs.size()) continue;
         const OrderConfig& c = s.configs[(size_t)mi];
@@ -475,6 +512,215 @@ void draw_order_stability_map(AppModel& model, OrderPlotWindow& win,
 }
 
 namespace ucuda::ui_detail {
+namespace {
+// Ломаные границ одного члена окна. Ключ — (окно, вкладка, какая граница);
+// пересчёт — при новом прогоне вкладки или (у предпочтительности) смене допуска.
+struct OrderBoundsEntry {
+    int gen = -1;
+    const void* data = nullptr;   // rho.data(): вкладку на этом месте могли заменить
+    double tol = std::numeric_limits<double>::quiet_NaN();
+    StabilityContour contour;
+};
+using OrderBoundsCache = std::map<std::tuple<int, int, int>, OrderBoundsEntry>;
+OrderBoundsCache& order_bounds_caches() { return ui_resource<OrderBoundsCache, 3029>(); }
+
+const char* const kBoundDashNames[4] = { "solid", "dashed", "dotted", "long dash" };
+
+// Штрихи в px, пропорционально толщине: на толстой линии мелкий пунктир
+// сливается в сплошную.
+void bound_dash_pattern(int style, float width, float& period, float& on) {
+    const float u = std::max(width, 1.0f);
+    switch (style) {
+        case 1:  period = 6.0f * u;  on = 3.5f * u; break;
+        case 2:  period = 3.0f * u;  on = 1.2f * u; break;
+        case 3:  period = 12.0f * u; on = 8.5f * u; break;
+        default: period = 0.0f;      on = 0.0f;     break;
+    }
+}
+}  // namespace
+
+void draw_order_bounds_window(AppModel& model, OrderPlotWindow& win,
+                              const GuiCallbacks& cb,
+                              PlotRenderer& renderer, Plot2DView& view) {
+    OrderAnalysisSession& s = model.order_session;
+    auto& cache = order_bounds_caches();
+    if (win.bound_dash.size() < win.members.size()) win.bound_dash.resize(win.members.size(), -1);
+    if (win.bound_dash_pref.size() < win.members.size()) win.bound_dash_pref.resize(win.members.size(), -1);
+    // Умолчание: устойчивость сплошной, предпочтительность штрихом.
+    auto style_of = [&win](size_t j, int which) {
+        const std::vector<int>& v = (which == kStabBoundPreference) ? win.bound_dash_pref : win.bound_dash;
+        const int st = (j < v.size()) ? v[j] : -1;
+        return (st >= 0 && st < 4) ? st : (which == kStabBoundPreference ? 1 : 0);
+    };
+
+    toolbar_row([&]() {
+        ImGui::TextDisabled("show:"); ImGui::SameLine();
+        ImGui::RadioButton("stability##bw", &win.bound_which, 0); ImGui::SameLine();
+        ImGui::RadioButton("preference##bw", &win.bound_which, 1); ImGui::SameLine();
+        ImGui::RadioButton("both##bw", &win.bound_which, 2);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "stability  - the line rho = 1 of every tab of the window.\n"
+                "preference - the boundary of rho <= 1 AND a one-step error not above\n"
+                "             the tolerance of that tab (Fedoseev et al., 2022).\n"
+                "both       - both lines: by default stability solid, preference\n"
+                "             dashed and lighter (\"Line styles...\" changes it).\n"
+                "\n"
+                "The lines are iso-lines of the computed grid, interpolated along the\n"
+                "edges of the cells. A boundary that leaves the grid ends at its edge:\n"
+                "widen sigma / omega of the tab to close it.");
+        ImGui::SameLine();
+        ImGui::TextDisabled("|"); ImGui::SameLine();
+        item_w(110);
+        ImGui::SliderFloat("width##bw", &win.bound_width, 0.5f, 6.0f, "%.1f px", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SameLine();
+        if (ImGui::Button("Line styles...##bw")) ImGui::OpenPopup("bound_styles");
+        if (ImGui::BeginPopup("bound_styles")) {
+            item_w(160);
+            ImGui::Combo("palette##bw", &win.palette, kOrderPaletteNames, 3);
+            for (size_t j = 0; j < win.members.size(); ++j) {
+                const int mi = win.members[j];
+                if (mi < 0 || mi >= (int)s.configs.size()) continue;
+                ImGui::PushID((int)j);
+                ImGui::ColorButton("##sw", order_base_color((int)j, win.palette),
+                                   ImGuiColorEditFlags_NoTooltip,
+                                   ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()));
+                ImGui::SameLine();
+                int st = style_of(j, kStabBoundStability);
+                item_w(110);
+                if (ImGui::Combo("##stab", &st, kBoundDashNames, 4)) win.bound_dash[j] = st;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stability boundary (rho = 1).");
+                ImGui::SameLine();
+                int sp = style_of(j, kStabBoundPreference);
+                item_w(110);
+                if (ImGui::Combo("##pref", &sp, kBoundDashNames, 4)) win.bound_dash_pref[j] = sp;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Preference boundary.");
+                ImGui::SameLine();
+                ImGui::TextUnformatted(s.configs[(size_t)mi].label.c_str());
+                ImGui::PopID();
+            }
+            ImGui::TextDisabled("Columns: stability, preference.\n"
+                                "Colour of a line: right click its entry in the legend.");
+            ImGui::EndPopup();
+        }
+    });
+
+    if (win.members.empty()) {
+        ImGui::TextDisabled("The window is empty - add stability tabs via \"Members...\".");
+        return;
+    }
+
+    const bool both = (win.bound_which == 2);
+    std::vector<PlotSeriesInput> series;
+    std::vector<bool> init_vis, glob_vis;
+    std::vector<std::string> missing, empty_lines;
+    double xlo = 0.0, xhi = 0.0, ylo = 0.0, yhi = 0.0;
+    bool got_range = false;
+    unsigned long long h = 1469598103934665603ULL;
+    auto mixh = [&h](unsigned long long v) { h = (h ^ v) * 1099511628211ULL; };
+
+    for (size_t j = 0; j < win.members.size(); ++j) {
+        const int mi = win.members[j];
+        if (mi < 0 || mi >= (int)s.configs.size()) continue;
+        const OrderConfig& c = s.configs[(size_t)mi];
+        const StabilityResult& r = c.stab_result;
+        if (c.calc_kind != kOrderCalcStab || !c.stab_last_run_ok || r.rho.empty()) {
+            missing.push_back(c.label);
+            continue;
+        }
+        if (!got_range) { xlo = r.sigma_lo; xhi = r.sigma_hi; ylo = r.omega_lo; yhi = r.omega_hi; got_range = true; }
+        else {
+            xlo = std::min(xlo, r.sigma_lo); xhi = std::max(xhi, r.sigma_hi);
+            ylo = std::min(ylo, r.omega_lo); yhi = std::max(yhi, r.omega_hi);
+        }
+        const double tol = parse_num(c.stab_pref_tol_text, 1.0);
+        const ImVec4 base = order_base_color((int)j, win.palette);
+        for (int which = 0; which < 2; ++which) {
+            if (!both && win.bound_which != which) continue;
+            OrderBoundsEntry& e = cache[std::make_tuple(win.id, mi, which)];
+            const bool tol_changed = (which == kStabBoundPreference) && !(e.tol == tol);
+            if (e.gen != c.stab_data_generation || e.data != (const void*)r.rho.data() || tol_changed) {
+                e.contour = stability_contour(r, which, tol);
+                e.gen  = c.stab_data_generation;
+                e.data = r.rho.data();
+                e.tol  = tol;
+            }
+            const char* what = (which == kStabBoundPreference) ? "preference" : "stability";
+            if (e.contour.n_lines == 0) empty_lines.push_back(c.label + " (" + what + ")");
+            PlotSeriesInput si;
+            si.points   = e.contour.xy.data();
+            si.n_points = (int)(e.contour.xy.size() / 2);
+            si.label    = both ? c.label + ": " + what : c.label;
+            const bool minor = both && which == kStabBoundPreference;
+            si.color    = minor ? order_shade(base, 1.35f) : base;
+            float period = 0.0f, on = 0.0f;
+            bound_dash_pattern(style_of(j, which), win.bound_width, period, on);
+            si.dash_period_px = period;
+            si.dash_on_px     = on;
+            series.push_back(si);
+            init_vis.push_back(true);
+            glob_vis.push_back(true);
+            mixh((unsigned long long)mi); mixh((unsigned long long)which);
+            mixh((unsigned long long)e.gen); mixh((unsigned long long)(uintptr_t)e.data);
+            std::uint64_t tb = 0; std::memcpy(&tb, &e.tol, sizeof(tb)); mixh(tb);
+        }
+    }
+
+    toolbar_row([&]() {
+        if (!missing.empty()) {
+            std::string m;
+            for (const auto& l : missing) { if (!m.empty()) m += ", "; m += l; }
+            ImGui::TextDisabled("no data yet: %s", m.c_str());
+        }
+        if (!empty_lines.empty()) {
+            std::string m;
+            for (const auto& l : empty_lines) { if (!m.empty()) m += ", "; m += l; }
+            ImGui::TextColored(readable_text(ImVec4(1.0f, 0.75f, 0.4f, 1.0f)),
+                               "no boundary inside the grid: %s", m.c_str());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The whole grid is on one side of the boundary (all inside or\n"
+                                  "all outside the region). Widen sigma / omega of that tab.");
+        }
+    });
+
+    if (series.empty()) {
+        ImGui::TextDisabled("No data yet. Press Run on the stability tabs of this window.");
+        return;
+    }
+
+    view.imdraw_lines      = true;
+    view.gpu_thick_lines   = true;    // пунктир есть только у GL-ломаной
+    view.line_thickness_px = win.bound_width;
+    view.points_mode       = false;
+    view.point_markers     = false;
+    view.show_zero_x       = false;
+    view.show_zero_y       = false;
+    view.x_axis.name = "sigma";
+    view.y_axis.name = "omega";
+    view.x_axis.log_scale   = false;
+    view.y_axis.display_log = false;
+    // Автоподбор — по сеткам расчёта, а не по самим линиям: оборванная на краю
+    // граница должна читаться как упёршаяся в край сетки.
+    view.x_fit_use_explicit = got_range && xhi > xlo;
+    view.x_fit_min = xlo; view.x_fit_max = xhi;
+    view.y_fit_use_explicit = got_range && yhi > ylo;
+    view.y_fit_min = ylo; view.y_fit_max = yhi;
+    view.pad_x = view.pad_y = false;
+
+    mixh((unsigned long long)series.size());
+    const int sig = (int)((h ^ (h >> 32)) & 0x3FFFFFFFULL);
+    bool fit = false;
+    if (win.plot_sig != sig) { fit = true; win.plot_sig = sig; }
+
+    view.popup_extras = [&model, &win, &cb, &s]() {
+        draw_order_export_items(model, win, cb, s.in_flight);
+    };
+    ImVec2 avail  = ImGui::GetContentRegionAvail();
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    view.render(renderer, origin, avail, /*owner_id*/ 0x0BDE3000 + win.id, sig,
+                series, init_vis, glob_vis, fit);
+}
+
 void draw_order_map_window(AppModel& model, OrderPlotWindow& win,
                                   const GuiCallbacks& cb,
                                   PlotRenderer& renderer, HeatmapView& hv) {
@@ -1326,6 +1572,11 @@ void draw_order_plot_windows(AppModel& model, const GuiCallbacks& cb) {
                     cv->y_axis.display_log = true;
                 }
                 draw_order_errt_window(model, win, cb, *renderer, *cv);
+            } else if (win.kind == OrderPlotWindow::Kind::Bounds) {
+                order_curve_caches().erase(win.id);
+                auto& cv = curves[win.id];
+                if (!cv) cv = std::make_unique<Plot2DView>();
+                draw_order_bounds_window(model, win, cb, *renderer, *cv);
             } else {
                 auto& cv = curves[win.id];
                 if (!cv) cv = std::make_unique<Plot2DView>();
@@ -1343,6 +1594,11 @@ void draw_order_plot_windows(AppModel& model, const GuiCallbacks& cb) {
         curves.erase(id);
         order_curve_caches().erase(id);
         order_errt_caches().erase(id);
+        {
+            auto& bc = order_bounds_caches();
+            for (auto it = bc.begin(); it != bc.end(); )
+                it = (std::get<0>(it->first) == id) ? bc.erase(it) : std::next(it);
+        }
         model.remove_order_plot_window(to_remove);
     }
 }
@@ -2262,8 +2518,9 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
         ImGui::SameLine();
         item_w(140);
         int kind = (int)win.kind;
-        const char* kind_names[] = { "Order p", "Error", "Order map 2D", "Performance", "Error(t)" };
-        if (ImGui::Combo("##wkind", &kind, kind_names, 5)) {
+        const char* kind_names[] = { "Order p", "Error", "Order map 2D", "Performance", "Error(t)",
+                                     "Stability bounds" };
+        if (ImGui::Combo("##wkind", &kind, kind_names, 6)) {
             win.kind = (OrderPlotWindow::Kind)kind;
             // Члены, которые новому виду не подходят, из окна выпадают: иначе
             // окно молча показывало бы "нет данных" от чужой вкладки.
@@ -2315,6 +2572,19 @@ void draw_order_controls(AppModel& model, SystemLibrary& /*lib*/) {
     if (ImGui::Button("Add window"))
         model.add_order_plot_window(order_kind_for(c), { s.active_config_index });
     ImGui::SameLine();
+    if (c.calc_kind == kOrderCalcStab) {
+        if (ImGui::Button("Compare boundaries")) {
+            std::vector<int> stabs;
+            for (int ci = 0; ci < (int)s.configs.size(); ++ci)
+                if (s.configs[(size_t)ci].calc_kind == kOrderCalcStab) stabs.push_back(ci);
+            model.add_order_plot_window(OrderPlotWindow::Kind::Bounds, stabs);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("A window with the stability and preference boundaries of ALL\n"
+                              "stability tabs as lines on one diagram - one colour and line\n"
+                              "style per tab. Pick the tabs later via \"Members...\".");
+        ImGui::SameLine();
+    }
     if (ImGui::Button("Reset windows layout")) model.order_layout_generation++;
 
     // ---- Auto-compute ----

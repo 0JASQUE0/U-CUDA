@@ -1205,6 +1205,38 @@ bool export_stability(const StabilityResult& res, const OrderSnapshot& snap,
     return true;
 }
 
+bool export_stability_bounds(const std::vector<StabBoundExport>& items, const std::string& path)
+{
+    std::ofstream out(path);
+    if (!out.is_open()) return false;
+    out << std::setprecision(set_precision);
+    out << "tab,scheme,boundary,tolerance,line,sigma,omega\n";
+    // Запятые в подписи вкладки сломали бы столбцы — подменяются на ';'.
+    auto clean = [](std::string s) {
+        for (char& ch : s) if (ch == ',' || ch == '\n' || ch == '\r') ch = ';';
+        return s;
+    };
+    for (const StabBoundExport& it : items) {
+        if (!it.xy) continue;
+        const std::string head = clean(it.tab) + "," + clean(it.scheme) + "," + it.boundary + ",";
+        int line = 0;
+        bool in_line = false;
+        for (size_t i = 0; i + 1 < it.xy->size(); i += 2) {
+            const double x = (*it.xy)[i], y = (*it.xy)[i + 1];
+            if (std::isnan(x) || std::isnan(y)) {
+                if (in_line) ++line;
+                in_line = false;
+                continue;
+            }
+            in_line = true;
+            out << head;
+            if (it.boundary != "stability") out << it.tolerance;
+            out << "," << line << "," << x << "," << y << "\n";
+        }
+    }
+    return true;
+}
+
 bool export_errt(const ErrTimeResult& res, const OrderSnapshot& snap, const std::string& path)
 {
     std::ofstream cfg(path + "_config.csv");

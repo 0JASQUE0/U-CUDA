@@ -220,6 +220,14 @@ std::string session_to_json_order_windows(const std::vector<OrderPlotWindow>& wi
         o << ",\"stab_pref_edge\":" << w.stab_pref_edge;
         o << ",\"stab_pref_edge_w\":" << w.stab_pref_edge_w;
         o << ",\"stab_paper_cmap\":" << (w.stab_paper_cmap ? "true" : "false");
+        o << ",\"bound_which\":" << w.bound_which;
+        o << ",\"bound_width\":" << w.bound_width;
+        o << ",\"bound_dash\":[";
+        for (size_t k = 0; k < w.bound_dash.size(); ++k) { if (k) o << ","; o << w.bound_dash[k]; }
+        o << "]";
+        o << ",\"bound_dash_pref\":[";
+        for (size_t k = 0; k < w.bound_dash_pref.size(); ++k) { if (k) o << ","; o << w.bound_dash_pref[k]; }
+        o << "]";
         o << ",\"colormap_idx\":" << w.colormap_idx;
         o << ",\"error_source\":" << w.error_source;
         o << ",\"errt_show_vars\":" << (w.errt_show_vars ? "true" : "false");
@@ -269,7 +277,7 @@ bool session_from_json_order_windows(const std::string& json, std::vector<OrderP
                                 if      (k == "id")              w.id              = std::stoi(p.str_or_num());
                                 else if (k == "kind") {
                                     const int kk = std::stoi(p.str_or_num());
-                                    w.kind = (kk >= 0 && kk <= 4) ? (OrderPlotWindow::Kind)kk
+                                    w.kind = (kk >= 0 && kk <= 5) ? (OrderPlotWindow::Kind)kk
                                                                   : OrderPlotWindow::Kind::P;
                                 }
                                 else if (k == "label")           w.label           = p.str();
@@ -287,6 +295,20 @@ bool session_from_json_order_windows(const std::string& json, std::vector<OrderP
                                 else if (k == "stab_pref_edge")  w.stab_pref_edge  = (unsigned)std::stoul(p.str_or_num());
                                 else if (k == "stab_paper_cmap") w.stab_paper_cmap = p.boolean();
                                 else if (k == "stab_pref_edge_w") w.stab_pref_edge_w = std::max(0, std::stoi(p.str_or_num()));
+                                else if (k == "bound_which")     w.bound_which     = std::clamp(std::stoi(p.str_or_num()), 0, 2);
+                                else if (k == "bound_width")     w.bound_width     = std::stof(p.str_or_num());
+                                else if (k == "bound_dash" || k == "bound_dash_pref") {
+                                    std::vector<int>& dst = (k == "bound_dash") ? w.bound_dash : w.bound_dash_pref;
+                                    dst.clear();
+                                    p.expect('[');
+                                    if (!p.opt(']')) {
+                                        while (true) {
+                                            dst.push_back(std::stoi(p.str_or_num()));
+                                            if (p.opt(',')) continue;
+                                            p.expect(']'); break;
+                                        }
+                                    }
+                                }
                                 else if (k == "colormap_idx")    w.colormap_idx    = std::stoi(p.str_or_num());
                                 else if (k == "error_source")    w.error_source    = std::stoi(p.str_or_num());
                                 else if (k == "errt_show_vars")  w.errt_show_vars  = p.boolean();
