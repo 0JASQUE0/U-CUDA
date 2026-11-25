@@ -344,6 +344,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     bool   last_ok      = true;       // for show_done: true = green "Done", false = red "Cancelled"
     double done_seconds = 0.0;
     int    basins_phase = 0;          // 1 = sim, 2 = cluster; 0 = not basins or not started
+    NeuralRunPhase neural_phase = NeuralRunPhase::Preparing;
 
     {
         auto& bif = model.bifurcation_session;
@@ -390,9 +391,13 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     else if (ord.in_flight)
         busy = busy_from(ord, BusyKind::Order,
                          running_label(ord.configs, ord.running_config_index, "order"));
-    else if (model.neural_session.in_flight)
-        busy = busy_from(model.neural_session, BusyKind::Neural,
-                         running_label(model.neural_session.configs, model.neural_session.running_config_index, "neural"));
+    else if (model.neural_session.in_flight) {
+        const auto& neural = model.neural_session;
+        if (neural.progress_phase_token)
+            neural_phase = neural.progress_phase_token->load(std::memory_order_acquire);
+        busy = busy_from(neural, BusyKind::Neural,
+                         running_label(neural.configs, neural.running_config_index, "neural"));
+    }
     else if (cus.any_in_flight()) {
         // Custom-tab: queue is drained serially, so at most one sub-session is
         // in-flight at any time — pick whichever one it is and surface its
@@ -597,12 +602,27 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
 
     if (busy.kind != BusyKind::None) {
         char text[200];
-        // Phase suffix appears only for basins while running (not on "Cancelling"
-        // or "Done" — those reflect overall state, not the current sub-phase).
         const char* phase_suffix = "";
+        const bool neural_steps = neural_phase_has_step_progress(neural_phase) && busy.progress < 1.0f;
         if (busy.kind == BusyKind::Basins && !show_done && !busy.cancelling) {
             if      (basins_phase == 1) phase_suffix = " (1/2 sim)";
             else if (basins_phase == 2) phase_suffix = " (2/2 cluster)";
+        }
+        if (busy.kind == BusyKind::Neural && !show_done && !busy.cancelling) {
+            switch (neural_phase) {
+                case NeuralRunPhase::Preparing:   phase_suffix = " (preparing)"; break;
+                case NeuralRunPhase::Simulating:  phase_suffix = " (simulation)"; break;
+                case NeuralRunPhase::Features:    phase_suffix = " (extracting features)"; break;
+                case NeuralRunPhase::Training:    phase_suffix = " (training)"; break;
+                case NeuralRunPhase::Classifying: phase_suffix = " (classifying test samples)"; break;
+                case NeuralRunPhase::Baseline:    phase_suffix = " (evaluating baseline)"; break;
+                case NeuralRunPhase::Readout:     phase_suffix = " (evaluating readout)"; break;
+                case NeuralRunPhase::Forecast:    phase_suffix = " (forecast)"; break;
+                case NeuralRunPhase::Control:     phase_suffix = " (K = 0 simulation)"; break;
+                case NeuralRunPhase::Finalizing:  phase_suffix = " (finalizing results)"; break;
+            }
+            if (neural_phase_has_step_progress(neural_phase) && !neural_steps)
+                phase_suffix = " (collecting GPU results)";
         }
         if (show_done) {
             std::snprintf(text, sizeof(text), "%s %s in %.1fs",
@@ -636,7 +656,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
 
         const bool show_stop = (busy.kind != BusyKind::Phase) &&
                                !show_done && !busy.cancelling;
-        const bool show_bar  = show_stop;  // bar only when running & not cancelling
+        const bool show_bar = show_stop;
 
         const float pad      = ImGui::GetStyle().ItemSpacing.x;
         const float bar_w    = 120.0f;
@@ -665,7 +685,9 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
 
         if (show_bar) {
             ImGui::SameLine();
-            const float f = std::clamp(busy.progress, 0.0f, 1.0f);
+            const float f = busy.kind == BusyKind::Neural && !neural_steps
+                ? -1.0f - static_cast<float>(ImGui::GetTime())
+                : std::clamp(busy.progress, 0.0f, 1.0f);
             ImGui::ProgressBar(f, ImVec2(bar_w, bar_h), "");
         }
         if (show_est) {
