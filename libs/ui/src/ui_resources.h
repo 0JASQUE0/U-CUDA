@@ -22,6 +22,7 @@ struct ProjectionViews {
     std::unique_ptr<Plot3DView> view3d;
     std::unique_ptr<HeatmapView> viewrp;
     int last_frame = 0;
+    int fitted_generation = -1;
 };
-ProjectionViews& projection_views(const Projection& projection);
+ProjectionViews& projection_views(const Projection& projection, int workspace_owner);
 void prune_projection_views();

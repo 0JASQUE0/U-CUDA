@@ -6,6 +6,7 @@
 #include "tab_phase.h"
 #include "tab_basins.h"
 #include "ucuda/storage/system_library.h"
+#include <limits>
 
 namespace ucuda::ui_detail {
 
@@ -75,7 +76,7 @@ std::string node_meta(const TreeSession& ts, const TreeNode& n) {
     }
 }
 
-enum class Act { None, Add, Dup, Del, Toggle, Up, Down, RunNode, NewView, CloseView };
+enum class Act { None, Add, Dup, Del, Toggle, Up, Down, RunNode, NewView, RemoveView };
 struct Pending { Act act = Act::None; int id = 0; TreeNodeKind kind = TreeNodeKind::System; int dir = 0; };
 
 int  g_rename_id = 0;
@@ -190,28 +191,118 @@ bool small_icon_button(const char* label, const char* tip, ImVec4 col = ImVec4(0
 
 enum TreeColumn { NodeColumn, AddColumn, DuplicateColumn, PowerColumn, CloseColumn, LevelColumn, TreeColumnCount };
 
+void focus_tree_window(int id, int index, char type) {
+    g_tree_focus_leaf = id;
+    g_tree_focus_view = index;
+    g_tree_focus_type = type;
+}
+
+struct TreeWindowRow {
+    int index;
+    char type;
+    bool available;
+    std::string name;
+};
+
+std::vector<TreeWindowRow> tree_window_rows(const TreeSession& session, const TreeNode& node) {
+    const auto it = session.leaves.find(node.id);
+    if (it == session.leaves.end()) return {};
+    const auto& runtime = it->second;
+    std::vector<TreeWindowRow> rows;
+    const auto append_projections = [&rows](const PhaseAnalysisSession& phase, char type, bool available) {
+        for (int i = 0; i < static_cast<int>(phase.projections.size()); ++i)
+            rows.push_back({i, type, available, phase.projections[i].label});
+    };
+    if (runtime.phase) {
+        append_projections(*runtime.phase, 'p', true);
+        return rows;
+    }
+    rows.push_back({0, 'w', true, "Window 1"});
+    for (int i = 0; i < static_cast<int>(node.extra_views.size()) && i < kTreeMaxExtraViews; ++i) {
+        std::string name = "Window " + std::to_string(i + 2);
+        if (node.kind == TreeNodeKind::LS2D) {
+            const int exponent = node.extra_views[i];
+            name += exponent < 0 ? " (sum)" : " (L" + std::to_string(exponent + 1) + ")";
+        }
+        rows.push_back({i + 1, 'w', true, std::move(name)});
+    }
+    if (runtime.basins && !runtime.basins->phase_slots.empty() && runtime.basins->phase_slots[0]) {
+        const auto& slot = *runtime.basins->phase_slots[0];
+        append_projections(slot.phase, 'b', slot.has_result || slot.phase.in_flight);
+    }
+    return rows;
+}
+
+void draw_window_rows(TreeSession& ts, const TreeNode& node, const TreeWindowRow& window,
+                      bool active, Pending& pend, float power_width) {
+    const auto key = tree_leaf_window_key(node.id, window.index, window.type);
+    for (const auto owner : ts.tree.window_tabs(key, window.available)) {
+        auto& tab = ts.tree.tabs[owner];
+        const bool on = tab.shows(key, window.available);
+        const bool copy = tab.is_copy(key);
+        std::string label = window.name;
+        if (copy) label += " (copy)";
+        if (ts.tree.tabs.size() > 1) label += " [" + tab.name + "]";
+
+        ImGui::PushID(key.c_str());
+        ImGui::PushID(tab.id);
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(NodeColumn);
+        if (!on || !active) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TreeNodeEx("##view", ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                          ImGuiTreeNodeFlags_SpanAvailWidth, "%s", label.c_str());
+        if (!on || !active) ImGui::PopStyleColor();
+        const bool here = tab.id == ts.tree.active_tab_id;
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+            ts.tree.selected_id = node.id;
+            if (here && on && active) focus_tree_window(node.id, window.index, window.type);
+        }
+        ImGui::TableSetColumnIndex(PowerColumn);
+        if (small_icon_button(on ? "on" : "off", on ? "Hide window on its tab" : "Show window on its tab",
+                              on ? ImVec4(0.30f, 0.79f, 0.69f, 1.0f) : ImVec4(0.96f, 0.53f, 0.44f, 1.0f),
+                              power_width)) {
+            ts.dirty |= tab.remember_window(key);
+            ts.dirty |= tab.set_visible(key, !on);
+            if (here && !on && active) focus_tree_window(node.id, window.index, window.type);
+        }
+        ImGui::TableSetColumnIndex(CloseColumn);
+        if (copy) {
+            if (small_icon_button("x", "Remove this layout copy from its tab"))
+                ts.dirty |= tab.remove_copy(key);
+        } else if (window.type == 'w' && window.index > 0) {
+            if (small_icon_button("x", "Remove this extra window from the tree and all tabs"))
+                pend = { Act::RemoveView, node.id, node.kind, window.index };
+        }
+        ImGui::PopID();
+        ImGui::PopID();
+    }
+}
+
 void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend, float power_width) {
     TreeNode* n = ts.tree.find(id);
     if (!n) return;
     const bool ctx    = tree_kind_is_context(n->kind);
     const bool active = ts.tree.is_active(id);
     const int  level  = ts.tree.level(id);
-    const ImVec4 col  = tree_dim_color(tree_kind_dim_slot(n->kind), active);
+    const ImVec4 col  = n->needs_review ? readable_text(ImVec4(1.0f, 0.68f, 0.25f, 1.0f))
+                                       : tree_dim_color(tree_kind_dim_slot(n->kind), active);
 
     ImGui::PushID(id);
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(NodeColumn);
     ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth
                           | ImGuiTreeNodeFlags_AllowOverlap;
-    // Лист с доп. окнами раскрывается: под ним строки этих окон.
-    const bool has_views = !ctx && !n->extra_views.empty();
+    const auto windows = ctx ? std::vector<TreeWindowRow>{} : tree_window_rows(ts, *n);
+    auto& tab = ts.tree.active_tab();
+    const bool has_views = !windows.empty();
     const bool branch    = ctx || has_views;
     if (!branch) fl |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
     if (ts.tree.selected_id == id) fl |= ImGuiTreeNodeFlags_Selected;
     if (branch) ImGui::SetNextItemOpen(n->enabled && n->expanded, ImGuiCond_Always);
 
     ImGui::PushStyleColor(ImGuiCol_Text, col);
-    const bool open = ImGui::TreeNodeEx("##node", fl, "%s", n->name.c_str());
+    const bool open = ImGui::TreeNodeEx("##node", fl, "%s%s", n->name.c_str(),
+                                        n->needs_review ? " (review settings)" : "");
     ImGui::PopStyleColor();
     if (branch && ImGui::IsItemToggledOpen()) {
         if (!n->enabled) flash("Node is disabled - enable it to expand");
@@ -219,7 +310,13 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend, float po
     }
     if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen()) {
         ts.tree.selected_id = id;
-        if (!ctx) { g_tree_focus_leaf = id; g_tree_focus_view = 0; }
+        if (active) {
+            for (const auto& window : windows) {
+                if (!tab.shows(tree_leaf_window_key(id, window.index, window.type), window.available)) continue;
+                focus_tree_window(id, window.index, window.type);
+                break;
+            }
+        }
     }
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         g_rename_id = id;
@@ -228,12 +325,14 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend, float po
     if (ImGui::BeginPopupContextItem("##ctx")) {
         ts.tree.selected_id = id;
         if (ImGui::MenuItem(ctx ? "Run subtree" : "Run node")) pend = { Act::RunNode, id };
+        const bool window_visible = !ctx && ts.leaf_window_visible(id);
         if (tree_kind_is_2d_leaf(n->kind) || tree_kind_is_1d_leaf(n->kind)) {
-            if (ImGui::MenuItem("New window", nullptr, false, n->extra_views.size() < 15))
+            if (ImGui::MenuItem("New window", nullptr, false,
+                                !window_visible || n->extra_views.size() < kTreeMaxExtraViews))
                 pend = { Act::NewView, id };
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Another window of the same result, no recomputation\n"
-                                  "(e.g. a different Lyapunov exponent of the same 2D map).");
+                ImGui::SetTooltip(window_visible ? "Open an additional view of the same result."
+                                                : "Restore the main window on this tab.");
         }
         if (ImGui::MenuItem("Rename")) {
             g_rename_id = id;
@@ -278,7 +377,7 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend, float po
         if (small_icon_button("dup", "Duplicate (with subtree)")) pend = { Act::Dup, id };
     }
     ImGui::TableSetColumnIndex(PowerColumn);
-    if (small_icon_button(power, n->enabled ? "Disable node" : "Enable node",
+    if (small_icon_button(power, n->enabled ? "Disable calculation and its windows" : "Enable calculation and its windows",
                           n->enabled ? ImVec4(0.30f, 0.79f, 0.69f, 1.0f) : ImVec4(0.96f, 0.53f, 0.44f, 1.0f),
                           power_width))
         pend = { Act::Toggle, id };
@@ -294,30 +393,7 @@ void draw_node(AppModel& model, TreeSession& ts, int id, Pending& pend, float po
         ImGui::TreePop();
     }
     if (has_views && open) {
-        // Доп. окна листа: клик выводит окно вперёд, x закрывает.
-        const bool ls2d = n->kind == TreeNodeKind::LS2D;
-        for (int k = 1; k <= (int)n->extra_views.size(); ++k) {
-            ImGui::PushID(1000 + k);
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(NodeColumn);
-            char label[64];
-            const int ex = n->extra_views[k - 1];
-            if (ls2d && ex < 0)  std::snprintf(label, sizeof(label), "Window %d  (sum)", k + 1);
-            else if (ls2d)       std::snprintf(label, sizeof(label), "Window %d  (L%d)", k + 1, ex + 1);
-            else                 std::snprintf(label, sizeof(label), "Window %d", k + 1);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-            ImGui::TreeNodeEx("##view", ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen
-                              | ImGuiTreeNodeFlags_SpanAvailWidth, "%s", label);
-            ImGui::PopStyleColor();
-            if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-                ts.tree.selected_id = id;
-                g_tree_focus_leaf = id;
-                g_tree_focus_view = k;
-            }
-            ImGui::TableSetColumnIndex(CloseColumn);
-            if (small_icon_button("x", "Close this window")) pend = { Act::CloseView, id, n->kind, k };
-            ImGui::PopID();
-        }
+        for (const auto& window : windows) draw_window_rows(ts, *n, window, active, pend, power_width);
         ImGui::TreePop();
     }
     ImGui::PopID();
@@ -331,7 +407,7 @@ void apply_pending(AppModel& model, TreeSession& ts, const Pending& p) {
         const int nid = ts.add_node(p.id, p.kind, p.dir);
         if (nid) {
             ts.tree.selected_id = nid;
-            if (!tree_kind_is_context(p.kind)) g_tree_focus_leaf = nid;
+            if (ts.show_leaf_window(nid)) focus_tree_window(nid, 0, p.kind == TreeNodeKind::Phase ? 'p' : 'w');
         }
         break;
     }
@@ -350,23 +426,16 @@ void apply_pending(AppModel& model, TreeSession& ts, const Pending& p) {
     case Act::Up:   ts.move_node(p.id, -1); break;
     case Act::Down: ts.move_node(p.id, +1); break;
     case Act::NewView: {
-        int v = 0;
-        auto it = ts.leaves.find(p.id);
-        if (it != ts.leaves.end() && it->second.ls && !it->second.ls->curves.empty())
-            v = it->second.ls->curves[0].display_exponent_idx;
-        n->extra_views.push_back(v);
-        ts.dirty = true;
+        const int view = ts.open_or_add_leaf_window(p.id);
+        if (view >= 0) focus_tree_window(p.id, view, 'w');
         break;
     }
-    case Act::CloseView:
-        if (p.dir >= 1 && p.dir <= (int)n->extra_views.size()) {
-            n->extra_views.erase(n->extra_views.begin() + (p.dir - 1));
-            tree_forget_views(p.id, p.dir);
-            ts.dirty = true;
-        }
+    case Act::RemoveView:
+        if (ts.remove_extra_view(p.id, p.dir)) tree_forget_extra_views(p.id, p.dir);
         break;
     case Act::RunNode:
-        if (tree_kind_is_context(n->kind)) model.enqueue_tree(ts.dirty_leaves(p.id));
+        if (ts.tree.needs_review(p.id)) flash("Review layout settings before running this node");
+        else if (tree_kind_is_context(n->kind)) model.enqueue_tree(ts.dirty_leaves(p.id));
         else if (ts.tree.is_active(p.id))  model.enqueue_tree({ p.id });
         break;
     default: break;
@@ -757,6 +826,13 @@ void draw_params_panel(AppModel& model, TreeSession& ts) {
                         n->enabled ? "" : "(disabled)");
     ImGui::Separator();
     ImGui::PushID(n->id);
+    if (n->needs_review) {
+        ImGui::TextWrapped("Added by a layout with default settings.");
+        if (ImGui::Button("Confirm settings")) {
+            n->needs_review = false;
+            ts.dirty = true;
+        }
+    }
     bool ch = false;
     const TreeNodeFieldScope cfg_field_scope(model, ts, *n);
     switch (n->kind) {
@@ -803,6 +879,115 @@ void load_tree_session(AppModel& model, SystemLibrary& lib) {
     model.tree_session.dirty = false;
 }
 
+void draw_tree_workspace_tabs(TreeSession& session, const std::string& system,
+                              const std::function<void(int)>& on_close) {
+    auto& tree = session.tree;
+    auto& tabs = tree.tabs;
+    const auto label = [](const TreeWorkspaceTab& tab) {
+        return tab.name + "###tree_tab_" + std::to_string(tab.id);
+    };
+    struct RenameTab {
+        int id = 0;
+        char name[128]{};
+    };
+    auto& rename = ui_resource<RenameTab, 7704>();
+    ImGui::PushID(system.c_str());
+    const auto flags = ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_TabListPopupButton |
+                       ImGuiTabBarFlags_FittingPolicyScroll | ImGuiTabBarFlags_AutoSelectNewTabs;
+    bool add = false;
+    int close = 0;
+    bool open_rename = false;
+    ImGuiTabBar* bar = nullptr;
+    if (ImGui::BeginTabBar("##tree_workspace_tabs", flags)) {
+        bar = ImGui::GetCurrentTabBar();
+        const bool restore_selection = bar->PrevFrameVisible < ImGui::GetFrameCount() - 1 ||
+                                       bar->SelectedTabId == 0;
+        for (const auto& tab : tabs) {
+            const bool select = restore_selection && tree.active_tab_id == tab.id;
+            bool keep = true;
+            const bool active = ImGui::BeginTabItem(label(tab).c_str(), tabs.size() > 1 ? &keep : nullptr,
+                select ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None);
+            if (ImGui::BeginPopupContextItem()) {
+                if (ImGui::MenuItem("Rename")) {
+                    rename.id = tab.id;
+                    std::snprintf(rename.name, sizeof(rename.name), "%s", tab.name.c_str());
+                    open_rename = true;
+                }
+                if (tabs.size() > 1 && ImGui::MenuItem("Close tab")) close = tab.id;
+                ImGui::EndPopup();
+            }
+            if (active) {
+                if (!restore_selection && tree.active_tab_id != tab.id) {
+                    tree.active_tab_id = tab.id;
+                    session.dirty = true;
+                }
+                ImGui::EndTabItem();
+            }
+            if (!keep) close = tab.id;
+        }
+        add = ImGui::TabItemButton("+", ImGuiTabItemFlags_Trailing) &&
+              tree.next_tab_id < std::numeric_limits<int>::max();
+        if (!add && !close && bar->Tabs.Size == static_cast<int>(tabs.size()) + 1) {
+            std::vector<TreeWorkspaceTab> ordered;
+            for (const auto& item : bar->Tabs) {
+                const auto it = std::find_if(tabs.begin(), tabs.end(), [&](const auto& tab) {
+                    return ImHashStr(label(tab).c_str(), 0, bar->ID) == item.ID;
+                });
+                if (it != tabs.end()) ordered.push_back(*it);
+            }
+            if (ordered.size() == tabs.size() &&
+                !std::equal(tabs.begin(), tabs.end(), ordered.begin(), [](const auto& a, const auto& b) {
+                    return a.id == b.id;
+                })) {
+                tabs = std::move(ordered);
+                session.dirty = true;
+            }
+        }
+        ImGui::EndTabBar();
+    }
+    if (close) {
+        const auto it = std::find_if(tabs.begin(), tabs.end(), [close](const auto& t) { return t.id == close; });
+        if (it != tabs.end()) {
+            on_close(close);
+            tabs.erase(it);
+            if (tree.active_tab_id == close) tree.active_tab_id = tabs.front().id;
+            session.dirty = true;
+        }
+    }
+    if (add) {
+        int number = 1;
+        std::string name = "Tab 1";
+        while (std::any_of(tabs.begin(), tabs.end(), [&](const auto& tab) { return tab.name == name; }))
+            name = "Tab " + std::to_string(++number);
+        const int id = tree.next_tab_id++;
+        tabs.push_back({id, std::move(name), false, {}, {}});
+        tree.active_tab_id = id;
+        session.dirty = true;
+    }
+    // The active workspace is chosen immediately, while ImGui selects a new tab next frame.
+    if ((add || close) && bar)
+        bar->NextSelectedTabId = ImHashStr(label(tree.active_tab()).c_str(), 0, bar->ID);
+    if (open_rename) ImGui::OpenPopup("Rename tab##tree");
+    if (ImGui::BeginPopupModal("Rename tab##tree", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool enter = ImGui::InputText("##name", rename.name, sizeof(rename.name),
+                                           ImGuiInputTextFlags_EnterReturnsTrue);
+        if ((ImGui::Button("OK") || enter) && rename.name[0]) {
+            for (auto& tab : tabs) {
+                if (tab.id != rename.id) continue;
+                tab.name = rename.name;
+                session.dirty = true;
+                break;
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::PopID();
+}
+
 void draw_tree_controls(AppModel& model, SystemLibrary& lib) {
     (void)lib;
     auto& ts = model.tree_session;
@@ -821,7 +1006,7 @@ void draw_tree_controls(AppModel& model, SystemLibrary& lib) {
 
     // Run / Stop.
     bool run_now = ImGui::Button("Run");
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Compute every out-of-date node (Ctrl+R)");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Compute out-of-date nodes with confirmed settings (Ctrl+R)");
     if (ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_R, false))
         run_now = true;
     if (run_now) model.enqueue_tree(ts.dirty_leaves(ts.tree.nodes.front().id));
@@ -832,6 +1017,14 @@ void draw_tree_controls(AppModel& model, SystemLibrary& lib) {
     }
     ImGui::SameLine();
     ImGui::TextDisabled("(%zu queued)", model.tree_queue().size());
+    const auto pending_review = std::find_if(ts.tree.nodes.begin(), ts.tree.nodes.end(),
+                                             [](const auto& node) { return node.needs_review; });
+    if (pending_review != ts.tree.nodes.end() && ImGui::Button("Review layout settings")) {
+        ts.tree.selected_id = pending_review->id;
+        for (auto* parent = ts.tree.find(pending_review->parent); parent; parent = ts.tree.find(parent->parent))
+            parent->expanded = true;
+        ts.dirty = true;
+    }
     if (ImGui::GetTime() - g_msg_time < 3.0)
         ImGui::TextColored(readable_text(ImVec4(0.96f, 0.53f, 0.44f, 1.0f)), "%s", g_msg.c_str());
 

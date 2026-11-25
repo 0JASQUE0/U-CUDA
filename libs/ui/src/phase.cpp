@@ -20,7 +20,8 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                                     int owner_id_delta,
                                     const PhaseStyleFn& style_fn,
                                     const FeatureClusterParams& clust,
-                                    const ProjVisibilityFn& visible) {
+                                    const ProjVisibilityFn& visible,
+                                    const ProjHookFn& on_close_copy) {
     const AnalysisResult& res = s.result;
     // Lambda installed on every projection view that has data — right-click "Export data..."
     // writes the full double-precision trajectory set (all coords for all ICs) + a _config.csv
@@ -75,10 +76,14 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
     int pr_to_remove = -1;
     // Ctrl+Shift+клик по галкам стиля — на все проекции этой вкладки (draw_proj_style_controls).
     const ProjStyleGroupScope style_group(&s.projections);
+    // Bind all view lookups in this draw call to the same workspace.
+    const auto projection_views = [owner = on_close_copy ? owner_id_delta : 0](const Projection& projection)
+        -> ProjectionViews& { return ::projection_views(projection, owner); };
     for (int i = 0; i < (int)s.projections.size(); ++i) {
         const std::string title = projection_window_title(s, i, title_suffix);
-        if (visible && !visible(title)) continue;
+        if (visible && !visible(i, title)) continue;
         Projection& pr = s.projections[i];
+        bool fit = pr.fit_pending || (on_close_copy && projection_views(pr).fitted_generation != s.data_generation);
         auto& points = bucket.points[i];
         if (pr.type != ProjType::Phase2D && pr.type != ProjType::FeatureDiagram && pr.type != ProjType::TimeDomain)
             points.clear();
@@ -123,7 +128,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). По дефолту выключено → быстрый
                     // GL shader-line путь (1px, α=1). Текущая отрисовка не ломается.
-                    draw_proj_line_style(pr, "phase2d",
+                    draw_proj_line_style(pr, *projection_views(pr).view2d, "phase2d",
                         "Draw iterates as markers instead of a polyline.\n"
                         "Default for discrete maps: consecutive iterates are\n"
                         "not joined by a continuous path, so the connecting\n"
@@ -197,7 +202,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
 
                     projection_views(pr).view2d->popup_extras = phase_popup_extras;
                     projection_views(pr).view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, pr.fit_pending);
+                        series_in, init_vis, glob_vis, fit);
                 }
             }
             // Диаграмма признаков: точечный график (значение пика; интервал до
@@ -333,7 +338,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     ImVec2 origin = ImGui::GetCursorScreenPos();
                     projection_views(pr).view2d->popup_extras = phase_popup_extras;
                     projection_views(pr).view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, pr.fit_pending);
+                        series_in, init_vis, glob_vis, fit);
                 }
             }
             else if (pr.type == ProjType::TimeDomain) {
@@ -350,7 +355,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     // Toolbar над плотом: opt-in custom line styling (ImDrawList-путь
                     // с настраиваемой толщиной + α). Дефолт — быстрый GL shader-line
                     // путь (1px, α=1). Аналогично Phase2D.
-                    draw_proj_line_style(pr, "timedomain",
+                    draw_proj_line_style(pr, *projection_views(pr).view2d, "timedomain",
                         "Draw the samples as markers instead of a polyline\n"
                         "(on step nodes: where the adaptive step actually landed).");
 
@@ -450,7 +455,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
 
                     projection_views(pr).view2d->popup_extras = phase_popup_extras;
                     projection_views(pr).view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, pr.fit_pending);
+                        series_in, init_vis, glob_vis, fit);
                 }
             }
             // Recurrence plot + RQA. Матрица считается на GPU в воркере вместе с траекториями
@@ -724,7 +729,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                                       (i ^ owner_id_delta) ^ 0x5251A0, data_gen,
                                       n, n, values,
                                       rq->t0, rq->t1, rq->t0, rq->t1,
-                                      vlo, vhi, pr.fit_pending);
+                                      vlo, vhi, fit);
                 }
             }
             else if (pr.type == ProjType::Phase3D) {
@@ -800,7 +805,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
 
                     projection_views(pr).view3d->popup_extras = phase_popup_extras;
                     projection_views(pr).view3d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, pr.fit_pending);
+                        series_in, init_vis, glob_vis, fit);
                 }
             }
             else if (pr.type == ProjType::ContinuationDiagram) {
@@ -879,7 +884,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     ImVec2 origin = ImGui::GetCursorScreenPos();
                     projection_views(pr).view2d->popup_extras = phase_popup_extras;
                     projection_views(pr).view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, pr.fit_pending);
+                        series_in, init_vis, glob_vis, fit);
                 }
             }
             // h(t) адаптивного шага: принятые шаги линией, отвергнутые попытки —
@@ -892,16 +897,16 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                 else {
                     if (!projection_views(pr).view2d) projection_views(pr).view2d = std::make_unique<Plot2DView>();
                     // log Y — пересчётом в log10 h (лог-оси Y у Plot2DView нет), как у окон Order.
-                    toolbar_row([&pr]() {   // часть тулбара (Show → Toolbar)
+                    toolbar_row([&pr, &fit]() {   // часть тулбара (Show → Toolbar)
                         const bool was = pr.y_log;
                         ImGui::Checkbox("log Y##stepsize", &pr.y_log);
-                        if (pr.y_log != was) pr.fit_pending = true;
+                        if (pr.y_log != was) fit = true;
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("Y axis in log10 h: steps spread over orders of magnitude\n"
                                               "(stiff parts, rejections near h_min) become readable.");
                         ImGui::SameLine();
                     });
-                    draw_proj_line_style(pr, "stepsize",
+                    draw_proj_line_style(pr, *projection_views(pr).view2d, "stepsize",
                         "Draw the accepted steps as markers instead of a line.");
                     projection_views(pr).view2d->x_axis.name = "t";
                     projection_views(pr).view2d->y_axis.name = pr.y_log ? "log10 h" : "h";
@@ -959,7 +964,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     ImVec2 origin = ImGui::GetCursorScreenPos();
                     projection_views(pr).view2d->popup_extras = phase_popup_extras;
                     projection_views(pr).view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, pr.fit_pending);
+                        series_in, init_vis, glob_vis, fit);
                 }
             }
             // Отказы адаптивного шага: у каждого принятого шага — сколько попыток ему
@@ -973,7 +978,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                 }
                 else {
                     if (!projection_views(pr).view2d) projection_views(pr).view2d = std::make_unique<Plot2DView>();
-                    draw_proj_line_style(pr, "rejections",
+                    draw_proj_line_style(pr, *projection_views(pr).view2d, "rejections",
                         "Draw the moving mean as markers instead of a line.");
                     projection_views(pr).view2d->x_axis.name = "t";
                     projection_views(pr).view2d->y_axis.name = "rejected per step";
@@ -1035,7 +1040,7 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                     ImVec2 origin = ImGui::GetCursorScreenPos();
                     projection_views(pr).view2d->popup_extras = phase_popup_extras;
                     projection_views(pr).view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
-                        series_in, init_vis, glob_vis, pr.fit_pending);
+                        series_in, init_vis, glob_vis, fit);
                 }
             }
             ImGui::PopID();
@@ -1045,9 +1050,13 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
             // Ветка "No data" тоже гасит: фитить нечего, а приход результата
             // взведёт fit_request заново.
             pr.fit_pending = false;
+            projection_views(pr).fitted_generation = s.data_generation;
         }
         ImGui::End();
-        if (!open) pr_to_remove = i; // окно закрыто крестиком
+        if (!open) {
+            if (on_close_copy) on_close_copy(i, title);
+            else pr_to_remove = i;
+        }
     }
     if (pr_to_remove >= 0) s.remove_projection(pr_to_remove);
 }

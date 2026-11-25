@@ -23,6 +23,12 @@ using namespace ucuda::ui_detail;
 namespace {
 int g_prev_frame_mode = -1;
 
+ImGuiID tree_workspace_dock(const std::string& system, int tab) {
+    const std::string name = "MainDockspace_" + std::to_string((int)AppModel::AppMode::Tree)
+        + (tab == 1 ? "" : "_tab_" + std::to_string(tab)) + "_sys_" + system;
+    return ImGui::GetID(name.c_str());
+}
+
 const char* controls_window_for(AppModel::AppMode m) {
     switch (m) {
     case AppModel::AppMode::Analysis:   return "Controls";
@@ -140,7 +146,9 @@ bool layout_factory_for(AppModel& model, DockWindowFactory& f) {
         return true;
     case AppModel::AppMode::Tree:
         f.available_windows = [&model]() { return tree_layout_windows(model); };
-        f.apply_unmatched = [&model](const std::vector<std::string>& windows) {
+        f.describe = [&model](const std::string& title) { return describe_tree_layout_window(model, title); };
+        f.resolve = [&model](const std::string& descriptor) { return resolve_tree_layout_window(model, descriptor); };
+        f.apply_matched = [&model](const std::vector<std::string>& windows) {
             apply_tree_layout_windows(model, windows);
         };
         return true;
@@ -152,16 +160,22 @@ bool layout_factory_for(AppModel& model, DockWindowFactory& f) {
 // Окна вкладки — те, что рисовались в прошлом кадре (окна других вкладок не рисуются).
 // Порядок — порядок Begin в кадре, т.е. как их перечисляет код вкладки.
 void process_layout(AppModel& model, int mode, ImGuiID dock_id, ImVec2 size, const char* controls) {
+    if (!dock_layout_has_request(mode, dock_id)) return;
     ImGuiContext& g = *GImGui;
     const int last_frame = ImGui::GetFrameCount() - 1;
     std::vector<ImGuiWindow*> wins;
-    const char* side = nullptr;
+    const bool tree = model.app_mode == AppModel::AppMode::Tree;
+    std::unordered_set<ImGuiID> tree_windows;
+    if (tree)
+        for (const auto& name : tree_layout_windows(model)) tree_windows.insert(ImHashStr(name.c_str()));
+    const char* side = tree ? controls : nullptr;
     for (ImGuiWindow* w : g.Windows) {
         if (w->RootWindow != w || w->LastFrameActive < last_frame) continue;
         if (w->Flags & (ImGuiWindowFlags_Popup | ImGuiWindowFlags_Tooltip | ImGuiWindowFlags_ChildMenu |
                         ImGuiWindowFlags_DockNodeHost | ImGuiWindowFlags_NoDocking)) continue;
         if (std::strncmp(w->Name, "Debug##", 7) == 0) continue;
         if (controls && std::strcmp(w->Name, controls) == 0) { side = controls; continue; }
+        if (tree && !tree_windows.count(w->ID)) continue;
         wins.push_back(w);
     }
     std::sort(wins.begin(), wins.end(), [](const ImGuiWindow* a, const ImGuiWindow* b) {
@@ -738,19 +752,27 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         // области (панель Controls там своя, вне dockspace).
         {
             ImGui::SameLine();
+            const bool tree = model.app_mode == AppModel::AppMode::Tree;
+            const ImGuiID target = tree
+                ? tree_workspace_dock(model.loaded_name, model.tree_session.tree.active_tab().id) : 0;
             if (ImGui::Button("Layout")) ImGui::OpenPopup("##layout_presets");
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(model.app_mode == AppModel::AppMode::Custom
-                    ? "Arrange the plots of the active workspace tab: tabs, columns, rows,\n"
+                ImGui::SetTooltip((tree || model.app_mode == AppModel::AppMode::Custom)
+                    ? "Arrange the windows of the active workspace tab: tabs, columns, rows,\n"
                       "grid, or a layout you saved."
                     : "Arrange the windows of this tab: controls on the right, plots as tabs,\n"
                       "columns, rows, grid, or a layout you saved.");
             if (ImGui::BeginPopup("##layout_presets")) {
-                dock_layout_menu((int)model.app_mode);
-                if (model.app_mode == AppModel::AppMode::Tree && tree_has_hidden_windows(model.loaded_name)) {
+                dock_layout_menu((int)model.app_mode, target);
+                if (tree) {
+                    auto& tab = model.tree_session.tree.active_tab();
                     ImGui::Separator();
-                    if (ImGui::MenuItem("Show hidden views of enabled nodes"))
-                        tree_hide_layout_windows(model.loaded_name, {});
+                    if (ImGui::MenuItem("Show all enabled plots", nullptr, false,
+                                        !tab.show_enabled_windows || !tab.hidden_windows.empty())) {
+                        tab.show_enabled_windows = true;
+                        tab.hidden_windows.clear();
+                        model.tree_session.dirty = true;
+                    }
                 }
                 ImGui::EndPopup();
             }
@@ -947,12 +969,21 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
     ImGui::Separator();
 
     const bool tree_mode = model.app_mode == AppModel::AppMode::Tree;
-    const std::string tree_controls = tree_mode ? tree_controls_title(model.loaded_name) : std::string{};
-    const std::string tree_dock_name = "MainDockspace_" + std::to_string((int)AppModel::AppMode::Tree);
-    const ImGuiID tree_dock = tree_mode ? ImGui::GetID((tree_dock_name + "_sys_" + model.loaded_name).c_str()) : 0;
-    const ImGuiID old_tree_dock = ImGui::GetID(tree_dock_name.c_str());
     auto& tree_dockspaces = ui_resource<std::unordered_set<ImGuiID>, 7702>();
-    if (tree_mode) tree_dockspaces.insert(tree_dock);
+    if (tree_mode) {
+        draw_tree_workspace_tabs(model.tree_session, model.loaded_name, [&](int tab) {
+            const ImGuiID dock = tree_workspace_dock(model.loaded_name, tab);
+            ImGui::DockBuilderRemoveNode(dock);
+            dock_layout_forget_target(dock);
+            tree_dockspaces.erase(dock);
+        });
+        for (const auto& tab : model.tree_session.tree.tabs)
+            tree_dockspaces.insert(tree_workspace_dock(model.loaded_name, tab.id));
+    }
+    const int tree_tab = model.tree_session.tree.active_tab().id;
+    const std::string tree_controls = tree_mode ? tree_controls_title(model.loaded_name, tree_tab) : std::string{};
+    const ImGuiID tree_dock = tree_mode ? tree_workspace_dock(model.loaded_name, tree_tab) : 0;
+    const ImGuiID old_tree_dock = ImGui::GetID(("MainDockspace_" + std::to_string((int)AppModel::AppMode::Tree)).c_str());
     if (ImGui::DockBuilderGetNode(old_tree_dock)) tree_dockspaces.insert(old_tree_dock);
     for (ImGuiID id : tree_dockspaces) {
         if (id != tree_dock && ImGui::DockBuilderGetNode(id))
@@ -975,11 +1006,12 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
         const std::string ds_name = "MainDockspace_" + std::to_string(mode_i);
         const ImGuiID dockspace_id = tree_mode ? tree_dock : ImGui::GetID(ds_name.c_str());
         const char* controls = tree_mode ? tree_controls.c_str() : controls_window_for(model.app_mode);
-        if (tree_mode && !ImGui::DockBuilderGetNode(dockspace_id))
+        if (tree_mode && tree_tab == 1 && !ImGui::DockBuilderGetNode(dockspace_id))
             migrate_tree_layout(old_tree_dock, dockspace_id, model.loaded_name, tree_controls);
         // Для новой системы Tree начинаем с сетки; у остальных режимов — вкладки.
-        if (!ImGui::DockBuilderGetNode(dockspace_id) && !dock_layout_has_request(mode_i))
-            dock_layout_request(mode_i, tree_mode ? kDockGrid : kDockTabs);
+        const ImGuiID layout_target = tree_mode ? tree_dock : 0;
+        if (!ImGui::DockBuilderGetNode(dockspace_id) && !dock_layout_has_request(mode_i, layout_target))
+            dock_layout_request(mode_i, tree_mode ? kDockGrid : kDockTabs, layout_target);
         // Применяем со второго кадра на вкладке: список окон берётся из прошлого кадра.
         if (g_prev_frame_mode == mode_i && (!tree_mode || g_tree_dockspace_id == dockspace_id))
             process_layout(model, mode_i, dockspace_id, ImGui::GetContentRegionAvail(), controls);
@@ -996,7 +1028,7 @@ void draw_gui(AppModel& model, SystemLibrary& lib, const GuiCallbacks& cb) {
 
     // Окна диаграмм, нарисованные дальше, запоминают вкладку: Ctrl+Shift+клик в меню «Show»
     // применяет галку ко всем окнам этой вкладки (plot_show_menu).
-    plot_set_window_scope((int)model.app_mode);
+    plot_set_window_scope(tree_mode ? static_cast<int>(tree_dock) : (int)model.app_mode);
     // Custom: 1D-сечения (Bif / LLE) считаются из той же точки, что и фазовый «IC 1», —
     // разнос цвета (Ctrl+Shift или «Apply to all plots») красит их вместе.
     static const bool custom_links = [] {

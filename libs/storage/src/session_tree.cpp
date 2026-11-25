@@ -1,5 +1,6 @@
 ﻿#include "session_json_internal.h"
 #include <algorithm>
+#include <limits>
 
 using namespace ucuda::storage_detail;
 
@@ -85,6 +86,36 @@ std::vector<int> read_int_array(JP& q) {
     return v;
 }
 
+void read_tabs(JP& q, AnalysisTree& tree) {
+    q.expect('[');
+    if (q.opt(']')) return;
+    std::vector<TreeWorkspaceTab> tabs;
+    do {
+        TreeWorkspaceTab tab;
+        q.expect('{');
+        if (!q.opt('}')) {
+            do {
+                const std::string key = q.str();
+                q.expect(':');
+                if (key == "id") tab.id = std::stoi(q.str_or_num());
+                else if (key == "name") tab.name = q.str();
+                else if (key == "show_enabled_windows") tab.show_enabled_windows = q.boolean();
+                else if (key == "shown_windows") read_str_array(q, tab.shown_windows);
+                else if (key == "hidden_windows") read_str_array(q, tab.hidden_windows);
+                else if (key == "layout_windows") read_str_array(q, tab.layout_windows);
+                else if (key == "layout_copies") read_str_array(q, tab.layout_copies);
+                else q.skip_value();
+            } while (q.opt(','));
+            q.expect('}');
+        }
+        if (tab.id > 0 && tab.id < std::numeric_limits<int>::max() && !tab.name.empty() &&
+            std::none_of(tabs.begin(), tabs.end(), [&](const auto& t) { return t.id == tab.id; }))
+            tabs.push_back(std::move(tab));
+    } while (q.opt(','));
+    q.expect(']');
+    if (!tabs.empty()) tree.tabs = std::move(tabs);
+}
+
 } // namespace
 
 std::string tree_state_to_json(const AnalysisTree& t, const std::map<int, std::string>& leaf_json) {
@@ -92,6 +123,25 @@ std::string tree_state_to_json(const AnalysisTree& t, const std::map<int, std::s
     o << "{\n  \"version\":1,\n";
     o << "  \"next_id\":" << t.next_id << ",\n";
     o << "  \"selected_id\":" << t.selected_id << ",\n";
+    o << "  \"active_tab_id\":" << t.active_tab_id << ",\n";
+    o << "  \"next_tab_id\":" << t.next_tab_id << ",\n";
+    o << "  \"tabs\":[";
+    for (size_t i = 0; i < t.tabs.size(); ++i) {
+        const auto& tab = t.tabs[i];
+        o << (i ? ",\n    " : "\n    ") << "{\"id\":" << tab.id << ",\"name\":";
+        jstr(o, tab.name);
+        o << ",\"show_enabled_windows\":" << (tab.show_enabled_windows ? "true" : "false");
+        o << ",\"shown_windows\":"; write_str_array(o, tab.shown_windows);
+        o << ",\"hidden_windows\":"; write_str_array(o, tab.hidden_windows);
+        if (!tab.layout_windows.empty()) {
+            o << ",\"layout_windows\":"; write_str_array(o, tab.layout_windows);
+        }
+        if (!tab.layout_copies.empty()) {
+            o << ",\"layout_copies\":"; write_str_array(o, tab.layout_copies);
+        }
+        o << "}";
+    }
+    o << "\n  ],\n";
     o << "  \"nodes\":[";
     for (size_t i = 0; i < t.nodes.size(); ++i) {
         const TreeNode& n = t.nodes[i];
@@ -100,6 +150,7 @@ std::string tree_state_to_json(const AnalysisTree& t, const std::map<int, std::s
         o << "\"kind\":"; jstr(o, tree_kind_key(n.kind)); o << ",";
         o << "\"name\":"; jstr(o, n.name); o << ",";
         o << "\"enabled\":" << (n.enabled ? "true" : "false") << ",";
+        if (n.needs_review) o << "\"needs_review\":true,";
         o << "\"expanded\":" << (n.expanded ? "true" : "false") << ",";
         o << "\"was_expanded\":" << (n.was_expanded ? "true" : "false") << ",";
         o << "\"follow_cursor\":" << (n.follow_cursor ? "true" : "false") << ",";
@@ -139,6 +190,9 @@ bool tree_state_from_json(const std::string& json, AnalysisTree& out, std::map<i
                 std::string key = p.str(); p.expect(':');
                 if      (key == "next_id")     t.next_id = std::stoi(p.str_or_num());
                 else if (key == "selected_id") t.selected_id = std::stoi(p.str_or_num());
+                else if (key == "active_tab_id") t.active_tab_id = std::stoi(p.str_or_num());
+                else if (key == "next_tab_id") t.next_tab_id = std::stoi(p.str_or_num());
+                else if (key == "tabs") read_tabs(p, t);
                 else if (key == "nodes") {
                     p.expect('[');
                     if (!p.opt(']')) {
@@ -155,6 +209,7 @@ bool tree_state_from_json(const std::string& json, AnalysisTree& out, std::map<i
                                     else if (k == "kind")          kind_ok = tree_kind_from_key(p.str(), n.kind);
                                     else if (k == "name")          n.name = p.str();
                                     else if (k == "enabled")       n.enabled = p.boolean();
+                                    else if (k == "needs_review")  n.needs_review = p.boolean();
                                     else if (k == "expanded")      n.expanded = p.boolean();
                                     else if (k == "was_expanded")  n.was_expanded = p.boolean();
                                     else if (k == "follow_cursor") n.follow_cursor = p.boolean();
@@ -210,6 +265,8 @@ bool tree_state_from_json(const std::string& json, AnalysisTree& out, std::map<i
     }
     if (t.next_id <= max_id) t.next_id = max_id + 1;
     if (!t.find(t.selected_id)) t.selected_id = t.nodes.front().id;
+    t.active_tab_id = t.active_tab().id;
+    for (const auto& tab : t.tabs) t.next_tab_id = std::max(t.next_tab_id, tab.id + 1);
     out = std::move(t);
     leaf_json = std::move(leaves);
     return true;

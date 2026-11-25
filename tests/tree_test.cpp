@@ -264,6 +264,164 @@ void slice_integrator_inherits() {
     require(c.effective_shared(bif1d).l1d_transient_text == "100", "legacy slice keeps its values");
 }
 
+void layout_uses_one_tree_and_separate_workspaces() {
+    TreeSession source, target;
+    source.load_from_record(make_record(), kVars, kParams);
+    target.load_from_record(make_record(), kVars, kParams);
+    const int point = find_kind(source, TreeNodeKind::Point);
+    const int basins = source.add_node(point, TreeNodeKind::Basins);
+    const auto path = source.tree.layout_path(basins);
+    require(path.size() == 3 && path.back().kind == TreeNodeKind::Basins, "layout stores the path to its leaf");
+    const int target_point = find_kind(target, TreeNodeKind::Point);
+    target.tree.find(target_point)->cfg.fix_x_value = 9.0;
+    const size_t initial_nodes = target.tree.nodes.size();
+    const int leaf = target.ensure_layout_leaf(path);
+    require(leaf > 0 && target.tree.nodes.size() == initial_nodes + 1, "layout creates only the missing leaf");
+    require(target.tree.find(leaf)->parent == target_point &&
+            target.tree.find(target_point)->cfg.fix_x_value == 9.0, "layout reuses the existing context and settings");
+    require(target.leaves.at(leaf).basins != nullptr && target.tree.needs_review(leaf), "new calculation has defaults and a review flag");
+    require(target.ensure_layout_leaf(path) == leaf && target.tree.nodes.size() == initial_nodes + 1,
+            "applying the same layout reuses the calculation");
+
+    auto missing_branch = path;
+    missing_branch.front().name = "Layout region";
+    const int other = target.ensure_layout_leaf(missing_branch);
+    require(other && other != leaf && target.tree.nodes.size() == initial_nodes + 4,
+            "layout creates missing ancestors for a distinct branch");
+    const int other_point = target.tree.find(other)->parent;
+    target.tree.find(other)->needs_review = false;
+    require(target.tree.needs_review(other) && target.tree.find(other_point)->needs_review,
+            "unreviewed context still blocks the leaf");
+    auto invalid = path;
+    invalid[0].name = "Do not create";
+    invalid[1].kind = TreeNodeKind::System;
+    require(!target.ensure_layout_leaf(invalid) && target.tree.nodes.size() == initial_nodes + 4,
+            "invalid layout path leaves the tree untouched");
+
+    const auto key = std::to_string(leaf) + "w0";
+    auto& tree = target.tree;
+    tree.tabs.push_back({2, "Basins", false, {}, {}});
+    tree.next_tab_id = 3;
+    tree.active_tab_id = 2;
+    require(tree.tabs.front().shows(key, true) && !tree.active_tab().shows(key, true),
+            "legacy workspace shows enabled windows and new workspace starts empty");
+    tree.active_tab().set_visible(key, true);
+    tree.tabs.front().set_visible(key, false);
+    require(!tree.tabs.front().shows(key, true) && tree.active_tab().shows(key, true),
+            "closing one window copy leaves the other visible");
+    require(tree.find(leaf)->enabled && target.leaves.at(leaf).basins != nullptr, "visibility leaves analysis alone");
+    const auto dirty = target.dirty_leaves(tree.nodes.front().id);
+    require(std::find(dirty.begin(), dirty.end(), leaf) == dirty.end(), "Run skips calculations awaiting review");
+
+    const auto json = session_to_json_tree(target);
+    TreeSession restored;
+    restored.load_from_record(make_record(), kVars, kParams);
+    require(session_from_json_tree(json, restored) && session_to_json_tree(restored) == json,
+            "workspace order, selected tab, windows and review flags round-trip");
+    require(restored.tree.active_tab().id == 2 && restored.tree.active_tab().shows(key, false) &&
+            !restored.tree.tabs.front().shows(key, true) && restored.tree.needs_review(leaf),
+            "workspace copies and review state survive reload");
+    restored.tree.find(leaf)->needs_review = false;
+    const auto ready = restored.dirty_leaves(restored.tree.nodes.front().id);
+    require(std::find(ready.begin(), ready.end(), leaf) != ready.end(), "confirmed leaf can be queued");
+
+    const std::string legacy = R"({"version":1,"next_id":2,"selected_id":1,"nodes":[
+        {"id":1,"parent":0,"kind":"system","name":"System","children":[]}]})";
+    require(session_from_json_tree(legacy, restored) && restored.tree.tabs.size() == 1 &&
+            restored.tree.active_tab().id == 1 && restored.tree.active_tab().shows(key, true) &&
+            !restored.tree.needs_review(1), "old sessions open on their original enabled-window workspace");
+}
+
+void closed_tree_windows_can_be_restored_and_extra_views_removed() {
+    TreeSession ts;
+    ts.load_from_record(make_record(), kVars, kParams);
+    const int leaf = find_kind(ts, TreeNodeKind::LS2D);
+    auto& tree = ts.tree;
+    tree.tabs.push_back({2, "Copy", false, {}, {}});
+    tree.tabs.back().set_visible(tree_leaf_window_key(leaf), true);
+
+    tree.active_tab().set_visible(tree_leaf_window_key(leaf), false);
+    require(!ts.leaf_window_visible(leaf) && tree.is_active(leaf), "closing a window leaves the calculation enabled");
+    require(tree.tabs.back().shows(tree_leaf_window_key(leaf), true), "closing one copy leaves the other visible");
+    require(ts.open_or_add_leaf_window(leaf) == 0 && ts.leaf_window_visible(leaf) &&
+            tree.find(leaf)->extra_views.empty(), "New window restores the main view before adding a duplicate");
+    require(ts.open_or_add_leaf_window(leaf) == 1 && ts.leaf_window_visible(leaf, 1) &&
+            tree.find(leaf)->expanded, "adding a second view exposes its row in the tree");
+    require(ts.open_or_add_leaf_window(leaf) == 2, "another extra view is added");
+    tree.active_tab().set_visible(tree_leaf_window_key(leaf), false);
+    require(!ts.workspace_window_visible(leaf, tree_leaf_window_key(leaf)) &&
+            ts.workspace_window_visible(leaf, tree_leaf_window_key(leaf, 1)) &&
+            tree.is_active(leaf), "turning the main window off leaves the extra window visible");
+    ts.toggle_enabled(leaf);
+    require(!ts.workspace_window_visible(leaf, tree_leaf_window_key(leaf, 1)),
+            "disabling the calculation hides its windows");
+    ts.toggle_enabled(leaf);
+    require(ts.workspace_window_visible(leaf, tree_leaf_window_key(leaf, 1)) &&
+            !ts.workspace_window_visible(leaf, tree_leaf_window_key(leaf)),
+            "reenabling the calculation restores each window's on/off choice");
+
+    tree.active_tab().set_visible(tree_leaf_window_key(leaf, 1), false);
+    require(!ts.leaf_window_visible(leaf, 1) && ts.show_leaf_window(leaf, 1) &&
+            ts.leaf_window_visible(leaf, 1), "the tree can restore a closed extra view");
+    tree.find(leaf)->extra_views = {0, 2};
+    tree.active_tab().set_visible(tree_leaf_window_key(leaf, 2), false);
+    tree.tabs.back().set_visible(tree_leaf_window_key(leaf, 2), true);
+    require(ts.remove_extra_view(leaf, 1) && tree.find(leaf)->extra_views == std::vector<int>{2},
+            "the tree deletes a view row and preserves the remaining view settings");
+    require(!ts.leaf_window_visible(leaf, 1) && tree.tabs.back().shows(tree_leaf_window_key(leaf, 1), true) &&
+            !tree.tabs.back().shows(tree_leaf_window_key(leaf, 2), true),
+            "removing a view preserves each tab's visibility for the remaining view");
+    require(!ts.remove_extra_view(leaf, 0) && !ts.remove_extra_view(leaf, 2) && tree.is_active(leaf),
+            "removing an invalid view leaves the main calculation intact");
+}
+
+void layout_copies_and_sweep_titles() {
+    TreeSession ts;
+    ts.load_from_record(make_record(), kVars, kParams);
+    auto& tree = ts.tree;
+    const int plane = find_kind(ts, TreeNodeKind::Bif2D);
+    const int x = find_kind(ts, TreeNodeKind::Bif1D, 0);
+    const int y = find_kind(ts, TreeNodeKind::Bif1D, 1);
+    require(ts.sweep_window_label(plane) == "X: a, Y: b" &&
+            ts.sweep_window_label(x) == "a (X)" && ts.sweep_window_label(y) == "b (Y)",
+            "titles distinguish 2D sweep and both 1D slices");
+    auto& region = *tree.find(find_kind(ts, TreeNodeKind::Region2D));
+    region.cfg.axis_x_over_var = true;
+    region.cfg.axis_x_var_index = 2;
+    region.cfg.axis_y_over_h = true;
+    require(ts.sweep_window_label(plane) == "X: z (IC), Y: h" &&
+            ts.sweep_window_label(x) == "z (IC) (X)" && ts.sweep_window_label(y) == "h (Y)",
+            "titles follow edits to initial-condition and step axes");
+
+    const auto key = tree_leaf_window_key(plane);
+    const auto nodes = tree.nodes.size();
+    require(tree.register_layout_window(key) && !tree.active_tab().is_copy(key),
+            "a first layout window is the original");
+    tree.active_tab().set_visible(key, false);
+    tree.tabs.push_back({2, "Copy", false, {}, {}});
+    tree.active_tab_id = 2;
+    tree.next_tab_id = 3;
+    require(tree.register_layout_window(key) && tree.active_tab().is_copy(key) &&
+            !tree.register_layout_window(key) && tree.nodes.size() == nodes,
+            "the second tab gets one reusable copy of the same calculation even if its original is off");
+    tree.active_tab().set_visible(key, true);
+    const auto both_tabs = std::vector<std::size_t>{0, 1};
+    require(tree.window_tabs(key, true) == both_tabs, "the shared tree lists the closed original and its open copy");
+    tree.active_tab_id = 1;
+    require(tree.window_tabs(key, true) == both_tabs, "switching tabs keeps both window rows in the shared tree");
+    tree.active_tab_id = 2;
+    const auto json = session_to_json_tree(ts);
+    TreeSession restored;
+    restored.load_from_record(make_record(), kVars, kParams);
+    require(session_from_json_tree(json, restored) && session_to_json_tree(restored) == json &&
+            restored.tree.active_tab().is_copy(key), "layout copies round-trip");
+    require(restored.tree.active_tab().remove_copy(key) &&
+            !restored.tree.active_tab().shows(key, true) &&
+            restored.tree.window_tabs(key, true) == std::vector<std::size_t>{0} &&
+            restored.tree.tabs.front().layout_windows == std::vector<std::string>{key},
+            "deleting the copy preserves the original layout window");
+}
+
 } // namespace
 
 int main() {
@@ -273,6 +431,9 @@ int main() {
         structure_and_queue();
         json_round_trip();
         slice_integrator_inherits();
+        layout_uses_one_tree_and_separate_workspaces();
+        closed_tree_windows_can_be_restored_and_extra_views_removed();
+        layout_copies_and_sweep_titles();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FAIL: %s\n", e.what());
         return 1;

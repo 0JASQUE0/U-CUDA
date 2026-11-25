@@ -367,6 +367,144 @@ int TreeSession::add_node(int parent, TreeNodeKind kind, int slice_dir) {
     return id;
 }
 
+int TreeSession::ensure_layout_leaf(const std::vector<TreeLayoutNode>& path) {
+    if (tree.nodes.empty() || path.empty() || tree_kind_is_context(path.back().kind)) return 0;
+    TreeNodeKind parent_kind = TreeNodeKind::System;
+    for (const auto& part : path) {
+        const auto allowed = tree_addable_children(parent_kind);
+        if (std::find(allowed.begin(), allowed.end(), part.kind) == allowed.end() ||
+            part.slice_dir < 0 || part.slice_dir > 1 || part.occurrence < 0 ||
+            part.occurrence >= 64 || part.name.empty()) return 0;
+        parent_kind = part.kind;
+    }
+
+    int parent = tree.nodes.front().id;
+    for (const auto& part : path) {
+        int matches = 0;
+        int id = 0;
+        for (int child : tree.find(parent)->children) {
+            const auto* n = tree.find(child);
+            if (n && n->kind == part.kind && n->name == part.name &&
+                n->slice_dir == part.slice_dir && matches++ == part.occurrence) {
+                id = child;
+                break;
+            }
+        }
+        if (!id) {
+            for (; matches <= part.occurrence; ++matches) {
+                id = add_node(parent, part.kind, part.slice_dir);
+                auto& n = *tree.find(id);
+                n.name = part.name;
+                n.needs_review = true;
+            }
+        }
+        parent = id;
+    }
+    return parent;
+}
+
+std::string TreeSession::sweep_axis_label(const EffectiveSweep& axis) const {
+    if (axis.over_h) return "h";
+    if (axis.over_var) {
+        if (axis.var_index >= 0 && axis.var_index < static_cast<int>(vars.size()))
+            return vars[axis.var_index] + " (IC)";
+        return "x (IC)";
+    }
+    if (axis.par_index >= 0 && axis.par_index < static_cast<int>(params.size()))
+        return params[axis.par_index];
+    return "param";
+}
+
+std::string TreeSession::sweep_window_label(int id) const {
+    const auto* node = tree.find(id);
+    if (!node) return {};
+    if (tree_kind_is_2d_leaf(node->kind)) {
+        const auto shared = effective_shared(id);
+        return "X: " + sweep_axis_label(effective_sweep_x(shared)) +
+               ", Y: " + sweep_axis_label(effective_sweep_y(shared));
+    }
+    if (tree_kind_is_1d_leaf(node->kind)) {
+        const auto shared = effective_shared(id);
+        const auto* slice = tree.find(tree.nearest(id, TreeNodeKind::Slice1D));
+        const bool y = slice && slice->slice_dir == 1;
+        return sweep_axis_label(y ? effective_sweep_y(shared) : effective_sweep_x(shared)) +
+               (y ? " (Y)" : " (X)");
+    }
+    return {};
+}
+
+bool TreeSession::workspace_window_visible(int id, const std::string& key, bool available) const {
+    return tree.is_active(id) && tree.active_tab().shows(key, available);
+}
+
+bool TreeSession::leaf_window_visible(int id, int view) const {
+    const auto* node = tree.find(id);
+    if (!node || tree_kind_is_context(node->kind) || view < 0 ||
+        view > static_cast<int>(node->extra_views.size())) return false;
+    const char type = node->kind == TreeNodeKind::Phase ? 'p' : 'w';
+    return tree.active_tab().shows(tree_leaf_window_key(id, view, type), tree.is_active(id));
+}
+
+bool TreeSession::show_leaf_window(int id, int view) {
+    const auto* node = tree.find(id);
+    if (!node || tree_kind_is_context(node->kind) || view < 0 ||
+        view > static_cast<int>(node->extra_views.size())) return false;
+    const char type = node->kind == TreeNodeKind::Phase ? 'p' : 'w';
+    const auto key = tree_leaf_window_key(id, view, type);
+    auto& tab = tree.active_tab();
+    dirty |= tab.owns_window(key, true) ? tab.remember_window(key) : tree.register_layout_window(key);
+    if (!leaf_window_visible(id, view)) dirty |= tab.set_visible(key, true);
+    return true;
+}
+
+int TreeSession::open_or_add_leaf_window(int id) {
+    auto* node = tree.find(id);
+    if (!node || (!tree_kind_is_1d_leaf(node->kind) && !tree_kind_is_2d_leaf(node->kind))) return -1;
+    if (!leaf_window_visible(id)) {
+        show_leaf_window(id);
+        return 0;
+    }
+    if (node->extra_views.size() >= kTreeMaxExtraViews) return -1;
+
+    int exponent = 0;
+    const auto it = leaves.find(id);
+    if (it != leaves.end() && it->second.ls && !it->second.ls->curves.empty())
+        exponent = it->second.ls->curves[0].display_exponent_idx;
+    node->extra_views.push_back(exponent);
+    node->expanded = true;
+    const int view = static_cast<int>(node->extra_views.size());
+    const auto key = tree_leaf_window_key(id, view);
+    for (auto& tab : tree.tabs)
+        if (tab.id != tree.active_tab_id && tab.show_enabled_windows) tab.set_visible(key, false);
+    dirty = true;
+    show_leaf_window(id, view);
+    return view;
+}
+
+bool TreeSession::remove_extra_view(int id, int view) {
+    auto* node = tree.find(id);
+    if (!node || view < 1 || view > static_cast<int>(node->extra_views.size())) return false;
+
+    const int old_count = static_cast<int>(node->extra_views.size());
+    const auto deleted_key = tree_leaf_window_key(id, view);
+    const auto shift_keys = [&](std::vector<std::string>& keys) {
+        keys.erase(std::remove(keys.begin(), keys.end(), deleted_key), keys.end());
+        for (int index = view + 1; index <= old_count; ++index) {
+            const auto old_key = tree_leaf_window_key(id, index);
+            std::replace(keys.begin(), keys.end(), old_key, tree_leaf_window_key(id, index - 1));
+        }
+    };
+    for (auto& tab : tree.tabs) {
+        shift_keys(tab.shown_windows);
+        shift_keys(tab.hidden_windows);
+        shift_keys(tab.layout_windows);
+        shift_keys(tab.layout_copies);
+    }
+    node->extra_views.erase(node->extra_views.begin() + (view - 1));
+    dirty = true;
+    return true;
+}
+
 int TreeSession::duplicate_node(int id) {
     const TreeNode* src = tree.find(id);
     if (!src || src->parent == 0) return 0;
@@ -659,7 +797,7 @@ std::vector<int> TreeSession::dirty_leaves(int subtree_root) const {
         const TreeNode* n = tree.find(id);
         if (!n || tree_kind_is_context(n->kind)) continue;
         if (!tree.is_active(id)) continue;
-        if (leaf_dirty(id)) out.push_back(id);
+        if (!tree.needs_review(id) && leaf_dirty(id)) out.push_back(id);
     }
     return out;
 }
@@ -674,7 +812,7 @@ std::vector<int> TreeSession::cursor_leaves(int region_id) const {
     for (int id : tree.subtree(region_id)) {
         const TreeNode* n = tree.find(id);
         if (!n || tree_kind_is_context(n->kind) || tree_kind_is_2d_leaf(n->kind)) continue;
-        if (cursor_owner(id) != region_id || !tree.is_active(id)) continue;
+        if (cursor_owner(id) != region_id || !tree.is_active(id) || tree.needs_review(id)) continue;
         // Все контексты между листом и регионом обязаны следовать за курсором и быть живыми.
         bool follows = true;
         for (const TreeNode* c = tree.find(n->parent); c && c->id != region_id;
@@ -691,7 +829,7 @@ std::vector<int> TreeSession::cursor_leaves(int region_id) const {
 bool TreeSession::start_leaf(int leaf_id, ParametricEngine& engine) {
     const TreeNode* leaf = tree.find(leaf_id);
     auto it = leaves.find(leaf_id);
-    if (!leaf || it == leaves.end()) return false;
+    if (!leaf || it == leaves.end() || tree.needs_review(leaf_id)) return false;
     auto& rt = it->second;
     if (rt.in_flight()) return false;
     const CustomTabSharedConfig s = effective_shared(leaf_id);

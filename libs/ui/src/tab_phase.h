@@ -21,7 +21,7 @@ void draw_phase_controls(PhaseAnalysisSession& s,
 
 
 using ProjHookFn = std::function<void(int proj_index, const std::string& title)>;
-using ProjVisibilityFn = std::function<bool(const std::string& title)>;
+using ProjVisibilityFn = std::function<bool(int proj_index, const std::string& title)>;
 std::string projection_window_title(const PhaseAnalysisSession& s, int index, const std::string& suffix);
 
 
@@ -51,5 +51,6 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                                     int owner_id_delta = 0,
                                     const PhaseStyleFn& style_fn = {},
                                     const FeatureClusterParams& clust = {},
-                                    const ProjVisibilityFn& visible = {});
+                                    const ProjVisibilityFn& visible = {},
+                                    const ProjHookFn& on_close_copy = {});
 }

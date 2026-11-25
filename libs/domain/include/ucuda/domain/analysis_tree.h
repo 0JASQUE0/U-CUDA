@@ -54,6 +54,7 @@ struct TreeNode {
     // Slice1D: свой 1D-интегратор (cfg.l1d_*) вместо h/transient/time System; файл без
     // ключа (старая сессия) грузится с true.
     bool         own_integration = false;
+    bool         needs_review = false;
     // Лист: дополнительные окна того же результата (без пересчёта); значение — показатель
     // для LS 2D (-1 — сумма), у остальных не используется.
     std::vector<int> extra_views;
@@ -68,11 +69,47 @@ struct TreeNode {
     std::vector<int> children;
 };
 
+struct TreeWorkspaceTab {
+    int id = 1;
+    std::string name = "Tab 1";
+    bool show_enabled_windows = true;
+    std::vector<std::string> shown_windows;
+    std::vector<std::string> hidden_windows;
+    std::vector<std::string> layout_windows;
+    std::vector<std::string> layout_copies;
+
+    [[nodiscard]] bool shows(const std::string& key, bool enabled) const;
+    [[nodiscard]] bool owns_window(const std::string& key, bool available) const;
+    [[nodiscard]] bool is_copy(const std::string& key) const;
+    bool remember_window(const std::string& key);
+    bool set_visible(const std::string& key, bool visible);
+    bool remove_copy(const std::string& key);
+};
+
+constexpr int kTreeMaxExtraViews = 15;
+[[nodiscard]] std::string tree_leaf_window_key(int leaf, int view = 0, char type = 'w');
+
+struct TreeLayoutNode {
+    TreeNodeKind kind;
+    std::string name;
+    int slice_dir = 0;
+    int occurrence = 0;
+};
+
 struct AnalysisTree {
     std::vector<TreeNode> nodes;      // корень — nodes[0], id = 1
     int next_id     = 1;
     int selected_id = 0;
+    std::vector<TreeWorkspaceTab> tabs{{}};
+    int active_tab_id = 1;
+    int next_tab_id = 2;
 
+    [[nodiscard]] TreeWorkspaceTab& active_tab();
+    [[nodiscard]] const TreeWorkspaceTab& active_tab() const;
+    bool register_layout_window(const std::string& key);
+    [[nodiscard]] std::vector<std::size_t> window_tabs(const std::string& key, bool available) const;
+    [[nodiscard]] std::vector<TreeLayoutNode> layout_path(int id) const;
+    [[nodiscard]] bool needs_review(int id) const;
     [[nodiscard]] TreeNode*       find(int id);
     [[nodiscard]] const TreeNode* find(int id) const;
     [[nodiscard]] int  level(int id) const;            // глубина: корень 0
