@@ -27,6 +27,37 @@ namespace ui_test {
 
 void register_sweep_tests(ImGuiTestEngine* engine);   // ui_tests_sweep.cpp
 
+// Пункт по метке в открытых попапах (меню и его подменю), сверху стека вниз; 0 — нет такого.
+static ImGuiID popup_item(ImGuiTestContext* ctx, const char* label) {
+    ImGuiContext& g = *ImGui::GetCurrentContext();
+    for (int i = g.OpenPopupStack.Size - 1; i >= 0; --i) {
+        ImGuiWindow* w = g.OpenPopupStack[i].Window;
+        if (!w) continue;
+        ImGuiTestItemList items;
+        ctx->GatherItems(&items, ImGuiTestRef(w->ID), 1);
+        for (int k = 0; k < items.GetSize(); ++k)
+            if (std::strcmp(items.GetByIndex(k)->DebugLabel, label) == 0) return items.GetByIndex(k)->ID;
+    }
+    return 0;
+}
+
+// Меню вида открыто: Show -> Ctrl+Shift+клик по пункту label, меню закрыть.
+static void show_menu_ctrl_shift_click(ImGuiTestContext* ctx, const char* label) {
+    const ImGuiID show = popup_item(ctx, "Show");
+    IM_CHECK_NO_RET(show != 0);
+    if (!show) { ctx->PopupCloseAll(); return; }
+    ctx->ItemClick(show);
+    ctx->Yield(2);
+    const ImGuiID item = popup_item(ctx, label);
+    IM_CHECK_NO_RET(item != 0);
+    if (!item) { ctx->PopupCloseAll(); return; }
+    ctx->KeyDown(ImGuiMod_Ctrl | ImGuiMod_Shift);
+    ctx->ItemClick(item);
+    ctx->KeyUp(ImGuiMod_Ctrl | ImGuiMod_Shift);
+    ctx->PopupCloseAll();
+    ctx->Yield(3);
+}
+
 void register_tests(ImGuiTestEngine* engine) {
     ImGuiTest* t = nullptr;
 
@@ -526,6 +557,118 @@ void register_tests(ImGuiTestEngine* engine) {
         ctx->LogInfo("[throttle] checked %d tabs", checked);
         IM_CHECK_GT(checked, 3);
         m->hidden_tabs = hidden_before;
+    };
+
+    // Plot menu -> Show: Ctrl+Shift+click sets the item in every plot window of the tab. Broke on
+    // Tree: its scope was the dock id cast to int, negative for about half the ids, and a negative
+    // scope means "not drawn yet" (PlotWindowPrefs::scope). Checks Phase and Tree (after a Run).
+    // Needs a loaded system with plots on both tabs (Chen: prep script recomputes Phase).
+    t = IM_REGISTER_TEST(engine, "plot", "show_menu_ctrl_shift");
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        AppModel* m = app_model();
+        IM_CHECK_NO_RET(m != nullptr);
+        if (!m) return;
+        struct PlotArea { ImGuiID id; std::string window; };
+        // Области диаграмм (2D, карты, 3D) всех видимых окон; окно — корневое (ключ вида окна).
+        auto plot_areas = [&]() {
+            std::vector<PlotArea> out;
+            ImGuiContext& g = *ImGui::GetCurrentContext();
+            for (ImGuiWindow* w : g.Windows) {
+                if (!w->WasActive || w->Hidden || (w->Flags & ImGuiWindowFlags_ChildWindow)) continue;
+                ImGuiTestItemList items;
+                ctx->GatherItems(&items, ImGuiTestRef(w->ID), -1);
+                for (int i = 0; i < items.GetSize(); ++i) {
+                    const ImGuiTestItemInfo* it = items.GetByIndex(i);
+                    const char* lb = it->DebugLabel;
+                    if (std::strncmp(lb, "##plot_", 7) && std::strncmp(lb, "##hm_plot_", 10) && std::strncmp(lb, "##plot3d_", 9))
+                        continue;
+                    if (it->RectClipped.GetWidth() <= 0.0f || !it->Window) continue;
+                    // Вид окна хранится по корневому окну элемента (plot_window_prefs_current).
+                    const ImGuiWindow* root = it->Window->RootWindow ? it->Window->RootWindow : it->Window;
+                    if (std::none_of(out.begin(), out.end(), [&](const PlotArea& a) { return a.window == root->Name; }))
+                        out.push_back({ it->ID, root->Name });
+                }
+            }
+            return out;
+        };
+        auto x_label_on = [](const std::string& win) {
+            return plot_window_prefs_to_string(win).find(";xlabel=1;") != std::string::npos;
+        };
+        auto ctrl_shift_x_label = [&](const PlotArea& a) {
+            ctx->ItemClick(a.id, ImGuiMouseButton_Right);
+            ctx->Yield(2);
+            show_menu_ctrl_shift_click(ctx, "X label");
+        };
+        auto check_tab = [&](const char* tab) {
+            const std::vector<PlotArea> areas = plot_areas();
+            ctx->LogInfo("[show] %s: %d plot windows", tab, (int)areas.size());
+            IM_CHECK_NO_RET(areas.size() >= 2);
+            if (areas.size() < 2) return;
+            for (const PlotArea& a : areas) IM_CHECK(x_label_on(a.window));
+            ctrl_shift_x_label(areas[0]);   // off everywhere
+            for (const PlotArea& a : areas) {
+                if (x_label_on(a.window)) ctx->LogError("[show] %s: '%s' kept X label", tab, a.window.c_str());
+                IM_CHECK(!x_label_on(a.window));
+            }
+            ctrl_shift_x_label(areas[0]);   // back on everywhere
+            for (const PlotArea& a : areas) IM_CHECK(x_label_on(a.window));
+        };
+        ctx->SetRef("//MainHost");
+        ctx->ItemClick("Phase analysis");
+        ctx->Yield(5);
+        check_tab("Phase");
+        ctx->SetRef("//MainHost");
+        ctx->ItemClick("Tree");
+        ctx->Yield(10);
+        for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+            if (std::strncmp(w->Name, "Tree Controls", 13) == 0 && w->WasActive) {
+                ctx->SetRef(ImGuiTestRef(w->ID));
+                ctx->ItemClick("Run");
+                break;
+            }
+        for (int f = 0; f < 5000 && (m->any_gpu_job_in_flight() || !m->tree_queue().empty() || f < 10); ++f) {
+            ctx->Yield();
+            ctx->SleepNoSkip(0.01f, 0.01f);
+        }
+        ctx->Yield(10);
+        check_tab("Tree");
+    };
+
+    // The same with a negative tab scope, whatever system is loaded: Tree tabs use the dock id as the
+    // scope, and about half of the ids are negative as int. Two test windows draw with scope
+    // -123456789; Ctrl+Shift+click in the Show menu of one must reach the other.
+    t = IM_REGISTER_TEST(engine, "plot", "show_menu_negative_scope");
+    t->GuiFunc = [](ImGuiTestContext*) {
+        plot_set_window_scope(-123456789);
+        for (const char* name : { "Scope test A", "Scope test B" }) {
+            ImGui::SetNextWindowSize(ImVec2(240, 120), ImGuiCond_Appearing);
+            ImGui::Begin(name, nullptr, ImGuiWindowFlags_NoSavedSettings);
+            PlotWindowPrefs& p = plot_window_prefs_current();
+            if (ImGui::Button("menu")) ImGui::OpenPopup("##scope_menu");
+            if (ImGui::BeginPopup("##scope_menu")) {
+                plot_show_menu(p, PlotShowAxes2D);
+                ImGui::EndPopup();
+            }
+            ImGui::End();
+        }
+    };
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        auto x_label_on = [](const char* win) {
+            return plot_window_prefs_to_string(win).find(";xlabel=1;") != std::string::npos;
+        };
+        ctx->Yield(3);
+        IM_CHECK(x_label_on("Scope test A") && x_label_on("Scope test B"));
+        ctx->SetRef("Scope test A");
+        ctx->ItemClick("menu");
+        ctx->Yield(2);
+        show_menu_ctrl_shift_click(ctx, "X label");
+        IM_CHECK(!x_label_on("Scope test A"));
+        IM_CHECK(!x_label_on("Scope test B"));
+        ctx->SetRef("Scope test A");
+        ctx->ItemClick("menu");
+        ctx->Yield(2);
+        show_menu_ctrl_shift_click(ctx, "X label");
+        IM_CHECK(x_label_on("Scope test A") && x_label_on("Scope test B"));
     };
 
     // Legend placement: MATLAB location presets (geometry and the room *outside takes from the plot),
