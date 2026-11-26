@@ -1,0 +1,57 @@
+{
+  "name": "HIRES",
+  "note": "Eight-variable HIRES benchmark on [0, 321.8122].",
+  "kind": "ode",
+  "mode": "Plain",
+  "plain_text": "y1' = (-k171)*y1 + (k043*y2 + k832*y3 + k0007) \\\\\ny2' = (-k875)*y2 + (k171*y1) \\\\\ny3' = (-k1003)*y3 + (k043*y4 + k0035*y5) \\\\\ny4' = (-k112)*y4 + (k832*y2 + k171*y3) \\\\\ny5' = (-k1745)*y5 + (k043*y6 + k043*y7) \\\\\ny6' = (-k043 - k280*y8)*y6 + (k069*y4 + k171*y5 + k069*y7) \\\\\ny7' = (-k181)*y7 + (k280*y6*y8) \\\\\ny8' = (-k280*y6)*y8 + (k181*y7)",
+  "vars_text": "y1, y2, y3, y4, y5, y6, y7, y8",
+  "params_text": "k171, k043, k832, k0007, k875, k1003, k112, k0035, k1745, k280, k069, k181",
+  "param_order": "AsInAlphabet",
+  "scheme_euler": false,
+  "scheme_cromer": false,
+  "scheme_midpoint": false,
+  "scheme_rk4": false,
+  "scheme_cd": true,
+  "scheme_gbs246": true,
+  "scheme_dopri78": true,
+  "scheme_dop853": true,
+  "symmetry_s": "0.5",
+  "init_conditions": {
+    "y1": "1",
+    "y2": "0",
+    "y3": "0",
+    "y4": "0",
+    "y5": "0",
+    "y6": "0",
+    "y7": "0",
+    "y8": "0.0057"
+  },
+  "param_values": {
+    "k171": "1.71",
+    "k043": "0.43",
+    "k832": "8.32",
+    "k0007": "0.0007",
+    "k875": "8.75",
+    "k1003": "10.03",
+    "k112": "1.12",
+    "k0035": "0.035",
+    "k1745": "1.745",
+    "k280": "280",
+    "k069": "0.69",
+    "k181": "1.81"
+  },
+  "custom_schemes": [
+    {
+      "name": "E23",
+      "body": "    const numb k171 = a[1];\n    const numb k043 = a[2];\n    const numb k832 = a[3];\n    const numb k0007 = a[4];\n    const numb k875 = a[5];\n    const numb k1003 = a[6];\n    const numb k112 = a[7];\n    const numb k0035 = a[8];\n    const numb k1745 = a[9];\n    const numb k280 = a[10];\n    const numb k069 = a[11];\n    const numb k181 = a[12];\n    const numb beta2 = numb(0.28867513459481287) + numb(1.6725140369678172e-17);\n    const numb beta3 = numb(0.23570226039551584) + numb(2.3915615546644207e-18);\n    const numb third = numb(1) / numb(3);\n    const ucmplx row2[] = {ucmplx(numb(0.5), -beta2), ucmplx(numb(0.5), beta2)};\n    const ucmplx row3[] = {ucmplx(third, -beta3), ucmplx(third, numb(0)), ucmplx(third, beta3)};\n\n    auto cd = [&](ucmplx* z, const ucmplx& fraction) {\n        const ucmplx t = fraction * (h * numb(0.5));\n        ucmplx& y1 = z[0];\n        ucmplx& y2 = z[1];\n        ucmplx& y3 = z[2];\n        ucmplx& y4 = z[3];\n        ucmplx& y5 = z[4];\n        ucmplx& y6 = z[5];\n        ucmplx& y7 = z[6];\n        ucmplx& y8 = z[7];\n        y1 = y1 + t * ((-k171) * y1 + (k043*y2 + k832*y3 + k0007));\n        y2 = y2 + t * ((-k875) * y2 + (k171*y1));\n        y3 = y3 + t * ((-k1003) * y3 + (k043*y4 + k0035*y5));\n        y4 = y4 + t * ((-k112) * y4 + (k832*y2 + k171*y3));\n        y5 = y5 + t * ((-k1745) * y5 + (k043*y6 + k043*y7));\n        y6 = y6 + t * ((-k043 - k280*y8) * y6 + (k069*y4 + k171*y5 + k069*y7));\n        y7 = y7 + t * ((-k181) * y7 + (k280*y6*y8));\n        y8 = y8 + t * ((-k280*y6) * y8 + (k181*y7));\n        y8 = (y8 + t * (k181*y7)) / (numb(1) - t * (-k280*y6));\n        y7 = (y7 + t * (k280*y6*y8)) / (numb(1) - t * (-k181));\n        y6 = (y6 + t * (k069*y4 + k171*y5 + k069*y7)) / (numb(1) - t * (-k043 - k280*y8));\n        y5 = (y5 + t * (k043*y6 + k043*y7)) / (numb(1) - t * (-k1745));\n        y4 = (y4 + t * (k832*y2 + k171*y3)) / (numb(1) - t * (-k112));\n        y3 = (y3 + t * (k043*y4 + k0035*y5)) / (numb(1) - t * (-k1003));\n        y2 = (y2 + t * (k171*y1)) / (numb(1) - t * (-k875));\n        y1 = (y1 + t * (k043*y2 + k832*y3 + k0007)) / (numb(1) - t * (-k171));\n    };\n\n    ucmplx y2[8], y3[8];\n    for (int i = 0; i < 8; ++i) {\n        y2[i] = ucmplx(X[i], numb(0));\n        y3[i] = y2[i];\n    }\n    for (const auto& c : row2) cd(y2, c);\n    for (const auto& c : row3) cd(y3, c);\n    const numb w2 = -numb(1) / numb(5);\n    const numb w3 = numb(6) / numb(5);\n    for (int i = 0; i < 8; ++i) X[i] = w2 * y2[i].re + w3 * y3[i].re;\n",
+      "order": "6",
+      "symmetric": "1",
+      "enabled": "1",
+      "rhs_per_step": "10"
+    }
+  ],
+  "extr_schemes": [
+    "Extr(CD|1,2,3)"
+  ],
+  "scheme_rk6": true
+}

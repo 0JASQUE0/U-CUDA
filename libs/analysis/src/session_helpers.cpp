@@ -301,6 +301,7 @@ std::vector<std::string> enabled_builtins_from_record(const SystemRecord& r) {
     if (r.scheme_semp)     out.emplace_back("SEMP");
     if (r.scheme_simp)     out.emplace_back("SIMP");
     if (r.scheme_rk4)      out.emplace_back("RK4");
+    if (r.scheme_rk6)      out.emplace_back("RK6");
     if (r.scheme_ccd4)     out.emplace_back("Complex CD4");
     if (r.scheme_ccd4_10) out.emplace_back("Complex CD4_{1-0}");
     if (r.scheme_ccd4s3)   out.emplace_back("CCD4 (o4s3)");
@@ -524,6 +525,7 @@ Scheme scheme_from_string(const std::string& s) {
     if (s == "Euler-Cromer")      return Scheme::EulerCromer;
     if (s == "Explicit Midpoint") return Scheme::ExplicitMidpoint;
     if (s == "RK4")               return Scheme::RK4;
+    if (s == "RK6")               return Scheme::RK6;
     if (s == "DOPRI78")           return Scheme::DOPRI78;
     if (s == "DOPRI78 (legacy)")  return Scheme::DOPRI78Legacy;
     if (s == "RK45")              return Scheme::RK45;

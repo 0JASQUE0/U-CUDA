@@ -88,6 +88,7 @@ struct SystemRecord {
     bool scheme_cromer   = false;
     bool scheme_midpoint = false;
     bool scheme_rk4      = false;
+    bool scheme_rk6      = false;
     bool scheme_dopri78  = false;
     bool scheme_dopri78_legacy = false;   // DOPRI78 (legacy) — дроби статьи без уточнения
     bool scheme_rk45     = false;         // RK45 — Dormand-Prince 5(4)

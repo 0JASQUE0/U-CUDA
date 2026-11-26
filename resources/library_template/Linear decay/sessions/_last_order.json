@@ -1,0 +1,101 @@
+{
+  "active_config_index": 0,
+  "configs": [
+    {
+      "label": "E23",
+      "scheme": "E23",
+      "calc_kind": 1,
+      "symmetry_s": "0.5",
+      "axis_x_target": -1,
+      "axis_x_lo_text": "0.005",
+      "axis_x_hi_text": "1",
+      "axis_x_n_text": "18",
+      "axis_x_log": true,
+      "t_max_text": "5",
+      "use_gpu": false,
+      "cpu_precision": 1,
+      "snap_steps": true,
+      "endpoint_only": false,
+      "perf_ref_scheme": "DOPRI78",
+      "perf_ref_substeps_text": "16",
+      "perf_warmup_text": "2",
+      "perf_repeats_text": "10",
+      "initial_conditions": {
+        "y": "1"
+      },
+      "param_values": {}
+    },
+    {
+      "label": "Extr123",
+      "scheme": "Extr(CD|1,2,3)",
+      "calc_kind": 1,
+      "symmetry_s": "0.5",
+      "axis_x_target": -1,
+      "axis_x_lo_text": "0.005",
+      "axis_x_hi_text": "1",
+      "axis_x_n_text": "18",
+      "axis_x_log": true,
+      "t_max_text": "5",
+      "use_gpu": false,
+      "cpu_precision": 1,
+      "snap_steps": true,
+      "endpoint_only": false,
+      "perf_ref_scheme": "DOPRI78",
+      "perf_ref_substeps_text": "16",
+      "perf_warmup_text": "2",
+      "perf_repeats_text": "10",
+      "initial_conditions": {
+        "y": "1"
+      },
+      "param_values": {}
+    },
+    {
+      "label": "GBS 6",
+      "scheme": "GBS 2-4-6",
+      "calc_kind": 1,
+      "symmetry_s": "0.5",
+      "axis_x_target": -1,
+      "axis_x_lo_text": "0.005",
+      "axis_x_hi_text": "1",
+      "axis_x_n_text": "18",
+      "axis_x_log": true,
+      "t_max_text": "5",
+      "use_gpu": false,
+      "cpu_precision": 1,
+      "snap_steps": true,
+      "endpoint_only": false,
+      "perf_ref_scheme": "DOPRI78",
+      "perf_ref_substeps_text": "16",
+      "perf_warmup_text": "2",
+      "perf_repeats_text": "10",
+      "initial_conditions": {
+        "y": "1"
+      },
+      "param_values": {}
+    },
+    {
+      "label": "RK6",
+      "scheme": "RK6",
+      "calc_kind": 1,
+      "symmetry_s": "0.5",
+      "axis_x_target": -1,
+      "axis_x_lo_text": "0.005",
+      "axis_x_hi_text": "1",
+      "axis_x_n_text": "18",
+      "axis_x_log": true,
+      "t_max_text": "5",
+      "use_gpu": false,
+      "cpu_precision": 1,
+      "snap_steps": true,
+      "endpoint_only": false,
+      "perf_ref_scheme": "DOPRI78",
+      "perf_ref_substeps_text": "16",
+      "perf_warmup_text": "2",
+      "perf_repeats_text": "10",
+      "initial_conditions": {
+        "y": "1"
+      },
+      "param_values": {}
+    }
+  ]
+}

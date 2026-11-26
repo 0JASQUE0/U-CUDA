@@ -27,6 +27,7 @@ IntScheme int_scheme_from_string(const std::string& s) {
     if (s == "Euler-Cromer")      return IntScheme::EulerCromer;
     if (s == "Explicit Midpoint") return IntScheme::ExplicitMidpoint;
     if (s == "RK4")               return IntScheme::RK4;
+    if (s == "RK6")               return IntScheme::RK6;
     if (s == "DOPRI78")           return IntScheme::DOPRI78;
     if (s == "DOPRI78 (legacy)")  return IntScheme::DOPRI78Legacy;
     if (s == "RK45")              return IntScheme::RK45;
@@ -102,7 +103,10 @@ struct ErkTable {
 const ErkTable& erk_table(IntScheme sch) {
     static const ErkTable rk45(&kRK45A[0][0], 6, &kRK45B[0][0], 6);
     static const ErkTable dop853(&kDop853A[0][0], 11, kDop853B, 12);
-    return sch == IntScheme::RK45 ? rk45 : dop853;
+    static const ErkTable rk6(&kRK6A[0][0], 6, kRK6B, 7);
+    if (sch == IntScheme::RK45) return rk45;
+    if (sch == IntScheme::RK6) return rk6;
+    return dop853;
 }
 } // namespace
 
@@ -779,6 +783,7 @@ bool computePhasePortraitCPU(
         case IntScheme::DOPRI78:          step_dopri78(ev, X.data(), a, h, n, kbuf.data(), X1.data(), X2.data()); break;
         case IntScheme::DOPRI78Legacy:    step_dopri78(ev, X.data(), a, h, n, kbuf.data(), X1.data(), X2.data(), true); break;
         case IntScheme::RK45:
+        case IntScheme::RK6:
         case IntScheme::DOP853:           step_erk(ev, X.data(), a, h, n, erk_table(scheme), kbuf.data(), X1.data(), X2.data()); break;
         case IntScheme::CD:               step_cd(ev, X.data(), a, h, n, k1.data()); break;
         case IntScheme::CDFast:           step_cd(ev, X.data(), a, h, n, k1.data(), false, true); break;

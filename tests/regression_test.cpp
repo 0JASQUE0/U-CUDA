@@ -33,6 +33,8 @@ void fixed_case(int method, bool gpu) {
     System system; system.vars = {"x", "y"};
     system.rhs = scheme == Scheme::Map ? std::vector<std::string>{"x+0.125", "y-0.25"}
                                       : std::vector<std::string>{"-x", "-2*y"};
+    const bool rk6 = scheme == Scheme::RK6;
+    if (rk6) system.rhs = {"-x*x", "-2*y*y"};
     const auto body = codegen_scheme(system, scheme);
     ASSERT_FALSE(body.empty());
     KrsCpuStep step; ASSERT_NO_THROW(compile(step, body));
@@ -42,6 +44,20 @@ void fixed_case(int method, bool gpu) {
     std::vector<std::vector<double>> cpu;
     ASSERT_TRUE(computePhasePortraitCPU_custom(step.fn(), ic, 2, a.data(), (int)a.size(), h, count, 0, cpu));
     ASSERT_EQ(cpu.size(), count);
+    if (rk6 && !gpu) {
+        SystemEvaluator evaluator(system);
+        const auto interpreted_scheme = int_scheme_from_string("RK6");
+        ASSERT_EQ(interpreted_scheme, IntScheme::RK6);
+        std::vector<std::vector<double>> interpreted;
+        ASSERT_TRUE(computePhasePortraitCPU(evaluator, interpreted_scheme, ic, 2, a.data(),
+                                           (int)a.size(), h, count, 0, interpreted));
+        ASSERT_EQ(interpreted.size(), cpu.size());
+        for (size_t i = 0; i < cpu.size(); ++i) {
+            ASSERT_EQ(interpreted[i].size(), cpu[i].size());
+            for (size_t j = 0; j < cpu[i].size(); ++j)
+                EXPECT_NEAR(interpreted[i][j], cpu[i][j], 1e-12);
+        }
+    }
     std::vector<std::vector<double>> actual = cpu;
     NvrtcEngine engine;
     if (gpu) {
@@ -56,7 +72,8 @@ void fixed_case(int method, bool gpu) {
         ASSERT_EQ(actual[i].size(), 2);
         for (int k = 0; k < 2; ++k) {
             ASSERT_TRUE(std::isfinite(actual[i][k]));
-            const double expected = scheme == Scheme::Map ? 1 + i * (k ? -.25 : .125) : std::exp(-(k + 1) * i * h);
+            const double expected = rk6 ? 1.0 / (1 + (k + 1) * i * h)
+                : scheme == Scheme::Map ? 1 + i * (k ? -.25 : .125) : std::exp(-(k + 1) * i * h);
             ASSERT_NEAR(actual[i][k], expected, scheme == Scheme::Map ? 0 : 2e-4) << "point " << i;
             ASSERT_NEAR(actual[i][k], cpu[i][k], 1e-10);
             values.push_back(actual[i][k]);
@@ -64,9 +81,11 @@ void fixed_case(int method, bool gpu) {
     }
     Json inputs = {{"method", method}, {"rhs", system.rhs}, {"initial", {1, 1}}, {"parameters", a}, {"h", h}, {"count", count}};
     const bool new_cd = scheme == Scheme::CDFast || scheme == Scheme::CDFP || scheme == Scheme::CDFastFP;
-    if (new_cd) {
+    if (new_cd || rk6) {
         std::vector<double> errors;
-        for (int n : {10, 20, 40}) {
+        const std::vector<int> step_counts = rk6 ? std::vector<int>{8, 16, 32}
+                                                 : std::vector<int>{10, 20, 40};
+        for (int n : step_counts) {
             std::vector<std::vector<double>> trajectory;
             if (gpu) {
                 std::vector<std::vector<std::vector<double>>> result;
@@ -75,13 +94,14 @@ void fixed_case(int method, bool gpu) {
             } else {
                 ASSERT_TRUE(computePhasePortraitCPU_custom(step.fn(), ic, 2, a.data(), (int)a.size(), 1.0 / n, n + 1, 0, trajectory));
             }
-            errors.push_back(std::fabs(trajectory.back()[0] - std::exp(-1.0)));
+            errors.push_back(std::fabs(trajectory.back()[0] - (rk6 ? 0.5 : std::exp(-1.0))));
         }
         for (size_t i = 1; i < errors.size(); ++i) {
             const double order = std::log2(errors[i - 1] / errors[i]);
-            ASSERT_GT(order, 1.8); ASSERT_LT(order, 2.2);
+            ASSERT_GT(order, rk6 ? 5.5 : 1.8);
+            ASSERT_LT(order, rk6 ? 6.5 : 2.2);
         }
-        inputs["convergence_steps"] = {10, 20, 40};
+        inputs["convergence_steps"] = step_counts;
         values.insert(values.end(), errors.begin(), errors.end());
     }
     regression::snapshot("fixed." + std::string(gpu ? "gpu." : "cpu.") + std::to_string(method), inputs, values, new_cd ? 2 : 1);
@@ -295,9 +315,9 @@ TEST(CacheGpu, SwitchingModulesAndCompileFailurePreserveCachedResults) {
     EXPECT_FALSE(engine.compile("this is invalid CUDA;", 1));
     EXPECT_EQ(run("X[0] += h;"), initial);
 }
-void explicit_time_trajectory(bool gpu) {
+void explicit_time_trajectory(bool gpu, Scheme scheme = Scheme::RK4) {
     System sys; sys.vars = {"x"}; sys.rhs = {"t"};
-    const auto body = codegen_scheme(sys, Scheme::RK4);
+    const auto body = codegen_scheme(sys, scheme);
     const std::vector<double> a = parameters();
     std::vector<std::vector<double>> result;
     if (gpu) {
@@ -319,12 +339,19 @@ void explicit_time_trajectory(bool gpu) {
         }
     }
     ASSERT_EQ(result.size(), 101u);
-    regression::snapshot(std::string("time.") + (gpu ? "gpu" : "cpu"), {{"rhs", "t"}, {"h", .01}, {"skip", 20}, {"count", 101}}, {result.front()[0], result.back()[0]});
+    const auto id = std::string("time.") + (gpu ? "gpu" : "cpu")
+        + (scheme == Scheme::RK6 ? ".rk6" : "");
+    regression::snapshot(id, {{"rhs", "t"}, {"h", .01}, {"skip", 20}, {"count", 101}}, {result.front()[0], result.back()[0]});
     EXPECT_THROW(codegen_scheme(sys, Scheme::ComplexCD), std::runtime_error);
 }
 TEST(TimeCpu, NonAutonomousStagesTransientAndRepeatedRunStartAtTheCorrectTime) { explicit_time_trajectory(false); }
 TEST(TimeGpu, NonAutonomousStagesTransientAndRepeatedRunStartAtTheCorrectTime) {
     ASSERT_EQ(cuInit(0), CUDA_SUCCESS); explicit_time_trajectory(true);
+}
+TEST(TimeCpu, RK6UsesStageTimes) { explicit_time_trajectory(false, Scheme::RK6); }
+TEST(TimeGpu, RK6UsesStageTimes) {
+    ASSERT_EQ(cuInit(0), CUDA_SUCCESS);
+    explicit_time_trajectory(true, Scheme::RK6);
 }
 TEST(MatrixCpu, EveryBuiltinEnumIsEnumerated) {
     EXPECT_EQ(methods().size(), 2u * regression::builtin_cases().size());

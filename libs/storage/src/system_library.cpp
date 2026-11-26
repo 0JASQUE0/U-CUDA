@@ -158,6 +158,7 @@ std::string record_to_json(const SystemRecord& r) {
     kvbool(o, "scheme_cromer", r.scheme_cromer);
     kvbool(o, "scheme_midpoint", r.scheme_midpoint);
     kvbool(o, "scheme_rk4", r.scheme_rk4);
+    if (r.scheme_rk6) kvbool(o, "scheme_rk6", true);
     kvbool(o, "scheme_dopri78", r.scheme_dopri78);
     kvbool(o, "scheme_dopri78_legacy", r.scheme_dopri78_legacy);
     kvbool(o, "scheme_rk45", r.scheme_rk45);
@@ -266,6 +267,7 @@ SystemRecord record_from_json(const std::string& json) {
         else if (key == "scheme_cromer") r.scheme_cromer = p.parse_bool();
         else if (key == "scheme_midpoint") r.scheme_midpoint = p.parse_bool();
         else if (key == "scheme_rk4") r.scheme_rk4 = p.parse_bool();
+        else if (key == "scheme_rk6") r.scheme_rk6 = p.parse_bool();
         else if (key == "scheme_dopri78") r.scheme_dopri78 = p.parse_bool();
         else if (key == "scheme_dopri78_legacy") r.scheme_dopri78_legacy = p.parse_bool();
         else if (key == "scheme_rk45") r.scheme_rk45 = p.parse_bool();

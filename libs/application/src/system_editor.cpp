@@ -370,6 +370,7 @@ SystemRecord SystemEditor::to_record() const {
     r.scheme_cromer = scheme_cromer;
     r.scheme_midpoint = scheme_midpoint;
     r.scheme_rk4 = scheme_rk4;
+    r.scheme_rk6 = scheme_rk6;
     r.scheme_dopri78 = scheme_dopri78;
     r.scheme_dopri78_legacy = scheme_dopri78_legacy;
     r.scheme_rk45 = scheme_rk45;
@@ -453,6 +454,7 @@ void SystemEditor::from_record(const SystemRecord& r) {
     scheme_cromer = r.scheme_cromer;
     scheme_midpoint = r.scheme_midpoint;
     scheme_rk4 = r.scheme_rk4;
+    scheme_rk6 = r.scheme_rk6;
     scheme_dopri78 = r.scheme_dopri78;
     scheme_dopri78_legacy = r.scheme_dopri78_legacy;
     scheme_rk45 = r.scheme_rk45;
@@ -506,7 +508,7 @@ void SystemEditor::from_record(const SystemRecord& r) {
     // A map has no scheme_* flag set — its single body is always generated.
     if (is_map
         || scheme_euler || scheme_cromer || scheme_midpoint || scheme_rk4 || scheme_dopri78 || scheme_dopri78_legacy
-        || scheme_rk45 || scheme_dop853
+        || scheme_rk6 || scheme_rk45 || scheme_dop853
         || scheme_cd || scheme_cdfast
         || scheme_cdfp || scheme_cdfastfp || scheme_ccd || scheme_ccd4|| scheme_ccd4s3 || scheme_ccd4s4 || scheme_ccd4ss01
         || scheme_ccd4ss10
@@ -605,7 +607,7 @@ void SystemEditor::clear() {
     field_labels.clear();
     pg_ui = ParamGroupsUi{};
     scheme_euler = scheme_cromer = scheme_midpoint = scheme_rk4 = scheme_dopri78 = scheme_dopri78_legacy
-        = scheme_rk45 = scheme_dop853
+        = scheme_rk6 = scheme_rk45 = scheme_dop853
         = scheme_cd = scheme_cdfast
         = scheme_cdfp = scheme_cdfastfp = scheme_ccd = scheme_ccd4= scheme_ccd4s3 = scheme_ccd4s4 = scheme_ccd4ss01
         = scheme_ccd4ss10

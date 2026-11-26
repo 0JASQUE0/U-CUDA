@@ -1,0 +1,24 @@
+{
+  "windows": [
+    {
+      "id": 1,
+      "kind": 3,
+      "label": "PR1000 performance",
+      "label_is_manual": true,
+      "x_log": true,
+      "y_log": true,
+      "error_source": 2,
+      "time_unit": 1,
+      "perf_cost": 0,
+      "show_min": true,
+      "show_avg": false,
+      "show_max": false,
+      "members": [
+        0,
+        1,
+        2,
+        3
+      ]
+    }
+  ]
+}

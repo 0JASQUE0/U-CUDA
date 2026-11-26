@@ -13,6 +13,31 @@
   "scheme_midpoint": false,
   "scheme_rk4": true,
   "step_h": "0.01",
-  "init_conditions": {"x": "0.2", "y": "0.2", "z": "0.2"},
-  "param_values": {"a": "0.2", "b": "0.2", "c": "5.7"}
+  "init_conditions": {
+    "x": "0.2",
+    "y": "0.2",
+    "z": "0.2"
+  },
+  "param_values": {
+    "a": "0.2",
+    "b": "0.2",
+    "c": "5.7"
+  },
+  "custom_schemes": [
+    {
+      "name": "E23",
+      "body": "    const numb alpha = a[1], beta = a[2], gamma = a[3];\n    const numb beta2 = numb(0.28867513459481287) + numb(1.6725140369678172e-17);\n    const numb beta3 = numb(0.23570226039551584) + numb(2.3915615546644207e-18);\n    const numb third = numb(1) / numb(3);\n    const ucmplx row2[] = {ucmplx(numb(0.5), -beta2), ucmplx(numb(0.5), beta2)};\n    const ucmplx row3[] = {ucmplx(third, -beta3), ucmplx(third, numb(0)), ucmplx(third, beta3)};\n\n    auto cd = [&](ucmplx* state, const ucmplx& fraction) {\n        const ucmplx t = fraction * (h * numb(0.5));\n        ucmplx& x = state[0];\n        ucmplx& y = state[1];\n        ucmplx& z = state[2];\n\n        x = x - t * (y + z);\n        y = y + t * (x + alpha * y);\n        const ucmplx rate = x - gamma;\n        z = z + t * (beta + rate * z);\n        z = (z + t * beta) / (numb(1) - t * rate);\n        y = (y + t * x) / (numb(1) - t * alpha);\n        x = x - t * (y + z);\n    };\n\n    ucmplx y2[3], y3[3];\n    for (int i = 0; i < 3; ++i) {\n        y2[i] = ucmplx(X[i], numb(0));\n        y3[i] = y2[i];\n    }\n    for (const auto& c : row2) cd(y2, c);\n    for (const auto& c : row3) cd(y3, c);\n    const numb w2 = -numb(1) / numb(5);\n    const numb w3 = numb(6) / numb(5);\n    for (int i = 0; i < 3; ++i) X[i] = w2 * y2[i].re + w3 * y3[i].re;\n",
+      "order": "6",
+      "symmetric": "1",
+      "enabled": "1",
+      "rhs_per_step": "10"
+    }
+  ],
+  "extr_schemes": [
+    "Extr(CD|1,2,3)"
+  ],
+  "scheme_cd": true,
+  "scheme_gbs246": true,
+  "scheme_rk6": true,
+  "scheme_dopri78": true
 }

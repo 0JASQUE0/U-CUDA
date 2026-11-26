@@ -574,6 +574,55 @@ const MultiDoubleCoef kRK45P[7][4] = {
 };
 
 
+// Butcher (1964), seven-stage order-six method, lambda = 4, mu = 1/3.
+// Exact rational coefficients split into four double limbs for double, dd and qd.
+const MultiDoubleCoef kRK6A[7][6] = {
+    {},
+    { // 1/3
+        {{0.3333333333333333, 1.850371707708594e-17, 1.0271626370065257e-33, 5.701898048196684e-50}},
+    },
+    { // 0, 2/3
+        {},
+        {{0.6666666666666666, 3.700743415417188e-17, 2.0543252740130515e-33, 1.1403796096393367e-49}},
+    },
+    { // 1/12, 1/3, -1/12
+        {{0.08333333333333333, 4.625929269271485e-18, 2.5679065925163143e-34, 1.425474512049171e-50}},
+        {{0.3333333333333333, 1.850371707708594e-17, 1.0271626370065257e-33, 5.701898048196684e-50}},
+        {{-0.08333333333333333, -4.625929269271485e-18, -2.5679065925163143e-34, -1.425474512049171e-50}},
+    },
+    { // -1/16, 9/8, -3/16, -3/8
+        {{-0.0625}},
+        {{1.125}},
+        {{-0.1875}},
+        {{-0.375}},
+    },
+    { // 0, 9/8, -3/8, -3/4, 1/2
+        {},
+        {{1.125}},
+        {{-0.375}},
+        {{-0.75}},
+        {{0.5}},
+    },
+    { // 9/44, -9/11, 63/44, 18/11, 0, -16/11
+        {{0.20454545454545456, -1.2616170734376778e-17, -4.202028969572151e-34, -3.1101262081072823e-50}},
+        {{-0.8181818181818182, 5.0464682937507114e-17, 1.6808115878288603e-33, 1.244050483242913e-49}},
+        {{1.4318181818181819, -6.055761952500853e-17, -4.4821642342102945e-33, 1.244050483242913e-49}},
+        {{1.6363636363636365, -1.0092936587501423e-16, -3.3616231756577205e-33, -2.488100966485826e-49}},
+        {},
+        {{-1.4545454545454546, 4.0371746350005693e-17, -1.1205410585525736e-33, 3.1101262081072823e-50}},
+    },
+};
+
+const MultiDoubleCoef kRK6B[7] = { // 11/120, 0, 27/40, 27/40, -4/15, -4/15, 11/120
+    {{0.09166666666666666, 6.47630097698008e-18, -1.0271626370065258e-34, -1.425474512049171e-51}},
+    {},
+    {{0.675, -4.4408920985006264e-17, 2.465190328815662e-33, -1.3684555315672042e-49}},
+    {{0.675, -4.4408920985006264e-17, 2.465190328815662e-33, -1.3684555315672042e-49}},
+    {{-0.26666666666666666, -3.7007434154171884e-18, -5.135813185032629e-35, -7.127372560245855e-52}},
+    {{-0.26666666666666666, -3.7007434154171884e-18, -5.135813185032629e-35, -7.127372560245855e-52}},
+    {{0.09166666666666666, 6.47630097698008e-18, -1.0271626370065258e-34, -1.425474512049171e-51}},
+};
+
 const MultiDoubleCoef kDop853A[12][11] = {
     { // stage 0
       { 0.0, 0.0, 0.0, 0.0 },
@@ -1300,6 +1349,7 @@ std::string codegen_scheme(const System& s, Scheme sch) {
     case Scheme::EulerCromer:      return scheme_euler_cromer(s);
     case Scheme::ExplicitMidpoint: return scheme_midpoint(s);
     case Scheme::RK4:              return scheme_rk4(s);
+    case Scheme::RK6:              return scheme_erk(s, &kRK6A[0][0], 6, kRK6B, 7);
     case Scheme::DOPRI78:          return scheme_dopri78(s);
     case Scheme::DOPRI78Legacy:    return scheme_dopri78(s, true);
     case Scheme::RK45:             return scheme_erk(s, &kRK45A[0][0], 6, &kRK45B[0][0], 6);
@@ -1585,7 +1635,7 @@ bool system_uses_time(const System& s) {
 bool scheme_supports_time(Scheme sch) {
     switch (sch) {
     case Scheme::Euler: case Scheme::EulerCromer: case Scheme::ExplicitMidpoint: case Scheme::RK4:
-    case Scheme::DOPRI78: case Scheme::DOPRI78Legacy: case Scheme::RK45: case Scheme::DOP853:
+    case Scheme::DOPRI78: case Scheme::DOPRI78Legacy: case Scheme::RK45: case Scheme::RK6: case Scheme::DOP853:
     case Scheme::ImplicitEuler: case Scheme::ImplicitMidpoint:
     case Scheme::CD: case Scheme::CD10: case Scheme::CDFP:
     case Scheme::GBS: case Scheme::GBS24: case Scheme::GBS246: case Scheme::GBS2468:

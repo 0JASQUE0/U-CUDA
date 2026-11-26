@@ -229,6 +229,11 @@ void records() {
         "{\"name\":\"Old\",\"mode\":\"LaTeX\",\"latex_text\":\"\\\\dot{x} = -a x\","
         "\"alphabet_text\":\"x, a\",\"init_conditions\":{\"x\":\"1\"},\"param_values\":{\"a\":\"2\"}}");
     require(old.name == "Old" && !old.is_dae && !old.is_map && old.alphabet_text == "x, a", "old ODE record");
+    require(!old.scheme_rk6, "old ODE records leave RK6 disabled");
+    SystemRecord rk6 = old;
+    rk6.scheme_rk6 = true;
+    require(record_from_json(record_to_json(rk6)).scheme_rk6, "RK6 selection survives record round trip");
+
     SystemRecord custom = record_from_json(
         R"({"custom_schemes":[{"name":"Legacy","body":"X[0] += h;"},
               {"name":"Invalid","rhs_per_step":"2x"},

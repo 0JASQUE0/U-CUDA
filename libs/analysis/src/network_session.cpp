@@ -367,7 +367,7 @@ NetworkMonolithic net_monolithic_snapshot(const NetworkState& s, const NetworkCo
              "Initial spread is realized and stored. Later Network changes do not affect this record.";
     r.step_h = c.h_text; r.symmetry_s = c.symmetry_s; r.cd_fp_iters = c.cd_fp_iters;
     r.newton_tol = c.newton.tol; r.newton_max_iters = c.newton.max_iters; r.newton_full = c.newton.full;
-    r.scheme_euler = r.scheme_cromer = r.scheme_midpoint = r.scheme_rk4 = true;
+    r.scheme_euler = r.scheme_cromer = r.scheme_midpoint = r.scheme_rk4 = r.scheme_rk6 = true;
     r.scheme_dopri78 = r.scheme_dopri78_legacy = r.scheme_rk45 = r.scheme_dop853 = true;
     r.scheme_cd = r.scheme_cdfast = r.scheme_cdfp = r.scheme_cdfastfp = true;
     r.scheme_ccd = r.scheme_ccd4 = r.scheme_ccd4s3 = r.scheme_ccd4s4 = true;

@@ -1,0 +1,41 @@
+{
+  "name": "Prothero-Robinson",
+  "note": "PR1000 performance benchmark for E23, Extr123, GBS 2-4-6 and RK6 on [0, 10].",
+  "kind": "ode",
+  "mode": "Plain",
+  "plain_text": "s' = c \\\\\nc' = -s \\\\\ny' = lambda*(y-s)+c",
+  "vars_text": "s, c, y",
+  "params_text": "lambda",
+  "param_order": "AsInAlphabet",
+  "scheme_euler": false,
+  "scheme_cromer": false,
+  "scheme_midpoint": false,
+  "scheme_rk4": false,
+  "scheme_cd": true,
+  "scheme_gbs246": true,
+  "scheme_dopri78": true,
+  "symmetry_s": "0.5",
+  "init_conditions": {
+    "s": "0",
+    "c": "1",
+    "y": "0.001"
+  },
+  "param_values": {
+    "lambda": "-1000"
+  },
+  "custom_schemes": [
+    {
+      "name": "E23",
+      "body": "\r\n    const numb lambda = a[1];\r\n    const numb beta2 = numb(0.28867513459481287) + numb(1.6725140369678172e-17);\r\n    const numb beta3 = numb(0.23570226039551584) + numb(2.3915615546644207e-18);\r\n    const numb third = numb(1) / numb(3);\r\n    const ucmplx row2[] = {ucmplx(numb(0.5), -beta2), ucmplx(numb(0.5), beta2)};\r\n    const ucmplx row3[] = {ucmplx(third, -beta3), ucmplx(third, numb(0)), ucmplx(third, beta3)};\r\n\r\n    auto cd = [&](ucmplx* z, const ucmplx& fraction) {\r\n        const ucmplx t = fraction * (h * numb(0.5));\r\n        z[0] = z[0] + t * z[1];\r\n        z[1] = z[1] - t * z[0];\r\n        z[2] = z[2] + t * (lambda * (z[2] - z[0]) + z[1]);\r\n        z[2] = (z[2] + t * (z[1] - lambda * z[0])) / (numb(1) - t * lambda);\r\n        z[1] = z[1] - t * z[0];\r\n        z[0] = z[0] + t * z[1];\r\n    };\r\n\r\n    ucmplx y2[3], y3[3];\r\n    for (int i = 0; i < 3; ++i) {\r\n        y2[i] = ucmplx(X[i], numb(0));\r\n        y3[i] = y2[i];\r\n    }\r\n    for (const auto& c : row2) cd(y2, c);\r\n    for (const auto& c : row3) cd(y3, c);\r\n    const numb w2 = -numb(1) / numb(5);\r\n    const numb w3 = numb(6) / numb(5);\r\n    for (int i = 0; i < 3; ++i) X[i] = w2 * y2[i].re + w3 * y3[i].re;",
+      "order": "6",
+      "symmetric": "1",
+      "enabled": "1",
+      "rhs_per_step": "10"
+    }
+  ],
+  "extr_schemes": [
+    "Extr(CD|1,2,3)"
+  ],
+  "scheme_dop853": true,
+  "scheme_rk6": true
+}

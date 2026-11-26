@@ -1284,6 +1284,7 @@ const SchemeRow kSchemeRows[] = {
     { "SEMP",                   2, false },  // предиктор-корректор, не Phi* ∘ Phi
     { "SIMP",                   2, false },
     { "RK4",                    4, false },
+    { "RK6",                    6, false },
     { "Complex CD4",            4, false },
     { "Complex CD4_{1-0}",      4, false },
     { "CCD4 (o4s3)",            4, true  },  // палиндром (a, 1-2a, a)
