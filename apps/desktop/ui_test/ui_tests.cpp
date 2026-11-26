@@ -12,9 +12,11 @@
 #include "ucuda/application/app_model.h"
 #include "ucuda/domain/configCUDA.h"
 #include "ucuda/domain/num_parse.h"
+#include "ucuda/plotting/plot_axis.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <functional>
 #include <vector>
@@ -208,6 +210,68 @@ void register_tests(ImGuiTestEngine* engine) {
         // Back to the linear defaults the system had (the session is the isolated copy).
         BasinsConfig& c = s.configs[0];
         c.axis_x_symlog = c.axis_y_symlog = false;
+    };
+
+    t = IM_REGISTER_TEST(engine, "plot", "log_axis_decade_labels");
+    t->TestFunc = [](ImGuiTestContext*) {
+        const bool was_math_enabled = plot_math_enabled();
+        set_plot_math_enabled(true);
+        const bool formatted = fmt_log_tick(1e-10) == "10^{-10}"
+                            && fmt_log_tick(100.0) == "10^{2}"
+                            && fmt_log_tick(-1e-10) == "-10^{-10}";
+        set_plot_math_enabled(false);
+        const bool plain = fmt_log_tick(1e-10) == "10^-10";
+        const auto ticks = log_axis_ticks(1e-4, 1e-1, 1000.0f, true);
+        set_plot_math_enabled(was_math_enabled);
+
+        IM_CHECK(formatted);
+        IM_CHECK(plain);
+        int decades = 0;
+        bool has_minor = false;
+        for (const auto& tick : ticks) {
+            if (!tick.major) {
+                has_minor = true;
+                continue;
+            }
+            const double exponent = std::log10(tick.value);
+            IM_CHECK(std::abs(exponent - std::round(exponent)) < 1e-8);
+            ++decades;
+        }
+        IM_CHECK_EQ(decades, 4);
+        IM_CHECK(has_minor);
+    };
+
+    t = IM_REGISTER_TEST(engine, "order", "performance_axis_defaults");
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        AppModel* m = app_model();
+        IM_CHECK(m != nullptr);
+        const auto previous_mode = m->app_mode;
+        m->app_mode = AppModel::AppMode::Order;
+        ctx->Yield(3);
+
+        const int index = (int)m->order_plot_windows.size();
+        m->add_order_plot_window(OrderPlotWindow::Kind::Perf, {});
+        auto& plot = m->order_plot_windows.back();
+        plot.label = "Performance axis defaults";
+        plot.label_is_manual = true;
+        IM_CHECK(plot.x_log && plot.y_log);
+        const std::string path = "//" + plot.label + "###orderwin" + std::to_string(plot.id)
+                               + "_g" + std::to_string(m->order_layout_generation);
+        ctx->Yield(3);
+        ctx->WindowFocus(path.c_str());
+        ImGuiTestItemList items;
+        ctx->GatherItems(&items, path.c_str(), -1);
+        bool found_error_source = false;
+        bool found_log_checkbox = false;
+        for (const ImGuiTestItemInfo& item : items) {
+            found_error_source |= std::strncmp(item.DebugLabel, "Eref", 4) == 0;
+            found_log_checkbox |= std::strcmp(item.DebugLabel, "log X") == 0
+                               || std::strcmp(item.DebugLabel, "log Y") == 0;
+        }
+        m->remove_order_plot_window(index);
+        m->app_mode = previous_mode;
+        IM_CHECK(found_error_source);
+        IM_CHECK(!found_log_checkbox);
     };
 
     t = IM_REGISTER_TEST(engine, "tree", "phase_projection_style");

@@ -77,8 +77,9 @@ struct OrderPlotWindow {
     std::vector<int> members;
     int id = 0;
 
+    // Performance stores the display scale chosen in each axis menu.
     bool x_log = true;
-    bool y_log = true;          // лог берётся от ЗНАЧЕНИЙ: Plot2DView умеет лог только по X
+    bool y_log = true;
     bool show_e2 = false;       // Error: вторая разность рядом с первой
     bool show_nominal = false;  // P: паспортный порядок схемы горизонталью
     bool map_error = false;     // Map: log10 E1 вместо p

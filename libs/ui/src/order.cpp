@@ -865,20 +865,19 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     // ---- Тулбар ---- (скрывается в меню графика: Show → Toolbar)
     const bool bar = !plot_toolbar_hidden();
     toolbar_row([&]() {
-    ImGui::Checkbox("log X", &win.x_log);
-    if (!is_p) {
-        ImGui::SameLine();
-        ImGui::Checkbox("log Y", &win.y_log);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "The logarithm is taken of THE VALUES THEMSELVES while the axis stays linear:\n"
-                "Plot2DView can only do log on X. The slope of the line in log-log\n"
-                "does not change because of that, but the axis labels read as log10.");
+    if (!is_perf) {
+        ImGui::Checkbox("log X", &win.x_log);
+        if (!is_p) {
+            ImGui::SameLine();
+            ImGui::Checkbox("log Y", &win.y_log);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Show the error on a logarithmic Y axis.");
+        }
+        if (is_error) { ImGui::SameLine(); ImGui::Checkbox("show E2", &win.show_e2); }
+        if (is_p)     { ImGui::SameLine(); ImGui::Checkbox("nominal order line", &win.show_nominal); }
     }
-    if (is_error) { ImGui::SameLine(); ImGui::Checkbox("show E2", &win.show_e2); }
-    if (is_p)     { ImGui::SameLine(); ImGui::Checkbox("nominal order line", &win.show_nominal); }
     if (is_perf) {
-        ImGui::SameLine(); ImGui::TextDisabled("| X:"); ImGui::SameLine();
+        ImGui::TextDisabled("X:"); ImGui::SameLine();
         ImGui::RadioButton("E1##perrsrc", &win.error_source, 0); ImGui::SameLine();
         ImGui::RadioButton("E2##perrsrc", &win.error_source, 1); ImGui::SameLine();
         ImGui::RadioButton("Eref##perrsrc", &win.error_source, 2);
@@ -1043,9 +1042,8 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                         if (win.x_log && !(e > 0.0)) continue;
                         if (ylog && !(cv > 0.0)) continue;
                         const double ns = ((size_t)i < r.n_steps.size()) ? (double)r.n_steps[(size_t)i] : qn;
-                        // e и cv кладём в теги ОТДЕЛЬНО от координат: в лог-режиме в
-                        // координатах лежат log10. В подсказке хочется исходные числа.
-                        Pt pt{ win.x_log ? std::log10(e) : e, ylog ? std::log10(cv) : cv,
+                        // Plot2DView applies the axis scale to these raw coordinates.
+                        Pt pt{ e, cv,
                                { r.adaptive ? at(r.axis_vals, i) : at(r.h_eff, i), e,
                                  at(tsrc, i) * time_scale, ns, at(r.n_rhs, i), at(r.n_rej, i) } };
                         pts.push_back(pt);
@@ -1059,7 +1057,6 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                     for (const auto& pr : pts) {
                         xy.push_back(pr.x); xy.push_back(pr.y);
                         for (int q = 0; q < (any_ad ? 6 : 4); ++q) tg.push_back(pr.tg[q]);   // Fixed: h, E, t, steps
-                        note_x(pr.x);
                     }
                     bufs.push_back(std::move(xy));
                     tags.resize(bufs.size());
@@ -1103,7 +1100,7 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                     } else {
                         const double e = (which == 1) ? r.e1[(size_t)i] : r.e2[(size_t)i];
                         if (!std::isfinite(e) || (ylog && !(e > 0.0))) continue;
-                        y = ylog ? std::log10(e) : e;
+                        y = e;
                     }
                     xy.push_back(x); xy.push_back(y); note_x(x);
                 }
@@ -1225,31 +1222,21 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                         : s.axis_target_label(s.configs[(size_t)mi].axis_x_target);
         break;
     }
-    // На диаграмме производительности лог по X берётся ЛОГАРИФМОМ ДАННЫХ, а не
-    // логарифмическим масштабом оси — как это давно сделано по Y. Причина в
-    // подписях: на лог-оси тики печатаются как сами значения, и на
-    // double-double ошибка уходит к 1e-30, где формат схлопывает их в "0" и
-    // ось становится нечитаемой. log10(E) — обычные числа вроде -16, они
-    // помещаются всегда. Исходное E остаётся в подсказке узла (тег "E1").
-    // На диаграмме порядка по X лежит сетка свипа, там масштаб оси и остаётся.
-    if (is_perf && win.x_log) xname = "log10 " + xname;
     view.x_axis.name = xname;
     if (is_perf) {
         const char* unit = (win.time_unit == 1) ? "ms" : "us";
-        const std::string yn = win.perf_cost == 1 ? std::string("f evals")
-                             : win.perf_cost == 2 ? std::string("steps")
-                                                  : std::string("t, ") + unit;
-        view.y_axis.name = ylog ? "log10 " + yn : yn;
+        view.y_axis.name = win.perf_cost == 1 ? std::string("f evals")
+                         : win.perf_cost == 2 ? std::string("steps")
+                                              : std::string("t, ") + unit;
+        view.x_axis.display_log = win.x_log;
     } else {
-        view.y_axis.name = is_error ? (ylog ? "log10 E" : "E") : "p";
+        view.y_axis.name = is_error ? "E" : "p";
     }
+    if (is_perf || is_error) view.y_axis.display_log = win.y_log;
     view.x_axis.log_scale = !is_perf && win.x_log;
 
-    // Явный X-диапазон по всем кривым окна: без него Plot2DView берёт границы
-    // клампа из bbox VBO, а там на лог-оси лежит log10(x). На диаграмме
-    // производительности ось линейная, и note_x собирал уже те же значения,
-    // что легли в VBO, — единицы сходятся и тут.
-    view.x_fit_use_explicit = got_x && (xhi > xlo);
+    // Sweep windows fit to their sampled range; Performance fits the plotted data.
+    view.x_fit_use_explicit = !is_perf && got_x && (xhi > xlo);
     view.x_fit_min = xlo;
     view.x_fit_max = xhi;
 
@@ -1294,7 +1281,7 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     // Сигнатура рисуемого: новые данные любого члена, смена масштаба любой
     // оси, состав кривых. Служит и поколением для перезаливки VBO, и триггером
     // autofit — log10 E и E отличаются на четырнадцать порядков, а p от них обоих.
-    sig = sig * 131 + (win.x_log ? 1 : 0) + (ylog ? 2 : 0) + (win.show_e2 ? 4 : 0)
+    sig = sig * 131 + (!is_perf && win.x_log ? 1 : 0) + (!is_perf && ylog ? 2 : 0) + (win.show_e2 ? 4 : 0)
         + (win.show_nominal ? 8 : 0) + (win.show_min ? 16 : 0) + (win.show_avg ? 32 : 0)
         + (win.show_max ? 64 : 0) + win.error_source * 128 + win.time_unit * 512
         + win.perf_cost * 1024 + (int)bufs.size() * 4096;
@@ -1318,6 +1305,8 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
     view.render(renderer, origin, avail,
                 /*owner_id*/ 0x0BDE1000 + win.id, sig,
                 series, init_vis, glob_vis, fit);
+    if (is_perf) win.x_log = view.x_axis.display_log;
+    if (is_perf || is_error) win.y_log = view.y_axis.display_log;
     if (!vrt.empty())
         handle_view_range_keys(vrt, view.x_axis, view.y_axis, plot_window_active(), /*swapped*/ false, &model);
 }

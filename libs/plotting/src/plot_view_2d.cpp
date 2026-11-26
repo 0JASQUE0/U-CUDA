@@ -1183,7 +1183,7 @@ void Plot2DView::render(PlotRenderer& renderer,
             double vry = ey1 - ey0;
             if (!show_y_ticks) {
                 // Чисел нет — имя оси встаёт к плоту (max_tick_w = 0).
-            } else if (ylog && std::abs(vry) >= 1e-30) {
+            } else if (ylog) {
                 // Лог-ось подписана главными тиками log_axis_ticks (draw_axis_y_grid).
                 for (const LogAxisTick& t : log_axis_ticks(std::min(ey0, ey1), std::max(ey0, ey1),
                                                            (float)plot_h, false))

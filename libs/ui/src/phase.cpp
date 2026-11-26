@@ -896,20 +896,20 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                 }
                 else {
                     if (!projection_views(pr).view2d) projection_views(pr).view2d = std::make_unique<Plot2DView>();
-                    // log Y — пересчётом в log10 h (лог-оси Y у Plot2DView нет), как у окон Order.
                     toolbar_row([&pr, &fit]() {   // часть тулбара (Show → Toolbar)
                         const bool was = pr.y_log;
                         ImGui::Checkbox("log Y##stepsize", &pr.y_log);
                         if (pr.y_log != was) fit = true;
                         if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("Y axis in log10 h: steps spread over orders of magnitude\n"
+                            ImGui::SetTooltip("Logarithmic Y axis: steps spread over orders of magnitude\n"
                                               "(stiff parts, rejections near h_min) become readable.");
                         ImGui::SameLine();
                     });
                     draw_proj_line_style(pr, *projection_views(pr).view2d, "stepsize",
                         "Draw the accepted steps as markers instead of a line.");
                     projection_views(pr).view2d->x_axis.name = "t";
-                    projection_views(pr).view2d->y_axis.name = pr.y_log ? "log10 h" : "h";
+                    projection_views(pr).view2d->y_axis.name = "h";
+                    projection_views(pr).view2d->y_axis.display_log = pr.y_log;
                     projection_views(pr).view2d->show_zero_x = false;
                     projection_views(pr).view2d->show_zero_y = false;
 
@@ -922,11 +922,8 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                         std::vector<double> acc, rej, frc;
                         for (size_t r = 0; r + 4 <= lg.size(); r += 4) {
                             const double t = lg[r], code = lg[r + 3];
-                            double hh = lg[r + 1];
-                            if (pr.y_log) {
-                                if (!(hh > 0)) continue;   // log10 не определён
-                                hh = std::log10(hh);
-                            }
+                            const double hh = lg[r + 1];
+                            if (pr.y_log && !(hh > 0.0)) continue;
                             if (code == 0) { rej.push_back(t); rej.push_back(hh); continue; }
                             acc.push_back(t); acc.push_back(hh);
                             if (code == 2) { frc.push_back(t); frc.push_back(hh); }
@@ -959,12 +956,13 @@ void draw_projection_windows(PhaseAnalysisSession& s, const GuiCallbacks& cb,
                             glob_vis.push_back(ic_vis);
                         }
                     }
-                    int data_gen = s.data_generation * 1000 + (pr.y_log ? 507 : 7);   // log Y — другие данные
+                    int data_gen = s.data_generation * 1000 + (pr.y_log ? 507 : 7);
                     ImVec2 avail  = ImGui::GetContentRegionAvail();
                     ImVec2 origin = ImGui::GetCursorScreenPos();
                     projection_views(pr).view2d->popup_extras = phase_popup_extras;
                     projection_views(pr).view2d->render(renderer, origin, avail, i ^ owner_id_delta, data_gen,
                         series_in, init_vis, glob_vis, fit);
+                    pr.y_log = projection_views(pr).view2d->y_axis.display_log;
                 }
             }
             // Отказы адаптивного шага: у каждого принятого шага — сколько попыток ему

@@ -1196,10 +1196,11 @@ float plot_y_axis_margin(const AxisInfo& y, const char* y_name) {
     axis_effective(y, emin, emax);
     const double vry = emax - emin;
     float max_w = 0.0f;
-    if (std::abs(vry) >= 1e-30) {
-        const double lo = std::min(emin, emax);
-        const double hi = std::max(emin, emax);
-        if (y.display_log && lo > 0.0) {
+    const double lo = std::min(emin, emax);
+    const double hi = std::max(emin, emax);
+    const bool log = y.display_log && lo > 0.0 && hi > lo;
+    if (log || std::abs(vry) >= 1e-30) {
+        if (log) {
             // Лог-отображение: подписи — главные тики log_axis_ticks, как в draw_axis_y_grid.
             // Высоты плота здесь нет (марджин нужен до layout'а) — берём с запасом: на высоком
             // плоте подписей больше, а ширину задаёт самая длинная из них.
@@ -1255,15 +1256,25 @@ std::string fmt_tick(double v, double step) {
     return buf;
 }
 
-// Подпись тика лог-оси. Отдельно от fmt_tick по двум причинам: порог «|v| < 1e-12 — это 0»
-// нужен линейной оси (гасит шум вроде -1e-17 на месте нуля), а лог-тик — точная степень,
-// и ошибки в double-double лежат на 1e-20..1e-30, где порог превращал все подписи в «0»;
-// значения лог-сетки круглые (1, 2, 3, 5, 7 x 10^k), и хвостовые нули «3.000e-11» им не нужны.
+// Show decades as powers of ten and retain a mantissa for labels in a narrow view.
 std::string fmt_log_tick(double v) {
+    if (v == 0.0 || !std::isfinite(v)) return fmt_tick(v);
     char buf[32];
-    if (!(v > 0.0) || !std::isfinite(v)) return fmt_tick(v);
-    std::snprintf(buf, sizeof(buf), "%.*g", g_tick_precision, v);
-    return buf;
+    std::snprintf(buf, sizeof(buf), "%.*e", g_tick_precision - 1, std::fabs(v));
+    const char* exponent = std::strchr(buf, 'e');
+    std::string mantissa(static_cast<const char*>(buf), exponent);
+    while (mantissa.back() == '0') mantissa.pop_back();
+    if (mantissa.back() == '.') mantissa.pop_back();
+
+    const int power = std::stoi(exponent + 1);
+    std::string label = v < 0.0 ? "-" : "";
+    if (power == 0 && mantissa != "1") return label + mantissa;
+    if (mantissa != "1") {
+        label += mantissa;
+        label += g_math_on && has_glyph(0x00D7) ? "×" : "*";
+    }
+    if (g_math_on) return label + "10^{" + std::to_string(power) + "}";
+    return label + "10^" + std::to_string(power);
 }
 
 double fit_tick_step_x(double step, double lo, double hi, float plot_w) {
@@ -1374,14 +1385,13 @@ std::vector<LogAxisTick> log_axis_ticks(double lo, double hi, float span_px,
     auto px_of = [&](double v) { return (std::log10(v) - l0) * px_dec; };
     auto fits = [&](double a, double b) {
         const double need = horizontal
-            ? ((double)plot_text_size(fmt_tick(a).c_str()).x +
-               (double)plot_text_size(fmt_tick(b).c_str()).x) * 0.5 + 6.0
+            ? ((double)plot_text_size(fmt_log_tick(a).c_str()).x +
+               (double)plot_text_size(fmt_log_tick(b).c_str()).x) * 0.5 + 6.0
             : (double)plot_text_line_height() * 1.2;
         return std::abs(px_of(a) - px_of(b)) >= need;
     };
 
-    // Подписи расставляем по приоритету мантиссы: сначала декады, потом 5, 2, 3
-    // и остальное — что не влезло, остаётся линией без числа.
+    // Prefer decade labels. Label intermediate ticks only in a narrow view.
     std::vector<double> labeled;
     auto try_label = [&](double v) {
         auto it = std::lower_bound(labeled.begin(), labeled.end(), v);
@@ -1417,11 +1427,14 @@ std::vector<LogAxisTick> log_axis_ticks(double lo, double hi, float span_px,
 
     std::sort(cand.begin(), cand.end(),
               [](const Cand& a, const Cand& b) { return a.v < b.v; });
-    for (int prio = 0; prio <= 4; ++prio)
+    const auto decades = std::count_if(cand.begin(), cand.end(),
+                                       [](const Cand& c) { return c.prio == 0; });
+    const int max_label_priority = decades >= 2 ? 0 : 4;
+    for (int prio = 0; prio <= max_label_priority; ++prio)
         for (const Cand& c : cand)
             if (c.prio == prio) try_label(c.v);
 
-    if (labeled.size() >= 2) {
+    if (decades >= 2 || labeled.size() >= 2) {
         out.reserve(cand.size());
         for (const Cand& c : cand)
             out.push_back({ c.v, std::binary_search(labeled.begin(), labeled.end(), c.v) });
@@ -1469,7 +1482,6 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     double emin, emax;
     axis_effective(x, emin, emax);
     double vrx = emax - emin;
-    if (std::abs(vrx) < 1e-30) return;
 
     double lo = std::min(emin, emax);
     double hi = std::max(emin, emax);
@@ -1481,6 +1493,7 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
     if ((x.log_scale || x.display_log) && lo > 0.0) {
         const double le0 = std::log10(emin), le1 = std::log10(emax);
         const double lvr = le1 - le0;
+        if (lvr == 0.0) return;
         const ImU32 col_minor = dim_grid_col(col_grid);
         for (const LogAxisTick& t : log_axis_ticks(lo, hi, plot_w, true)) {
             float px = axis_px(pos.x + (float)((std::log10(t.value) - le0) / lvr) * plot_w,
@@ -1493,6 +1506,8 @@ void draw_axis_x_grid(ImDrawList* dl, const AxisInfo& x,
         }
         return;
     }
+
+    if (std::abs(vrx) < 1e-30) return;
 
     // Шаг тиков — «красивое» число, к узлам параметрической сетки он больше не
     // притягивается. Привязка давала подписи вида 4, 5.6, 7.2 — читаются хуже
@@ -1571,7 +1586,6 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     double emin, emax;
     axis_effective(y, emin, emax);
     double vry = emax - emin;
-    if (std::abs(vry) < 1e-30) return;
 
     double lo = std::min(emin, emax);
     double hi = std::max(emin, emax);
@@ -1581,6 +1595,7 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
     if (y.display_log && lo > 0.0) {
         const double le0 = std::log10(emin), le1 = std::log10(emax);
         const double lvr = le1 - le0;
+        if (lvr == 0.0) return;
         const ImU32 col_minor = dim_grid_col(col_grid);
         for (const LogAxisTick& t : log_axis_ticks(lo, hi, plot_h, false)) {
             float py = axis_px(pos.y + (float)((le1 - std::log10(t.value)) / lvr) * plot_h,
@@ -1593,6 +1608,8 @@ void draw_axis_y_grid(ImDrawList* dl, const AxisInfo& y,
         }
         return;
     }
+
+    if (std::abs(vry) < 1e-30) return;
 
     // Без display_log декадной сетки тут нет намеренно: log_scale по Y — свойство данных, а
     // отображение тогда линейное — тики 10^k встали бы не там, где данные. Остаются границы.
