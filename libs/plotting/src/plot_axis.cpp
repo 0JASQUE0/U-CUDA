@@ -819,7 +819,13 @@ std::string window_prefs_key(const std::string& name) {
     return id == std::string::npos ? name : name.substr(id);
 }
 
-int g_window_scope = -1;   // вкладка приложения текущего кадра (plot_set_window_scope)
+int  g_window_scope     = 0;       // вкладка приложения текущего кадра (plot_set_window_scope)
+bool g_window_scope_set = false;   // вызывалась ли plot_set_window_scope вообще
+
+// Окна одной вкладки: обе рисовались после plot_set_window_scope и с тем же значением.
+bool same_scope(const PlotWindowPrefs& a, const PlotWindowPrefs& b) {
+    return a.has_scope && b.has_scope && a.scope == b.scope;
+}
 
 bool prefs_default(const PlotWindowPrefs& p) {
     return p.toolbar && p.legend && p.x_label && p.x_ticks && p.y_label && p.y_ticks &&
@@ -1035,12 +1041,14 @@ PlotWindowPrefs& plot_window_prefs_current() {
         return fallback;
     }
     PlotWindowPrefs& p = window_prefs()[window_prefs_key(w->Name)];
-    p.scope = g_window_scope;
+    p.scope     = g_window_scope;
+    p.has_scope = g_window_scope_set;
     return p;
 }
 
 void plot_set_window_scope(int scope) {
-    g_window_scope = scope;
+    g_window_scope     = scope;
+    g_window_scope_set = true;
 }
 
 bool plot_toolbar_hidden() {
@@ -1129,9 +1137,9 @@ void plot_legend_menu(PlotWindowPrefs& p, bool has_best) {
     if (!legend_placement_menu(p.legend_place, has_best, spread)) return;
     ImGui::MarkIniSettingsDirty();
     const ImGuiIO& io = ImGui::GetIO();
-    if ((spread || (io.KeyCtrl && io.KeyShift)) && p.scope >= 0)
+    if (spread || (io.KeyCtrl && io.KeyShift))
         for (auto& [name, other] : window_prefs())
-            if (other.scope == p.scope) other.legend_place = p.legend_place;
+            if (same_scope(other, p)) other.legend_place = p.legend_place;
 }
 
 // Галка меню «Show». Ctrl+Shift+клик — то же значение во всех окнах той же вкладки приложения
@@ -1139,9 +1147,9 @@ void plot_legend_menu(PlotWindowPrefs& p, bool has_best) {
 static void prefs_item(PlotWindowPrefs& p, const char* label, bool PlotWindowPrefs::* field) {
     if (!ImGui::MenuItem(label, nullptr, &(p.*field))) return;
     const ImGuiIO& io = ImGui::GetIO();
-    if (io.KeyCtrl && io.KeyShift && p.scope >= 0)
+    if (io.KeyCtrl && io.KeyShift)
         for (auto& [name, other] : window_prefs())
-            if (other.scope == p.scope) other.*field = p.*field;
+            if (same_scope(other, p)) other.*field = p.*field;
     ImGui::MarkIniSettingsDirty();
 }
 
@@ -1159,7 +1167,7 @@ void plot_set_series_color_links(int scope, std::vector<std::vector<std::string>
 }
 
 void plot_series_color_spread(PlotWindowPrefs& p, const std::string& label) {
-    if (p.scope < 0 || label.empty()) return;
+    if (!p.has_scope || label.empty()) return;
     // Подпись и её группа связанных подписей (plot_set_series_color_links) этой вкладки.
     std::vector<std::string> labels{label};
     const auto links = series_color_links().find(p.scope);
@@ -1173,7 +1181,7 @@ void plot_series_color_spread(PlotWindowPrefs& p, const std::string& label) {
     const bool set = it != p.series_colors.end();
     const ImVec4 colour = set ? it->second : ImVec4();
     for (auto& [name, other] : window_prefs()) {
-        if (other.scope != p.scope) continue;
+        if (!same_scope(other, p)) continue;
         for (const std::string& l : labels) {
             if (&other == &p && l == label) continue;
             if (set) other.series_colors[l] = colour;
