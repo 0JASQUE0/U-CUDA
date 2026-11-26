@@ -107,7 +107,7 @@ enum class Scheme { Euler, EulerCromer, ExplicitMidpoint, RK4, DOPRI78, CD, Comp
                     CD10, ComplexCD10, ComplexCD4_10, ComplexCD4S3_10, ComplexCD4S4_10,
                     ImplicitEuler, ImplicitMidpoint, SEMP, SIMP, D, ComplexIEuler,
                     GBS, GBS24, GBS246, GBS2468, GBS246810, GBS24681012, DOPRI78Legacy,
-                    RK45, DOP853, Map, CDFast, CDFP, CDFastFP };
+                    RK45, DOP853, Map, CDFast, CDFP, CDFastFP, RK6 };
 
 // Число стадий K схемы ГБШ (1 у опорной GBS, 2..6 у экстраполяторов), 0 — не ГБШ.
 int gbs_stage_count(Scheme sch);
@@ -149,6 +149,10 @@ extern const MultiDoubleCoef kDopri78B[2][13];
 // коэффициента на ulp, в dd ошибка упирается в полку ~1e-17. Оставлена для сравнения.
 extern const MultiDoubleCoef kDopri78LegacyA[13][12];
 extern const MultiDoubleCoef kDopri78LegacyB[2][13];
+
+// Butcher's seven-stage RK6, stored with the same precision as the other RK tables.
+extern const MultiDoubleCoef kRK6A[7][6];
+extern const MultiDoubleCoef kRK6B[7];
 
 // RK45 — Dormand-Prince 5(4)7M. Коэффициенты — точные дроби (взяты из
 // исходника scipy RK45 и проверены точной арифметикой: b — порядок 5, b^ —

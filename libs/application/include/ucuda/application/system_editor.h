@@ -89,6 +89,7 @@ public:
     bool scheme_cromer = false;
     bool scheme_midpoint = false;
     bool scheme_rk4 = false;
+    bool scheme_rk6 = false;
     bool scheme_dopri78 = false;
     bool scheme_dopri78_legacy = false;   // DOPRI78 (legacy): дроби статьи без уточнения
     bool scheme_rk45 = false;
@@ -420,6 +421,7 @@ public:
                 { scheme_semp,     "SEMP",              Scheme::SEMP },
                 { scheme_simp,     "SIMP",              Scheme::SIMP },
                 { scheme_rk4,      "RK4",               Scheme::RK4 },
+                { scheme_rk6,      "RK6",               Scheme::RK6 },
                 { scheme_ccd4,     "Complex CD4",       Scheme::ComplexCD4 },
                 { scheme_ccd4_10, "Complex CD4_{1-0}", Scheme::ComplexCD4_10 },
                 { scheme_ccd4s3,   "CCD4 (o4s3)",       Scheme::ComplexCD4S3 },

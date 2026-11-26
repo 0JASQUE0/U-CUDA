@@ -230,6 +230,9 @@ static const BuiltinScheme kBuiltinSchemes[] = {
       "solution advances the step; the 4th-order one and the\n"
       "FSAL 7th stage are only for error control).\n"
       "Coefficients are the exact published fractions." },
+    { "RK6",                      6, &AppModel::scheme_rk6,
+      "Butcher (1964): explicit sixth-order Runge-Kutta method.\n"
+      "Seven evaluations of the right-hand side per fixed step." },
     { "DOPRI78",                  8, &AppModel::scheme_dopri78,
       "Dormand-Prince RK8(7)13M, 13 stages, order 8 (the 7th-order\n"
       "embedded solution is computed but not used).\n"

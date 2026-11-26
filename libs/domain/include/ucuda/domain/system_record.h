@@ -31,6 +31,9 @@ struct CustomScheme {
     // попадает в Generate. Тело и паспорт при этом живут, и опорной для
     // обёртки выключенная КРС быть может.
     bool enabled   = true;
+
+    // Full right-hand-side evaluations per fixed step. Zero means unknown.
+    double rhs_per_step = 0.0;
 };
 
 // Полная запись системы в библиотеке: весь ввод (для редактирования) +
@@ -85,6 +88,7 @@ struct SystemRecord {
     bool scheme_cromer   = false;
     bool scheme_midpoint = false;
     bool scheme_rk4      = false;
+    bool scheme_rk6      = false;
     bool scheme_dopri78  = false;
     bool scheme_dopri78_legacy = false;   // DOPRI78 (legacy) — дроби статьи без уточнения
     bool scheme_rk45     = false;         // RK45 — Dormand-Prince 5(4)

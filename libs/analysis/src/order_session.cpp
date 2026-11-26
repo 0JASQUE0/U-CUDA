@@ -118,16 +118,25 @@ OrderRequest build_order_request(const OrderAnalysisSession& s, const OrderConfi
 // Вычислений f на шаг постоянного шага — для оси «вызовы f» Fixed-кривой; 0 — неизвестно.
 // Счёт — scheme_rhs_per_step (codegen): явные схемы, CD-семейство, SEMP/SIMP, GBS, Extr и Comp
 // над ними; неявный полушаг CD — по компонентам, поэтому дробный. Не считаются неявные схемы
-// с Ньютоном (число итераций своё на каждом шаге) и кастомные КРС (тело непрозрачно).
+// с Ньютоном (число итераций своё на каждом шаге) и пользовательские КРС без явной оценки.
 static double perf_rhs_per_step(const OrderAnalysisSession& s, const std::string& scheme,
                                  int cd_fp_iters) {
-    for (const auto& cs : s.custom_schemes) if (cs.name == scheme) return 0.0;
+    for (const auto& custom : s.custom_schemes)
+        if (custom.name == scheme) return custom.rhs_per_step;
+
     ExtrapolationSpec es;
-    CompositionSpec   cs;
-    const std::string base = parse_extrapolation_name(scheme, &es) ? es.base
-                           : parse_composition_name(scheme, &cs)   ? cs.base : std::string();
-    if (!base.empty())
-        for (const auto& c : s.custom_schemes) if (c.name == base) return 0.0;
+    CompositionSpec cs;
+    if (parse_extrapolation_name(scheme, &es)) {
+        for (const auto& custom : s.custom_schemes) {
+            if (custom.name != es.base) continue;
+            double cost = 0.0;
+            for (int substeps : es.n) cost += substeps * custom.rhs_per_step;
+            return cost;
+        }
+    } else if (parse_composition_name(scheme, &cs)) {
+        for (const auto& custom : s.custom_schemes)
+            if (custom.name == cs.base) return cs.gammas.size() * custom.rhs_per_step;
+    }
     System sys = s.sys;   // CD FP: цена шага по n этого конфига
     sys.cd_fp_iters = cd_fp_iters;
     return scheme_rhs_per_step(sys, scheme);

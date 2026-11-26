@@ -126,6 +126,7 @@ Json generated_sources() {
         system.rhs = model == 0 ? std::vector<std::string>{"-p*x","-2*y"} : model == 1
             ? std::vector<std::string>{"y","-x-p*y+x*x"} : std::vector<std::string>{"p*cos(t)-x","-2*y"};
         for (const auto& method : regression::builtin_cases()) {
+            if (std::string(method.name) == "RK6") continue;  // Absent from the upstream comparison.
             const auto key = std::to_string(model) + "." + method.name;
             try { result[key] = {{"source", codegen_scheme(system, method.scheme)}}; }
             catch (const std::exception& e) { result[key] = {{"rejection", e.what()}}; }
@@ -137,6 +138,7 @@ Json interpreted_cpu() {
     Json result = Json::object();
     const double initial[] = {1,1}, parameters[] = {.5,4,1e-12,25,0};
     for (const auto& method : regression::builtin_cases()) {
+        if (std::string(method.name) == "RK6") continue;  // Absent from the upstream comparison.
         const bool map = method.scheme == Scheme::Map;
         System sys; sys.vars = {"x","y"}; sys.is_map = map;
         sys.rhs = map ? std::vector<std::string>{"x+0.125","y-0.25"} : std::vector<std::string>{"-x","-2*y"};

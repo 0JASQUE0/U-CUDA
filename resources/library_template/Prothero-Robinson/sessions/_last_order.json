@@ -1,0 +1,113 @@
+{
+  "active_config_index": 0,
+  "configs": [
+    {
+      "label": "E23",
+      "scheme": "E23",
+      "calc_kind": 1,
+      "symmetry_s": "0.5",
+      "axis_x_lo_text": "0.000125",
+      "axis_x_hi_text": "0.0235",
+      "axis_x_n_text": "26",
+      "axis_x_log": true,
+      "t_max_text": "10",
+      "use_gpu": false,
+      "cpu_precision": 1,
+      "snap_steps": true,
+      "endpoint_only": false,
+      "perf_ref_scheme": "DOPRI78",
+      "perf_ref_substeps_text": "64",
+      "perf_warmup_text": "2",
+      "perf_repeats_text": "20",
+      "initial_conditions": {
+        "s": "0",
+        "c": "1",
+        "y": "0.001"
+      },
+      "param_values": {
+        "lambda": "-1000"
+      }
+    },
+    {
+      "label": "Extr123",
+      "scheme": "Extr(CD|1,2,3)",
+      "calc_kind": 1,
+      "symmetry_s": "0.5",
+      "axis_x_lo_text": "0.000125",
+      "axis_x_hi_text": "0.0235",
+      "axis_x_n_text": "26",
+      "axis_x_log": true,
+      "t_max_text": "10",
+      "use_gpu": false,
+      "cpu_precision": 1,
+      "snap_steps": true,
+      "endpoint_only": false,
+      "perf_ref_scheme": "DOPRI78",
+      "perf_ref_substeps_text": "64",
+      "perf_warmup_text": "2",
+      "perf_repeats_text": "20",
+      "initial_conditions": {
+        "s": "0",
+        "c": "1",
+        "y": "0.001"
+      },
+      "param_values": {
+        "lambda": "-1000"
+      }
+    },
+    {
+      "label": "GBS 6",
+      "scheme": "GBS 2-4-6",
+      "calc_kind": 1,
+      "symmetry_s": "0.5",
+      "axis_x_lo_text": "0.000125",
+      "axis_x_hi_text": "0.0235",
+      "axis_x_n_text": "26",
+      "axis_x_log": true,
+      "t_max_text": "10",
+      "use_gpu": false,
+      "cpu_precision": 1,
+      "snap_steps": true,
+      "endpoint_only": false,
+      "perf_ref_scheme": "DOPRI78",
+      "perf_ref_substeps_text": "64",
+      "perf_warmup_text": "2",
+      "perf_repeats_text": "20",
+      "initial_conditions": {
+        "s": "0",
+        "c": "1",
+        "y": "0.001"
+      },
+      "param_values": {
+        "lambda": "-1000"
+      }
+    },
+    {
+      "label": "RK6",
+      "scheme": "RK6",
+      "calc_kind": 1,
+      "symmetry_s": "0.5",
+      "axis_x_lo_text": "0.000125",
+      "axis_x_hi_text": "0.0235",
+      "axis_x_n_text": "26",
+      "axis_x_log": true,
+      "t_max_text": "10",
+      "use_gpu": false,
+      "cpu_precision": 1,
+      "snap_steps": true,
+      "endpoint_only": false,
+      "perf_ref_scheme": "DOPRI78",
+      "perf_ref_substeps_text": "64",
+      "perf_warmup_text": "2",
+      "perf_repeats_text": "20",
+      "initial_conditions": {
+        "s": "0",
+        "c": "1",
+        "y": "0.001"
+      },
+      "param_values": {
+        "lambda": "-1000"
+      }
+    }
+  ]
+}

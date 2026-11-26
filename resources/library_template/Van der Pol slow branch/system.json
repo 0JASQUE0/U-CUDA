@@ -1,0 +1,40 @@
+{
+  "name": "Van der Pol slow branch",
+  "note": "mu = 1000, slow segment on [0, 50]. Initial velocity uses the slow-manifold expansion through order mu^-3 at x = 2.",
+  "kind": "ode",
+  "mode": "Plain",
+  "plain_text": "x' = y \\\\\ny' = mu*(1-x*x)*y - x",
+  "vars_text": "x, y",
+  "params_text": "mu",
+  "param_order": "AsInAlphabet",
+  "scheme_euler": false,
+  "scheme_cromer": false,
+  "scheme_midpoint": false,
+  "scheme_rk4": false,
+  "scheme_cd": true,
+  "scheme_gbs246": true,
+  "scheme_dopri78": true,
+  "scheme_dop853": true,
+  "symmetry_s": "0.5",
+  "init_conditions": {
+    "x": "2",
+    "y": "-0.0006666665432098765"
+  },
+  "param_values": {
+    "mu": "1000"
+  },
+  "custom_schemes": [
+    {
+      "name": "E23",
+      "body": "    const numb mu = a[1];\n    const numb beta2 = numb(0.28867513459481287) + numb(1.6725140369678172e-17);\n    const numb beta3 = numb(0.23570226039551584) + numb(2.3915615546644207e-18);\n    const numb third = numb(1) / numb(3);\n    const ucmplx row2[] = {ucmplx(numb(0.5), -beta2), ucmplx(numb(0.5), beta2)};\n    const ucmplx row3[] = {ucmplx(third, -beta3), ucmplx(third, numb(0)), ucmplx(third, beta3)};\n\n    auto cd = [&](ucmplx* z, const ucmplx& fraction) {\n        const ucmplx t = fraction * (h * numb(0.5));\n        ucmplx& x = z[0];\n        ucmplx& y = z[1];\n        x = x + t * y;\n        const ucmplx rate = mu * (numb(1) - x*x);\n        y = y + t * (rate*y - x);\n        y = (y - t*x) / (numb(1) - t*rate);\n        x = x + t * y;\n    };\n\n    ucmplx y2[2], y3[2];\n    for (int i = 0; i < 2; ++i) {\n        y2[i] = ucmplx(X[i], numb(0));\n        y3[i] = y2[i];\n    }\n    for (const auto& c : row2) cd(y2, c);\n    for (const auto& c : row3) cd(y3, c);\n    const numb w2 = -numb(1) / numb(5);\n    const numb w3 = numb(6) / numb(5);\n    for (int i = 0; i < 2; ++i) X[i] = w2 * y2[i].re + w3 * y3[i].re;\n",
+      "order": "6",
+      "symmetric": "1",
+      "enabled": "1",
+      "rhs_per_step": "10"
+    }
+  ],
+  "extr_schemes": [
+    "Extr(CD|1,2,3)"
+  ],
+  "scheme_rk6": true
+}

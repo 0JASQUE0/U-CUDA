@@ -117,6 +117,45 @@ int main() {
             ut::require(okk, std::string("Order ") + nm + ": " + c.last_error);
         }
 
+        // Custom costs flow through the same Performance run as built-in costs.
+        for (bool gpu : {false, true}) {
+            OrderAnalysisSession o;
+            o.load_from_record(r, vars, params);
+            o.sys = sys;
+            o.custom_schemes.push_back({"CustomEuler", "X[0] += h * (X[1] - X[0]);"});
+            OrderConfig& c = o.configs[0];
+            c.calc_kind = kOrderCalcPerf;
+            c.use_gpu = gpu;
+            c.axis_x_lo_text = "0.01"; c.axis_x_hi_text = "0.02"; c.axis_x_n_text = "3";
+            c.t_max_text = "0.1";
+            c.perf_repeats_text = "1"; c.perf_warmup_text = "0";
+            c.perf_ref_substeps_text = "0";
+
+            auto run_with_cost = [&](const char* scheme, double cost) {
+                c.scheme = scheme;
+                const bool ok = o.run_async(eng, 0);
+                ut::require(ok, "custom Performance setup: " + c.last_error);
+                wait(o);
+                ut::require(c.perf_last_run_ok && c.perf_result.ok,
+                            "custom Performance result: " + c.last_error);
+                const auto& result = c.perf_result;
+                ut::require(!result.n_rhs.empty() && result.n_rhs.size() == result.n_steps.size(),
+                            "custom Performance needs a cost entry per node");
+                for (size_t i = 0; i < result.n_rhs.size(); ++i) {
+                    ut::require(result.n_steps[i] > 0, "custom Performance node must run steps");
+                    if (cost > 0.0)
+                        ut::require(result.n_rhs[i] == cost * result.n_steps[i],
+                                    "custom RHS cost must be multiplied by the number of steps");
+                    else
+                        ut::require(std::isnan(result.n_rhs[i]), "unset custom RHS cost must stay unknown");
+                }
+            };
+            run_with_cost("CustomEuler", 0.0);
+            o.custom_schemes.back().rhs_per_step = 1.25;
+            run_with_cost("CustomEuler", 1.25);
+            run_with_cost("Extr(CustomEuler|1,2)", 3.75);
+        }
+
         // Network: кольцо 16 узлов
         {
             NetworkSession n;

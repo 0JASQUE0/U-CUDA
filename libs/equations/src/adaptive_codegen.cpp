@@ -281,7 +281,7 @@ namespace ucuda::equations_detail {
 bool zb_scheme_ok(Scheme sch) {
         switch (sch) {
         case Scheme::Euler: case Scheme::ExplicitMidpoint: case Scheme::RK4: case Scheme::DOPRI78:
-        case Scheme::DOPRI78Legacy: case Scheme::RK45: case Scheme::DOP853:
+        case Scheme::DOPRI78Legacy: case Scheme::RK45: case Scheme::RK6: case Scheme::DOP853:
         case Scheme::GBS: case Scheme::GBS24: case Scheme::GBS246: case Scheme::GBS2468:
         case Scheme::GBS246810: case Scheme::GBS24681012:
             return true;
@@ -1147,6 +1147,7 @@ Scheme scheme_from_name(const std::string& name) {
     if (name == "Euler-Cromer")      return Scheme::EulerCromer;
     if (name == "Explicit Midpoint") return Scheme::ExplicitMidpoint;
     if (name == "RK4")               return Scheme::RK4;
+    if (name == "RK6")               return Scheme::RK6;
     if (name == "DOPRI78")           return Scheme::DOPRI78;
     if (name == "DOPRI78 (legacy)")  return Scheme::DOPRI78Legacy;
     if (name == "RK45")              return Scheme::RK45;
@@ -1674,7 +1675,7 @@ AdaptiveCode codegen_adaptive_gbs(const System& s, int K) {
 
 int builtin_scheme_rhs_per_step(const std::string& name) {
     static const struct { const char* name; int k; } kTab[] = {
-        { "Euler", 1 }, { "Explicit Midpoint", 2 }, { "RK4", 4 }, { "RK45", 6 },
+        { "Euler", 1 }, { "Explicit Midpoint", 2 }, { "RK4", 4 }, { "RK45", 6 }, { "RK6", 7 },
         { "DOP853", 12 }, { "DOPRI78", 13 }, { "DOPRI78 (legacy)", 13 },
     };
     for (const auto& t : kTab) if (name == t.name) return t.k;
