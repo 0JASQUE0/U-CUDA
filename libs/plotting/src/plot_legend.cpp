@@ -471,6 +471,8 @@ bool legend_placement_menu(LegendPlacement& place, bool has_best, bool& spread_a
         }
     };
     if (ImGui::BeginMenu("Location")) {
+        // Выбор не закрывает меню: положения обычно перебирают, глядя на график.
+        ImGui::PushItemFlag(ImGuiItemFlags_AutoClosePopups, false);
         ImGui::TextDisabled("Inside");
         for (int loc = kLegendNorthEast; loc <= kLegendWest; ++loc) loc_item(loc);
         ImGui::Separator();
@@ -487,6 +489,7 @@ bool legend_placement_menu(LegendPlacement& place, bool has_best, bool& spread_a
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Manual position: drag the legend with the left mouse button.\n"
                               "Dragging switches any location to this one.");
+        ImGui::PopItemFlag();
         ImGui::EndMenu();
     }
     ImGui::Separator();
