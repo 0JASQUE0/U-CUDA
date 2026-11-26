@@ -5,8 +5,150 @@
 #include <cmath>
 #include <algorithm>
 
+namespace {
+constexpr int   kLegendMaxRows   = 20;
+constexpr float kLegendMarkerW   = 14.0f;
+constexpr float kLegendGap       = 4.0f;    // квадрат — подпись
+constexpr float kLegendPad       = 6.0f;    // поле внутри рамки
+constexpr float kLegendInset     = 6.0f;    // отступ внутренних положений от края поля графика
+constexpr float kLegendOutsideGap = 6.0f;   // outside: зазор легенда — оси
+constexpr float kLegendEdge      = 2.0f;    // outside: отступ от края блока
+
+float legend_row_h() { return plot_text_line_height() + 2.0f; }
+
+float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+ImU32 with_alpha(ImU32 c, float a) {
+    const unsigned base = (c >> IM_COL32_A_SHIFT) & 0xFFu;
+    const unsigned aa = (unsigned)std::lround(base * clamp01(a));
+    return (c & ~IM_COL32_A_MASK) | (aa << IM_COL32_A_SHIFT);
+}
+
+// Новое место при протяжке: ручное положение, доли свободного хода внутри поля графика.
+void legend_move_to(LegendPlacement& place, ImVec2 origin, ImVec2 size, const LegendFrame& f) {
+    const float free_x = (f.plot_max.x - f.plot_min.x) - size.x;
+    const float free_y = (f.plot_max.y - f.plot_min.y) - size.y;
+    place.location = kLegendNone;
+    place.pos[0] = free_x > 0.0f ? clamp01((origin.x - f.plot_min.x) / free_x) : 0.0f;
+    place.pos[1] = free_y > 0.0f ? clamp01((origin.y - f.plot_min.y) / free_y) : 0.0f;
+}
+
+constexpr float kLegendColGap = 12.0f;   // между столбцами
+
+// Раскладка записей: показываемые записи (не скрытые глобально, не больше kLegendMaxRows строк
+// на столбец), по столбцам сверху вниз; ширина столбца — по его самой длинной подписи.
+struct LegendLayout {
+    std::vector<int>   idx;            // индексы записей в порядке показа
+    int                rows = 0, cols = 0;
+    std::vector<float> col_x, col_w;   // смещение столбца от левого поля и его ширина
+    ImVec2             size{ 0.0f, 0.0f };
+};
+
+LegendLayout legend_layout(const std::vector<LegendEntry>& entries, const std::vector<bool>& global_visible,
+                           int columns) {
+    LegendLayout L;
+    for (int k = 0; k < (int)entries.size(); ++k)
+        if (k >= (int)global_visible.size() || global_visible[k]) L.idx.push_back(k);
+    if (L.idx.empty()) return L;
+    L.cols = std::clamp(columns, 1, kLegendMaxColumns);
+    L.cols = std::min(L.cols, (int)L.idx.size());
+    if ((int)L.idx.size() > kLegendMaxRows * L.cols) L.idx.resize((size_t)kLegendMaxRows * L.cols);
+    L.rows = ((int)L.idx.size() + L.cols - 1) / L.cols;
+    L.cols = ((int)L.idx.size() + L.rows - 1) / L.rows;   // 5 записей в 4 столбца -> 2 строки, 3 столбца
+    float x = 0.0f;
+    for (int c = 0; c < L.cols; ++c) {
+        float text_w = 0.0f;
+        for (int r = 0; r < L.rows; ++r) {
+            const int i = c * L.rows + r;
+            if (i >= (int)L.idx.size()) break;
+            text_w = std::max(text_w, plot_text_size(entries[L.idx[i]].label.c_str()).x);
+        }
+        if (c > 0) x += kLegendColGap;
+        L.col_x.push_back(x);
+        L.col_w.push_back(kLegendMarkerW + kLegendGap + text_w);
+        x += L.col_w.back();
+    }
+    L.size = ImVec2(x + kLegendPad * 2.0f, L.rows * legend_row_h() + kLegendPad * 2.0f);
+    return L;
+}
+}  // namespace
+
+const char* legend_location_name(int loc) {
+    static const char* const names[kLegendLocationCount] = {
+        "northeast", "northwest", "southeast", "southwest",
+        "north", "south", "east", "west",
+        "northoutside", "southoutside", "eastoutside", "westoutside",
+        "northeastoutside", "northwestoutside", "southeastoutside", "southwestoutside",
+        "best", "none",
+    };
+    return (loc >= 0 && loc < kLegendLocationCount) ? names[loc] : "?";
+}
+
+bool legend_location_outside(int loc) {
+    return loc >= kLegendNorthOutside && loc <= kLegendSouthWestOutside;
+}
+
+bool legend_placement_default(const LegendPlacement& p) {
+    const LegendPlacement d;
+    return p.location == d.location && p.box_line == d.box_line && p.box_fill == d.box_fill &&
+           p.line_alpha == d.line_alpha && p.fill_alpha == d.fill_alpha && p.columns == d.columns;
+}
+
+ImVec2 legend_size(const std::vector<LegendEntry>& entries, const std::vector<bool>& global_visible,
+                   int columns) {
+    return legend_layout(entries, global_visible, columns).size;
+}
+
+void legend_reserve_margins(int loc, ImVec2 size, float& left, float& top, float& right, float& bottom) {
+    if (size.x <= 0.0f || size.y <= 0.0f) return;
+    switch (loc) {
+    case kLegendNorthOutside: top    += size.y + kLegendOutsideGap; break;
+    case kLegendSouthOutside: bottom += size.y + kLegendOutsideGap; break;
+    case kLegendEastOutside: case kLegendNorthEastOutside: case kLegendSouthEastOutside:
+        right += size.x + kLegendOutsideGap; break;
+    case kLegendWestOutside: case kLegendNorthWestOutside: case kLegendSouthWestOutside:
+        left  += size.x + kLegendOutsideGap; break;
+    default: break;
+    }
+}
+
+ImVec2 legend_origin(int loc, const LegendPlacement& place, ImVec2 s, const LegendFrame& f) {
+    if (loc == kLegendBest) loc = (f.best >= 0 && f.best < kLegendBest) ? f.best : kLegendNorthEast;
+    const ImVec2 P0 = f.plot_min, P1 = f.plot_max, B0 = f.block_min, B1 = f.block_max;
+    const float  cx = 0.5f * (P0.x + P1.x) - 0.5f * s.x;
+    const float  cy = 0.5f * (P0.y + P1.y) - 0.5f * s.y;
+    const float  in_l = P0.x + kLegendInset, in_r = P1.x - s.x - kLegendInset;
+    const float  in_t = P0.y + kLegendInset, in_b = P1.y - s.y - kLegendInset;
+    const float  out_l = B0.x + kLegendEdge, out_r = B1.x - s.x - kLegendEdge;
+    switch (loc) {
+    case kLegendNorthWest:        return ImVec2(in_l, in_t);
+    case kLegendSouthEast:        return ImVec2(in_r, in_b);
+    case kLegendSouthWest:        return ImVec2(in_l, in_b);
+    case kLegendNorth:            return ImVec2(cx, in_t);
+    case kLegendSouth:            return ImVec2(cx, in_b);
+    case kLegendEast:             return ImVec2(in_r, cy);
+    case kLegendWest:             return ImVec2(in_l, cy);
+    case kLegendNorthOutside:     return ImVec2(cx, B0.y + kLegendEdge);
+    case kLegendSouthOutside:     return ImVec2(cx, B1.y - s.y - kLegendEdge);
+    case kLegendEastOutside:      return ImVec2(out_r, cy);
+    case kLegendWestOutside:      return ImVec2(out_l, cy);
+    case kLegendNorthEastOutside: return ImVec2(out_r, P0.y);
+    case kLegendNorthWestOutside: return ImVec2(out_l, P0.y);
+    case kLegendSouthEastOutside: return ImVec2(out_r, P1.y - s.y);
+    case kLegendSouthWestOutside: return ImVec2(out_l, P1.y - s.y);
+    case kLegendNone: {
+        const float free_x = std::max(0.0f, (P1.x - P0.x) - s.x);
+        const float free_y = std::max(0.0f, (P1.y - P0.y) - s.y);
+        return ImVec2(std::floor(P0.x + clamp01(place.pos[0]) * free_x),
+                      std::floor(P0.y + clamp01(place.pos[1]) * free_y));
+    }
+    case kLegendNorthEast:
+    default:                      return ImVec2(in_r, in_t);
+    }
+}
+
 void draw_legend(ImDrawList* dl,
-    ImVec2 img_pos, float plot_w,
+    const LegendFrame& frame, LegendPlacement& place,
     const std::vector<LegendEntry>& entries,
     std::vector<bool>& visible,
     const std::vector<bool>& global_visible,
@@ -14,58 +156,74 @@ void draw_legend(ImDrawList* dl,
     LegendPass pass,
     LegendRightClick* out_clicks)
 {
+    // Оба прохода сразу — сначала клики (протяжка меняет place), потом визуал уже на новом
+    // месте: иначе легенда отставала бы от курсора на кадр.
+    if (pass == LegendPass::Both) {
+        draw_legend(dl, frame, place, entries, visible, global_visible, owner_id, LegendPass::Interact, out_clicks);
+        draw_legend(dl, frame, place, entries, visible, global_visible, owner_id, LegendPass::Draw, out_clicks);
+        return;
+    }
     const bool do_visual   = (pass != LegendPass::Interact);
     const bool do_interact = (pass != LegendPass::Draw);
 
-    auto is_global_vis = [&](int k) -> bool {
-        return (k < (int)global_visible.size()) ? global_visible[k] : true;
-        };
+    const LegendLayout layout = legend_layout(entries, global_visible, place.columns);
+    const ImVec2 size = layout.size;
+    if (size.x <= 0.0f) return; // рисовать нечего
+    const float row_h    = legend_row_h();
+    const float marker_w = kLegendMarkerW;
+    const float gap      = kLegendGap;
+    const float pad      = kLegendPad;
 
-    float line_h = plot_text_line_height();
-    float row_h = line_h + 2;
-    float marker_w = 14;
-    float gap = 4;
+    ImVec2 leg_min = legend_origin(place.location, place, size, frame);
+    ImVec2 leg_max = ImVec2(leg_min.x + size.x, leg_min.y + size.y);
 
-    // Ширина панели — по самой длинной подписи среди показываемых записей
-    float max_text_w = 0;
-    int visible_count = 0;
-    for (int k = 0; k < (int)entries.size(); ++k) {
-        if (!is_global_vis(k)) continue;
-        max_text_w = std::max(max_text_w, plot_text_size(entries[k].label.c_str()).x);
-        ++visible_count;
-    }
-    if (visible_count == 0) return; // рисовать нечего
-
-    float pad = 6;
-    float entry_w = marker_w + gap + max_text_w;
-    float legend_w = entry_w + pad * 2;
-    int nrows = std::min(visible_count, 20);
-    float legend_h = nrows * row_h + pad * 2;
-
-    ImVec2 leg_min = ImVec2(img_pos.x + plot_w - legend_w - 6, img_pos.y + 6);
-    ImVec2 leg_max = ImVec2(leg_min.x + legend_w, leg_min.y + legend_h);
+    // Протяжка ЛКМ: начало — по нажатию на строку или на подложку, сдвиг — от угла легенды
+    // в момент нажатия. Состояние — в хранилище окна ImGui (между кадрами, на легенду).
+    char bg_id[48];
+    std::snprintf(bg_id, sizeof(bg_id), "##legend_bg_%d", owner_id);
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    const ImGuiID key = ImGui::GetID(bg_id);
+    const ImGuiID k_drag = key ^ 0x9E3779B1u, k_x = key ^ 0x85EBCA6Bu, k_y = key ^ 0xC2B2AE35u;
+    auto drag_item = [&]() {
+        if (ImGui::IsItemActivated() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            st->SetBool(k_drag, false);
+            st->SetFloat(k_x, leg_min.x);
+            st->SetFloat(k_y, leg_min.y);
+        }
+        if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            // До порога перетаскивания ImGui дельта нулевая: щелчок не сдвигает легенду.
+            const ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+            if (d.x != 0.0f || d.y != 0.0f || st->GetBool(k_drag)) {
+                st->SetBool(k_drag, true);
+                legend_move_to(place, ImVec2(st->GetFloat(k_x) + d.x, st->GetFloat(k_y) + d.y), size, frame);
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+            }
+        }
+        if (ImGui::IsItemDeactivated() && st->GetBool(k_drag))
+            ImGui::MarkIniSettingsDirty();
+    };
 
     if (do_visual) {
-        // Bg+border легенды зависит от темы: на dark — почти-чёрный полупрозрачный
-        // блок, на light — почти-белый. Без этого в light-теме легенда оставалась
-        // чёрным пятном поверх белого плота.
+        // Подложка — цвет фона плота (совпадает и с чёрным фоном High Contrast, и с
+        // пользовательским фоном): на dark — почти-чёрная, на light — почти-белая;
+        // непрозрачность — Box из меню легенды.
         float pr = 0, pg = 0, pb = 0, pa = 1;
         plot_bg_color(pr, pg, pb, pa);
-        // Подложка — цвет фона плота, полупрозрачно: так она совпадает и с
-        // чёрным фоном High Contrast, и с пользовательским фоном.
-        ImU32 bg_col     = plot_bg_is_custom()
-                         ? IM_COL32((int)(pr * 255), (int)(pg * 255), (int)(pb * 255), 210)
-                         : plot_light_theme() ? IM_COL32(248, 248, 248, 200)
-                                              : IM_COL32( 20,  20,  25, 180);
-        ImU32 border_col = plot_col_border();
-        dl->AddRectFilled(leg_min, leg_max, bg_col, 4.0f);
-        dl->AddRect(leg_min, leg_max, border_col, 4.0f);
+        const ImVec4 bg = plot_bg_is_custom() ? ImVec4(pr, pg, pb, 1.0f)
+                        : plot_light_theme()  ? ImVec4(248 / 255.0f, 248 / 255.0f, 248 / 255.0f, 1.0f)
+                                              : ImVec4( 20 / 255.0f,  20 / 255.0f,  25 / 255.0f, 1.0f);
+        const float fill_a = clamp01(place.fill_alpha);
+        if (place.box_fill && fill_a > 0.0f)
+            dl->AddRectFilled(leg_min, leg_max,
+                              ImGui::ColorConvertFloat4ToU32(ImVec4(bg.x, bg.y, bg.z, fill_a)), 4.0f);
+        if (place.box_line && place.line_alpha > 0.0f)
+            dl->AddRect(leg_min, leg_max, with_alpha(plot_col_border(), place.line_alpha), 4.0f);
     }
 
-    int row = 0;
-    for (int k = 0; k < (int)entries.size(); ++k) {
-        if (!is_global_vis(k)) continue;   // скрытые глобально не показываем
-        if (row >= 20) break;
+    for (int i = 0; i < (int)layout.idx.size(); ++i) {
+        const int k   = layout.idx[i];          // скрытые глобально в раскладку не попали
+        const int col = i / layout.rows, row = i % layout.rows;
+        const float col_x = leg_min.x + pad + layout.col_x[col];
         bool v = (k < (int)visible.size()) ? visible[k] : true;
         ImVec4 c = entries[k].color;
         if (!v) c.w *= 0.35f;
@@ -80,7 +238,7 @@ void draw_legend(ImDrawList* dl,
             text_cu = (base & ~IM_COL32_A_MASK) | (aa << IM_COL32_A_SHIFT);
         }
         float row_y = leg_min.y + pad + row * row_h;
-        ImVec2 mmin = ImVec2(leg_min.x + pad, row_y + 2);
+        ImVec2 mmin = ImVec2(col_x, row_y + 2);
         ImVec2 mmax = ImVec2(mmin.x + marker_w, row_y + row_h - 2);
         if (do_visual) {
             dl->AddRectFilled(mmin, mmax, cu);
@@ -90,8 +248,8 @@ void draw_legend(ImDrawList* dl,
                 dl->AddRect(mmin, mmax, plot_col_text(), 0.0f, 0, 1.5f);
             plot_text(dl, ImVec2(mmax.x + gap, row_y), text_cu, entries[k].label.c_str());
         }
-        ImVec2 emin = ImVec2(leg_min.x + pad, row_y);
-        ImVec2 emax = ImVec2(leg_max.x - pad, row_y + row_h);
+        ImVec2 emin = ImVec2(col_x, row_y);
+        ImVec2 emax = ImVec2(col_x + layout.col_w[col], row_y + row_h);
 
         if (do_interact) {
             ImGui::SetCursorScreenPos(emin);
@@ -100,11 +258,12 @@ void draw_legend(ImDrawList* dl,
             // ПКМ включаем явно: по умолчанию InvisibleButton слушает только ЛКМ.
             // Меню плота от этого не страдает — его InvisibleButton подан ПОЗЖЕ и
             // под легендой hover не получает (первый item в кадре выигрывает).
-            ImGui::InvisibleButton(btn_id, ImVec2(emax.x - emin.x, emax.y - emin.y),
+            const bool released = ImGui::InvisibleButton(btn_id, ImVec2(emax.x - emin.x, emax.y - emin.y),
                 ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
-            if (do_visual && ImGui::IsItemHovered())
-                dl->AddRectFilled(emin, emax, IM_COL32(255, 255, 255, 18));
-            if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+            drag_item();
+            // Гасим серию по ОТПУСКАНИЮ ЛКМ и только если легенду не тянули: нажатие на строку
+            // может оказаться началом протяжки.
+            if (released && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !st->GetBool(k_drag)) {
                 if (k < (int)visible.size()) visible[k] = !visible[k];
             }
             // Меню цвета — только по цветному квадрату. Промах мимо него (по
@@ -123,7 +282,19 @@ void draw_legend(ImDrawList* dl,
             if (ImGui::IsMouseHoveringRect(emin, emax, false))
                 dl->AddRectFilled(emin, emax, IM_COL32(255, 255, 255, 18));
         }
-        ++row;
+    }
+
+    // Подложка целиком (поля вокруг строк) — тоже ручка протяжки. Подана ПОСЛЕ строк: те
+    // поданы раньше и hover над собой оставляют себе. Плот подаёт свою кнопку ещё позже,
+    // так что ЛКМ по легенде не тянет вид, а ПКМ по полям — его обычное меню.
+    if (do_interact) {
+        ImGui::SetCursorScreenPos(leg_min);
+        ImGui::InvisibleButton(bg_id, size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+        drag_item();
+        if (ImGui::IsItemHovered() && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        if (out_clicks && ImGui::IsItemClicked(ImGuiMouseButton_Right))
+            out_clicks->row_other = true;
     }
 }
 
@@ -287,4 +458,77 @@ bool legend_color_popup(const char* pop_id, const std::string& target,
                           target.c_str());
     ImGui::EndPopup();
     return spread;
+}
+
+bool legend_placement_menu(LegendPlacement& place, bool has_best, bool& spread_all) {
+    spread_all = false;
+    if (!ImGui::BeginMenu("Legend")) return false;
+    bool changed = false;
+    auto loc_item = [&](int loc) {
+        if (ImGui::MenuItem(legend_location_name(loc), nullptr, place.location == loc) && place.location != loc) {
+            place.location = loc;
+            changed = true;
+        }
+    };
+    if (ImGui::BeginMenu("Location")) {
+        ImGui::TextDisabled("Inside");
+        for (int loc = kLegendNorthEast; loc <= kLegendWest; ++loc) loc_item(loc);
+        ImGui::Separator();
+        ImGui::TextDisabled("Outside (the plot shrinks)");
+        for (int loc = kLegendNorthOutside; loc <= kLegendSouthWestOutside; ++loc) loc_item(loc);
+        ImGui::Separator();
+        if (!has_best) ImGui::BeginDisabled();
+        loc_item(kLegendBest);
+        if (!has_best) ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(has_best ? "Inside position that covers the fewest data points."
+                                       : "Not available in this plot.");
+        loc_item(kLegendNone);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Manual position: drag the legend with the left mouse button.\n"
+                              "Dragging switches any location to this one.");
+        ImGui::EndMenu();
+    }
+    ImGui::Separator();
+    // Галка и ползунки не закрывают меню: Box обычно подбирают несколькими правками подряд.
+    ImGui::PushItemFlag(ImGuiItemFlags_AutoClosePopups, false);
+    changed |= ImGui::MenuItem("Box line", nullptr, &place.box_line);
+    ImGui::PopItemFlag();
+    const float w = ImGui::GetFontSize() * 9.0f;
+    if (!place.box_line) ImGui::BeginDisabled();
+    float line_pct = place.line_alpha * 100.0f;
+    ImGui::SetNextItemWidth(w);
+    if (ImGui::SliderFloat("Line opacity", &line_pct, 0.0f, 100.0f, "%.0f %%", ImGuiSliderFlags_AlwaysClamp)) {
+        place.line_alpha = line_pct / 100.0f;
+        changed = true;
+    }
+    if (!place.box_line) ImGui::EndDisabled();
+    ImGui::PushItemFlag(ImGuiItemFlags_AutoClosePopups, false);
+    changed |= ImGui::MenuItem("Box fill", nullptr, &place.box_fill);
+    ImGui::PopItemFlag();
+    if (!place.box_fill) ImGui::BeginDisabled();
+    float fill_pct = place.fill_alpha * 100.0f;
+    ImGui::SetNextItemWidth(w);
+    if (ImGui::SliderFloat("Fill opacity", &fill_pct, 0.0f, 100.0f, "%.0f %%", ImGuiSliderFlags_AlwaysClamp)) {
+        place.fill_alpha = fill_pct / 100.0f;
+        changed = true;
+    }
+    if (!place.box_fill) ImGui::EndDisabled();
+    ImGui::Separator();
+    ImGui::SetNextItemWidth(w);
+    if (ImGui::SliderInt("Columns", &place.columns, 1, kLegendMaxColumns, "%d", ImGuiSliderFlags_AlwaysClamp))
+        changed = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Number of legend columns (MATLAB NumColumns).\n"
+                          "Entries fill each column top to bottom, columns go left to right.");
+    ImGui::Separator();
+    if (ImGui::MenuItem("Reset legend", nullptr, false, !legend_placement_default(place))) {
+        place = LegendPlacement{};
+        changed = true;
+    }
+    if (ImGui::MenuItem("Apply to all plots of this tab")) spread_all = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Same location and box in every plot of this tab.");
+    ImGui::EndMenu();
+    return changed || spread_all;
 }

@@ -126,10 +126,33 @@ void Plot3DView::render(PlotRenderer& renderer,
         return loc && glob;
         };
 
+    // Цвет серии: пользовательский (меню легенды) поверх цвета вызывающего, альфа — его.
+    auto series_color = [&](const PlotSeriesInput3D& s) -> ImVec4 {
+        auto it = wp.series_colors.find(s.label);
+        if (it == wp.series_colors.end()) return s.color;
+        return ImVec4(it->second.x, it->second.y, it->second.z, s.color.w);
+        };
+
+    // Записи легенды — до размеров поля: положение *outside забирает у него место.
+    std::vector<LegendEntry> legend_entries;
+    ImVec2 legend_sz(0.0f, 0.0f);
+    if (legend_on) {
+        legend_entries.reserve(series_in.size());
+        for (const auto& s : series_in) {
+            LegendEntry e{ s.label, series_color(s) };
+            e.color.w = 1.0f;   // см. Plot2DView: ярлык не гаснет вместе с кривой
+            legend_entries.push_back(e);
+        }
+        legend_sz = legend_size(legend_entries, global_visible, wp.legend_place.columns);
+    }
+
     // Размер поля нужен до автофита: от его соотношения сторон зависит масштаб осей.
     const float margin = wp.fit_pane ? plot_compact_margin() : 4.0f;
-    int plot_w = (std::max)(64, (int)(avail_size.x - margin * 2));
-    int plot_h = (std::max)(64, (int)(avail_size.y - margin * 2));
+    float margin_l = margin, margin_t = margin, margin_r = margin, margin_b = margin;
+    if (legend_on)
+        legend_reserve_margins(wp.legend_place.location, legend_sz, margin_l, margin_t, margin_r, margin_b);
+    int plot_w = (std::max)(64, (int)(avail_size.x - margin_l - margin_r));
+    int plot_h = (std::max)(64, (int)(avail_size.y - margin_t - margin_b));
     // Окно растянули при «Fit axes to window» — заново вписываем портрет (если автофит не
     // выключен: тогда пользовательский вид не трогаем, только масштаб осей ниже).
     const float aspect_now = (float)plot_w / (float)plot_h;
@@ -151,19 +174,12 @@ void Plot3DView::render(PlotRenderer& renderer,
             }
     }
 
-    // Цвет серии: пользовательский (меню легенды) поверх цвета вызывающего, альфа — его.
-    auto series_color = [&](const PlotSeriesInput3D& s) -> ImVec4 {
-        auto it = wp.series_colors.find(s.label);
-        if (it == wp.series_colors.end()) return s.color;
-        return ImVec4(it->second.x, it->second.y, it->second.z, s.color.w);
-        };
-
     // 3. Отступы и размеры (3D не нужен margin под подписи осей, они лежат внутри -
     //    но небольшой зазор от краёв оставляем, чтобы рамка ImGui не сливалась с полем)
     // Fit to pane — узкое поле, как у 2D и карт; без него — прежний зазор (размеры — выше).
 
     ImGui::Dummy(avail_size);
-    ImVec2 img_pos = ImVec2(block_origin.x + margin, block_origin.y + margin);
+    ImVec2 img_pos = ImVec2(block_origin.x + margin_l, block_origin.y + margin_t);
     last_img_pos  = img_pos;
     last_img_size = ImVec2((float)plot_w, (float)plot_h);
 
@@ -343,14 +359,13 @@ void Plot3DView::render(PlotRenderer& renderer,
     // 6. Легенда. ПКМ по квадрату — меню цвета, по строке мимо — меню плота (как в 2D).
     LegendRightClick legend_rclick;
     if (legend_on) {
-        std::vector<LegendEntry> entries;
-        entries.reserve(series_in.size());
-        for (const auto& s : series_in) {
-            LegendEntry e{ s.label, series_color(s) };
-            e.color.w = 1.0f;   // см. Plot2DView: ярлык не гаснет вместе с кривой
-            entries.push_back(e);
-        }
-        draw_legend(dl, img_pos, (float)plot_w, entries, visible, global_visible, owner_id,
+        // best в 3D не разрешается (данные — в проекции камеры): остаётся northeast.
+        LegendFrame frame;
+        frame.plot_min  = img_pos;
+        frame.plot_max  = ImVec2(img_pos.x + plot_w, img_pos.y + plot_h);
+        frame.block_min = block_origin;
+        frame.block_max = ImVec2(block_origin.x + avail_size.x, block_origin.y + avail_size.y);
+        draw_legend(dl, frame, wp.legend_place, legend_entries, visible, global_visible, owner_id,
                     LegendPass::Both, &legend_rclick);
     }
 
@@ -456,6 +471,7 @@ void Plot3DView::render(PlotRenderer& renderer,
         plot_toolbar_menu();   // элементы тулбара окна (plot_axis.h)
         plot_show_menu(wp, (show_legend ? PlotShowLegend : 0u) | (show_axes ? PlotShowAxes3D : 0u) |
                            (external_colorbar ? PlotShowColorbar : 0u));
+        if (show_legend) plot_legend_menu(wp, false);
         ImGui::Separator();
         if (ImGui::MenuItem("Copy image to clipboard")) {
             request_plot_screenshot(block_origin,

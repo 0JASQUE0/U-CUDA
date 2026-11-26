@@ -486,6 +486,24 @@ void Plot2DView::render(PlotRenderer& renderer,
         if (!x_shown && !y_shown) margin_bottom = compact;
         margin_top += band_height;
     }
+    // Записи легенды — до полей: положение *outside забирает место у поля графика.
+    std::vector<LegendEntry> legend_entries;
+    ImVec2 legend_sz(0.0f, 0.0f);
+    if (legend_on) {
+        legend_entries.reserve(series_in.size());
+        for (const auto& s : series_in) {
+            LegendEntry e{ s.label, series_color(s) };
+            // Квадрат в легенде ОПОЗНАЁТ серию, поэтому всегда непрозрачен:
+            // слайдер Alpha гасит саму кривую, а не ярлык. Полупрозрачный
+            // маркер к тому же сливался с фоном легенды, а на скрытой записи
+            // (visible == false) множился на 0.35 и исчезал совсем.
+            e.color.w = 1.0f;
+            legend_entries.push_back(e);
+        }
+        legend_sz = legend_size(legend_entries, global_visible, wp.legend_place.columns);
+        legend_reserve_margins(wp.legend_place.location, legend_sz,
+                               margin_left, margin_top, margin_right, margin_bottom);
+    }
     last_margin_left   = margin_left;
     last_margin_top    = margin_top;
     last_margin_right  = margin_right;
@@ -814,22 +832,39 @@ void Plot2DView::render(PlotRenderer& renderer,
     // ДО плота-InvisibleButton (line ~178), чтобы легенда получала клики как
     // и раньше. Сам визуал легенды рисуем в самом конце — тогда линии данных
     // (imdraw_lines-путь ниже) не перекроют её.
-    std::vector<LegendEntry> legend_entries;
     LegendRightClick legend_rclick;   // ПКМ по легенде: квадрат -> цвет, мимо -> меню плота
-    if (legend_on) {
-        legend_entries.reserve(series_in.size());
-        for (const auto& s : series_in) {
-            LegendEntry e{ s.label, series_color(s) };
-            // Квадрат в легенде ОПОЗНАЁТ серию, поэтому всегда непрозрачен:
-            // слайдер Alpha гасит саму кривую, а не ярлык. Полупрозрачный
-            // маркер к тому же сливался с фоном легенды, а на скрытой записи
-            // (visible == false) множился на 0.35 и исчезал совсем.
-            e.color.w = 1.0f;
-            legend_entries.push_back(e);
+    LegendFrame legend_frame;
+    legend_frame.plot_min  = img_pos;
+    legend_frame.plot_max  = ImVec2(img_pos.x + plot_w, img_pos.y + plot_h);
+    legend_frame.block_min = block_origin;
+    legend_frame.block_max = ImVec2(block_origin.x + avail_size.x, block_origin.y + avail_size.y);
+    if (legend_on && wp.legend_place.location == kLegendBest && legend_sz.x > 0.0f && sx1 != sx0 && sy1 != sy0) {
+        // best (как в MATLAB): внутреннее положение, под которым меньше всего точек видимых
+        // серий. Точки — с шагом, не больше ~4000 на серию: важна доля, а не точный счёт.
+        // При равенстве — первое по порядку MATLAB (northeast, northwest, ...).
+        int counts[kLegendWest + 1] = {};
+        ImVec2 mins[kLegendWest + 1];
+        for (int loc = 0; loc <= kLegendWest; ++loc)
+            mins[loc] = legend_origin(loc, wp.legend_place, legend_sz, legend_frame);
+        const double kx = plot_w / (sx1 - sx0), ky = plot_h / (sy1 - sy0);
+        for (int k = 0; k < (int)series_in.size(); ++k) {
+            const PlotSeriesInput& s = series_in[k];
+            if (!eff_visible(k) || !s.points || s.n_points <= 0) continue;
+            const int step = std::max(1, s.n_points / 4000);
+            for (int i = 0; i < s.n_points; i += step) {
+                const float px = img_pos.x + (float)((XS(s.points[2 * i]) - sx0) * kx);
+                const float py = img_pos.y + (float)((sy1 - YS(s.points[2 * i + 1])) * ky);
+                if (!std::isfinite(px) || !std::isfinite(py)) continue;
+                for (int loc = 0; loc <= kLegendWest; ++loc)
+                    if (px >= mins[loc].x && px <= mins[loc].x + legend_sz.x &&
+                        py >= mins[loc].y && py <= mins[loc].y + legend_sz.y) ++counts[loc];
+            }
         }
-        draw_legend(dl, img_pos, (float)plot_w, legend_entries, visible, global_visible,
-                    owner_id, LegendPass::Interact, &legend_rclick);
+        legend_frame.best = (int)(std::min_element(counts, counts + kLegendWest + 1) - counts);
     }
+    if (legend_on)
+        draw_legend(dl, legend_frame, wp.legend_place, legend_entries, visible, global_visible,
+                    owner_id, LegendPass::Interact, &legend_rclick);
 
     // 7. Зоны взаимодействия
     ImGui::SetCursorScreenPos(ImVec2(img_pos.x, img_pos.y + plot_h));
@@ -1151,7 +1186,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         // &legend_rclick и здесь: в Draw-проходе клики не ловятся, указатель
         // служит признаком «меню цвета есть» — по нему рисуется рамка-подсказка
         // на наведении цветного квадрата (см. plot_legend.h).
-        draw_legend(dl, img_pos, (float)plot_w, legend_entries, visible, global_visible,
+        draw_legend(dl, legend_frame, wp.legend_place, legend_entries, visible, global_visible,
                     owner_id, LegendPass::Draw, &legend_rclick);
     }
 
@@ -1556,6 +1591,7 @@ void Plot2DView::render(PlotRenderer& renderer,
         // Легенда — галка окна (wp.legend), если вызывающий её вообще не выключил (show_legend).
         plot_show_menu(wp, (show_legend ? PlotShowLegend : 0u) | PlotShowAxes2D | PlotShowGrid |
                            (external_colorbar ? PlotShowColorbar : 0u));
+        if (show_legend) plot_legend_menu(wp, true);
         ImGui::MenuItem("Lock X axis", nullptr, &x_axis.lock);
         ImGui::MenuItem("Lock Y axis", nullptr, &y_axis.lock);
         ImGui::Separator();
