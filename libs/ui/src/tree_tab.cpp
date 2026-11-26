@@ -1066,7 +1066,10 @@ void draw_tree_controls(AppModel& model, SystemLibrary& lib) {
             ImGui::GetColorU32(ImGui::IsItemActive() ? ImGuiCol_SeparatorActive : ImGuiCol_Separator), 2.0f);
     }
 
-    if (ImGui::BeginChild("##tree_params", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
+    // Своя горизонтальная прокрутка: флаг окна Tree Controls сюда не доходит — панель заполняет
+    // окно до низа, и окно само никогда не переполняется по ширине.
+    if (ImGui::BeginChild("##tree_params", ImVec2(0, 0), ImGuiChildFlags_Borders,
+                          ImGuiWindowFlags_HorizontalScrollbar)) {
         draw_params_panel(model, ts);
     }
     ImGui::EndChild();

@@ -826,7 +826,7 @@ bool prefs_default(const PlotWindowPrefs& p) {
            p.colorbar && p.axes3d && !p.smooth && !p.swap_axes && !p.invert_x && !p.invert_y &&
            !p.fit_pane && p.grid && p.grid_on_top &&
            !p.fit3d && p.scale3d[0] == 1.0f && p.scale3d[1] == 1.0f && p.scale3d[2] == 1.0f &&
-           p.series_colors.empty();
+           p.series_colors.empty() && legend_placement_default(p.legend_place);
 }
 
 // Секция [UcudaPlot][#RecentColours] — недавние цвета меню легенды (legend_recent_colors).
@@ -870,6 +870,22 @@ void prefs_read_line(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const ch
         for (float& s : p.scale3d)
             if (!(s >= 0.01f && s <= 100.0f)) s = 1.0f;   // битое значение — по умолчанию
     }
+    else if (std::sscanf(line, "LegendLoc=%d", &v) == 1) {
+        if (v >= 0 && v < kLegendLocationCount) p.legend_place.location = v;
+    }
+    else if (std::sscanf(line, "LegendPos=%f,%f", &p.legend_place.pos[0], &p.legend_place.pos[1]) == 2) {
+        for (float& f : p.legend_place.pos)
+            if (!(f >= 0.0f && f <= 1.0f)) f = 0.0f;
+    }
+    else if (std::sscanf(line, "LegendBox=%d,%f,%f", &v, &p.legend_place.line_alpha, &p.legend_place.fill_alpha) == 3) {
+        p.legend_place.box_line = v != 0;
+        for (float* f : { &p.legend_place.line_alpha, &p.legend_place.fill_alpha })
+            if (!(*f >= 0.0f && *f <= 1.0f)) *f = 1.0f;
+    }
+    else if (int cols = 1; std::sscanf(line, "LegendStyle=%d,%d", &v, &cols) == 2) {
+        p.legend_place.box_fill = v != 0;
+        p.legend_place.columns  = (cols >= 1 && cols <= kLegendMaxColumns) ? cols : 1;
+    }
     else {
         // Color=r,g,b,a,<подпись серии> — подпись последней: в ней могут быть запятые.
         float r, g, b, a;
@@ -894,6 +910,12 @@ void prefs_write_all(ImGuiContext*, ImGuiSettingsHandler*, ImGuiTextBuffer* out)
         if (p.fit3d || p.scale3d[0] != 1.0f || p.scale3d[1] != 1.0f || p.scale3d[2] != 1.0f)
             out->appendf("Fit3D=%d\nScale3D=%.4g,%.4g,%.4g\n", (int)p.fit3d,
                          p.scale3d[0], p.scale3d[1], p.scale3d[2]);
+        if (!legend_placement_default(p.legend_place)) {
+            const LegendPlacement& l = p.legend_place;
+            out->appendf("LegendLoc=%d\nLegendPos=%.4f,%.4f\nLegendBox=%d,%.3f,%.3f\nLegendStyle=%d,%d\n",
+                         l.location, l.pos[0], l.pos[1], (int)l.box_line, l.line_alpha, l.fill_alpha,
+                         (int)l.box_fill, l.columns);
+        }
         for (const auto& [label, c] : p.series_colors) {
             if (label.find('\n') != std::string::npos) continue;   // строка ini — одна строка
             out->appendf("Color=%.4f,%.4f,%.4f,%.4f,%s\n", c.x, c.y, c.z, c.w, label.c_str());
@@ -1047,6 +1069,13 @@ std::string plot_window_prefs_to_string(const std::string& window_name) {
         out += f.key;
         out += (p.*(f.field)) ? "=1;" : "=0;";
     }
+    // Легенда: положение и Box. Старые раскладки этих ключей не знают — легенда там по умолчанию.
+    const LegendPlacement& l = p.legend_place;
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "legloc=%d;legpos=%.4f,%.4f;legbox=%d,%.3f,%.3f;legstyle=%d,%d;",
+                  l.location, l.pos[0], l.pos[1], (int)l.box_line, l.line_alpha, l.fill_alpha,
+                  (int)l.box_fill, l.columns);
+    out += buf;
     return out;
 }
 
@@ -1065,7 +1094,44 @@ void plot_window_prefs_from_string(const std::string& window_name, const std::st
             ++pos;
         }
     }
+    auto value_of = [&s](const char* key) -> const char* {
+        const std::string pat = std::string(key) + "=";
+        for (size_t pos = s.find(pat); pos != std::string::npos; pos = s.find(pat, pos + 1))
+            if (pos == 0 || s[pos - 1] == ';') return s.c_str() + pos + pat.size();
+        return nullptr;
+    };
+    LegendPlacement& l = p.legend_place;
+    int iv = 0;
+    float a = 0.0f, b = 0.0f;
+    if (const char* v = value_of("legloc"); v && std::sscanf(v, "%d", &iv) == 1 && iv >= 0 && iv < kLegendLocationCount)
+        l.location = iv;
+    if (const char* v = value_of("legpos"); v && std::sscanf(v, "%f,%f", &a, &b) == 2) {
+        l.pos[0] = (a >= 0.0f && a <= 1.0f) ? a : 0.0f;
+        l.pos[1] = (b >= 0.0f && b <= 1.0f) ? b : 0.0f;
+    }
+    if (const char* v = value_of("legbox"); v && std::sscanf(v, "%d,%f,%f", &iv, &a, &b) == 3) {
+        l.box_line   = iv != 0;
+        l.line_alpha = (a >= 0.0f && a <= 1.0f) ? a : 1.0f;
+        l.fill_alpha = (b >= 0.0f && b <= 1.0f) ? b : 1.0f;
+    }
+    if (const char* v = value_of("legstyle"); v) {
+        int fill = 1, cols = 1;
+        if (std::sscanf(v, "%d,%d", &fill, &cols) == 2) {
+            l.box_fill = fill != 0;
+            l.columns  = (cols >= 1 && cols <= kLegendMaxColumns) ? cols : 1;
+        }
+    }
     ImGui::MarkIniSettingsDirty();
+}
+
+void plot_legend_menu(PlotWindowPrefs& p, bool has_best) {
+    bool spread = false;
+    if (!legend_placement_menu(p.legend_place, has_best, spread)) return;
+    ImGui::MarkIniSettingsDirty();
+    const ImGuiIO& io = ImGui::GetIO();
+    if ((spread || (io.KeyCtrl && io.KeyShift)) && p.scope >= 0)
+        for (auto& [name, other] : window_prefs())
+            if (other.scope == p.scope) other.legend_place = p.legend_place;
 }
 
 // Галка меню «Show». Ctrl+Shift+клик — то же значение во всех окнах той же вкладки приложения

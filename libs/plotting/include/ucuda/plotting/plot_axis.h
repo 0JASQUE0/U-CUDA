@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include "imgui.h"
+#include "ucuda/plotting/plot_legend.h"
 #include <cmath>
 #include <map>
 #include <string>
@@ -319,6 +320,8 @@ struct PlotWindowPrefs {
     // Цвета серий из меню легенды (ПКМ по квадрату -> legend_color_popup). Ключ — подпись серии,
     // а не индекс (серии сдвигаются, цвет должен остаться на своей кривой); альфа — от вызывающего.
     std::map<std::string, ImVec4> series_colors;
+    // Положение легенды (пресет MATLAB или ручное после протяжки ЛКМ) и её Box.
+    LegendPlacement legend_place;
     // Вкладка приложения, на которой окно рисовалось последним (plot_set_window_scope); -1 — ещё
     // не рисовалось в этом запуске. Не сохраняется: нужна только для Ctrl+Shift+клика в «Show».
     int scope = -1;
@@ -390,6 +393,10 @@ enum PlotShowItems : unsigned {
     PlotShowGrid     = 1u << 5,   // сетка 2D-диаграммы: есть ли, поверх данных или под ними
 };
 void plot_show_menu(PlotWindowPrefs& p, unsigned items);
+// Подменю «Legend» (legend_placement_menu) для окна p: правка помечает imgui.ini; «Apply to all
+// plots of this tab» или Ctrl+Shift при правке — то же положение и Box во всех окнах вкладки.
+// has_best — вид умеет разрешать положение best (2D, по точкам данных).
+void plot_legend_menu(PlotWindowPrefs& p, bool has_best);
 
 float plot_bottom_margin();
 // То же, когда подписи тиков и/или имя оси X скрыты (меню плота): отступ сжимается.

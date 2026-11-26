@@ -13,10 +13,12 @@
 #include "ucuda/domain/configCUDA.h"
 #include "ucuda/domain/num_parse.h"
 #include "ucuda/plotting/plot_axis.h"
+#include "imgui_internal.h"   // ImGuiSettingsHandler (чтение строк imgui.ini в тесте легенды)
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <vector>
@@ -524,6 +526,152 @@ void register_tests(ImGuiTestEngine* engine) {
         ctx->LogInfo("[throttle] checked %d tabs", checked);
         IM_CHECK_GT(checked, 3);
         m->hidden_tabs = hidden_before;
+    };
+
+    // Legend placement: MATLAB location presets (geometry and the room *outside takes from the plot),
+    // Box settings, their round trip through the window-layout string (old strings without legend
+    // keys keep the defaults) and through imgui.ini, and moving the legend with the left mouse button.
+    // The GUI part needs the Phase tab with 2D plots ("Projection 3" = Phase 2D, as in the Chen preset
+    // after Recompute); without it only the non-GUI part runs.
+    t = IM_REGISTER_TEST(engine, "plot", "legend_placement");
+    t->TestFunc = [](ImGuiTestContext* ctx) {
+        // 1. Geometry.
+        LegendFrame f;
+        f.plot_min = ImVec2(100, 100);  f.plot_max = ImVec2(500, 400);
+        f.block_min = ImVec2(50, 60);   f.block_max = ImVec2(600, 480);
+        const ImVec2 s(80, 50);
+        LegendPlacement p;
+        auto at = [&](int loc) { return legend_origin(loc, p, s, f); };
+        auto eq = [](ImVec2 a, float x, float y) { return a.x == x && a.y == y; };
+        IM_CHECK(eq(at(kLegendNorthEast), 414, 106));
+        IM_CHECK(eq(at(kLegendNorthWest), 106, 106));
+        IM_CHECK(eq(at(kLegendSouthEast), 414, 344));
+        IM_CHECK(eq(at(kLegendSouthWest), 106, 344));
+        IM_CHECK(eq(at(kLegendNorth), 260, 106));
+        IM_CHECK(eq(at(kLegendWest), 106, 225));
+        IM_CHECK(eq(at(kLegendNorthOutside), 260, 62));
+        IM_CHECK(eq(at(kLegendSouthOutside), 260, 428));
+        IM_CHECK(eq(at(kLegendEastOutside), 518, 225));
+        IM_CHECK(eq(at(kLegendNorthEastOutside), 518, 100));
+        IM_CHECK(eq(at(kLegendSouthWestOutside), 52, 350));
+        f.best = kLegendSouthWest;
+        IM_CHECK(eq(at(kLegendBest), 106, 344));
+        p.pos[0] = 0.5f; p.pos[1] = 0.5f;
+        IM_CHECK(eq(at(kLegendNone), 260, 225));
+        for (int loc = 0; loc < kLegendLocationCount; ++loc) {
+            float l = 0, t = 0, r = 0, b = 0;
+            legend_reserve_margins(loc, s, l, t, r, b);
+            const bool side = loc == kLegendEastOutside || loc == kLegendNorthEastOutside || loc == kLegendSouthEastOutside;
+            const bool west = loc == kLegendWestOutside || loc == kLegendNorthWestOutside || loc == kLegendSouthWestOutside;
+            IM_CHECK_EQ(r, side ? 86.0f : 0.0f);
+            IM_CHECK_EQ(l, west ? 86.0f : 0.0f);
+            IM_CHECK_EQ(t, loc == kLegendNorthOutside ? 56.0f : 0.0f);
+            IM_CHECK_EQ(b, loc == kLegendSouthOutside ? 56.0f : 0.0f);
+            IM_CHECK_EQ(legend_location_outside(loc), side || west || loc == kLegendNorthOutside || loc == kLegendSouthOutside);
+        }
+        IM_CHECK_STR_EQ(legend_location_name(kLegendNorthWestOutside), "northwestoutside");
+
+        // 2. Window-layout string: an old string has no legend keys -> defaults; then a round trip.
+        const char* win = "__legend_test_window";
+        plot_window_prefs_from_string(win, "toolbar=1;legend=1;xlabel=1;");
+        std::string str = plot_window_prefs_to_string(win);
+        IM_CHECK(str.find("legloc=0;legpos=1.0000,0.0000;legbox=1,1.000,0.750;legstyle=1,1;") != std::string::npos);
+        plot_window_prefs_from_string(win, "legend=1;legloc=12;legpos=0.2500,0.7500;legbox=0,0.500,0.250;legstyle=0,3;");
+        str = plot_window_prefs_to_string(win);
+        IM_CHECK(str.find("legloc=12;legpos=0.2500,0.7500;legbox=0,0.500,0.250;legstyle=0,3;") != std::string::npos);
+        // Строка без legstyle (раскладка до столбцов) оставляет заливку и столбцы как были.
+        plot_window_prefs_from_string(win, "legloc=12;legpos=0.2500,0.7500;legbox=0,0.500,0.250;");
+        IM_CHECK(plot_window_prefs_to_string(win).find("legstyle=0,3;") != std::string::npos);
+
+        // 3. imgui.ini: written by the UcudaPlot handler, read back line by line.
+        size_t ini_len = 0;
+        const std::string ini = ImGui::SaveIniSettingsToMemory(&ini_len);
+        const size_t sec = ini.find("[UcudaPlot][__legend_test_window]");
+        IM_CHECK_NO_RET(sec != std::string::npos);
+        if (sec != std::string::npos) {
+            const std::string body = ini.substr(sec, ini.find("\n\n", sec) + 1 - sec);
+            IM_CHECK(body.find("LegendLoc=12\n") != std::string::npos);
+            IM_CHECK(body.find("LegendPos=0.2500,0.7500\n") != std::string::npos);
+            IM_CHECK(body.find("LegendBox=0,0.500,0.250\n") != std::string::npos);
+            IM_CHECK(body.find("LegendStyle=0,3\n") != std::string::npos);
+        }
+        plot_window_prefs_from_string(win, "legloc=0;legpos=1,0;legbox=1,1,0.75;legstyle=1,1;");
+        if (ImGuiSettingsHandler* h = ImGui::FindSettingsHandler("UcudaPlot")) {
+            void* e = h->ReadOpenFn(ImGui::GetCurrentContext(), h, win);
+            for (const char* line : { "LegendLoc=15", "LegendPos=0.1000,0.9000", "LegendBox=1,0.300,0.400",
+                                      "LegendStyle=0,2",
+                                      "LegendLoc=99" /* out of range: ignored */ })
+                h->ReadLineFn(ImGui::GetCurrentContext(), h, e, line);
+        }
+        str = plot_window_prefs_to_string(win);
+        IM_CHECK(str.find("legloc=15;legpos=0.1000,0.9000;legbox=1,0.300,0.400;legstyle=0,2;") != std::string::npos);
+        plot_window_prefs_from_string(win, "legloc=0;legpos=1,0;legbox=1,1,0.75;legstyle=1,1;");
+
+        // Столбцы: 5 записей в 1 столбец — 5 строк; в 2 — 3 строки, шире; 4 столбца дают 2 строки
+        // и на деле 3 столбца (как 3); больше записей столбцов не бывает; скрытые места не занимают.
+        {
+            std::vector<LegendEntry> es;
+            for (const char* lb : { "IC 1", "IC 2", "IC 3", "IC 4", "IC 5" }) es.push_back({ lb, ImVec4(1, 1, 1, 1) });
+            const std::vector<bool> all;
+            const ImVec2 c1 = legend_size(es, all, 1), c2 = legend_size(es, all, 2);
+            const ImVec2 c3 = legend_size(es, all, 3), c4 = legend_size(es, all, 4);
+            const ImVec2 c5 = legend_size(es, all, 5), c8 = legend_size(es, all, 8);
+            const float row_h = (c1.y - c2.y) / 2.0f;
+            IM_CHECK_GT(row_h, 0.0f);
+            IM_CHECK_EQ(c3.y, c2.y - row_h);
+            IM_CHECK_GT(c2.x, c1.x);
+            IM_CHECK_EQ(c4.x, c3.x);  IM_CHECK_EQ(c4.y, c3.y);
+            IM_CHECK_EQ(c8.x, c5.x);  IM_CHECK_EQ(c8.y, c5.y);
+            const std::vector<bool> two_hidden = { true, false, true, false, true };
+            IM_CHECK_EQ(legend_size(es, two_hidden, 3).y, c5.y);
+        }
+
+        // 4. GUI: a short click on a legend row keeps the location, a drag makes it manual (none).
+        const char* proj = "Projection 3##proj2_g0";
+        ctx->SetRef("//MainHost");
+        ctx->ItemClick("Phase analysis");
+        ctx->Yield(5);
+        // Область графика — по метке среди всех элементов окна (она лежит в дочернем окне).
+        auto find_plot = [&]() -> ImRect {
+            ImGuiTestItemList items;
+            if (ctx->WindowInfo("//Projection 3##proj2_g0", ImGuiTestOpFlags_NoError).Window)
+                ctx->GatherItems(&items, "//Projection 3##proj2_g0", -1);
+            for (int i = 0; i < items.GetSize(); ++i)
+                if (std::strcmp(items.GetByIndex(i)->DebugLabel, "##plot_2") == 0) return items.GetByIndex(i)->RectFull;
+            return ImRect();
+        };
+        if (find_plot().GetWidth() <= 0.0f) {
+            ctx->LogWarning("[legend] no Phase 2D plot 'Projection 3' (run after a Chen recompute): GUI part skipped");
+            return;
+        }
+        const std::string saved = plot_window_prefs_to_string(proj);
+        plot_window_prefs_from_string(proj, "legloc=0;legpos=1,0;legbox=1,1,0.75;");
+        ctx->Yield(3);
+        const ImRect r = find_plot();
+        const ImVec2 row(r.Max.x - 30.0f, r.Min.y + 16.0f);   // first row of a northeast legend
+        ctx->MouseMoveToPos(row);
+        ctx->MouseClick(ImGuiMouseButton_Left);
+        ctx->Yield(3);
+        IM_CHECK(plot_window_prefs_to_string(proj).find("legloc=0;") != std::string::npos);
+        ctx->MouseClick(ImGuiMouseButton_Left);   // toggle the series back
+        ctx->Yield(3);
+        ctx->MouseMoveToPos(row);
+        ctx->MouseDown(ImGuiMouseButton_Left);
+        const ImVec2 to(r.Min.x + 0.3f * r.GetWidth(), r.Min.y + 0.6f * r.GetHeight());
+        for (int k = 1; k <= 4; ++k)
+            ctx->MouseMoveToPos(ImVec2(row.x + (to.x - row.x) * k / 4.0f, row.y + (to.y - row.y) * k / 4.0f));
+        ctx->MouseUp(ImGuiMouseButton_Left);
+        ctx->Yield(3);
+        str = plot_window_prefs_to_string(proj);
+        ctx->LogInfo("[legend] after drag: %s", str.c_str());
+        IM_CHECK(str.find("legloc=17;") != std::string::npos);
+        float px = -1, py = -1;
+        const size_t pp = str.find("legpos=");
+        if (pp != std::string::npos) std::sscanf(str.c_str() + pp, "legpos=%f,%f", &px, &py);
+        IM_CHECK(px > 0.05f && px < 0.6f);
+        IM_CHECK(py > 0.3f && py < 0.95f);
+        plot_window_prefs_from_string(proj, saved);
+        ctx->Yield(2);
     };
 
     register_sweep_tests(engine);
