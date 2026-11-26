@@ -1,4 +1,6 @@
 ﻿#include "ucuda/storage/system_library.h"
+#include <charconv>
+#include <cmath>
 #include <sstream>
 #include <fstream>
 #include <stdexcept>
@@ -209,7 +211,14 @@ std::string record_to_json(const SystemRecord& r) {
           << "\", \"body\": \"" << esc(cs.body)
           << "\", \"order\": \"" << cs.order
           << "\", \"symmetric\": \"" << (cs.symmetric ? 1 : 0)
-          << "\", \"enabled\": \"" << (cs.enabled ? 1 : 0) << "\"}";
+          << "\", \"enabled\": \"" << (cs.enabled ? 1 : 0) << "\"";
+        if (std::isfinite(cs.rhs_per_step) && cs.rhs_per_step > 0.0) {
+            char value[64];
+            const auto result = std::to_chars(value, value + sizeof(value), cs.rhs_per_step);
+            if (result.ec == std::errc{})
+                o << ", \"rhs_per_step\": \"" << std::string(value, result.ptr) << "\"";
+        }
+        o << "}";
     }
     o << "],\n";
     // Wrapper scheme names only ("Extr(RK4|1,2,4)", "Comp(CD|g1,g2,g1)"); the
@@ -322,6 +331,14 @@ SystemRecord record_from_json(const std::string& json) {
                         else if (ck == "symmetric") cs.symmetric = (cv == "1" || cv == "true");
                         // Нет ключа — включена: так читаются старые system.json.
                         else if (ck == "enabled") cs.enabled = !(cv == "0" || cv == "false");
+                        else if (ck == "rhs_per_step") {
+                            double value = 0.0;
+                            const char* end = cv.data() + cv.size();
+                            const auto result = std::from_chars(cv.data(), end, value);
+                            if (result.ec == std::errc{} && result.ptr == end &&
+                                std::isfinite(value) && value > 0.0)
+                                cs.rhs_per_step = value;
+                        }
                         p.ws();
                         if (p.peek() == ',') { ++p.i; continue; }
                         if (p.peek() == '}') { ++p.i; break; }

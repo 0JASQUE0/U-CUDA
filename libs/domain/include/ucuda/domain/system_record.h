@@ -31,6 +31,9 @@ struct CustomScheme {
     // попадает в Generate. Тело и паспорт при этом живут, и опорной для
     // обёртки выключенная КРС быть может.
     bool enabled   = true;
+
+    // Full right-hand-side evaluations per fixed step. Zero means unknown.
+    double rhs_per_step = 0.0;
 };
 
 // Полная запись системы в библиотеке: весь ввод (для редактирования) +

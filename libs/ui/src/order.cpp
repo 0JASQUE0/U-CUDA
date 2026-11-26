@@ -675,8 +675,9 @@ void draw_order_curve_window(AppModel& model, OrderPlotWindow& win,
                               "included), f per step x steps for the fixed one. CD family: passes x\n"
                               "(explicit half 1 + implicit half: 1 per component linear in its own\n"
                               "variable, 4 iterations otherwise, / N); Extr: substeps x the base;\n"
-                              "Comp: stages x the base; GBS: sum n_k + 1. Unknown for Newton-based\n"
-                              "implicit schemes and custom KRS - their curves are left out.\n"
+                              "Comp: stages x the base; GBS: sum n_k + 1. For custom KRS,\n"
+                              "set f evals per step in System. Curves with unknown cost\n"
+                              "are left out.\n"
                               "min / avg / max apply to time only.");
         ImGui::SameLine();
         ImGui::RadioButton("steps##pcost", &win.perf_cost, 2);

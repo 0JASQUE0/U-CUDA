@@ -3,6 +3,7 @@
 #include "gui_integration.h"
 #include "gui_fields.h"
 #include "tab_system.h"
+#include <cmath>
 // Вкладка System: блок сгенерированного кода, построители Extr/Comp, список обёрток, параметры.
 using namespace ucuda::ui_detail;
 
@@ -929,6 +930,15 @@ void draw_system_tab(SystemEditor& model, const GuiCallbacks& cb) {
                                   "NOT true for explicit midpoint / RK4 / predictor-corrector.\n"
                                   "A symmetric base gains 2 orders per extrapolation stage\n"
                                   "instead of 1. Same as above: a wrong tick only costs order.");
+            item_w(100);
+            if (ImGui::InputDouble("f evals per step", &cs.rhs_per_step, 0.0, 0.0, "%.15g")) {
+                if (!std::isfinite(cs.rhs_per_step) || cs.rhs_per_step < 0.0)
+                    cs.rhs_per_step = 0.0;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Full right-hand-side evaluations per fixed step for the\n"
+                                  "Order performance plot. Fractional values are allowed.\n"
+                                  "Set to 0 if unknown.");
             if (collapsed) {
                 const int n_lines = cs.body.empty()
                     ? 0 : 1 + (int)std::count(cs.body.begin(), cs.body.end(), '\n');

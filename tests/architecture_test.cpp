@@ -229,6 +229,20 @@ void records() {
         "{\"name\":\"Old\",\"mode\":\"LaTeX\",\"latex_text\":\"\\\\dot{x} = -a x\","
         "\"alphabet_text\":\"x, a\",\"init_conditions\":{\"x\":\"1\"},\"param_values\":{\"a\":\"2\"}}");
     require(old.name == "Old" && !old.is_dae && !old.is_map && old.alphabet_text == "x, a", "old ODE record");
+    SystemRecord custom = record_from_json(
+        R"({"custom_schemes":[{"name":"Legacy","body":"X[0] += h;"},
+              {"name":"Invalid","rhs_per_step":"2x"},
+              {"name":"Negative","rhs_per_step":"-1"},
+              {"name":"Infinite","rhs_per_step":"inf"}]})");
+    require(custom.custom_schemes.size() == 4, "custom schemes must load");
+    for (const auto& scheme : custom.custom_schemes)
+        require(scheme.rhs_per_step == 0.0, "missing or invalid custom RHS cost must be unknown");
+    custom.custom_schemes[0].rhs_per_step = 1.25;
+    const SystemRecord custom_back = record_from_json(record_to_json(custom));
+    require(custom_back.custom_schemes.size() == 4 &&
+            custom_back.custom_schemes[0].rhs_per_step == 1.25 &&
+            custom_back.custom_schemes[1].rhs_per_step == 0.0,
+            "custom RHS costs must survive the system record round trip");
 
     SystemRecord d;
     d.name = "DAE round trip";
